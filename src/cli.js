@@ -2,10 +2,12 @@
 
 import path from "node:path";
 
+import { DEFAULT_BACKUP_RETENTION_COUNT } from "./constants.js";
 import { installWindowsLauncher } from "./launcher.js";
 import {
   getStatus,
   renderStatus,
+  runPruneBackups,
   runRestore,
   runSwitch,
   runSync
@@ -16,8 +18,9 @@ function printHelp() {
 
 Usage:
   codex-provider status [--codex-home PATH]
-  codex-provider sync [--provider ID] [--codex-home PATH]
-  codex-provider switch <provider-id> [--codex-home PATH]
+  codex-provider sync [--provider ID] [--keep N] [--codex-home PATH]
+  codex-provider switch <provider-id> [--keep N] [--codex-home PATH]
+  codex-provider prune-backups [--keep N] [--codex-home PATH]
   codex-provider restore <backup-dir> [--codex-home PATH]
   codex-provider install-windows-launcher [--dir PATH] [--codex-home PATH]
 `);
@@ -65,7 +68,52 @@ function summarizeSync(result, label) {
     lines.push(`Skipped locked rollout files: ${result.skippedLockedRolloutFiles.length}`);
     lines.push(`Locked file(s): ${preview}${extraCount > 0 ? ` (+${extraCount} more)` : ""}`);
   }
+  if (result.autoPruneResult) {
+    lines.push(
+      `Backup cleanup: deleted ${result.autoPruneResult.deletedCount}, remaining ${result.autoPruneResult.remainingCount}, freed ${formatBytes(result.autoPruneResult.freedBytes)}`
+    );
+  }
+  if (result.autoPruneWarning) {
+    lines.push(`Backup cleanup warning: ${result.autoPruneWarning}`);
+  }
   return lines.join("\n");
+}
+
+function summarizePrune(result) {
+  return [
+    `Backup root: ${result.backupRoot}`,
+    `Deleted backups: ${result.deletedCount}`,
+    `Remaining backups: ${result.remainingCount}`,
+    `Freed space: ${formatBytes(result.freedBytes)}`
+  ].join("\n");
+}
+
+function formatBytes(bytes) {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return unitIndex === 0 ? `${bytes} B` : `${value.toFixed(value >= 10 ? 1 : 2).replace(/\.0$/, "")} ${units[unitIndex]}`;
+}
+
+function parseKeepCount(rawValue, { allowZero = false } = {}) {
+  if (rawValue === undefined) {
+    return DEFAULT_BACKUP_RETENTION_COUNT;
+  }
+  const normalized = String(rawValue).trim();
+  if (!/^\d+$/.test(normalized)) {
+    const minimum = allowZero ? 0 : 1;
+    throw new Error(`Invalid --keep value: ${rawValue}. Expected an integer greater than or equal to ${minimum}.`);
+  }
+  const keepCount = Number.parseInt(normalized, 10);
+  const minimum = allowZero ? 0 : 1;
+  if (!Number.isInteger(keepCount) || keepCount < minimum) {
+    throw new Error(`Invalid --keep value: ${rawValue}. Expected an integer greater than or equal to ${minimum}.`);
+  }
+  return keepCount;
 }
 
 async function main() {
@@ -86,7 +134,8 @@ async function main() {
   if (command === "sync") {
     const result = await runSync({
       codexHome: flags["codex-home"],
-      provider: flags.provider
+      provider: flags.provider,
+      keepCount: parseKeepCount(flags.keep)
     });
     console.log(summarizeSync(result, "Synchronized"));
     return;
@@ -96,9 +145,19 @@ async function main() {
     const provider = positionals[1] ?? flags.provider;
     const result = await runSwitch({
       codexHome: flags["codex-home"],
-      provider
+      provider,
+      keepCount: parseKeepCount(flags.keep)
     });
     console.log(summarizeSync(result, "Switched to"));
+    return;
+  }
+
+  if (command === "prune-backups") {
+    const result = await runPruneBackups({
+      codexHome: flags["codex-home"],
+      keepCount: parseKeepCount(flags.keep, { allowZero: true })
+    });
+    console.log(summarizePrune(result));
     return;
   }
 

@@ -27,6 +27,19 @@ function wrapRolloutFileBusyError(error, filePath, action) {
   );
 }
 
+async function getFileSnapshot(filePath) {
+  const stat = await fsp.stat(filePath);
+  return {
+    size: stat.size,
+    mtimeMs: stat.mtimeMs
+  };
+}
+
+function snapshotMatches(change, snapshot) {
+  return change.originalSize === snapshot.size
+    && change.originalMtimeMs === snapshot.mtimeMs;
+}
+
 async function listJsonlFiles(rootDir) {
   const entries = await fsp.readdir(rootDir, { withFileTypes: true });
   const files = [];
@@ -95,7 +108,185 @@ function parseSessionMetaRecord(firstLine) {
   }
 }
 
+async function invokeWindowsExclusiveRewrite(change, { requireOriginalMatch }) {
+  const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "codex-provider-rewrite-"));
+  const manifestPath = path.join(tempDir, "change.json");
+  const script = `
+& {
+  param([string]$manifestPath)
+
+  function Read-FirstLineRecord([System.IO.FileStream]$stream) {
+    $stream.Seek(0, [System.IO.SeekOrigin]::Begin) | Out-Null
+    $buffer = New-Object byte[] (64 * 1024)
+    $collected = New-Object System.IO.MemoryStream
+    try {
+      while ($true) {
+        $bytesRead = $stream.Read($buffer, 0, $buffer.Length)
+        if ($bytesRead -le 0) {
+          break
+        }
+
+        $collected.Write($buffer, 0, $bytesRead)
+        $bytes = $collected.ToArray()
+        $newlineIndex = [Array]::IndexOf($bytes, [byte]10)
+        if ($newlineIndex -ge 0) {
+          $crlf = $newlineIndex -gt 0 -and $bytes[$newlineIndex - 1] -eq [byte]13
+          $lineLength = if ($crlf) { $newlineIndex - 1 } else { $newlineIndex }
+          return @{
+            firstLine = [System.Text.Encoding]::UTF8.GetString($bytes, 0, $lineLength)
+            offset = $newlineIndex + 1
+          }
+        }
+      }
+
+      return @{
+        firstLine = [System.Text.Encoding]::UTF8.GetString($collected.ToArray())
+        offset = [int]$collected.Length
+      }
+    } finally {
+      $collected.Dispose()
+    }
+  }
+
+  $change = Get-Content -Raw -Path $manifestPath | ConvertFrom-Json
+  $path = [string]$change.path
+  $tmpPath = "$path.provider-sync.$PID.$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()).tmp"
+  $encoding = [System.Text.UTF8Encoding]::new($false)
+  $source = $null
+  $writer = $null
+  $tempReader = $null
+
+  try {
+    try {
+      $source = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+    } catch {
+      if (Test-Path $path) {
+        Write-Output "SKIP_BUSY"
+      } else {
+        Write-Output "SKIP_CHANGED"
+      }
+      return
+    }
+
+    if ([bool]$change.requireOriginalMatch) {
+      if ($source.Length -ne [int64]$change.originalSize) {
+        Write-Output "SKIP_CHANGED"
+        return
+      }
+
+      $record = Read-FirstLineRecord $source
+      if ($record.firstLine -ne [string]$change.originalFirstLine -or $record.offset -ne [int]$change.originalOffset) {
+        Write-Output "SKIP_CHANGED"
+        return
+      }
+
+      $separator = [string]$change.originalSeparator
+      $sourceOffset = [int64]$change.originalOffset
+      $headerOnly = $sourceOffset -ge [int64]$change.originalSize
+    } else {
+      $record = Read-FirstLineRecord $source
+      $separator = [string]$change.separator
+      $sourceOffset = [int64]$record.offset
+      $headerOnly = $record.offset -ge $source.Length
+    }
+
+    $writer = [System.IO.File]::Open($tmpPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    $firstLineBytes = $encoding.GetBytes([string]$change.updatedFirstLine)
+    $writer.Write($firstLineBytes, 0, $firstLineBytes.Length)
+
+    if (-not [string]::IsNullOrEmpty($separator)) {
+      $separatorBytes = $encoding.GetBytes($separator)
+      $writer.Write($separatorBytes, 0, $separatorBytes.Length)
+    }
+
+    if (-not $headerOnly) {
+      $source.Seek($sourceOffset, [System.IO.SeekOrigin]::Begin) | Out-Null
+      $source.CopyTo($writer)
+    }
+
+    $writer.Flush()
+    $writer.Dispose()
+    $writer = $null
+
+    $tempReader = [System.IO.File]::OpenRead($tmpPath)
+    $source.SetLength(0)
+    $source.Seek(0, [System.IO.SeekOrigin]::Begin) | Out-Null
+    $tempReader.CopyTo($source)
+    $source.Flush()
+
+    Write-Output "APPLIED"
+  } finally {
+    if ($tempReader) {
+      $tempReader.Dispose()
+    }
+    if ($writer) {
+      $writer.Dispose()
+    }
+    if ($source) {
+      $source.Dispose()
+    }
+    Remove-Item -Path $tmpPath -Force -ErrorAction SilentlyContinue
+  }
+}
+`.trim();
+
+  try {
+    await fsp.writeFile(
+      manifestPath,
+      JSON.stringify({
+        ...change,
+        requireOriginalMatch
+      }),
+      "utf8"
+    );
+
+    const { stdout } = await execFileAsync("powershell.exe", [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      script,
+      manifestPath
+    ]);
+
+    const result = stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .at(-1);
+
+    if (result === "APPLIED" || result === "SKIP_BUSY" || result === "SKIP_CHANGED") {
+      return result;
+    }
+
+    throw new Error(`Unexpected rewrite result for ${change.path}: ${stdout.trim() || "(empty output)"}`);
+  } catch (error) {
+    throw wrapRolloutFileBusyError(error, change.path, "rewrite");
+  } finally {
+    await fsp.rm(tempDir, { recursive: true, force: true });
+  }
+}
+
 async function rewriteFirstLine(filePath, nextFirstLine, separator) {
+  if (process.platform === "win32") {
+    const result = await invokeWindowsExclusiveRewrite(
+      {
+        path: filePath,
+        separator,
+        updatedFirstLine: nextFirstLine
+      },
+      { requireOriginalMatch: false }
+    );
+
+    if (result !== "APPLIED") {
+      throw new Error(
+        `Unable to rewrite rollout file because it is currently in use. Close Codex and the Codex app, then retry. Locked file: ${filePath}`
+      );
+    }
+
+    return;
+  }
+
   const current = await readFirstLineRecord(filePath);
   const tmpPath = `${filePath}.provider-sync.${process.pid}.${Date.now()}.tmp`;
   const writer = fs.createWriteStream(tmpPath, { encoding: "utf8" });
@@ -129,6 +320,61 @@ async function rewriteFirstLine(filePath, nextFirstLine, separator) {
   } catch (error) {
     await fsp.rm(tmpPath, { force: true });
     throw wrapRolloutFileBusyError(error, filePath, "rewrite");
+  }
+}
+
+async function tryRewriteCollectedFirstLine(change) {
+  if (process.platform === "win32") {
+    const result = await invokeWindowsExclusiveRewrite(change, { requireOriginalMatch: true });
+    return result === "APPLIED";
+  }
+
+  const beforeSnapshot = await getFileSnapshot(change.path);
+  if (!snapshotMatches(change, beforeSnapshot)) {
+    return false;
+  }
+
+  const current = await readFirstLineRecord(change.path);
+  if (current.firstLine !== change.originalFirstLine || current.offset !== change.originalOffset) {
+    return false;
+  }
+
+  const tmpPath = `${change.path}.provider-sync.${process.pid}.${Date.now()}.tmp`;
+  const writer = fs.createWriteStream(tmpPath, { encoding: "utf8" });
+
+  try {
+    await new Promise((resolve, reject) => {
+      writer.on("error", reject);
+      writer.write(change.updatedFirstLine);
+      if (change.originalSeparator) {
+        writer.write(change.originalSeparator);
+      }
+
+      const headerOnly = change.originalOffset >= change.originalSize;
+      if (headerOnly) {
+        writer.end();
+        writer.once("finish", resolve);
+        return;
+      }
+
+      const reader = fs.createReadStream(change.path, { start: change.originalOffset });
+      reader.on("error", reject);
+      reader.on("end", () => writer.end());
+      writer.once("finish", resolve);
+      reader.pipe(writer, { end: false });
+    });
+
+    const afterSnapshot = await getFileSnapshot(change.path);
+    if (!snapshotMatches(change, afterSnapshot)) {
+      await fsp.rm(tmpPath, { force: true });
+      return false;
+    }
+
+    await fsp.rename(tmpPath, change.path);
+    return true;
+  } catch (error) {
+    await fsp.rm(tmpPath, { force: true });
+    throw wrapRolloutFileBusyError(error, change.path, "rewrite");
   }
 }
 
@@ -212,6 +458,7 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
       providerCounts[dirName].set(currentProvider, (providerCounts[dirName].get(currentProvider) ?? 0) + 1);
 
       if (targetProvider !== "__status_only__" && parsed.payload.model_provider !== targetProvider) {
+        const snapshot = await getFileSnapshot(rolloutPath);
         parsed.payload.model_provider = targetProvider;
         summaries.push({
           path: rolloutPath,
@@ -219,6 +466,9 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
           directory: dirName,
           originalFirstLine: record.firstLine,
           originalSeparator: record.separator,
+          originalOffset: record.offset,
+          originalSize: snapshot.size,
+          originalMtimeMs: snapshot.mtimeMs,
           updatedFirstLine: JSON.stringify(parsed)
         });
       }
@@ -229,9 +479,26 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
 }
 
 export async function applySessionChanges(changes) {
+  const skippedPaths = [];
+  const appliedPaths = [];
+  let appliedChanges = 0;
+
   for (const change of changes) {
-    await rewriteFirstLine(change.path, change.updatedFirstLine, change.originalSeparator);
+    if (await tryRewriteCollectedFirstLine(change)) {
+      appliedChanges += 1;
+      appliedPaths.push(change.path);
+    } else {
+      skippedPaths.push(change.path);
+    }
   }
+
+  appliedPaths.sort((left, right) => left.localeCompare(right));
+  skippedPaths.sort((left, right) => left.localeCompare(right));
+  return {
+    appliedChanges,
+    appliedPaths,
+    skippedPaths
+  };
 }
 
 export async function assertSessionFilesWritable(changes) {

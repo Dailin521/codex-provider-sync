@@ -1,7 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import { DEFAULT_PROVIDER, defaultCodexHome } from "./constants.js";
+import {
+  DEFAULT_BACKUP_RETENTION_COUNT,
+  DEFAULT_PROVIDER,
+  defaultBackupRoot,
+  defaultCodexHome
+} from "./constants.js";
 import {
   configDeclaresProvider,
   listConfiguredProviderIds,
@@ -10,11 +15,18 @@ import {
   setRootProviderInConfigText,
   writeConfigText
 } from "./config-file.js";
-import { createBackup, restoreBackup } from "./backup.js";
+import {
+  createBackup,
+  getBackupSummary,
+  pruneBackups,
+  restoreBackup,
+  updateSessionBackupManifest
+} from "./backup.js";
 import { acquireLock } from "./locking.js";
 import {
   applySessionChanges,
   collectSessionChanges,
+  restoreSessionChanges,
   splitLockedSessionChanges,
   summarizeProviderCounts
 } from "./session-files.js";
@@ -38,6 +50,17 @@ function formatCounts(counts) {
     .join(", ") || "(none)";
 }
 
+function formatBytes(bytes) {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return unitIndex === 0 ? `${bytes} B` : `${value.toFixed(value >= 10 ? 1 : 2).replace(/\.0$/, "")} ${units[unitIndex]}`;
+}
+
 export async function getStatus({ codexHome: explicitCodexHome } = {}) {
   const codexHome = normalizeCodexHome(explicitCodexHome);
   await ensureCodexHome(codexHome);
@@ -47,6 +70,7 @@ export async function getStatus({ codexHome: explicitCodexHome } = {}) {
   const configuredProviders = listConfiguredProviderIds(configText);
   const { providerCounts } = await collectSessionChanges(codexHome, "__status_only__");
   const sqliteCounts = await readSqliteProviderCounts(codexHome);
+  const backupSummary = await getBackupSummary(codexHome);
 
   return {
     codexHome,
@@ -54,7 +78,9 @@ export async function getStatus({ codexHome: explicitCodexHome } = {}) {
     currentProviderImplicit: current.implicit,
     configuredProviders,
     rolloutCounts: summarizeProviderCounts(providerCounts),
-    sqliteCounts
+    sqliteCounts,
+    backupRoot: defaultBackupRoot(codexHome),
+    backupSummary
   };
 }
 
@@ -62,7 +88,9 @@ export function renderStatus(status) {
   const lines = [
     `Codex home: ${status.codexHome}`,
     `Current provider: ${status.currentProvider}${status.currentProviderImplicit ? " (implicit default)" : ""}`,
-    `Configured providers: ${status.configuredProviders.join(", ")}`
+    `Configured providers: ${status.configuredProviders.join(", ")}`,
+    `Backups: ${status.backupSummary.count} (${formatBytes(status.backupSummary.totalBytes)})`,
+    `Backup root: ${status.backupRoot}`
   ];
 
   lines.push("");
@@ -86,8 +114,13 @@ export async function runSync({
   codexHome: explicitCodexHome,
   provider,
   configBackupText,
+  keepCount = DEFAULT_BACKUP_RETENTION_COUNT,
   sqliteBusyTimeoutMs
 } = {}) {
+  if (!Number.isInteger(keepCount) || keepCount < 1) {
+    throw new Error(`Invalid automatic keep count: ${keepCount}. Expected an integer greater than or equal to 1.`);
+  }
+
   const codexHome = normalizeCodexHome(explicitCodexHome);
   await ensureCodexHome(codexHome);
   const configPath = path.join(codexHome, "config.toml");
@@ -107,7 +140,7 @@ export async function runSync({
       writableChanges,
       lockedChanges
     } = await splitLockedSessionChanges(changes);
-    const skippedLockedRolloutFiles = [...new Set([
+    const skippedRolloutFiles = [...new Set([
       ...lockedReadPaths,
       ...lockedChanges.map((change) => change.path)
     ])].sort((left, right) => left.localeCompare(right));
@@ -121,7 +154,9 @@ export async function runSync({
     });
 
     let sessionRestoreNeeded = false;
+    let appliedSessionChanges = [];
     try {
+      let applyResult = { appliedChanges: 0, appliedPaths: [], skippedPaths: [] };
       const sqliteResult = await updateSqliteProvider(
         codexHome,
         targetProvider,
@@ -129,30 +164,46 @@ export async function runSync({
           if (writableChanges.length === 0) {
             return;
           }
-          sessionRestoreNeeded = true;
-          await applySessionChanges(writableChanges);
+          applyResult = await applySessionChanges(writableChanges);
+          const appliedPathSet = new Set(applyResult.appliedPaths ?? []);
+          appliedSessionChanges = writableChanges.filter((change) => appliedPathSet.has(change.path));
+          sessionRestoreNeeded = appliedSessionChanges.length > 0;
+          await updateSessionBackupManifest(backupDir, appliedSessionChanges);
         },
         { busyTimeoutMs: sqliteBusyTimeoutMs }
       );
+      const skippedLockedRolloutFiles = [...new Set([
+        ...skippedRolloutFiles,
+        ...applyResult.skippedPaths
+      ])].sort((left, right) => left.localeCompare(right));
+      let autoPruneResult = null;
+      let autoPruneWarning = null;
+      try {
+        autoPruneResult = await pruneBackups(codexHome, keepCount);
+      } catch (pruneError) {
+        autoPruneWarning = `Automatic backup cleanup failed: ${pruneError instanceof Error ? pruneError.message : String(pruneError)}`;
+      }
       return {
         codexHome,
         targetProvider,
         previousProvider: current.provider,
         backupDir,
-        changedSessionFiles: writableChanges.length,
+        changedSessionFiles: applyResult.appliedChanges,
         skippedLockedRolloutFiles,
         sqliteRowsUpdated: sqliteResult.updatedRows,
         sqlitePresent: sqliteResult.databasePresent,
-        rolloutCountsBefore: summarizeProviderCounts(providerCounts)
+        rolloutCountsBefore: summarizeProviderCounts(providerCounts),
+        autoPruneResult,
+        autoPruneWarning
       };
     } catch (error) {
-      if (backupDir && sessionRestoreNeeded) {
+      if (sessionRestoreNeeded) {
         try {
-          await restoreBackup(backupDir, codexHome, {
-            restoreConfig: false,
-            restoreDatabase: false,
-            restoreSessions: true
-          });
+          await restoreSessionChanges(appliedSessionChanges.map((change) => ({
+            path: change.path,
+            originalFirstLine: change.originalFirstLine,
+            originalSeparator: change.originalSeparator
+          })));
         } catch (restoreError) {
           throw new Error(
             `Failed to restore rollout files after sync error. Original error: ${error.message}. Restore error: ${restoreError.message}`
@@ -168,7 +219,8 @@ export async function runSync({
 
 export async function runSwitch({
   codexHome: explicitCodexHome,
-  provider
+  provider,
+  keepCount = DEFAULT_BACKUP_RETENTION_COUNT
 }) {
   if (!provider) {
     throw new Error("Missing provider id. Usage: codex-provider switch <provider-id>");
@@ -189,7 +241,8 @@ export async function runSwitch({
     const syncResult = await runSync({
       codexHome,
       provider,
-      configBackupText: originalConfigText
+      configBackupText: originalConfigText,
+      keepCount
     });
     return {
       ...syncResult,
@@ -213,6 +266,24 @@ export async function runRestore({
   const releaseLock = await acquireLock(codexHome, "restore");
   try {
     return await restoreBackup(path.resolve(backupDir), codexHome);
+  } finally {
+    await releaseLock();
+  }
+}
+
+export async function runPruneBackups({
+  codexHome: explicitCodexHome,
+  keepCount = DEFAULT_BACKUP_RETENTION_COUNT
+} = {}) {
+  if (!Number.isInteger(keepCount) || keepCount < 0) {
+    throw new Error(`Invalid keep count: ${keepCount}. Expected a non-negative integer.`);
+  }
+
+  const codexHome = normalizeCodexHome(explicitCodexHome);
+  await ensureCodexHome(codexHome);
+  const releaseLock = await acquireLock(codexHome, "prune-backups");
+  try {
+    return await pruneBackups(codexHome, keepCount);
   } finally {
     await releaseLock();
   }

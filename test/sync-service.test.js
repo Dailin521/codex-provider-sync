@@ -6,7 +6,16 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+import {
+  createBackup,
+  getBackupSummary,
+  pruneBackups,
+  restoreBackup,
+  updateSessionBackupManifest
+} from "../src/backup.js";
 import { getStatus, runRestore, runSwitch, runSync } from "../src/service.js";
+import { DEFAULT_BACKUP_RETENTION_COUNT } from "../src/constants.js";
+import { applySessionChanges, collectSessionChanges } from "../src/session-files.js";
 
 async function makeTempCodexHome() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-provider-sync-"));
@@ -30,6 +39,39 @@ async function writeRollout(filePath, id, provider) {
     JSON.stringify({ timestamp: payload.timestamp, type: "event_msg", payload: { type: "user_message", message: "hi" } })
   ];
   await fs.writeFile(filePath, `${lines.join("\n")}\n`, "utf8");
+}
+
+function backupRoot(codexHome) {
+  return path.join(codexHome, "backups_state", "provider-sync");
+}
+
+async function writeBackup(codexHome, directoryName, files) {
+  const backupDir = path.join(backupRoot(codexHome), directoryName);
+  await fs.mkdir(backupDir, { recursive: true });
+  let totalBytes = 0;
+  if (!files.some(([relativePath]) => relativePath === "metadata.json")) {
+    const metadataPath = path.join(backupDir, "metadata.json");
+    const metadataContent = JSON.stringify({
+      version: 1,
+      namespace: "provider-sync",
+      codexHome,
+      targetProvider: "openai",
+      createdAt: "2026-03-24T00:00:00.000Z",
+      dbFiles: [],
+      changedSessionFiles: 0
+    }, null, 2);
+    await fs.writeFile(metadataPath, metadataContent, "utf8");
+    const metadataStat = await fs.stat(metadataPath);
+    totalBytes += metadataStat.size;
+  }
+  for (const [relativePath, content] of files) {
+    const fullPath = path.join(backupDir, relativePath);
+    await fs.mkdir(path.dirname(fullPath), { recursive: true });
+    await fs.writeFile(fullPath, content, "utf8");
+    const stat = await fs.stat(fullPath);
+    totalBytes += stat.size;
+  }
+  return totalBytes;
 }
 
 async function writeConfig(codexHome, modelProviderLine = "") {
@@ -58,11 +100,12 @@ async function writeStateDb(codexHome, rows) {
   }
 }
 
-async function lockRolloutFile(filePath) {
+async function lockRolloutFile(filePath, shareMode = "None") {
   const script = `
 & {
-  param([string]$path)
-  $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+  param([string]$path, [string]$shareMode)
+  $share = [System.Enum]::Parse([System.IO.FileShare], $shareMode)
+  $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, $share)
   try {
     Write-Output 'locked'
     [Console]::Out.Flush()
@@ -79,7 +122,8 @@ async function lockRolloutFile(filePath) {
     "Bypass",
     "-Command",
     script,
-    filePath
+    filePath,
+    shareMode
   ], {
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -112,6 +156,29 @@ async function lockRolloutFile(filePath) {
   });
 
   return child;
+}
+
+async function runCli(args) {
+  const cliPath = path.resolve("src", "cli.js");
+  return await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [cliPath, ...args], {
+      cwd: path.resolve("."),
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.once("error", reject);
+    child.once("exit", (code) => {
+      resolve({ code, stdout, stderr });
+    });
+  });
 }
 
 test("runSync rewrites rollout files and sqlite, then restore reverts both", async () => {
@@ -184,6 +251,8 @@ test("status reports implicit default provider and rollout/sqlite counts", async
   const archivedPath = path.join(codexHome, "archived_sessions", "2026", "03", "18", "rollout-b.jsonl");
   await writeRollout(sessionPath, "thread-a", "apigather");
   await writeRollout(archivedPath, "thread-b", "openai");
+  const backupOneBytes = await writeBackup(codexHome, "20260319T000000000Z", [["note.txt", "backup-one"]]);
+  const backupTwoBytes = await writeBackup(codexHome, "20260320T000000000Z", [["note.txt", "backup-two"]]);
   await writeStateDb(codexHome, [
     { id: "thread-a", model_provider: "apigather", archived: false },
     { id: "thread-b", model_provider: "openai", archived: true }
@@ -194,6 +263,8 @@ test("status reports implicit default provider and rollout/sqlite counts", async
   assert.equal(status.currentProviderImplicit, true);
   assert.deepEqual(status.rolloutCounts.sessions, { apigather: 1 });
   assert.deepEqual(status.sqliteCounts.archived_sessions, { openai: 1 });
+  assert.equal(status.backupSummary.count, 2);
+  assert.equal(status.backupSummary.totalBytes, backupOneBytes + backupTwoBytes);
 });
 
 test("runSwitch rejects unknown custom providers", async () => {
@@ -282,4 +353,146 @@ test("runSync skips locked rollout files and still updates sqlite", async () => 
   } finally {
     db.close();
   }
+});
+
+test("applySessionChanges skips rollout files that changed after collection", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");
+  await writeRollout(sessionPath, "thread-a", "apigather");
+
+  const { changes } = await collectSessionChanges(codexHome, "openai");
+  await fs.appendFile(
+    sessionPath,
+    '{"timestamp":"2026-03-19T00:00:01.000Z","type":"event_msg","payload":{"type":"assistant_message","message":"later"}}\n',
+    "utf8"
+  );
+
+  const result = await applySessionChanges(changes);
+  assert.equal(result.appliedChanges, 0);
+  assert.deepEqual(result.skippedPaths, [sessionPath]);
+
+  const rollout = await fs.readFile(sessionPath, "utf8");
+  assert.match(rollout, /"model_provider":"apigather"/);
+  assert.match(rollout, /"message":"later"/);
+});
+
+test("restoreBackup only restores rollout files that were actually applied", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const configPath = path.join(codexHome, "config.toml");
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");
+  await writeRollout(sessionPath, "thread-a", "apigather");
+
+  const { changes } = await collectSessionChanges(codexHome, "openai");
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: changes,
+    configPath
+  });
+
+  await updateSessionBackupManifest(backupDir, []);
+  await writeRollout(sessionPath, "thread-a", "manual");
+
+  await restoreBackup(backupDir, codexHome, {
+    restoreConfig: false,
+    restoreDatabase: false,
+    restoreSessions: true
+  });
+
+  const rollout = await fs.readFile(sessionPath, "utf8");
+  assert.match(rollout, /"model_provider":"manual"/);
+});
+
+test("pruneBackups removes the oldest backup directories", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  const oldestBytes = await writeBackup(codexHome, "20260319T000000000Z", [
+    ["note.txt", "oldest"],
+    ["db/state_5.sqlite", "sqlite"]
+  ]);
+  await writeBackup(codexHome, "20260320T000000000Z", [["note.txt", "middle"]]);
+  await writeBackup(codexHome, "20260321T000000000Z", [["note.txt", "newest"]]);
+
+  const result = await pruneBackups(codexHome, 2);
+
+  assert.equal(result.backupRoot, backupRoot(codexHome));
+  assert.equal(result.deletedCount, 1);
+  assert.equal(result.remainingCount, 2);
+  assert.equal(result.freedBytes, oldestBytes);
+  await assert.rejects(fs.access(path.join(backupRoot(codexHome), "20260319T000000000Z")));
+  await fs.access(path.join(backupRoot(codexHome), "20260320T000000000Z"));
+  await fs.access(path.join(backupRoot(codexHome), "20260321T000000000Z"));
+});
+
+test("pruneBackups ignores directories without managed backup metadata", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeBackup(codexHome, "20260320T000000000Z", [
+    ["metadata.json", JSON.stringify({ namespace: "provider-sync" })]
+  ]);
+  const junkDirectory = path.join(backupRoot(codexHome), "manual-notes");
+  await fs.mkdir(junkDirectory, { recursive: true });
+  await fs.writeFile(path.join(junkDirectory, "readme.txt"), "keep me", "utf8");
+
+  const result = await pruneBackups(codexHome, 0);
+
+  assert.equal(result.deletedCount, 1);
+  assert.equal(result.remainingCount, 0);
+  await fs.access(junkDirectory);
+});
+
+test("runSync auto-prunes backups to the default retention count", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");
+  await writeRollout(sessionPath, "thread-a", "apigather");
+  await writeStateDb(codexHome, [
+    { id: "thread-a", model_provider: "apigather", archived: false }
+  ]);
+
+  for (let index = 0; index < DEFAULT_BACKUP_RETENTION_COUNT; index += 1) {
+    await writeBackup(codexHome, `20240101T0000${String(index).padStart(2, "0")}000Z`, [
+      ["note.txt", `backup-${index}`]
+    ]);
+  }
+
+  const result = await runSync({ codexHome });
+  const summary = await getBackupSummary(codexHome);
+
+  assert.equal(summary.count, DEFAULT_BACKUP_RETENTION_COUNT);
+  await fs.access(result.backupDir);
+  assert.equal(result.autoPruneResult.deletedCount, 1);
+  assert.equal(result.autoPruneResult.remainingCount, DEFAULT_BACKUP_RETENTION_COUNT);
+  assert.equal(result.autoPruneWarning, null);
+});
+
+test("runSync uses a custom automatic backup retention count", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");
+  await writeRollout(sessionPath, "thread-a", "apigather");
+  await writeStateDb(codexHome, [
+    { id: "thread-a", model_provider: "apigather", archived: false }
+  ]);
+
+  for (let index = 0; index < 4; index += 1) {
+    await writeBackup(codexHome, `20240101T0000${String(index).padStart(2, "0")}000Z`, [
+      ["note.txt", `backup-${index}`]
+    ]);
+  }
+
+  const result = await runSync({ codexHome, keepCount: 2 });
+  const summary = await getBackupSummary(codexHome);
+
+  assert.equal(summary.count, 2);
+  await fs.access(result.backupDir);
+  assert.equal(result.autoPruneResult.deletedCount, 3);
+  assert.equal(result.autoPruneResult.remainingCount, 2);
+  assert.equal(result.autoPruneWarning, null);
+});
+
+test("cli rejects non-integer keep values", async () => {
+  const result = await runCli(["prune-backups", "--keep", "1.5"]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /Invalid --keep value: 1\.5/);
 });

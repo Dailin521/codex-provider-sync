@@ -29,6 +29,23 @@
 - `~/.codex/sessions` 和 `~/.codex/archived_sessions`
 - `~/.codex/state_5.sqlite`
 
+## Windows 图形界面
+
+如果你不想装 Node、也不想进终端，现在可以直接使用发布页里的 `CodexProviderSync.exe`。
+
+GUI 版本会：
+
+- 扫描当前 `.codex` 目录
+- 展示 rollout files 和 SQLite 的 provider 分布
+- 自动汇总已检测到和已保存的 provider
+- 允许你选择目标 provider 后一键执行
+- 可选同时改 `config.toml` 根级 `model_provider`
+- 默认自动保留最近 5 份由本工具创建的备份，并支持自定义保留数
+- 支持手动清理旧备份
+- 支持从 backup 目录恢复
+
+GUI 专用说明见 [README_GUI_ZH.md](README_GUI_ZH.md)。
+
 ## 安装
 
 ```bash
@@ -41,7 +58,16 @@ npm install -g github:Dailin521/codex-provider-sync
 - 标准 `~/.codex` 目录结构
 - 当前优先面向 Windows 使用场景
 
+对普通用户来说，推荐直接下载 GUI EXE。npm CLI 会继续保留，适合脚本、自动化和高级用户。
+
 ## 快速开始
+
+GUI 方式：
+
+- 从 Releases 下载 `CodexProviderSync.exe`
+- 打开后先点 `Refresh`
+- 选择目标 Provider
+- 点击 `Execute`
 
 如果你已经用自己的方式切好了 provider 或认证状态，直接执行：
 
@@ -54,6 +80,13 @@ codex-provider sync
 ```bash
 codex-provider switch openai
 codex-provider switch apigather
+```
+
+如果你想只在这一次执行里改自动保留数：
+
+```bash
+codex-provider sync --keep 5
+codex-provider switch apigather --keep 10
 ```
 
 先看当前状态：
@@ -74,6 +107,12 @@ codex-provider install-windows-launcher
 codex-provider restore C:\Users\you\.codex\backups_state\provider-sync\<timestamp>
 ```
 
+手动清理旧备份：
+
+```bash
+codex-provider prune-backups --keep 5
+```
+
 ## AI 一键处理
 
 如果你想直接交给 AI 助手处理，把下面这段原样发给 AI：
@@ -89,6 +128,16 @@ codex-provider restore C:\Users\you\.codex\backups_state\provider-sync\<timestam
 5. 如果 sync 跳过了被锁住的 rollout 文件，就告诉我哪些文件被跳过了，并提醒我稍后再补跑一次 `codex-provider sync`。
 6. 最后总结 rollout files 和 SQLite 里的 provider 状态。
 ```
+
+如果用户更倾向于 GUI，也可以让 AI 这样引导：
+
+1. 打开 `CodexProviderSync.exe`
+2. 确认顶部 `.codex` 路径
+3. 点击 `Refresh`
+4. 在列表中选中目标 Provider
+5. 如果还要改 `config.toml` 根级 provider，再勾选右侧复选框
+6. 点击 `Execute`
+7. 查看底部日志区里的 backup 路径、更新数量和被跳过的锁文件
 
 快速对应关系：
 
@@ -109,6 +158,9 @@ codex-provider restore C:\Users\you\.codex\backups_state\provider-sync\<timestam
 - `codex-provider switch <provider-id>`
   - 修改 `config.toml` 根级 `model_provider`
   - 然后立即执行一次同步
+  - `--keep <n>` 可覆盖这次执行后的备份保留数量
+- `codex-provider prune-backups`
+  - 手动清理旧备份，只保留最近 `n` 份由本工具管理的备份
 - `codex-provider restore <backup-dir>`
   - 从历史备份恢复
 - `codex-provider install-windows-launcher`
@@ -123,8 +175,10 @@ codex-provider restore C:\Users\you\.codex\backups_state\provider-sync\<timestam
 ```bash
 codex-provider status
 codex-provider sync
+codex-provider sync --keep 5
 codex-provider sync --provider openai
 codex-provider switch apigather
+codex-provider prune-backups --keep 5
 codex-provider install-windows-launcher
 codex-provider install-windows-launcher --dir D:\Tools
 codex-provider install-windows-launcher --codex-home C:\Users\you\.codex
@@ -150,6 +204,8 @@ codex-provider restore C:\Users\you\.codex\backups_state\provider-sync\20260319T
 - 它不会替换官方 `codex`
 - 它不会帮你处理 `auth.json` 或第三方切号工具
 - 它不会改消息历史、标题、cwd、时间戳
+- 默认自动保留最近 5 份由本工具创建的备份；GUI 保留数或 CLI `--keep <n>` 可以覆盖
+- 自动清理和手动清理都只会处理 `backups_state/provider-sync` 下由本工具创建的备份
 - `Codex Provider Sync.vbs` 依赖 `codex-provider` 命令本身已经可用
 - 如果 `state_5.sqlite` 被占用，先关闭 Codex / Codex App / app-server 再重试
 - 如果当前活跃会话锁住了某个 rollout 文件，`sync` 会跳过该文件并继续处理其它历史会话
@@ -164,6 +220,8 @@ codex-provider restore C:\Users\you\.codex\backups_state\provider-sync\20260319T
 git clone https://github.com/Dailin521/codex-provider-sync.git
 cd codex-provider-sync
 npm test
+dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj
+pwsh ./scripts/publish-gui.ps1
 node ./src/cli.js status --codex-home C:\path\to\.codex
 ```
 
