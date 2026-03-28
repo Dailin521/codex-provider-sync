@@ -9,6 +9,7 @@
 [![Node](https://img.shields.io/badge/node-24%2B-brightgreen.svg)](https://nodejs.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Community](https://img.shields.io/badge/community-LINUX%20DO-2ea043.svg)](https://linux.do/)
+[![gitcgr](https://gitcgr.com/badge/Dailin521/codex-provider-sync.svg)](https://gitcgr.com/Dailin521/codex-provider-sync)
 
 [English](README_EN.md) | 中文
 
