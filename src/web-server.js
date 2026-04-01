@@ -106,7 +106,7 @@ async function deleteSessionById(codexHome, sessionId) {
   } finally { db.close(); }
 
   if (rolloutPath) {
-    const fullPath = path.join(codexHome, rolloutPath);
+    const fullPath = path.resolve(codexHome, rolloutPath);
     const dirPath = path.dirname(fullPath);
     await fs.rm(fullPath, { force: true });
     // 如果会话目录为空也删掉
