@@ -12,6 +12,7 @@ import {
   runSwitch,
   runSync
 } from "./service.js";
+import { startWebServer } from "./web-server.js";
 
 function printHelp() {
   console.log(`codex-provider
@@ -22,6 +23,7 @@ Usage:
   codex-provider switch <provider-id> [--keep N] [--codex-home PATH]
   codex-provider prune-backups [--keep N] [--codex-home PATH]
   codex-provider restore <backup-dir> [--codex-home PATH]
+  codex-provider gui [--port PORT] [--codex-home PATH]
   codex-provider install-windows-launcher [--dir PATH] [--codex-home PATH]
 `);
 }
@@ -170,6 +172,15 @@ async function main() {
     console.log(`Restored backup from ${path.resolve(backupDir)}`);
     console.log(`Codex home: ${result.codexHome}`);
     console.log(`Provider at backup time: ${result.targetProvider}`);
+    return;
+  }
+
+  if (command === "gui") {
+    const port = flags.port ? Number.parseInt(flags.port, 10) : 3456;
+    await startWebServer({
+      codexHome: flags["codex-home"],
+      port
+    });
     return;
   }
 

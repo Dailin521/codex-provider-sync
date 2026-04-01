@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Codex Provider Sync</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#0d1117;--surface:#161b22;--border:#30363d;
+  --text:#e6edf3;--text-dim:#8b949e;--accent:#58a6ff;
+  --green:#3fb950;--orange:#d29922;--red:#f85149;
+  --radius:12px;--glass:rgba(22,27,34,0.8);
+}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+  background:var(--bg);color:var(--text);
+  min-height:100vh;padding:24px;
+  background-image:radial-gradient(ellipse at 20% 50%,rgba(88,166,255,0.08) 0%,transparent 50%),
+                   radial-gradient(ellipse at 80% 20%,rgba(63,185,80,0.06) 0%,transparent 50%);
+}
+.container{max-width:960px;margin:0 auto}
+header{
+  display:flex;align-items:center;gap:16px;
+  margin-bottom:32px;padding-bottom:20px;
+  border-bottom:1px solid var(--border);
+}
+header h1{
+  font-size:24px;font-weight:600;
+  background:linear-gradient(135deg,var(--accent),var(--green));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+}
+header .badge{
+  font-size:12px;padding:3px 10px;border-radius:20px;
+  background:rgba(88,166,255,0.15);color:var(--accent);
+  border:1px solid rgba(88,166,255,0.3);
+}
+.card{
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);padding:20px;margin-bottom:16px;
+  backdrop-filter:blur(10px);
+  transition:border-color 0.2s;
+}
+.card:hover{border-color:rgba(88,166,255,0.3)}
+.card h2{
+  font-size:14px;font-weight:600;color:var(--text-dim);
+  text-transform:uppercase;letter-spacing:1px;margin-bottom:14px;
+}
+.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.info-item{
+  display:flex;flex-direction:column;gap:4px;
+  padding:12px;border-radius:8px;
+  background:rgba(255,255,255,0.02);
+}
+.info-item .label{font-size:12px;color:var(--text-dim)}
+.info-item .value{font-size:15px;font-weight:500;word-break:break-all}
+.provider-tag{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:4px 12px;border-radius:20px;font-size:13px;
+  font-weight:500;
+}
+.provider-tag.current{
+  background:rgba(63,185,80,0.15);color:var(--green);
+  border:1px solid rgba(63,185,80,0.3);
+}
+.provider-tag.implicit{
+  background:rgba(210,153,34,0.15);color:var(--orange);
+  border:1px solid rgba(210,153,34,0.3);
+}
+.dist-table{width:100%;border-collapse:collapse;font-size:14px}
+.dist-table th{
+  text-align:left;padding:8px 12px;color:var(--text-dim);
+  font-weight:500;border-bottom:1px solid var(--border);font-size:12px;
+}
+.dist-table td{padding:8px 12px;border-bottom:1px solid rgba(48,54,61,0.5)}
+.dist-table .count{
+  font-variant-numeric:tabular-nums;font-weight:600;color:var(--accent);
+}
+.actions{
+  display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;
+}
+.form-group{display:flex;flex-direction:column;gap:6px;flex:1;min-width:180px}
+.form-group label{font-size:12px;color:var(--text-dim);font-weight:500}
+select,input[type="number"]{
+  background:var(--bg);color:var(--text);
+  border:1px solid var(--border);border-radius:8px;
+  padding:10px 14px;font-size:14px;outline:none;
+  transition:border-color 0.2s;
+}
+select:focus,input:focus{border-color:var(--accent)}
+.btn{
+  padding:10px 20px;border-radius:8px;font-size:14px;
+  font-weight:600;cursor:pointer;border:none;
+  transition:all 0.2s;display:inline-flex;align-items:center;gap:6px;
+  white-space:nowrap;
+}
+.btn:active{transform:scale(0.97)}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:hover{background:#79c0ff}
+.btn-green{background:var(--green);color:#fff}
+.btn-green:hover{background:#56d364}
+.btn-outline{
+  background:transparent;color:var(--text);
+  border:1px solid var(--border);
+}
+.btn-outline:hover{border-color:var(--accent);color:var(--accent)}
+.btn-danger{background:rgba(248,81,73,0.15);color:var(--red);border:1px solid rgba(248,81,73,0.3)}
+.btn-danger:hover{background:rgba(248,81,73,0.25)}
+.btn:disabled{opacity:0.5;cursor:not-allowed;transform:none}
+.log-area{
+  background:var(--bg);border:1px solid var(--border);
+  border-radius:8px;padding:14px;margin-top:12px;
+  font-family:"SF Mono",Menlo,Monaco,monospace;
+  font-size:13px;line-height:1.6;
+  max-height:280px;overflow-y:auto;color:var(--text-dim);
+  white-space:pre-wrap;word-break:break-all;
+}
+.log-area .success{color:var(--green)}
+.log-area .error{color:var(--red)}
+.log-area .info{color:var(--accent)}
+.backup-list{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+.backup-item{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:10px 14px;border-radius:8px;
+  background:rgba(255,255,255,0.02);
+  border:1px solid transparent;
+  transition:border-color 0.2s;gap:12px;
+}
+.backup-item:hover{border-color:var(--border)}
+.backup-meta{flex:1;min-width:0}
+.backup-meta .time{font-size:14px;font-weight:500}
+.backup-meta .detail{font-size:12px;color:var(--text-dim);margin-top:2px}
+.spinner{
+  width:16px;height:16px;border:2px solid rgba(255,255,255,0.2);
+  border-top-color:#fff;border-radius:50%;
+  animation:spin 0.6s linear infinite;display:inline-block;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+.fade-in{animation:fadeIn 0.3s ease-out}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.flex-between{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
+.checkbox-group{display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer}
+.checkbox-group input{accent-color:var(--accent);width:16px;height:16px}
+.search-input{
+  background:var(--bg);color:var(--text);border:1px solid var(--border);
+  border-radius:8px;padding:8px 14px;font-size:13px;outline:none;
+  width:260px;transition:border-color 0.2s;
+}
+.search-input:focus{border-color:var(--accent)}
+.search-input::placeholder{color:var(--text-dim)}
+.session-list{max-height:500px;overflow-y:auto;margin-top:12px}
+.session-item{
+  display:flex;align-items:flex-start;gap:10px;
+  padding:10px 14px;border-radius:8px;
+  background:rgba(255,255,255,0.02);
+  border:1px solid transparent;
+  transition:all 0.15s;margin-bottom:6px;
+}
+.session-item:hover{border-color:var(--border);background:rgba(255,255,255,0.04)}
+.session-item.selected{border-color:rgba(248,81,73,0.4);background:rgba(248,81,73,0.06)}
+.session-item input[type=checkbox]{accent-color:var(--red);width:16px;height:16px;margin-top:3px;flex-shrink:0}
+.session-info{flex:1;min-width:0}
+.session-title{
+  font-size:14px;font-weight:500;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.session-detail{font-size:12px;color:var(--text-dim);margin-top:3px;line-height:1.5}
+.session-detail code{font-size:11px;color:var(--accent);background:rgba(88,166,255,0.08);padding:1px 5px;border-radius:3px}
+.tag-archived{
+  font-size:11px;padding:2px 8px;border-radius:10px;
+  background:rgba(210,153,34,0.15);color:var(--orange);
+  border:1px solid rgba(210,153,34,0.3);flex-shrink:0;
+}
+.btn-sm{padding:6px 12px;font-size:12px}
+.count-badge{
+  font-size:12px;padding:2px 10px;border-radius:20px;
+  background:rgba(88,166,255,0.1);color:var(--accent);
+  font-variant-numeric:tabular-nums;
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>⚡ Codex Provider Sync</h1>
+    <span class="badge">macOS GUI</span>
+  </header>
+
+  <div class="card fade-in" id="statusCard">
+    <h2>📊 当前状态</h2>
+    <div class="info-grid" id="statusGrid">
+      <div class="info-item"><span class="label">加载中...</span><span class="value">-</span></div>
+    </div>
+  </div>
+
+  <div class="card fade-in" id="distCard" style="animation-delay:0.05s">
+    <h2>📁 Provider 分布</h2>
+    <div id="distContent">加载中...</div>
+  </div>
+
+  <div class="card fade-in" style="animation-delay:0.1s">
+    <h2>🚀 操作</h2>
+    <div class="actions">
+      <div class="form-group">
+        <label>目标 Provider</label>
+        <select id="providerSelect"><option>加载中...</option></select>
+      </div>
+      <div class="form-group" style="max-width:100px">
+        <label>保留备份数</label>
+        <input type="number" id="keepCount" value="5" min="1" max="50">
+      </div>
+      <button class="btn btn-primary" id="btnSync" onclick="doSync()">
+        🔄 同步 Sync
+      </button>
+      <button class="btn btn-green" id="btnSwitch" onclick="doSwitch()">
+        🔀 切换 Switch
+      </button>
+    </div>
+    <label class="checkbox-group" style="margin-top:12px">
+      <input type="checkbox" id="chkUpdateConfig">
+      Switch 时同时修改 config.toml 根级 model_provider
+    </label>
+    <div class="log-area" id="logArea">就绪。点击上方按钮开始操作。</div>
+  </div>
+
+  <div class="card fade-in" style="animation-delay:0.12s">
+    <div class="flex-between">
+      <h2>📋 会话列表 <span class="count-badge" id="sessionCount">0</span></h2>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input class="search-input" id="sessionSearch" type="text" placeholder="搜索标题、路径..." oninput="renderSessions()">
+        <button class="btn btn-outline btn-sm" id="btnLoadSessions" onclick="loadSessions()">📥 加载</button>
+        <button class="btn btn-danger btn-sm" id="btnDeleteSelected" onclick="doDeleteSelected()" disabled>🗑 删除选中</button>
+      </div>
+    </div>
+    <div style="margin-top:8px;display:flex;gap:12px;align-items:center">
+      <label class="checkbox-group" style="font-size:12px">
+        <input type="checkbox" id="chkSelectAll" onchange="toggleSelectAll(this.checked)"> 全选当页
+      </label>
+      <span id="selectedInfo" style="font-size:12px;color:var(--text-dim)"></span>
+    </div>
+    <div class="session-list" id="sessionList">
+      <div style="color:var(--text-dim);padding:24px;text-align:center">点击「加载」查看会话列表</div>
+    </div>
+  </div>
+
+  <div class="card fade-in" style="animation-delay:0.15s">
+    <div class="flex-between">
+      <h2>💾 备份管理</h2>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-outline" onclick="doRefresh()">🔄 刷新</button>
+        <button class="btn btn-danger" onclick="doPrune()">🗑 清理旧备份</button>
+      </div>
+    </div>
+    <div class="backup-list" id="backupList">加载中...</div>
+  </div>
+</div>
+<script>
+let statusData = null;
+
+function log(msg, cls = '') {
+  const el = document.getElementById('logArea');
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+function clearLog() {
+  document.getElementById('logArea').innerHTML = '';
+}
+
+function setLoading(btnId, loading) {
+  const btn = document.getElementById(btnId);
+  if (loading) {
+    btn.disabled = true;
+    btn._text = btn.innerHTML;
+    btn.innerHTML = '<span class="spinner"></span> 执行中...';
+  } else {
+    btn.disabled = false;
+    btn.innerHTML = btn._text || btn.innerHTML;
+  }
+}
+
+function formatBytes(bytes) {
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let v = bytes, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return i === 0 ? `${bytes} B` : `${v.toFixed(v >= 10 ? 1 : 2)} ${units[i]}`;
+}
+
+function formatCounts(counts) {
+  if (!counts || !Object.keys(counts).length) return '(无)';
+  return Object.entries(counts).map(([k, v]) =>
+    `<span class="provider-tag" style="background:rgba(88,166,255,0.1);color:var(--accent);border:1px solid rgba(88,166,255,0.2);margin:2px">${k}: <b>${v}</b></span>`
+  ).join(' ');
+}
+
+function formatTime(iso) {
+  if (!iso) return '-';
+  const d = new Date(iso);
+  return d.toLocaleString('zh-CN', { month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit' });
+}
+
+async function api(path, method = 'GET', body = null) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(`/api/${path}`, opts);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+let sessionsData = [];
+let edgesData = [];
+let selectedIds = new Set();
+
+async function loadStatus() {
+  try {
+    statusData = await api('status');
+    renderStatus();
+    renderDist();
+    renderProviderSelect();
+    renderBackups();
+  } catch (e) {
+    log(`加载状态失败: ${e.message}`, 'error');
+  }
+}
+
+async function loadSessions() {
+  setLoading('btnLoadSessions', true);
+  try {
+    const r = await api('sessions');
+    sessionsData = r.sessions || [];
+    edgesData = r.edges || [];
+    selectedIds.clear();
+    renderSessions();
+  } catch (e) {
+    log(`加载会话列表失败: ${e.message}`, 'error');
+  } finally {
+    setLoading('btnLoadSessions', false);
+  }
+}
+
+function buildTree(sessions) {
+  // 构建 parentId → childIds 映射
+  const childSet = new Set();
+  const parentToChildren = new Map();
+  for (const s of sessions) {
+    if (s.parentId) {
+      childSet.add(s.id);
+      if (!parentToChildren.has(s.parentId)) parentToChildren.set(s.parentId, []);
+      parentToChildren.get(s.parentId).push(s.id);
+    }
+  }
+  const sessionMap = new Map(sessions.map(s => [s.id, s]));
+  // 构建展示顺序：父 → 子1 → 子2 ...
+  const ordered = [];
+  const visited = new Set();
+  for (const s of sessions) {
+    if (visited.has(s.id)) continue;
+    if (childSet.has(s.id)) continue; // 子会话后面跟在父后面
+    visited.add(s.id);
+    const childCount = parentToChildren.get(s.id)?.length || 0;
+    ordered.push({ ...s, isChild: false, childCount, depth: 0 });
+    // 插入子会话
+    const children = parentToChildren.get(s.id) || [];
+    for (const cid of children) {
+      if (visited.has(cid)) continue;
+      visited.add(cid);
+      const child = sessionMap.get(cid);
+      if (child) ordered.push({ ...child, isChild: true, childCount: 0, depth: 1 });
+    }
+  }
+  // 如果有孤儿子会话（父不在当前列表）也加进来
+  for (const s of sessions) {
+    if (!visited.has(s.id)) {
+      ordered.push({ ...s, isChild: true, childCount: 0, depth: 1 });
+    }
+  }
+  return ordered;
+}
+
+function getFilteredSessions() {
+  const q = (document.getElementById('sessionSearch').value || '').toLowerCase();
+  const tree = buildTree(sessionsData);
+  if (!q) return tree;
+  // 搜索时同时匹配父子
+  const matchIds = new Set();
+  for (const s of sessionsData) {
+    if ((s.title || '').toLowerCase().includes(q) ||
+        (s.cwd || '').toLowerCase().includes(q) ||
+        (s.model_provider || '').toLowerCase().includes(q) ||
+        (s.id || '').toLowerCase().includes(q)) {
+      matchIds.add(s.id);
+      if (s.parentId) matchIds.add(s.parentId); // 子匹配则也显示父
+    }
+  }
+  return tree.filter(s => matchIds.has(s.id));
+}
+
+function renderSessionItem(s) {
+  const checked = selectedIds.has(s.id) ? 'checked' : '';
+  const selCls = selectedIds.has(s.id) ? ' selected' : '';
+  const title = escHtml(truncate(s.title || '(无标题)', 80));
+  const time = formatTime(s.updated_at_iso);
+  const archived = s.archived ? '<span class="tag-archived">已归档</span>' : '';
+  const cwdShort = escHtml((s.cwd || '').replace(/^\/Users\/[^/]+/, '~'));
+  const indent = s.depth ? 'margin-left:28px;border-left:2px solid var(--border);' : '';
+  const childTag = s.isChild
+    ? '<span style="font-size:11px;padding:2px 8px;border-radius:10px;background:rgba(88,166,255,0.12);color:var(--accent);border:1px solid rgba(88,166,255,0.25)">↳ 子线程</span>'
+    : '';
+  const parentBadge = s.childCount > 0
+    ? `<span style="font-size:11px;padding:2px 8px;border-radius:10px;background:rgba(63,185,80,0.12);color:var(--green);border:1px solid rgba(63,185,80,0.25)">🌳 ${s.childCount} 个子线程</span>`
+    : '';
+  return `<div class="session-item${selCls}" style="${indent}">
+    <input type="checkbox" ${checked} onchange="toggleSelect('${s.id}', this.checked)">
+    <div class="session-info">
+      <div class="session-title">${title}</div>
+      <div class="session-detail">
+        <code>${s.model_provider}</code> · ${time} · <code>${cwdShort}</code>
+        ${childTag}${parentBadge}
+      </div>
+    </div>
+    ${archived}
+  </div>`;
+}
+
+function renderSessions() {
+  const list = document.getElementById('sessionList');
+  const filtered = getFilteredSessions();
+  document.getElementById('sessionCount').textContent = `${filtered.length} / ${sessionsData.length}`;
+  updateSelectedInfo();
+  if (!sessionsData.length) {
+    list.innerHTML = '<div style="color:var(--text-dim);padding:24px;text-align:center">点击「加载」查看会话列表</div>';
+    return;
+  }
+  if (!filtered.length) {
+    list.innerHTML = '<div style="color:var(--text-dim);padding:24px;text-align:center">无匹配结果</div>';
+    return;
+  }
+  list.innerHTML = filtered.map(s => renderSessionItem(s)).join('');
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function truncate(s, n) { return s.length > n ? s.slice(0, n) + '…' : s; }
+
+function toggleSelect(id, checked) {
+  if (checked) selectedIds.add(id); else selectedIds.delete(id);
+  updateSelectedInfo();
+  renderSessions();
+}
+
+function toggleSelectAll(checked) {
+  const filtered = getFilteredSessions();
+  for (const s of filtered) {
+    if (checked) selectedIds.add(s.id); else selectedIds.delete(s.id);
+  }
+  updateSelectedInfo();
+  renderSessions();
+}
+
+function updateSelectedInfo() {
+  const n = selectedIds.size;
+  document.getElementById('selectedInfo').textContent = n ? `已选 ${n} 个会话` : '';
+  document.getElementById('btnDeleteSelected').disabled = n === 0;
+  document.getElementById('chkSelectAll').checked =
+    getFilteredSessions().length > 0 && getFilteredSessions().every(s => selectedIds.has(s.id));
+}
+
+async function doDeleteSelected() {
+  const ids = [...selectedIds];
+  if (!ids.length) return;
+  if (!confirm(`确定要永久删除 ${ids.length} 个会话吗？\n\n此操作不可恢复！将同时删除 rollout 文件和 SQLite 记录。`)) return;
+  clearLog();
+  log(`删除 ${ids.length} 个会话中...`, 'info');
+  try {
+    const r = await api('sessions/delete', 'POST', { ids });
+    log(`✅ 已删除 ${r.deleted} 个会话`, 'success');
+    selectedIds.clear();
+    await loadSessions();
+    await loadStatus();
+  } catch (e) {
+    log(`❌ 删除失败: ${e.message}`, 'error');
+  }
+}
+
+function renderStatus() {
+  const s = statusData;
+  const implicit = s.currentProviderImplicit ? ' (隐式默认)' : '';
+  const tagCls = s.currentProviderImplicit ? 'implicit' : 'current';
+  document.getElementById('statusGrid').innerHTML = `
+    <div class="info-item">
+      <span class="label">当前 Provider</span>
+      <span class="value"><span class="provider-tag ${tagCls}">${s.currentProvider}${implicit}</span></span>
+    </div>
+    <div class="info-item">
+      <span class="label">Codex Home</span>
+      <span class="value" style="font-size:13px;font-family:monospace">${s.codexHome}</span>
+    </div>
+    <div class="info-item">
+      <span class="label">已配置 Providers</span>
+      <span class="value">${s.configuredProviders.join(', ')}</span>
+    </div>
+    <div class="info-item">
+      <span class="label">备份</span>
+      <span class="value">${s.backupSummary.count} 份 (${formatBytes(s.backupSummary.totalBytes)})</span>
+    </div>`;
+}
+
+function renderDist() {
+  const r = statusData.rolloutCounts;
+  const q = statusData.sqliteCounts;
+  let html = '<table class="dist-table"><tr><th>来源</th><th>类型</th><th>Provider 分布</th></tr>';
+  html += `<tr><td>Rollout</td><td>sessions</td><td>${formatCounts(r?.sessions)}</td></tr>`;
+  html += `<tr><td>Rollout</td><td>archived</td><td>${formatCounts(r?.archived_sessions)}</td></tr>`;
+  if (q) {
+    html += `<tr><td>SQLite</td><td>sessions</td><td>${formatCounts(q.sessions)}</td></tr>`;
+    html += `<tr><td>SQLite</td><td>archived</td><td>${formatCounts(q.archived_sessions)}</td></tr>`;
+  } else {
+    html += '<tr><td>SQLite</td><td colspan="2" style="color:var(--text-dim)">state_5.sqlite 未找到</td></tr>';
+  }
+  html += '</table>';
+  document.getElementById('distContent').innerHTML = html;
+}
+
+function renderProviderSelect() {
+  const sel = document.getElementById('providerSelect');
+  const providers = new Set(statusData.configuredProviders);
+  for (const scope of ['sessions', 'archived_sessions']) {
+    for (const p of Object.keys(statusData.rolloutCounts?.[scope] || {})) providers.add(p);
+    for (const p of Object.keys(statusData.sqliteCounts?.[scope] || {})) providers.add(p);
+  }
+  providers.delete('(missing)');
+  sel.innerHTML = [...providers].sort()
+    .map(p => `<option value="${p}" ${p === statusData.currentProvider ? 'selected' : ''}>${p}</option>`)
+    .join('');
+}
+
+function renderBackups() {
+  const list = document.getElementById('backupList');
+  const backups = statusData.backups || [];
+  if (!backups.length) {
+    list.innerHTML = '<div style="color:var(--text-dim);padding:12px;text-align:center">暂无备份</div>';
+    return;
+  }
+  list.innerHTML = backups.map(b => `
+    <div class="backup-item">
+      <div class="backup-meta">
+        <div class="time">${formatTime(b.createdAt)}</div>
+        <div class="detail">Provider: ${b.targetProvider} · 变更 ${b.changedFiles} 个文件</div>
+      </div>
+      <button class="btn btn-outline" onclick="doRestore('${b.fullPath.replace(/'/g, "\\'")}')">恢复</button>
+    </div>`).join('');
+}
+
+async function doSync() {
+  clearLog();
+  const provider = document.getElementById('providerSelect').value;
+  const keepCount = parseInt(document.getElementById('keepCount').value) || 5;
+  log(`开始同步到 provider: ${provider} ...`, 'info');
+  setLoading('btnSync', true);
+  try {
+    const r = await api('sync', 'POST', { provider, keepCount });
+    log(`✅ 同步完成`, 'success');
+    log(`  目标 provider: ${r.targetProvider}`);
+    log(`  更新 rollout 文件: ${r.changedSessionFiles}`);
+    log(`  更新 SQLite 行: ${r.sqliteRowsUpdated}`);
+    log(`  备份位置: ${r.backupDir}`);
+    if (r.skippedLockedRolloutFiles?.length) {
+      log(`  ⚠️ 跳过锁定文件: ${r.skippedLockedRolloutFiles.length}`, 'error');
+    }
+    await loadStatus();
+  } catch (e) {
+    log(`❌ 同步失败: ${e.message}`, 'error');
+  } finally {
+    setLoading('btnSync', false);
+  }
+}
+
+async function doSwitch() {
+  clearLog();
+  const provider = document.getElementById('providerSelect').value;
+  const keepCount = parseInt(document.getElementById('keepCount').value) || 5;
+  if (!confirm(`确定要切换到 "${provider}" 并同步所有会话吗？`)) return;
+  log(`开始切换到 provider: ${provider} ...`, 'info');
+  setLoading('btnSwitch', true);
+  try {
+    const r = await api('switch', 'POST', { provider, keepCount });
+    log(`✅ 切换完成`, 'success');
+    log(`  目标 provider: ${r.targetProvider}`);
+    log(`  更新 rollout 文件: ${r.changedSessionFiles}`);
+    log(`  更新 SQLite 行: ${r.sqliteRowsUpdated}`);
+    await loadStatus();
+  } catch (e) {
+    log(`❌ 切换失败: ${e.message}`, 'error');
+  } finally {
+    setLoading('btnSwitch', false);
+  }
+}
+
+async function doRestore(backupDir) {
+  if (!confirm(`确定要从该备份恢复吗？\n${backupDir}`)) return;
+  clearLog();
+  log(`从备份恢复中...`, 'info');
+  try {
+    const r = await api('restore', 'POST', { backupDir });
+    log(`✅ 恢复完成 · provider: ${r.targetProvider}`, 'success');
+    await loadStatus();
+  } catch (e) {
+    log(`❌ 恢复失败: ${e.message}`, 'error');
+  }
+}
+
+async function doPrune() {
+  const keepCount = parseInt(document.getElementById('keepCount').value) || 5;
+  if (!confirm(`确定要清理旧备份吗？将保留最近 ${keepCount} 份。`)) return;
+  clearLog();
+  log(`清理旧备份中...`, 'info');
+  try {
+    const r = await api('prune', 'POST', { keepCount });
+    log(`✅ 清理完成 · 删除 ${r.deletedCount} 份 · 剩余 ${r.remainingCount} 份 · 释放 ${formatBytes(r.freedBytes)}`, 'success');
+    await loadStatus();
+  } catch (e) {
+    log(`❌ 清理失败: ${e.message}`, 'error');
+  }
+}
+
+async function doRefresh() {
+  clearLog();
+  log('正在刷新...', 'info');
+  await loadStatus();
+  log('✅ 刷新完成', 'success');
+}
+
+loadStatus();
+</script>
+</body>
+</html>
