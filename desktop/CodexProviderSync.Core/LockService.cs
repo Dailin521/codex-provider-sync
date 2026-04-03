@@ -5,22 +5,17 @@ namespace CodexProviderSync.Core;
 
 public sealed class LockService
 {
+    private const int Win32ErrorAlreadyExists = 183;
+    private const int Win32ErrorAccessDenied = 5;
+    private const int DefaultLockCreateRetryCount = 3;
+    private const int DefaultLockCreateRetryDelayMs = 75;
+
     public async Task<LockHandle> AcquireLockAsync(string codexHome, string label = "codex-provider-sync")
     {
         string lockPath = AppConstants.LockPath(codexHome);
         Directory.CreateDirectory(Path.GetDirectoryName(lockPath)!);
 
-        if (!CreateDirectory(lockPath, IntPtr.Zero))
-        {
-            int errorCode = Marshal.GetLastWin32Error();
-            if (errorCode == 183)
-            {
-                throw new InvalidOperationException(
-                    $"Lock already exists at {lockPath}. Close Codex/App and retry, or remove the stale lock if you are sure no sync is running.");
-            }
-
-            throw new IOException($"Unable to create lock directory at {lockPath}. Win32 error: {errorCode}");
-        }
+        await CreateLockDirectoryAsync(lockPath);
 
         try
         {
@@ -45,6 +40,51 @@ public sealed class LockService
             Directory.Delete(lockPath, recursive: true);
             throw;
         }
+    }
+
+    internal static async Task CreateLockDirectoryAsync(
+        string lockPath,
+        int retryCount = DefaultLockCreateRetryCount,
+        int retryDelayMs = DefaultLockCreateRetryDelayMs,
+        Func<int, Task>? delayAsync = null,
+        Func<string, int>? tryCreateDirectory = null)
+    {
+        delayAsync ??= static delay => Task.Delay(delay);
+        tryCreateDirectory ??= TryCreateDirectory;
+
+        int attempts = 0;
+        while (true)
+        {
+            int errorCode = tryCreateDirectory(lockPath);
+            if (errorCode == 0)
+            {
+                return;
+            }
+
+            if (errorCode == Win32ErrorAlreadyExists)
+            {
+                throw new InvalidOperationException(
+                    $"Lock already exists at {lockPath}. Close Codex/App and retry, or remove the stale lock if you are sure no sync is running.");
+            }
+
+            if (!IsTransientLockCreateError(errorCode) || attempts >= retryCount)
+            {
+                throw new IOException($"Unable to create lock directory at {lockPath}. Win32 error: {errorCode}");
+            }
+
+            attempts += 1;
+            await delayAsync(retryDelayMs);
+        }
+    }
+
+    private static bool IsTransientLockCreateError(int errorCode)
+    {
+        return errorCode == Win32ErrorAccessDenied;
+    }
+
+    private static int TryCreateDirectory(string lockPath)
+    {
+        return CreateDirectory(lockPath, IntPtr.Zero) ? 0 : Marshal.GetLastWin32Error();
     }
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
