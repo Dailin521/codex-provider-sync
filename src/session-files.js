@@ -35,6 +35,30 @@ async function getFileSnapshot(filePath) {
   };
 }
 
+async function restoreFileMtime(filePath, snapshot) {
+  if (!snapshot || typeof snapshot.mtimeMs !== "number") {
+    return;
+  }
+
+  const stat = await fsp.stat(filePath);
+  await fsp.utimes(filePath, stat.atimeMs / 1000, snapshot.mtimeMs / 1000);
+}
+
+async function overwriteFileInPlace(filePath, tmpPath, snapshot) {
+  const replacement = await fsp.readFile(tmpPath);
+  const handle = await fsp.open(filePath, "r+");
+
+  try {
+    await handle.truncate(0);
+    await handle.writeFile(replacement);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+
+  await restoreFileMtime(filePath, snapshot);
+}
+
 function snapshotMatches(change, snapshot) {
   return change.originalSize === snapshot.size
     && change.originalMtimeMs === snapshot.mtimeMs;
@@ -307,6 +331,7 @@ async function invokeWindowsExclusiveRewrite(change, options) {
 
 async function rewriteFirstLine(filePath, nextFirstLine, separator) {
   if (process.platform === "win32") {
+    const snapshot = await getFileSnapshot(filePath);
     const result = await invokeWindowsExclusiveRewrite(
       {
         path: filePath,
@@ -322,9 +347,11 @@ async function rewriteFirstLine(filePath, nextFirstLine, separator) {
       );
     }
 
+    await restoreFileMtime(filePath, snapshot);
     return;
   }
 
+  const snapshot = await getFileSnapshot(filePath);
   const current = await readFirstLineRecord(filePath);
   const tmpPath = `${filePath}.provider-sync.${process.pid}.${Date.now()}.tmp`;
   const writer = fs.createWriteStream(tmpPath, { encoding: "utf8" });
@@ -354,10 +381,12 @@ async function rewriteFirstLine(filePath, nextFirstLine, separator) {
       reader.pipe(writer, { end: false });
     });
 
-    await fsp.rename(tmpPath, filePath);
+    await overwriteFileInPlace(filePath, tmpPath, snapshot);
   } catch (error) {
     await fsp.rm(tmpPath, { force: true });
     throw wrapRolloutFileBusyError(error, filePath, "rewrite");
+  } finally {
+    await fsp.rm(tmpPath, { force: true });
   }
 }
 
@@ -403,11 +432,13 @@ async function tryRewriteCollectedFirstLine(change) {
       return false;
     }
 
-    await fsp.rename(tmpPath, change.path);
+    await overwriteFileInPlace(change.path, tmpPath, beforeSnapshot);
     return true;
   } catch (error) {
     await fsp.rm(tmpPath, { force: true });
     throw wrapRolloutFileBusyError(error, change.path, "rewrite");
+  } finally {
+    await fsp.rm(tmpPath, { force: true });
   }
 }
 
@@ -523,6 +554,7 @@ export async function applySessionChanges(changes) {
       if (results[index] === "APPLIED") {
         appliedChanges += 1;
         appliedPaths.push(normalizedChanges[index].path);
+        await restoreFileMtime(normalizedChanges[index].path, normalizedChanges[index]);
       } else {
         skippedPaths.push(normalizedChanges[index].path);
       }
@@ -608,6 +640,10 @@ export async function restoreSessionChanges(manifestEntries) {
       separator: entry.originalSeparator ?? "\n",
       updatedFirstLine: entry.originalFirstLine
     }));
+    const snapshots = await Promise.all(changes.map(async (change) => ({
+      path: change.path,
+      snapshot: await getFileSnapshot(change.path)
+    })));
     const results = await invokeWindowsExclusiveRewriteBatch(changes, { requireOriginalMatch: false });
     const firstFailureIndex = results.findIndex((result) => result !== "APPLIED");
     if (firstFailureIndex !== -1) {
@@ -616,6 +652,9 @@ export async function restoreSessionChanges(manifestEntries) {
         `Unable to rewrite rollout file because it is currently in use. Close Codex and the Codex app, then retry. Locked file: ${filePath}`
       );
     }
+    await Promise.all(
+      snapshots.map(({ path: targetPath, snapshot }) => restoreFileMtime(targetPath, snapshot))
+    );
     return;
   }
 

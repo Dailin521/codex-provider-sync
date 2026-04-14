@@ -236,6 +236,21 @@ test("runSync rewrites rollout files and sqlite, then restore reverts both", asy
   assert.match(restoredArchived, /"model_provider":"newapi"/);
 });
 
+test("runSync preserves rollout modified time after rewriting provider metadata", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");
+  await writeRollout(sessionPath, "thread-a", "apigather");
+  await fs.utimes(sessionPath, 1700000000, 1700000000);
+  const beforeStat = await fs.stat(sessionPath);
+
+  const result = await runSync({ codexHome });
+
+  assert.equal(result.changedSessionFiles, 1);
+  const afterStat = await fs.stat(sessionPath);
+  assert.equal(afterStat.mtimeMs, beforeStat.mtimeMs);
+});
+
 test("runSync reports stage progress and backup duration", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');

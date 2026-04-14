@@ -226,26 +226,32 @@ public sealed class SessionRolloutService
     {
         try
         {
-            await using FileStream sourceStream = OpenExclusiveRewriteStream(change.Path);
-            if (sourceStream.Length != change.OriginalFileLength)
+            FileSnapshot beforeSnapshot = GetFileSnapshot(change.Path);
+            if (beforeSnapshot.Length != change.OriginalFileLength
+                || beforeSnapshot.LastWriteTimeUtcTicks != change.OriginalLastWriteTimeUtcTicks)
             {
                 return false;
             }
 
-            FirstLineRecord current = await ReadFirstLineRecordAsync(sourceStream);
-            if (!string.Equals(current.FirstLine, change.OriginalFirstLine, StringComparison.Ordinal)
-                || current.Offset != change.OriginalOffset)
+            await using (FileStream sourceStream = OpenExclusiveRewriteStream(change.Path))
             {
-                return false;
+                FirstLineRecord current = await ReadFirstLineRecordAsync(sourceStream);
+                if (!string.Equals(current.FirstLine, change.OriginalFirstLine, StringComparison.Ordinal)
+                    || current.Offset != change.OriginalOffset)
+                {
+                    return false;
+                }
+
+                await RewriteFirstLineAsync(
+                    sourceStream,
+                    change.Path,
+                    change.UpdatedFirstLine,
+                    change.OriginalSeparator,
+                    change.OriginalOffset,
+                    headerOnly: change.OriginalOffset >= change.OriginalFileLength);
             }
 
-            await RewriteFirstLineAsync(
-                sourceStream,
-                change.Path,
-                change.UpdatedFirstLine,
-                change.OriginalSeparator,
-                change.OriginalOffset,
-                headerOnly: change.OriginalOffset >= change.OriginalFileLength);
+            RestoreLastWriteTimeUtc(change.Path, change.OriginalLastWriteTimeUtcTicks);
             return true;
         }
         catch (Exception error) when (IsRolloutFileBusyError(error))
@@ -258,11 +264,16 @@ public sealed class SessionRolloutService
     {
         try
         {
-            await using FileStream sourceStream = OpenExclusiveRewriteStream(filePath);
-            FirstLineRecord current = await ReadFirstLineRecordAsync(sourceStream);
-            bool headerOnly = string.IsNullOrEmpty(current.Separator)
-                && current.Offset == Encoding.UTF8.GetByteCount(current.FirstLine);
-            await RewriteFirstLineAsync(sourceStream, filePath, nextFirstLine, separator, current.Offset, headerOnly);
+            FileSnapshot snapshot = GetFileSnapshot(filePath);
+            await using (FileStream sourceStream = OpenExclusiveRewriteStream(filePath))
+            {
+                FirstLineRecord current = await ReadFirstLineRecordAsync(sourceStream);
+                bool headerOnly = string.IsNullOrEmpty(current.Separator)
+                    && current.Offset == Encoding.UTF8.GetByteCount(current.FirstLine);
+                await RewriteFirstLineAsync(sourceStream, filePath, nextFirstLine, separator, current.Offset, headerOnly);
+            }
+
+            RestoreLastWriteTimeUtc(filePath, snapshot.LastWriteTimeUtcTicks);
         }
         catch (Exception error)
         {
@@ -397,6 +408,11 @@ public sealed class SessionRolloutService
     {
         FileInfo fileInfo = new(filePath);
         return new FileSnapshot(fileInfo.Length, fileInfo.LastWriteTimeUtc.Ticks);
+    }
+
+    private static void RestoreLastWriteTimeUtc(string filePath, long lastWriteTimeUtcTicks)
+    {
+        File.SetLastWriteTimeUtc(filePath, new DateTime(lastWriteTimeUtcTicks, DateTimeKind.Utc));
     }
 
     private static async Task<List<string>> FindLockedFilesAsync(IEnumerable<string> filePaths)

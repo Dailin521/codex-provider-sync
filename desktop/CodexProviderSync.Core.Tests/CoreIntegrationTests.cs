@@ -61,6 +61,23 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
+    public async Task RunSync_PreservesRolloutModifiedTimeAfterRewrite()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-a", "apigather");
+        DateTime beforeLastWriteTimeUtc = new(2023, 11, 14, 22, 13, 20, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(sessionPath, beforeLastWriteTimeUtc);
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(1, result.ChangedSessionFiles);
+        Assert.Equal(beforeLastWriteTimeUtc, File.GetLastWriteTimeUtc(sessionPath));
+    }
+
+    [Fact]
     public async Task RunSwitch_UpdatesConfigAndSyncsProviderMetadata()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
