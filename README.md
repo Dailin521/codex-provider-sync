@@ -113,6 +113,13 @@ codex-provider restore C:\Users\you\.codex\backups_state\provider-sync\<timestam
 codex-provider prune-backups --keep 5
 ```
 
+按 session id 删除会话（会先备份）：
+
+```bash
+codex-provider delete <session-id>
+codex-provider delete <session-id-1> <session-id-2>
+```
+
 ## AI 一键处理
 
 如果你想直接交给 AI 助手处理，把下面这段原样发给 AI：
@@ -144,6 +151,7 @@ codex-provider prune-backups --keep 5
 - 只想查看状态：`codex-provider status`
 - 当前 provider 不变，只修复历史会话可见性：`codex-provider sync`
 - 切 provider 并同步历史：`codex-provider switch openai`
+- 删除指定会话：`codex-provider delete <session-id>`
 - 安装桌面双击启动器：`codex-provider install-windows-launcher`
 - 回滚误操作：`codex-provider restore <backup-dir>`
 
@@ -159,6 +167,11 @@ codex-provider prune-backups --keep 5
   - 修改 `config.toml` 根级 `model_provider`
   - 然后立即执行一次同步
   - `--keep <n>` 可覆盖这次执行后的备份保留数量
+- `codex-provider delete <session-id> [more-session-ids...]`
+  - 按 session id 删除会话
+  - 会同时删除 rollout 文件中的目标会话文件，以及 SQLite `threads` 对应行
+  - 如果 rollout 文件被占用，会跳过对应会话并在结果里提示
+  - 删除前会自动创建备份，可用 `restore` 回滚
 - `codex-provider prune-backups`
   - 手动清理旧备份，只保留最近 `n` 份由本工具管理的备份
 - `codex-provider restore <backup-dir>`
@@ -178,6 +191,8 @@ codex-provider sync
 codex-provider sync --keep 5
 codex-provider sync --provider openai
 codex-provider switch apigather
+codex-provider delete 019d95ee-abd6-7de3-b1f8-63b13c725f17
+codex-provider delete 019d95ee-abd6-7de3-b1f8-63b13c725f17 019d95ef-c7fd-74b0-956c-6110fd8ff314
 codex-provider prune-backups --keep 5
 codex-provider install-windows-launcher
 codex-provider install-windows-launcher --dir D:\Tools

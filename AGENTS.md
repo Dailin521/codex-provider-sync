@@ -58,6 +58,11 @@ Use `codex-provider restore <backup-dir>` when:
 - the user wants to roll back a previous sync
 - the user synced to the wrong provider
 
+Use `codex-provider delete <session-id> [...]` when:
+
+- the user wants to permanently remove specific sessions by id
+- the user expects rollout files and SQLite thread rows to be removed together
+
 Use `codex-provider status` only when:
 
 - the user asks for inspection only
@@ -126,6 +131,7 @@ codex-provider sync
 codex-provider sync --keep 5
 codex-provider sync --provider openai
 codex-provider switch apigather
+codex-provider delete 019d95ee-abd6-7de3-b1f8-63b13c725f17
 codex-provider prune-backups --keep 5
 codex-provider restore C:\Users\you\.codex\backups_state\provider-sync\20260319T042708906Z
 ```

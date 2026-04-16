@@ -6,6 +6,7 @@ import { DEFAULT_BACKUP_RETENTION_COUNT } from "./constants.js";
 import { installWindowsLauncher } from "./launcher.js";
 import {
   getStatus,
+  runDeleteSessions,
   renderStatus,
   runPruneBackups,
   runRestore,
@@ -20,6 +21,7 @@ Usage:
   codex-provider status [--codex-home PATH]
   codex-provider sync [--provider ID] [--keep N] [--codex-home PATH]
   codex-provider switch <provider-id> [--keep N] [--codex-home PATH]
+  codex-provider delete <session-id> [more-session-ids...] [--keep N] [--codex-home PATH]
   codex-provider prune-backups [--keep N] [--codex-home PATH]
   codex-provider restore <backup-dir> [--codex-home PATH]
   codex-provider install-windows-launcher [--dir PATH] [--codex-home PATH]
@@ -89,6 +91,52 @@ function summarizePrune(result) {
   ].join("\n");
 }
 
+function summarizeDelete(result) {
+  const lines = [
+    `Deleted sessions under provider: ${result.currentProvider}`,
+    `Codex home: ${result.codexHome}`,
+    `Backup: ${result.backupDir ?? "(not created, no deletable targets found)"}`,
+    `Backup creation time: ${result.backupDir ? formatDuration(result.backupDurationMs ?? 0) : "0 ms"}`,
+    `Requested session ids: ${result.requestedSessionIds.length}`,
+    `Deleted session ids: ${result.deletedSessionIds.length}`,
+    `Deleted rollout files: ${result.deletedRolloutFiles}`,
+    `Deleted SQLite rows: ${result.sqliteRowsDeleted}${result.sqlitePresent ? "" : " (state_5.sqlite not found)"}`
+  ];
+  if (result.missingSessionIds?.length) {
+    const preview = result.missingSessionIds.slice(0, 5).join(", ");
+    const extraCount = result.missingSessionIds.length - Math.min(result.missingSessionIds.length, 5);
+    lines.push(`Missing session ids: ${result.missingSessionIds.length}`);
+    lines.push(`Missing id(s): ${preview}${extraCount > 0 ? ` (+${extraCount} more)` : ""}`);
+  }
+  if (result.skippedLockedSessionIds?.length) {
+    const preview = result.skippedLockedSessionIds.slice(0, 5).join(", ");
+    const extraCount = result.skippedLockedSessionIds.length - Math.min(result.skippedLockedSessionIds.length, 5);
+    lines.push(`Skipped locked session ids: ${result.skippedLockedSessionIds.length}`);
+    lines.push(`Locked id(s): ${preview}${extraCount > 0 ? ` (+${extraCount} more)` : ""}`);
+  }
+  if (result.skippedRolloutSessionIds?.length) {
+    const preview = result.skippedRolloutSessionIds.slice(0, 5).join(", ");
+    const extraCount = result.skippedRolloutSessionIds.length - Math.min(result.skippedRolloutSessionIds.length, 5);
+    lines.push(`Skipped session ids due to rollout delete failure: ${result.skippedRolloutSessionIds.length}`);
+    lines.push(`Skipped id(s): ${preview}${extraCount > 0 ? ` (+${extraCount} more)` : ""}`);
+  }
+  if (result.skippedRolloutFiles?.length) {
+    const preview = result.skippedRolloutFiles.slice(0, 5).join(", ");
+    const extraCount = result.skippedRolloutFiles.length - Math.min(result.skippedRolloutFiles.length, 5);
+    lines.push(`Skipped locked rollout files: ${result.skippedRolloutFiles.length}`);
+    lines.push(`Locked file(s): ${preview}${extraCount > 0 ? ` (+${extraCount} more)` : ""}`);
+  }
+  if (result.autoPruneResult) {
+    lines.push(
+      `Backup cleanup: deleted ${result.autoPruneResult.deletedCount}, remaining ${result.autoPruneResult.remainingCount}, freed ${formatBytes(result.autoPruneResult.freedBytes)}`
+    );
+  }
+  if (result.autoPruneWarning) {
+    lines.push(`Backup cleanup warning: ${result.autoPruneWarning}`);
+  }
+  return lines.join("\n");
+}
+
 function formatBytes(bytes) {
   const units = ["B", "KB", "MB", "GB", "TB"];
   let value = bytes;
@@ -128,6 +176,19 @@ const SYNC_PROGRESS_STAGE_INDEX = new Map(
   SYNC_PROGRESS_STAGES.map(([stage], index) => [stage, index + 1])
 );
 
+const DELETE_PROGRESS_STAGES = [
+  ["scan_rollout_files", "Scanning rollout files..."],
+  ["check_locked_rollout_files", "Checking locked rollout files..."],
+  ["create_backup", "Creating backup..."],
+  ["rewrite_rollout_files", "Deleting rollout files..."],
+  ["update_sqlite", "Deleting SQLite rows..."],
+  ["clean_backups", "Cleaning backups..."]
+];
+
+const DELETE_PROGRESS_STAGE_INDEX = new Map(
+  DELETE_PROGRESS_STAGES.map(([stage], index) => [stage, index + 1])
+);
+
 function createSyncProgressReporter() {
   return (event) => {
     if (event?.stage === "update_config" && event.status === "start") {
@@ -147,6 +208,20 @@ function createSyncProgressReporter() {
   };
 }
 
+function createDeleteProgressReporter() {
+  return (event) => {
+    const stageIndex = DELETE_PROGRESS_STAGE_INDEX.get(event?.stage);
+    if (!stageIndex || event.status !== "start") {
+      if (event?.stage === "create_backup" && event.status === "complete") {
+        console.log(`     Backup created in ${formatDuration(event.durationMs)}: ${event.backupDir}`);
+      }
+      return;
+    }
+
+    console.log(`[${stageIndex}/${DELETE_PROGRESS_STAGES.length}] ${DELETE_PROGRESS_STAGES[stageIndex - 1][1]}`);
+  };
+}
+
 function parseKeepCount(rawValue, { allowZero = false } = {}) {
   if (rawValue === undefined) {
     return DEFAULT_BACKUP_RETENTION_COUNT;
@@ -162,6 +237,27 @@ function parseKeepCount(rawValue, { allowZero = false } = {}) {
     throw new Error(`Invalid --keep value: ${rawValue}. Expected an integer greater than or equal to ${minimum}.`);
   }
   return keepCount;
+}
+
+function parseSessionIds(rawPositionalIds, rawFlagValue) {
+  const values = [
+    ...(rawPositionalIds ?? []),
+    ...(rawFlagValue === undefined ? [] : [rawFlagValue])
+  ];
+  const normalized = [];
+  const seen = new Set();
+  for (const value of values) {
+    const tokens = String(value ?? "").split(",");
+    for (const token of tokens) {
+      const sessionId = token.trim();
+      if (!sessionId || seen.has(sessionId)) {
+        continue;
+      }
+      seen.add(sessionId);
+      normalized.push(sessionId);
+    }
+  }
+  return normalized;
 }
 
 async function main() {
@@ -199,6 +295,18 @@ async function main() {
       onProgress: createSyncProgressReporter()
     });
     console.log(summarizeSync(result, "Switched to"));
+    return;
+  }
+
+  if (command === "delete") {
+    const sessionIds = parseSessionIds(positionals.slice(1), flags.id);
+    const result = await runDeleteSessions({
+      codexHome: flags["codex-home"],
+      sessionIds,
+      keepCount: parseKeepCount(flags.keep),
+      onProgress: createDeleteProgressReporter()
+    });
+    console.log(summarizeDelete(result));
     return;
   }
 

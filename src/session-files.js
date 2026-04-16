@@ -511,6 +511,68 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
   return { changes: summaries, lockedPaths, providerCounts };
 }
 
+export async function collectSessionFilesByThreadIds(codexHome, threadIds, options = {}) {
+  const targetIds = new Set(
+    (threadIds ?? [])
+      .map((value) => String(value ?? "").trim())
+      .filter(Boolean)
+  );
+  if (targetIds.size === 0) {
+    return {
+      matches: [],
+      lockedPaths: []
+    };
+  }
+
+  const { skipLockedReads = false } = options;
+  const matches = [];
+  const lockedPaths = [];
+
+  for (const dirName of SESSION_DIRS) {
+    const rootDir = path.join(codexHome, dirName);
+    try {
+      await fsp.access(rootDir);
+    } catch {
+      continue;
+    }
+
+    const rolloutPaths = await listJsonlFiles(rootDir);
+    for (const rolloutPath of rolloutPaths) {
+      let record;
+      try {
+        record = await readFirstLineRecord(rolloutPath);
+      } catch (error) {
+        if (skipLockedReads && isRolloutFileBusyError(error)) {
+          lockedPaths.push(rolloutPath);
+          continue;
+        }
+        throw error;
+      }
+
+      const parsed = parseSessionMetaRecord(record.firstLine);
+      if (!parsed) {
+        continue;
+      }
+
+      const threadId = String(parsed.payload.id ?? "").trim();
+      if (!threadId || !targetIds.has(threadId)) {
+        continue;
+      }
+
+      matches.push({
+        path: rolloutPath,
+        threadId,
+        directory: dirName
+      });
+    }
+  }
+
+  return {
+    matches,
+    lockedPaths
+  };
+}
+
 export async function applySessionChanges(changes) {
   const normalizedChanges = changes ?? [];
   const skippedPaths = [];
@@ -622,6 +684,33 @@ export async function restoreSessionChanges(manifestEntries) {
   for (const entry of manifestEntries) {
     await rewriteFirstLine(entry.path, entry.originalFirstLine, entry.originalSeparator ?? "\n");
   }
+}
+
+export async function deleteSessionFiles(filePaths) {
+  const normalizedPaths = [...new Set((filePaths ?? [])
+    .map((value) => String(value ?? "").trim())
+    .filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right));
+
+  const deletedPaths = [];
+  const skippedPaths = [];
+  for (const filePath of normalizedPaths) {
+    try {
+      await fsp.rm(filePath, { force: true });
+      deletedPaths.push(filePath);
+    } catch (error) {
+      if (isRolloutFileBusyError(error)) {
+        skippedPaths.push(filePath);
+        continue;
+      }
+      throw wrapRolloutFileBusyError(error, filePath, "delete");
+    }
+  }
+
+  return {
+    deletedPaths,
+    skippedPaths
+  };
 }
 
 export function summarizeProviderCounts(providerCounts) {

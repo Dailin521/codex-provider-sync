@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { DB_FILE_BASENAME } from "./constants.js";
 
 const DEFAULT_BUSY_TIMEOUT_MS = 5000;
+const SQLITE_IN_CLAUSE_CHUNK_SIZE = 400;
 
 export function stateDbPath(codexHome) {
   return path.join(codexHome, DB_FILE_BASENAME);
@@ -22,6 +23,32 @@ function normalizeBusyTimeoutMs(busyTimeoutMs) {
 
 function setBusyTimeout(db, busyTimeoutMs) {
   db.exec(`PRAGMA busy_timeout = ${normalizeBusyTimeoutMs(busyTimeoutMs)}`);
+}
+
+function chunkArray(values, chunkSize = SQLITE_IN_CLAUSE_CHUNK_SIZE) {
+  const chunks = [];
+  for (let index = 0; index < values.length; index += chunkSize) {
+    chunks.push(values.slice(index, index + chunkSize));
+  }
+  return chunks;
+}
+
+function uniqueNonEmptyStrings(values) {
+  const result = [];
+  const seen = new Set();
+  for (const value of values ?? []) {
+    const normalized = String(value ?? "").trim();
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
+}
+
+function makeInClause(chunkLength) {
+  return new Array(chunkLength).fill("?").join(", ");
 }
 
 function isSqliteBusyError(error) {
@@ -141,6 +168,125 @@ export async function updateSqliteProvider(codexHome, targetProvider, afterUpdat
       }
     }
     throw wrapSqliteBusyError(error, "update session provider metadata");
+  } finally {
+    db.close();
+  }
+}
+
+export async function listSqliteThreadsByIds(codexHome, sessionIds, options = {}) {
+  const normalizedIds = uniqueNonEmptyStrings(sessionIds);
+  if (normalizedIds.length === 0) {
+    return { databasePresent: false, threads: [] };
+  }
+
+  const dbPath = stateDbPath(codexHome);
+  try {
+    await fs.access(dbPath);
+  } catch {
+    return { databasePresent: false, threads: [] };
+  }
+
+  const db = openDatabase(dbPath);
+  try {
+    setBusyTimeout(db, options.busyTimeoutMs);
+    const rows = [];
+    for (const chunk of chunkArray(normalizedIds)) {
+      const stmt = db.prepare(`
+        SELECT
+          id,
+          rollout_path,
+          archived,
+          model_provider
+        FROM threads
+        WHERE id IN (${makeInClause(chunk.length)})
+      `);
+      rows.push(...stmt.all(...chunk));
+    }
+    return {
+      databasePresent: true,
+      threads: rows
+    };
+  } catch (error) {
+    throw wrapSqliteBusyError(error, "read session metadata");
+  } finally {
+    db.close();
+  }
+}
+
+export async function deleteSqliteThreadsByIds(codexHome, sessionIds, options = {}) {
+  const normalizedIds = uniqueNonEmptyStrings(sessionIds);
+  if (normalizedIds.length === 0) {
+    return {
+      databasePresent: false,
+      deletedThreads: 0,
+      deletedThreadIds: []
+    };
+  }
+
+  const dbPath = stateDbPath(codexHome);
+  try {
+    await fs.access(dbPath);
+  } catch {
+    return {
+      databasePresent: false,
+      deletedThreads: 0,
+      deletedThreadIds: []
+    };
+  }
+
+  const db = openDatabase(dbPath);
+  let transactionOpen = false;
+  try {
+    setBusyTimeout(db, options.busyTimeoutMs);
+    db.exec("BEGIN IMMEDIATE");
+    transactionOpen = true;
+
+    const deletedThreadIds = [];
+    for (const chunk of chunkArray(normalizedIds)) {
+      const selectStmt = db.prepare(`
+        SELECT id
+        FROM threads
+        WHERE id IN (${makeInClause(chunk.length)})
+      `);
+      const selectedRows = selectStmt.all(...chunk);
+      deletedThreadIds.push(...selectedRows.map((row) => row.id));
+    }
+
+    if (deletedThreadIds.length > 0) {
+      for (const chunk of chunkArray(deletedThreadIds)) {
+        const inClause = makeInClause(chunk.length);
+        db.prepare(`
+          DELETE FROM thread_dynamic_tools
+          WHERE thread_id IN (${inClause})
+        `).run(...chunk);
+        db.prepare(`
+          DELETE FROM thread_spawn_edges
+          WHERE child_thread_id IN (${inClause})
+             OR parent_thread_id IN (${inClause})
+        `).run(...chunk, ...chunk);
+        db.prepare(`
+          DELETE FROM threads
+          WHERE id IN (${inClause})
+        `).run(...chunk);
+      }
+    }
+
+    db.exec("COMMIT");
+    transactionOpen = false;
+    return {
+      databasePresent: true,
+      deletedThreads: deletedThreadIds.length,
+      deletedThreadIds
+    };
+  } catch (error) {
+    if (transactionOpen) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // Ignore rollback failures and surface the original error.
+      }
+    }
+    throw wrapSqliteBusyError(error, "delete sessions from SQLite");
   } finally {
     db.close();
   }

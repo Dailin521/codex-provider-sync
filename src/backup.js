@@ -32,6 +32,7 @@ export async function createBackup({
   codexHome,
   targetProvider,
   sessionChanges,
+  deletedSessionFiles = [],
   configPath,
   configBackupText
 }) {
@@ -55,6 +56,32 @@ export async function createBackup({
     await copyIfPresent(configPath, path.join(backupDir, "config.toml"));
   }
 
+  const deletedFilesDir = path.join(backupDir, "deleted-session-files");
+  await fs.mkdir(deletedFilesDir, { recursive: true });
+  const deletedFilesManifest = [];
+  let deletedFileCounter = 0;
+  for (const rawFilePath of deletedSessionFiles ?? []) {
+    const absolutePath = path.resolve(rawFilePath);
+    const relativePath = path.relative(codexHome, absolutePath);
+    if (!relativePath || relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+      continue;
+    }
+
+    const backupFileName = `${String(deletedFileCounter).padStart(4, "0")}${path.extname(absolutePath) || ".jsonl"}`;
+    const backupRelativePath = path.join("deleted-session-files", backupFileName);
+    const copied = await copyIfPresent(absolutePath, path.join(backupDir, backupRelativePath));
+    if (!copied) {
+      continue;
+    }
+
+    deletedFilesManifest.push({
+      path: absolutePath,
+      relativePath,
+      backupRelativePath
+    });
+    deletedFileCounter += 1;
+  }
+
   const sessionManifest = {
     version: 1,
     namespace: BACKUP_NAMESPACE,
@@ -65,7 +92,8 @@ export async function createBackup({
       path: change.path,
       originalFirstLine: change.originalFirstLine,
       originalSeparator: change.originalSeparator
-    }))
+    })),
+    deletedFiles: deletedFilesManifest
   };
   await fs.writeFile(
     path.join(backupDir, "session-meta-backup.json"),
@@ -83,7 +111,8 @@ export async function createBackup({
         targetProvider,
         createdAt: sessionManifest.createdAt,
         dbFiles: copiedDbFiles,
-        changedSessionFiles: sessionChanges.length
+        changedSessionFiles: sessionChanges.length,
+        deletedSessionFiles: deletedFilesManifest.length
       },
       null,
       2
@@ -151,7 +180,8 @@ export async function restoreBackup(backupDir, codexHome, options = {}) {
   const {
     restoreConfig = true,
     restoreDatabase = true,
-    restoreSessions = true
+    restoreSessions = true,
+    restoreDeletedSessionFiles = true
   } = options;
   const metadataPath = path.join(backupDir, "metadata.json");
   const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
@@ -159,10 +189,14 @@ export async function restoreBackup(backupDir, codexHome, options = {}) {
     throw new Error(`Backup was created for ${metadata.codexHome}, not ${codexHome}.`);
   }
 
+  const needsSessionManifest = restoreSessions || restoreDeletedSessionFiles;
   let sessionManifest = null;
-  if (restoreSessions) {
+  if (needsSessionManifest) {
     const sessionManifestPath = path.join(backupDir, "session-meta-backup.json");
     sessionManifest = JSON.parse(await fs.readFile(sessionManifestPath, "utf8"));
+  }
+
+  if (restoreSessions) {
     await assertSessionFilesWritable(sessionManifest.files ?? []);
   }
 
@@ -191,7 +225,26 @@ export async function restoreBackup(backupDir, codexHome, options = {}) {
     await restoreSessionChanges(sessionManifest.files ?? []);
   }
 
+  if (restoreDeletedSessionFiles) {
+    await restoreDeletedSessionFilesFromBackup(backupDir, codexHome, sessionManifest?.deletedFiles ?? []);
+  }
+
   return metadata;
+}
+
+async function restoreDeletedSessionFilesFromBackup(backupDir, codexHome, deletedFiles) {
+  for (const entry of deletedFiles ?? []) {
+    const relativePath = String(entry?.relativePath ?? "").trim();
+    const backupRelativePath = String(entry?.backupRelativePath ?? "").trim();
+    if (!relativePath || !backupRelativePath) {
+      continue;
+    }
+
+    const sourcePath = path.join(backupDir, backupRelativePath);
+    const destinationPath = path.join(codexHome, relativePath);
+    await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+    await copyIfPresent(sourcePath, destinationPath);
+  }
 }
 
 async function listManagedBackupDirectories(backupRoot) {

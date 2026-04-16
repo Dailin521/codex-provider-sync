@@ -112,6 +112,13 @@ Clean old managed backups manually:
 codex-provider prune-backups --keep 5
 ```
 
+Delete one or more sessions by id (with backup):
+
+```bash
+codex-provider delete <session-id>
+codex-provider delete <session-id-1> <session-id-2>
+```
+
 ## AI Quick Run
 
 If you want an AI assistant to handle this in one shot, copy this prompt:
@@ -143,6 +150,7 @@ Quick mapping:
 - inspect only: `codex-provider status`
 - fix visibility under current provider: `codex-provider sync`
 - switch provider and sync: `codex-provider switch openai`
+- delete a specific session: `codex-provider delete <session-id>`
 - install a desktop double-click launcher: `codex-provider install-windows-launcher`
 - roll back a mistake: `codex-provider restore <backup-dir>`
 
@@ -158,6 +166,11 @@ Quick mapping:
   - updates root `model_provider` in `config.toml`
   - immediately runs a sync
   - `--keep <n>` overrides how many managed backups are retained after the run
+- `codex-provider delete <session-id> [more-session-ids...]`
+  - deletes sessions by id
+  - removes matching rollout session files and matching rows in SQLite `threads`
+  - skips sessions whose rollout files are currently locked, and reports them
+  - creates a backup before deletion so `restore` can roll back
 - `codex-provider prune-backups`
   - manually removes older managed backups and keeps the newest `n`
 - `codex-provider restore <backup-dir>`
@@ -176,6 +189,8 @@ codex-provider sync --keep 5
 codex-provider sync --provider openai
 codex-provider switch openai
 codex-provider switch apigather
+codex-provider delete 019d95ee-abd6-7de3-b1f8-63b13c725f17
+codex-provider delete 019d95ee-abd6-7de3-b1f8-63b13c725f17 019d95ef-c7fd-74b0-956c-6110fd8ff314
 codex-provider prune-backups --keep 5
 codex-provider install-windows-launcher
 codex-provider install-windows-launcher --dir D:\Tools
