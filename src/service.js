@@ -269,7 +269,8 @@ export async function runSync({
           await restoreSessionChanges(appliedSessionChanges.map((change) => ({
             path: change.path,
             originalFirstLine: change.originalFirstLine,
-            originalSeparator: change.originalSeparator
+            originalSeparator: change.originalSeparator,
+            lastActivityTimestampMs: change.lastActivityTimestampMs ?? null
           })));
         } catch (restoreError) {
           throw new Error(

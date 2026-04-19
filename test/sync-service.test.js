@@ -49,6 +49,10 @@ async function writeCustomRollout(filePath, payload, message = "hi") {
   await fs.writeFile(filePath, `${lines.join("\n")}\n`, "utf8");
 }
 
+async function writeRolloutLines(filePath, lines) {
+  await fs.writeFile(filePath, `${lines.join("\n")}\n`, "utf8");
+}
+
 function backupRoot(codexHome) {
   return path.join(codexHome, "backups_state", "provider-sync");
 }
@@ -272,6 +276,45 @@ test("runSync reports stage progress and backup duration", async () => {
   assert.ok(backupCompleteEvent);
   assert.equal(backupCompleteEvent.backupDir, result.backupDir);
   assert.ok(backupCompleteEvent.durationMs >= 0);
+});
+
+test("runSync normalizes rollout mtime to the thread's last activity time", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");
+  const latestActivityIso = "2026-03-22T15:45:30.000Z";
+  await writeRolloutLines(sessionPath, [
+    JSON.stringify({
+      timestamp: "2026-03-19T00:00:20.000Z",
+      type: "session_meta",
+      payload: {
+        id: "thread-a",
+        timestamp: "2026-03-19T00:00:00.000Z",
+        cwd: "C:\\AITemp",
+        source: "cli",
+        cli_version: "0.115.0",
+        model_provider: "apigather"
+      }
+    }),
+    JSON.stringify({
+      timestamp: latestActivityIso,
+      type: "event_msg",
+      payload: {
+        type: "assistant_message",
+        message: "latest"
+      }
+    })
+  ]);
+  const wrongTimestamp = new Date("2026-04-01T00:00:00.000Z");
+  await fs.utimes(sessionPath, wrongTimestamp, wrongTimestamp);
+  await writeStateDb(codexHome, [
+    { id: "thread-a", model_provider: "apigather", archived: false }
+  ]);
+
+  await runSync({ codexHome });
+
+  const stat = await fs.stat(sessionPath);
+  assert.ok(Math.abs(stat.mtimeMs - Date.parse(latestActivityIso)) < 2000);
 });
 
 test("runSwitch updates config and syncs provider metadata", async () => {

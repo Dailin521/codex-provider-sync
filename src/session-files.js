@@ -35,6 +35,61 @@ async function getFileSnapshot(filePath) {
   };
 }
 
+function parseTimestampMs(value) {
+  if (typeof value !== "string" || value.trim() === "") {
+    return null;
+  }
+
+  const timestampMs = Date.parse(value);
+  return Number.isFinite(timestampMs) ? timestampMs : null;
+}
+
+function updateLatestTimestamp(currentLatestMs, candidateMs) {
+  if (!Number.isFinite(candidateMs)) {
+    return currentLatestMs;
+  }
+  if (!Number.isFinite(currentLatestMs)) {
+    return candidateMs;
+  }
+  return Math.max(currentLatestMs, candidateMs);
+}
+
+async function readLastActivityTimestampMs(filePath, fallbackMs) {
+  try {
+    const content = await fsp.readFile(filePath, "utf8");
+    let latestTimestampMs = null;
+
+    for (const line of content.split(/\r?\n/)) {
+      if (!line) {
+        continue;
+      }
+
+      try {
+        const parsed = JSON.parse(line);
+        latestTimestampMs = updateLatestTimestamp(latestTimestampMs, parseTimestampMs(parsed?.timestamp));
+        if (parsed?.type === "session_meta") {
+          latestTimestampMs = updateLatestTimestamp(latestTimestampMs, parseTimestampMs(parsed?.payload?.timestamp));
+        }
+      } catch {
+        // Ignore malformed lines and fall back to file metadata if needed.
+      }
+    }
+
+    return Number.isFinite(latestTimestampMs) ? latestTimestampMs : fallbackMs;
+  } catch {
+    return fallbackMs;
+  }
+}
+
+async function applyNormalizedMtime(filePath, normalizedMtimeMs) {
+  if (!Number.isFinite(normalizedMtimeMs)) {
+    return;
+  }
+
+  const normalizedDate = new Date(normalizedMtimeMs);
+  await fsp.utimes(filePath, normalizedDate, normalizedDate);
+}
+
 function snapshotMatches(change, snapshot) {
   return change.originalSize === snapshot.size
     && change.originalMtimeMs === snapshot.mtimeMs;
@@ -305,7 +360,7 @@ async function invokeWindowsExclusiveRewrite(change, options) {
   return result;
 }
 
-async function rewriteFirstLine(filePath, nextFirstLine, separator) {
+async function rewriteFirstLine(filePath, nextFirstLine, separator, normalizedMtimeMs = null) {
   if (process.platform === "win32") {
     const result = await invokeWindowsExclusiveRewrite(
       {
@@ -355,6 +410,7 @@ async function rewriteFirstLine(filePath, nextFirstLine, separator) {
     });
 
     await fsp.rename(tmpPath, filePath);
+    await applyNormalizedMtime(filePath, normalizedMtimeMs);
   } catch (error) {
     await fsp.rm(tmpPath, { force: true });
     throw wrapRolloutFileBusyError(error, filePath, "rewrite");
@@ -404,6 +460,7 @@ async function tryRewriteCollectedFirstLine(change) {
     }
 
     await fsp.rename(tmpPath, change.path);
+    await applyNormalizedMtime(change.path, change.lastActivityTimestampMs);
     return true;
   } catch (error) {
     await fsp.rm(tmpPath, { force: true });
@@ -492,6 +549,7 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
 
       if (targetProvider !== "__status_only__" && parsed.payload.model_provider !== targetProvider) {
         const snapshot = await getFileSnapshot(rolloutPath);
+        const lastActivityTimestampMs = await readLastActivityTimestampMs(rolloutPath, snapshot.mtimeMs);
         parsed.payload.model_provider = targetProvider;
         summaries.push({
           path: rolloutPath,
@@ -502,6 +560,7 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
           originalOffset: record.offset,
           originalSize: snapshot.size,
           originalMtimeMs: snapshot.mtimeMs,
+          lastActivityTimestampMs,
           updatedFirstLine: JSON.stringify(parsed)
         });
       }
@@ -521,6 +580,10 @@ export async function applySessionChanges(changes) {
     const results = await invokeWindowsExclusiveRewriteBatch(normalizedChanges, { requireOriginalMatch: true });
     for (let index = 0; index < normalizedChanges.length; index += 1) {
       if (results[index] === "APPLIED") {
+        await applyNormalizedMtime(
+          normalizedChanges[index].path,
+          normalizedChanges[index].lastActivityTimestampMs
+        );
         appliedChanges += 1;
         appliedPaths.push(normalizedChanges[index].path);
       } else {
@@ -606,7 +669,8 @@ export async function restoreSessionChanges(manifestEntries) {
     const changes = manifestEntries.map((entry) => ({
       path: entry.path,
       separator: entry.originalSeparator ?? "\n",
-      updatedFirstLine: entry.originalFirstLine
+      updatedFirstLine: entry.originalFirstLine,
+      lastActivityTimestampMs: entry.lastActivityTimestampMs
     }));
     const results = await invokeWindowsExclusiveRewriteBatch(changes, { requireOriginalMatch: false });
     const firstFailureIndex = results.findIndex((result) => result !== "APPLIED");
@@ -616,11 +680,20 @@ export async function restoreSessionChanges(manifestEntries) {
         `Unable to rewrite rollout file because it is currently in use. Close Codex and the Codex app, then retry. Locked file: ${filePath}`
       );
     }
+
+    for (const change of changes) {
+      await applyNormalizedMtime(change.path, change.lastActivityTimestampMs);
+    }
     return;
   }
 
   for (const entry of manifestEntries) {
-    await rewriteFirstLine(entry.path, entry.originalFirstLine, entry.originalSeparator ?? "\n");
+    await rewriteFirstLine(
+      entry.path,
+      entry.originalFirstLine,
+      entry.originalSeparator ?? "\n",
+      entry.lastActivityTimestampMs ?? null
+    );
   }
 }
 

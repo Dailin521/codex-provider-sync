@@ -77,6 +77,11 @@ internal sealed class TestCodexHomeFixture
         await File.WriteAllTextAsync(filePath, $"{first}\n{second}\n");
     }
 
+    public Task WriteRolloutLinesAsync(string filePath, params string[] lines)
+    {
+        return File.WriteAllTextAsync(filePath, string.Join("\n", lines) + "\n");
+    }
+
     public async Task<long> WriteBackupAsync(string directoryName, params (string RelativePath, string Content)[] files)
     {
         string backupDir = BackupPath(directoryName);

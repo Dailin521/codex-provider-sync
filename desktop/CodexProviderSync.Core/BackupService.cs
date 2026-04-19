@@ -57,7 +57,8 @@ public sealed class BackupService
             {
                 Path = change.Path,
                 OriginalFirstLine = change.OriginalFirstLine,
-                OriginalSeparator = change.OriginalSeparator
+                OriginalSeparator = change.OriginalSeparator,
+                NormalizedLastWriteTimeUtcTicks = change.NormalizedLastWriteTimeUtcTicks
             }).ToList()
         };
         await File.WriteAllTextAsync(
@@ -177,7 +178,8 @@ public sealed class BackupService
             {
                 Path = change.Path,
                 OriginalFirstLine = change.OriginalFirstLine,
-                OriginalSeparator = change.OriginalSeparator
+                OriginalSeparator = change.OriginalSeparator,
+                NormalizedLastWriteTimeUtcTicks = change.NormalizedLastWriteTimeUtcTicks
             }).ToList()
         };
         metadata = new BackupMetadataFile

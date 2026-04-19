@@ -46,6 +46,7 @@ public sealed class SessionChange
     public required int OriginalOffset { get; init; }
     public required long OriginalFileLength { get; init; }
     public required long OriginalLastWriteTimeUtcTicks { get; init; }
+    public required long NormalizedLastWriteTimeUtcTicks { get; init; }
     public required string UpdatedFirstLine { get; init; }
 }
 
@@ -159,4 +160,5 @@ internal sealed class SessionBackupManifestEntry
     public required string Path { get; init; }
     public required string OriginalFirstLine { get; init; }
     public required string OriginalSeparator { get; init; }
+    public long? NormalizedLastWriteTimeUtcTicks { get; init; }
 }

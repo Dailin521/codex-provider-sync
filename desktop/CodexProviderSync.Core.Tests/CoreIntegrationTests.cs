@@ -85,6 +85,36 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
+    public async Task RunSync_NormalizesRolloutLastWriteTimeToLatestActivity()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        const string latestActivityIso = "2026-03-22T15:45:30.000Z";
+        await fixture.WriteRolloutLinesAsync(
+            sessionPath,
+            """
+            {"timestamp":"2026-03-19T00:00:20.000Z","type":"session_meta","payload":{"id":"thread-a","timestamp":"2026-03-19T00:00:00.000Z","cwd":"C:\\AITemp","source":"cli","cli_version":"0.115.0","model_provider":"apigather"}}
+            """,
+            $$$"""
+            {"timestamp":"{{{latestActivityIso}}}","type":"event_msg","payload":{"type":"assistant_message","message":"latest"}}
+            """);
+        DateTime wrongTimestamp = new(2026, 4, 1, 0, 0, 0, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(sessionPath, wrongTimestamp);
+        await fixture.WriteStateDbAsync(
+        [
+            ("thread-a", "apigather", false)
+        ]);
+
+        CodexSyncService service = new();
+        await service.RunSyncAsync(fixture.CodexHome);
+
+        DateTime expectedUtc = DateTime.Parse(latestActivityIso, null, System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime();
+        DateTime actualUtc = File.GetLastWriteTimeUtc(sessionPath);
+        Assert.InRange(Math.Abs((actualUtc - expectedUtc).TotalSeconds), 0, 2);
+    }
+
+    [Fact]
     public async Task GetStatus_ReportsImplicitDefaultProviderAndCounts()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
