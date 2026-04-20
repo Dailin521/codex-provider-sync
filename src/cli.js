@@ -61,6 +61,7 @@ function summarizeSync(result, label) {
     `${label} provider: ${result.targetProvider}`,
     `Codex home: ${result.codexHome}`,
     `Backup: ${result.backupDir}`,
+    `Backup creation time: ${formatDuration(result.backupDurationMs ?? 0)}`,
     `Updated rollout files: ${result.changedSessionFiles}`,
     `Updated SQLite rows: ${result.sqliteRowsUpdated}${result.sqlitePresent ? "" : " (state_5.sqlite not found)"}`
   ];
@@ -101,6 +102,53 @@ function formatBytes(bytes) {
   return unitIndex === 0 ? `${bytes} B` : `${value.toFixed(value >= 10 ? 1 : 2).replace(/\.0$/, "")} ${units[unitIndex]}`;
 }
 
+function formatDuration(durationMs) {
+  if (!Number.isFinite(durationMs) || durationMs < 1000) {
+    return `${Math.max(0, Math.round(durationMs ?? 0))} ms`;
+  }
+
+  const seconds = durationMs / 1000;
+  if (seconds < 60) {
+    return `${seconds.toFixed(seconds >= 10 ? 1 : 2).replace(/\.0$/, "")} s`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds - (minutes * 60);
+  return `${minutes}m ${remainingSeconds.toFixed(remainingSeconds >= 10 ? 0 : 1).replace(/\.0$/, "")}s`;
+}
+
+const SYNC_PROGRESS_STAGES = [
+  ["scan_rollout_files", "Scanning rollout files..."],
+  ["check_locked_rollout_files", "Checking locked rollout files..."],
+  ["create_backup", "Creating backup..."],
+  ["update_sqlite", "Updating SQLite..."],
+  ["rewrite_rollout_files", "Rewriting rollout files..."],
+  ["clean_backups", "Cleaning backups..."]
+];
+
+const SYNC_PROGRESS_STAGE_INDEX = new Map(
+  SYNC_PROGRESS_STAGES.map(([stage], index) => [stage, index + 1])
+);
+
+function createSyncProgressReporter() {
+  return (event) => {
+    if (event?.stage === "update_config" && event.status === "start") {
+      console.log(`Updating config.toml root model_provider to ${event.provider}...`);
+      return;
+    }
+
+    const stageIndex = SYNC_PROGRESS_STAGE_INDEX.get(event?.stage);
+    if (!stageIndex || event.status !== "start") {
+      if (event?.stage === "create_backup" && event.status === "complete") {
+        console.log(`     Backup created in ${formatDuration(event.durationMs)}: ${event.backupDir}`);
+      }
+      return;
+    }
+
+    console.log(`[${stageIndex}/${SYNC_PROGRESS_STAGES.length}] ${SYNC_PROGRESS_STAGES[stageIndex - 1][1]}`);
+  };
+}
+
 function parseKeepCount(rawValue, { allowZero = false } = {}) {
   if (rawValue === undefined) {
     return DEFAULT_BACKUP_RETENTION_COUNT;
@@ -137,7 +185,8 @@ async function main() {
     const result = await runSync({
       codexHome: flags["codex-home"],
       provider: flags.provider,
-      keepCount: parseKeepCount(flags.keep)
+      keepCount: parseKeepCount(flags.keep),
+      onProgress: createSyncProgressReporter()
     });
     console.log(summarizeSync(result, "Synchronized"));
     return;
@@ -148,7 +197,8 @@ async function main() {
     const result = await runSwitch({
       codexHome: flags["codex-home"],
       provider,
-      keepCount: parseKeepCount(flags.keep)
+      keepCount: parseKeepCount(flags.keep),
+      onProgress: createSyncProgressReporter()
     });
     console.log(summarizeSync(result, "Switched to"));
     return;

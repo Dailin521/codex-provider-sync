@@ -41,6 +41,14 @@ async function writeRollout(filePath, id, provider) {
   await fs.writeFile(filePath, `${lines.join("\n")}\n`, "utf8");
 }
 
+async function writeCustomRollout(filePath, payload, message = "hi") {
+  const lines = [
+    JSON.stringify({ timestamp: payload.timestamp, type: "session_meta", payload }),
+    JSON.stringify({ timestamp: payload.timestamp, type: "event_msg", payload: { type: "user_message", message } })
+  ];
+  await fs.writeFile(filePath, `${lines.join("\n")}\n`, "utf8");
+}
+
 function backupRoot(codexHome) {
   return path.join(codexHome, "backups_state", "provider-sync");
 }
@@ -195,6 +203,8 @@ test("runSync rewrites rollout files and sqlite, then restore reverts both", asy
 
   const syncResult = await runSync({ codexHome });
   assert.equal(syncResult.targetProvider, "openai");
+  assert.equal(typeof syncResult.backupDurationMs, "number");
+  assert.ok(syncResult.backupDurationMs >= 0);
   assert.equal(syncResult.changedSessionFiles, 2);
   assert.deepEqual(syncResult.skippedLockedRolloutFiles, []);
   assert.equal(syncResult.sqliteRowsUpdated, 2);
@@ -224,6 +234,44 @@ test("runSync rewrites rollout files and sqlite, then restore reverts both", asy
   const restoredArchived = await fs.readFile(archivedPath, "utf8");
   assert.match(restoredSession, /"model_provider":"apigather"/);
   assert.match(restoredArchived, /"model_provider":"newapi"/);
+});
+
+test("runSync reports stage progress and backup duration", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");
+  await writeRollout(sessionPath, "thread-a", "apigather");
+  await writeStateDb(codexHome, [
+    { id: "thread-a", model_provider: "apigather", archived: false }
+  ]);
+
+  const progressEvents = [];
+  const result = await runSync({
+    codexHome,
+    onProgress(event) {
+      progressEvents.push(event);
+    }
+  });
+
+  assert.ok(result.backupDurationMs >= 0);
+  assert.deepEqual(
+    progressEvents
+      .filter((event) => event.status === "start")
+      .map((event) => event.stage),
+    [
+      "scan_rollout_files",
+      "check_locked_rollout_files",
+      "create_backup",
+      "update_sqlite",
+      "rewrite_rollout_files",
+      "clean_backups"
+    ]
+  );
+
+  const backupCompleteEvent = progressEvents.find((event) => event.stage === "create_backup" && event.status === "complete");
+  assert.ok(backupCompleteEvent);
+  assert.equal(backupCompleteEvent.backupDir, result.backupDir);
+  assert.ok(backupCompleteEvent.durationMs >= 0);
 });
 
 test("runSwitch updates config and syncs provider metadata", async () => {
@@ -377,6 +425,69 @@ test("applySessionChanges skips rollout files that changed after collection", as
   assert.match(rollout, /"message":"later"/);
 });
 
+test("applySessionChanges preserves large UTF-8 session metadata", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-large.jsonl");
+  const payload = {
+    id: "thread-large",
+    timestamp: "2026-03-19T00:00:00.000Z",
+    cwd: "C:\\AITemp\\中文",
+    source: "cli",
+    cli_version: "0.115.0",
+    model_provider: "apigather",
+    title: "中文会话",
+    note: "保留 UTF-8 内容",
+    large_blob: "数据块".repeat(40000)
+  };
+  await writeCustomRollout(sessionPath, payload, "你好");
+
+  const { changes } = await collectSessionChanges(codexHome, "openai");
+  const result = await applySessionChanges(changes);
+
+  assert.equal(result.appliedChanges, 1);
+  assert.deepEqual(result.skippedPaths, []);
+
+  const rollout = await fs.readFile(sessionPath, "utf8");
+  assert.match(rollout, /"model_provider":"openai"/);
+  assert.match(rollout, /"title":"中文会话"/);
+  assert.match(rollout, /"note":"保留 UTF-8 内容"/);
+  assert.match(rollout, /"message":"你好"/);
+  assert.match(rollout, /"large_blob":"数据块数据块/);
+});
+
+test("applySessionChanges skips only the rollout file that becomes locked on Windows", async () => {
+  if (process.platform !== "win32") {
+    return;
+  }
+
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const lockedPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-locked.jsonl");
+  const writablePath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-writable.jsonl");
+  await writeRollout(lockedPath, "thread-locked", "apigather");
+  await writeRollout(writablePath, "thread-writable", "apigather");
+
+  const { changes } = await collectSessionChanges(codexHome, "openai");
+  const lockProcess = await lockRolloutFile(lockedPath);
+  let result;
+  try {
+    result = await applySessionChanges(changes);
+  } finally {
+    lockProcess.kill();
+    await new Promise((resolve) => lockProcess.once("exit", resolve));
+  }
+
+  assert.equal(result.appliedChanges, 1);
+  assert.deepEqual(result.appliedPaths, [writablePath]);
+  assert.deepEqual(result.skippedPaths, [lockedPath]);
+
+  const lockedRollout = await fs.readFile(lockedPath, "utf8");
+  const writableRollout = await fs.readFile(writablePath, "utf8");
+  assert.match(lockedRollout, /"model_provider":"apigather"/);
+  assert.match(writableRollout, /"model_provider":"openai"/);
+});
+
 test("restoreBackup only restores rollout files that were actually applied", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
@@ -495,4 +606,25 @@ test("cli rejects non-integer keep values", async () => {
   const result = await runCli(["prune-backups", "--keep", "1.5"]);
   assert.equal(result.code, 1);
   assert.match(result.stderr, /Invalid --keep value: 1\.5/);
+});
+
+test("cli sync prints stage progress and backup timing", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");
+  await writeRollout(sessionPath, "thread-a", "apigather");
+  await writeStateDb(codexHome, [
+    { id: "thread-a", model_provider: "apigather", archived: false }
+  ]);
+
+  const result = await runCli(["sync", "--codex-home", codexHome]);
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /\[1\/6\] Scanning rollout files\.\.\./);
+  assert.match(result.stdout, /\[2\/6\] Checking locked rollout files\.\.\./);
+  assert.match(result.stdout, /\[3\/6\] Creating backup\.\.\./);
+  assert.match(result.stdout, /\[4\/6\] Updating SQLite\.\.\./);
+  assert.match(result.stdout, /\[5\/6\] Rewriting rollout files\.\.\./);
+  assert.match(result.stdout, /\[6\/6\] Cleaning backups\.\.\./);
+  assert.match(result.stdout, /Backup created in .*: .+/);
+  assert.match(result.stdout, /Backup creation time: /);
 });

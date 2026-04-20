@@ -61,6 +61,12 @@ function formatBytes(bytes) {
   return unitIndex === 0 ? `${bytes} B` : `${value.toFixed(value >= 10 ? 1 : 2).replace(/\.0$/, "")} ${units[unitIndex]}`;
 }
 
+function emitProgress(onProgress, event) {
+  if (typeof onProgress === "function") {
+    onProgress(event);
+  }
+}
+
 export async function getStatus({ codexHome: explicitCodexHome } = {}) {
   const codexHome = normalizeCodexHome(explicitCodexHome);
   await ensureCodexHome(codexHome);
@@ -115,7 +121,8 @@ export async function runSync({
   provider,
   configBackupText,
   keepCount = DEFAULT_BACKUP_RETENTION_COUNT,
-  sqliteBusyTimeoutMs
+  sqliteBusyTimeoutMs,
+  onProgress
 } = {}) {
   if (!Number.isInteger(keepCount) || keepCount < 1) {
     throw new Error(`Invalid automatic keep count: ${keepCount}. Expected an integer greater than or equal to 1.`);
@@ -130,21 +137,45 @@ export async function runSync({
 
   const releaseLock = await acquireLock(codexHome, "sync");
   let backupDir = null;
+  let backupDurationMs = 0;
   try {
+    emitProgress(onProgress, { stage: "scan_rollout_files", status: "start" });
     const {
       changes,
       lockedPaths: lockedReadPaths,
       providerCounts
     } = await collectSessionChanges(codexHome, targetProvider, { skipLockedReads: true });
+    emitProgress(onProgress, {
+      stage: "scan_rollout_files",
+      status: "complete",
+      scannedChanges: changes.length,
+      lockedReadCount: lockedReadPaths.length
+    });
+
+    emitProgress(onProgress, { stage: "check_locked_rollout_files", status: "start" });
     const {
       writableChanges,
       lockedChanges
     } = await splitLockedSessionChanges(changes);
+    emitProgress(onProgress, {
+      stage: "check_locked_rollout_files",
+      status: "complete",
+      writableCount: writableChanges.length,
+      lockedCount: lockedChanges.length + lockedReadPaths.length
+    });
+
     const skippedRolloutFiles = [...new Set([
       ...lockedReadPaths,
       ...lockedChanges.map((change) => change.path)
     ])].sort((left, right) => left.localeCompare(right));
     await assertSqliteWritable(codexHome, { busyTimeoutMs: sqliteBusyTimeoutMs });
+
+    emitProgress(onProgress, {
+      stage: "create_backup",
+      status: "start",
+      writableCount: writableChanges.length
+    });
+    const backupStartedAt = Date.now();
     backupDir = await createBackup({
       codexHome,
       targetProvider,
@@ -152,11 +183,24 @@ export async function runSync({
       configPath,
       configBackupText
     });
+    backupDurationMs = Date.now() - backupStartedAt;
+    emitProgress(onProgress, {
+      stage: "create_backup",
+      status: "complete",
+      backupDir,
+      durationMs: backupDurationMs
+    });
 
     let sessionRestoreNeeded = false;
     let appliedSessionChanges = [];
     try {
       let applyResult = { appliedChanges: 0, appliedPaths: [], skippedPaths: [] };
+      emitProgress(onProgress, { stage: "update_sqlite", status: "start" });
+      emitProgress(onProgress, {
+        stage: "rewrite_rollout_files",
+        status: "start",
+        writableCount: writableChanges.length
+      });
       const sqliteResult = await updateSqliteProvider(
         codexHome,
         targetProvider,
@@ -172,22 +216,45 @@ export async function runSync({
         },
         { busyTimeoutMs: sqliteBusyTimeoutMs }
       );
+      emitProgress(onProgress, {
+        stage: "rewrite_rollout_files",
+        status: "complete",
+        appliedChanges: applyResult.appliedChanges,
+        skippedChanges: applyResult.skippedPaths.length
+      });
+      emitProgress(onProgress, {
+        stage: "update_sqlite",
+        status: "complete",
+        updatedRows: sqliteResult.updatedRows
+      });
       const skippedLockedRolloutFiles = [...new Set([
         ...skippedRolloutFiles,
         ...applyResult.skippedPaths
       ])].sort((left, right) => left.localeCompare(right));
       let autoPruneResult = null;
       let autoPruneWarning = null;
+      emitProgress(onProgress, {
+        stage: "clean_backups",
+        status: "start",
+        keepCount
+      });
       try {
         autoPruneResult = await pruneBackups(codexHome, keepCount);
       } catch (pruneError) {
         autoPruneWarning = `Automatic backup cleanup failed: ${pruneError instanceof Error ? pruneError.message : String(pruneError)}`;
       }
+      emitProgress(onProgress, {
+        stage: "clean_backups",
+        status: "complete",
+        deletedCount: autoPruneResult?.deletedCount ?? 0,
+        warning: autoPruneWarning
+      });
       return {
         codexHome,
         targetProvider,
         previousProvider: current.provider,
         backupDir,
+        backupDurationMs,
         changedSessionFiles: applyResult.appliedChanges,
         skippedLockedRolloutFiles,
         sqliteRowsUpdated: sqliteResult.updatedRows,
@@ -220,7 +287,8 @@ export async function runSync({
 export async function runSwitch({
   codexHome: explicitCodexHome,
   provider,
-  keepCount = DEFAULT_BACKUP_RETENTION_COUNT
+  keepCount = DEFAULT_BACKUP_RETENTION_COUNT,
+  onProgress
 }) {
   if (!provider) {
     throw new Error("Missing provider id. Usage: codex-provider switch <provider-id>");
@@ -235,14 +303,25 @@ export async function runSwitch({
   }
 
   const nextConfigText = setRootProviderInConfigText(originalConfigText, provider);
+  emitProgress(onProgress, {
+    stage: "update_config",
+    status: "start",
+    provider
+  });
   await writeConfigText(configPath, nextConfigText);
+  emitProgress(onProgress, {
+    stage: "update_config",
+    status: "complete",
+    provider
+  });
 
   try {
     const syncResult = await runSync({
       codexHome,
       provider,
       configBackupText: originalConfigText,
-      keepCount
+      keepCount,
+      onProgress
     });
     return {
       ...syncResult,
