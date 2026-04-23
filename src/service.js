@@ -32,6 +32,7 @@ import {
 } from "./session-files.js";
 import {
   assertSqliteWritable,
+  readSqliteThreadActivityTimestamps,
   readSqliteProviderCounts,
   updateSqliteProvider
 } from "./sqlite-state.js";
@@ -145,6 +146,16 @@ export async function runSync({
       lockedPaths: lockedReadPaths,
       providerCounts
     } = await collectSessionChanges(codexHome, targetProvider, { skipLockedReads: true });
+    const threadActivityTimestamps = await readSqliteThreadActivityTimestamps(
+      codexHome,
+      changes.map((change) => change.threadId)
+    );
+    for (const change of changes) {
+      const timestampMs = threadActivityTimestamps.get(change.threadId);
+      if (Number.isFinite(timestampMs)) {
+        change.lastActivityTimestampMs = timestampMs;
+      }
+    }
     emitProgress(onProgress, {
       stage: "scan_rollout_files",
       status: "complete",

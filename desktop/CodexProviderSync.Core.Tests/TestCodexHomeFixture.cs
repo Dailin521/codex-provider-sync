@@ -119,6 +119,26 @@ internal sealed class TestCodexHomeFixture
 
     public async Task WriteStateDbAsync(IEnumerable<(string Id, string ModelProvider, bool Archived)> rows)
     {
+        await WriteStateDbRowsAsync(rows.Select(static row => new ThreadStateRow(
+            row.Id,
+            row.ModelProvider,
+            row.Archived,
+            null,
+            null)));
+    }
+
+    public async Task WriteStateDbAsync(IEnumerable<(string Id, string ModelProvider, bool Archived, long? UpdatedAt, long? UpdatedAtMs)> rows)
+    {
+        await WriteStateDbRowsAsync(rows.Select(static row => new ThreadStateRow(
+            row.Id,
+            row.ModelProvider,
+            row.Archived,
+            row.UpdatedAt,
+            row.UpdatedAtMs)));
+    }
+
+    private async Task WriteStateDbRowsAsync(IEnumerable<ThreadStateRow> rows)
+    {
         string dbPath = Path.Combine(CodexHome, "state_5.sqlite");
         await using SqliteConnection connection = OpenSqliteConnection();
         await connection.OpenAsync();
@@ -126,6 +146,10 @@ internal sealed class TestCodexHomeFixture
         create.CommandText = """
             CREATE TABLE threads (
               id TEXT PRIMARY KEY,
+              rollout_path TEXT,
+              created_at INTEGER,
+              updated_at INTEGER,
+              updated_at_ms INTEGER,
               model_provider TEXT,
               archived INTEGER NOT NULL DEFAULT 0,
               first_user_message TEXT NOT NULL DEFAULT ''
@@ -133,16 +157,27 @@ internal sealed class TestCodexHomeFixture
             """;
         await create.ExecuteNonQueryAsync();
 
-        foreach ((string id, string modelProvider, bool archived) in rows)
+        foreach (ThreadStateRow row in rows)
         {
             SqliteCommand insert = connection.CreateCommand();
             insert.CommandText = """
-                INSERT INTO threads (id, model_provider, archived, first_user_message)
-                VALUES ($id, $provider, $archived, 'hello')
+                INSERT INTO threads (
+                  id,
+                  rollout_path,
+                  created_at,
+                  updated_at,
+                  updated_at_ms,
+                  model_provider,
+                  archived,
+                  first_user_message
+                )
+                VALUES ($id, '', NULL, $updatedAt, $updatedAtMs, $provider, $archived, 'hello')
                 """;
-            insert.Parameters.AddWithValue("$id", id);
-            insert.Parameters.AddWithValue("$provider", modelProvider);
-            insert.Parameters.AddWithValue("$archived", archived ? 1 : 0);
+            insert.Parameters.AddWithValue("$id", row.Id);
+            insert.Parameters.AddWithValue("$updatedAt", (object?)row.UpdatedAt ?? DBNull.Value);
+            insert.Parameters.AddWithValue("$updatedAtMs", (object?)row.UpdatedAtMs ?? DBNull.Value);
+            insert.Parameters.AddWithValue("$provider", row.ModelProvider);
+            insert.Parameters.AddWithValue("$archived", row.Archived ? 1 : 0);
             await insert.ExecuteNonQueryAsync();
         }
     }
@@ -151,4 +186,11 @@ internal sealed class TestCodexHomeFixture
     {
         return new SqliteConnection($"Data Source={Path.Combine(CodexHome, "state_5.sqlite")};Mode=ReadWriteCreate;Pooling=False");
     }
+
+    private sealed record ThreadStateRow(
+        string Id,
+        string ModelProvider,
+        bool Archived,
+        long? UpdatedAt,
+        long? UpdatedAtMs);
 }

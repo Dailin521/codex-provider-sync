@@ -93,6 +93,17 @@ public sealed class CodexSyncService
         await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "sync");
 
         SessionChangeCollection sessionInfo = await _sessionRolloutService.CollectSessionChangesAsync(codexHome, targetProvider, skipLockedReads: true);
+        IReadOnlyDictionary<string, long> threadActivityUtcTicks = await _sqliteStateService.ReadThreadActivityUtcTicksByIdAsync(
+            codexHome,
+            sessionInfo.Changes.Select(static change => change.ThreadId));
+        foreach (SessionChange change in sessionInfo.Changes)
+        {
+            if (change.ThreadId is not null
+                && threadActivityUtcTicks.TryGetValue(change.ThreadId, out long normalizedTicks))
+            {
+                change.NormalizedLastWriteTimeUtcTicks = normalizedTicks;
+            }
+        }
         (IReadOnlyList<SessionChange> writableChanges, IReadOnlyList<SessionChange> lockedChanges) =
             await _sessionRolloutService.SplitLockedSessionChangesAsync(sessionInfo.Changes);
 

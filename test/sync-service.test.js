@@ -98,14 +98,38 @@ async function writeStateDb(codexHome, rows) {
     db.exec(`
       CREATE TABLE threads (
         id TEXT PRIMARY KEY,
+        rollout_path TEXT,
+        created_at INTEGER,
+        updated_at INTEGER,
+        updated_at_ms INTEGER,
         model_provider TEXT,
         archived INTEGER NOT NULL DEFAULT 0,
         first_user_message TEXT NOT NULL DEFAULT ''
       )
     `);
-    const stmt = db.prepare("INSERT INTO threads (id, model_provider, archived, first_user_message) VALUES (?, ?, ?, ?)");
+    const stmt = db.prepare(`
+      INSERT INTO threads (
+        id,
+        rollout_path,
+        created_at,
+        updated_at,
+        updated_at_ms,
+        model_provider,
+        archived,
+        first_user_message
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
     for (const row of rows) {
-      stmt.run(row.id, row.model_provider, row.archived ? 1 : 0, row.first_user_message ?? "hello");
+      stmt.run(
+        row.id,
+        row.rollout_path ?? "",
+        row.created_at ?? null,
+        row.updated_at ?? null,
+        row.updated_at_ms ?? null,
+        row.model_provider,
+        row.archived ? 1 : 0,
+        row.first_user_message ?? "hello"
+      );
     }
   } finally {
     db.close();
@@ -278,11 +302,12 @@ test("runSync reports stage progress and backup duration", async () => {
   assert.ok(backupCompleteEvent.durationMs >= 0);
 });
 
-test("runSync normalizes rollout mtime to the thread's last activity time", async () => {
+test("runSync normalizes rollout mtime to sqlite thread updated_at_ms", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");
-  const latestActivityIso = "2026-03-22T15:45:30.000Z";
+  const rolloutActivityIso = "2026-03-22T15:45:30.000Z";
+  const sqliteActivityIso = "2026-03-21T09:10:11.123Z";
   await writeRolloutLines(sessionPath, [
     JSON.stringify({
       timestamp: "2026-03-19T00:00:20.000Z",
@@ -297,7 +322,7 @@ test("runSync normalizes rollout mtime to the thread's last activity time", asyn
       }
     }),
     JSON.stringify({
-      timestamp: latestActivityIso,
+      timestamp: rolloutActivityIso,
       type: "event_msg",
       payload: {
         type: "assistant_message",
@@ -308,13 +333,57 @@ test("runSync normalizes rollout mtime to the thread's last activity time", asyn
   const wrongTimestamp = new Date("2026-04-01T00:00:00.000Z");
   await fs.utimes(sessionPath, wrongTimestamp, wrongTimestamp);
   await writeStateDb(codexHome, [
+    {
+      id: "thread-a",
+      model_provider: "apigather",
+      archived: false,
+      updated_at: Math.floor(Date.parse(sqliteActivityIso) / 1000),
+      updated_at_ms: Date.parse(sqliteActivityIso)
+    }
+  ]);
+
+  await runSync({ codexHome });
+
+  const stat = await fs.stat(sessionPath);
+  assert.ok(Math.abs(stat.mtimeMs - Date.parse(sqliteActivityIso)) < 2000);
+});
+
+test("runSync preserves original rollout mtime when sqlite thread activity is unavailable", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");
+  await writeRolloutLines(sessionPath, [
+    JSON.stringify({
+      timestamp: "2026-03-19T00:00:20.000Z",
+      type: "session_meta",
+      payload: {
+        id: "thread-a",
+        timestamp: "2026-03-19T00:00:00.000Z",
+        cwd: "C:\\AITemp",
+        source: "cli",
+        cli_version: "0.115.0",
+        model_provider: "apigather"
+      }
+    }),
+    JSON.stringify({
+      timestamp: "2026-03-25T12:00:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "assistant_message",
+        message: "later in rollout only"
+      }
+    })
+  ]);
+  const preservedTimestamp = new Date("2026-04-01T00:00:00.000Z");
+  await fs.utimes(sessionPath, preservedTimestamp, preservedTimestamp);
+  await writeStateDb(codexHome, [
     { id: "thread-a", model_provider: "apigather", archived: false }
   ]);
 
   await runSync({ codexHome });
 
   const stat = await fs.stat(sessionPath);
-  assert.ok(Math.abs(stat.mtimeMs - Date.parse(latestActivityIso)) < 2000);
+  assert.ok(Math.abs(stat.mtimeMs - preservedTimestamp.getTime()) < 2000);
 });
 
 test("runSwitch updates config and syncs provider metadata", async () => {

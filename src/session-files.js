@@ -35,52 +35,6 @@ async function getFileSnapshot(filePath) {
   };
 }
 
-function parseTimestampMs(value) {
-  if (typeof value !== "string" || value.trim() === "") {
-    return null;
-  }
-
-  const timestampMs = Date.parse(value);
-  return Number.isFinite(timestampMs) ? timestampMs : null;
-}
-
-function updateLatestTimestamp(currentLatestMs, candidateMs) {
-  if (!Number.isFinite(candidateMs)) {
-    return currentLatestMs;
-  }
-  if (!Number.isFinite(currentLatestMs)) {
-    return candidateMs;
-  }
-  return Math.max(currentLatestMs, candidateMs);
-}
-
-async function readLastActivityTimestampMs(filePath, fallbackMs) {
-  try {
-    const content = await fsp.readFile(filePath, "utf8");
-    let latestTimestampMs = null;
-
-    for (const line of content.split(/\r?\n/)) {
-      if (!line) {
-        continue;
-      }
-
-      try {
-        const parsed = JSON.parse(line);
-        latestTimestampMs = updateLatestTimestamp(latestTimestampMs, parseTimestampMs(parsed?.timestamp));
-        if (parsed?.type === "session_meta") {
-          latestTimestampMs = updateLatestTimestamp(latestTimestampMs, parseTimestampMs(parsed?.payload?.timestamp));
-        }
-      } catch {
-        // Ignore malformed lines and fall back to file metadata if needed.
-      }
-    }
-
-    return Number.isFinite(latestTimestampMs) ? latestTimestampMs : fallbackMs;
-  } catch {
-    return fallbackMs;
-  }
-}
-
 async function applyNormalizedMtime(filePath, normalizedMtimeMs) {
   if (!Number.isFinite(normalizedMtimeMs)) {
     return;
@@ -549,7 +503,6 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
 
       if (targetProvider !== "__status_only__" && parsed.payload.model_provider !== targetProvider) {
         const snapshot = await getFileSnapshot(rolloutPath);
-        const lastActivityTimestampMs = await readLastActivityTimestampMs(rolloutPath, snapshot.mtimeMs);
         parsed.payload.model_provider = targetProvider;
         summaries.push({
           path: rolloutPath,
@@ -560,7 +513,7 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
           originalOffset: record.offset,
           originalSize: snapshot.size,
           originalMtimeMs: snapshot.mtimeMs,
-          lastActivityTimestampMs,
+          lastActivityTimestampMs: snapshot.mtimeMs,
           updatedFirstLine: JSON.stringify(parsed)
         });
       }

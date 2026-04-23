@@ -85,22 +85,53 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
-    public async Task RunSync_NormalizesRolloutLastWriteTimeToLatestActivity()
+    public async Task RunSync_NormalizesRolloutLastWriteTimeToSqliteUpdatedAtMs()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
         await fixture.WriteConfigAsync("model_provider = \"openai\"");
         string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
-        const string latestActivityIso = "2026-03-22T15:45:30.000Z";
+        const string rolloutActivityIso = "2026-03-22T15:45:30.000Z";
+        const string sqliteActivityIso = "2026-03-21T09:10:11.123Z";
         await fixture.WriteRolloutLinesAsync(
             sessionPath,
             """
             {"timestamp":"2026-03-19T00:00:20.000Z","type":"session_meta","payload":{"id":"thread-a","timestamp":"2026-03-19T00:00:00.000Z","cwd":"C:\\AITemp","source":"cli","cli_version":"0.115.0","model_provider":"apigather"}}
             """,
             $$$"""
-            {"timestamp":"{{{latestActivityIso}}}","type":"event_msg","payload":{"type":"assistant_message","message":"latest"}}
+            {"timestamp":"{{{rolloutActivityIso}}}","type":"event_msg","payload":{"type":"assistant_message","message":"latest"}}
             """);
         DateTime wrongTimestamp = new(2026, 4, 1, 0, 0, 0, DateTimeKind.Utc);
         File.SetLastWriteTimeUtc(sessionPath, wrongTimestamp);
+        DateTimeOffset sqliteActivity = DateTimeOffset.Parse(sqliteActivityIso, null, System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime();
+        await fixture.WriteStateDbAsync(
+        [
+            ("thread-a", "apigather", false, sqliteActivity.ToUnixTimeSeconds(), sqliteActivity.ToUnixTimeMilliseconds())
+        ]);
+
+        CodexSyncService service = new();
+        await service.RunSyncAsync(fixture.CodexHome);
+
+        DateTime expectedUtc = sqliteActivity.UtcDateTime;
+        DateTime actualUtc = File.GetLastWriteTimeUtc(sessionPath);
+        Assert.InRange(Math.Abs((actualUtc - expectedUtc).TotalSeconds), 0, 2);
+    }
+
+    [Fact]
+    public async Task RunSync_PreservesRolloutLastWriteTime_WhenSqliteActivityIsUnavailable()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutLinesAsync(
+            sessionPath,
+            """
+            {"timestamp":"2026-03-19T00:00:20.000Z","type":"session_meta","payload":{"id":"thread-a","timestamp":"2026-03-19T00:00:00.000Z","cwd":"C:\\AITemp","source":"cli","cli_version":"0.115.0","model_provider":"apigather"}}
+            """,
+            """
+            {"timestamp":"2026-03-25T12:00:00.000Z","type":"event_msg","payload":{"type":"assistant_message","message":"later in rollout only"}}
+            """);
+        DateTime preservedTimestamp = new(2026, 4, 1, 0, 0, 0, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(sessionPath, preservedTimestamp);
         await fixture.WriteStateDbAsync(
         [
             ("thread-a", "apigather", false)
@@ -109,9 +140,8 @@ public sealed class CoreIntegrationTests
         CodexSyncService service = new();
         await service.RunSyncAsync(fixture.CodexHome);
 
-        DateTime expectedUtc = DateTime.Parse(latestActivityIso, null, System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime();
         DateTime actualUtc = File.GetLastWriteTimeUtc(sessionPath);
-        Assert.InRange(Math.Abs((actualUtc - expectedUtc).TotalSeconds), 0, 2);
+        Assert.InRange(Math.Abs((actualUtc - preservedTimestamp).TotalSeconds), 0, 2);
     }
 
     [Fact]

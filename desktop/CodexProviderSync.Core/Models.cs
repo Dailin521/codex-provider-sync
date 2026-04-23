@@ -46,7 +46,7 @@ public sealed class SessionChange
     public required int OriginalOffset { get; init; }
     public required long OriginalFileLength { get; init; }
     public required long OriginalLastWriteTimeUtcTicks { get; init; }
-    public required long NormalizedLastWriteTimeUtcTicks { get; init; }
+    public required long NormalizedLastWriteTimeUtcTicks { get; set; }
     public required string UpdatedFirstLine { get; init; }
 }
 

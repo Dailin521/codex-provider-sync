@@ -1,5 +1,4 @@
 using System.Buffers;
-using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -54,9 +53,6 @@ public sealed class SessionRolloutService
                     && !string.Equals(currentProvider, targetProvider, StringComparison.Ordinal))
                 {
                     FileSnapshot snapshot = GetFileSnapshot(rolloutPath);
-                    long normalizedLastWriteTimeUtcTicks = await ReadLastActivityTimeUtcTicksAsync(
-                        rolloutPath,
-                        snapshot.LastWriteTimeUtcTicks);
                     payload["model_provider"] = targetProvider;
                     changes.Add(new SessionChange
                     {
@@ -68,7 +64,7 @@ public sealed class SessionRolloutService
                         OriginalOffset = record.Offset,
                         OriginalFileLength = snapshot.Length,
                         OriginalLastWriteTimeUtcTicks = snapshot.LastWriteTimeUtcTicks,
-                        NormalizedLastWriteTimeUtcTicks = normalizedLastWriteTimeUtcTicks,
+                        NormalizedLastWriteTimeUtcTicks = snapshot.LastWriteTimeUtcTicks,
                         UpdatedFirstLine = root!.ToJsonString()
                     });
                 }
@@ -432,93 +428,6 @@ public sealed class SessionRolloutService
         DateTime normalizedUtc = new(normalizedLastWriteTimeUtcTicks.Value, DateTimeKind.Utc);
         File.SetLastWriteTimeUtc(filePath, normalizedUtc);
         File.SetLastAccessTimeUtc(filePath, normalizedUtc);
-    }
-
-    private static long? ParseTimestampUtcTicks(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return null;
-        }
-
-        return DateTimeOffset.TryParse(
-            value,
-            CultureInfo.InvariantCulture,
-            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
-            out DateTimeOffset parsed)
-            ? parsed.UtcDateTime.Ticks
-            : null;
-    }
-
-    private static long? UpdateLatestTimestampTicks(long? currentTicks, long? candidateTicks)
-    {
-        if (candidateTicks is null)
-        {
-            return currentTicks;
-        }
-
-        if (currentTicks is null)
-        {
-            return candidateTicks;
-        }
-
-        return Math.Max(currentTicks.Value, candidateTicks.Value);
-    }
-
-    private static async Task<long> ReadLastActivityTimeUtcTicksAsync(string filePath, long fallbackTicks)
-    {
-        try
-        {
-            using StreamReader reader = new(
-                filePath,
-                Encoding.UTF8,
-                detectEncodingFromByteOrderMarks: true,
-                bufferSize: 64 * 1024);
-
-            long? latestTicks = null;
-            string? line;
-            while ((line = await reader.ReadLineAsync()) is not null)
-            {
-                if (string.IsNullOrWhiteSpace(line))
-                {
-                    continue;
-                }
-
-                try
-                {
-                    if (JsonNode.Parse(line) is not JsonObject root)
-                    {
-                        continue;
-                    }
-
-                    latestTicks = UpdateLatestTimestampTicks(
-                        latestTicks,
-                        ParseTimestampUtcTicks(root["timestamp"]?.GetValue<string>()));
-
-                    if (string.Equals(root["type"]?.GetValue<string>(), "session_meta", StringComparison.Ordinal)
-                        && root["payload"] is JsonObject payload)
-                    {
-                        latestTicks = UpdateLatestTimestampTicks(
-                            latestTicks,
-                            ParseTimestampUtcTicks(payload["timestamp"]?.GetValue<string>()));
-                    }
-                }
-                catch (JsonException)
-                {
-                    // Ignore malformed lines and fall back to file metadata if needed.
-                }
-                catch (InvalidOperationException)
-                {
-                    // Ignore unexpected JSON value shapes and fall back to file metadata if needed.
-                }
-            }
-
-            return latestTicks ?? fallbackTicks;
-        }
-        catch
-        {
-            return fallbackTicks;
-        }
     }
 
     private static async Task<List<string>> FindLockedFilesAsync(IEnumerable<string> filePaths)

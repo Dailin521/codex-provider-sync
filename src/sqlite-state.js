@@ -14,6 +14,40 @@ function openDatabase(dbPath) {
   return new DatabaseSync(dbPath);
 }
 
+function normalizeThreadIds(threadIds) {
+  return [...new Set(
+    (threadIds ?? [])
+      .filter((threadId) => typeof threadId === "string")
+      .map((threadId) => threadId.trim())
+      .filter(Boolean)
+  )];
+}
+
+function detectThreadActivityColumn(db) {
+  const rows = db.prepare("PRAGMA table_info(threads)").all();
+  const columns = new Set(rows.map((row) => row.name));
+  if (columns.has("updated_at_ms")) {
+    return "updated_at_ms";
+  }
+  if (columns.has("updated_at")) {
+    return "updated_at";
+  }
+  return null;
+}
+
+function toActivityTimestampMs(columnName, value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+  if (columnName === "updated_at_ms") {
+    return value;
+  }
+  if (columnName === "updated_at") {
+    return value * 1000;
+  }
+  return null;
+}
+
 function normalizeBusyTimeoutMs(busyTimeoutMs) {
   return Number.isInteger(busyTimeoutMs) && busyTimeoutMs >= 0
     ? busyTimeoutMs
@@ -69,6 +103,53 @@ export async function readSqliteProviderCounts(codexHome) {
       bucket[row.model_provider] = row.count;
     }
     return result;
+  } finally {
+    db.close();
+  }
+}
+
+export async function readSqliteThreadActivityTimestamps(codexHome, threadIds) {
+  const normalizedThreadIds = normalizeThreadIds(threadIds);
+  if (normalizedThreadIds.length === 0) {
+    return new Map();
+  }
+
+  const dbPath = stateDbPath(codexHome);
+  try {
+    await fs.access(dbPath);
+  } catch {
+    return new Map();
+  }
+
+  const db = openDatabase(dbPath);
+  try {
+    const activityColumn = detectThreadActivityColumn(db);
+    if (!activityColumn) {
+      return new Map();
+    }
+
+    const result = new Map();
+    const chunkSize = 500;
+    for (let index = 0; index < normalizedThreadIds.length; index += chunkSize) {
+      const chunk = normalizedThreadIds.slice(index, index + chunkSize);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const rows = db.prepare(`
+        SELECT id, ${activityColumn} AS activity_value
+        FROM threads
+        WHERE id IN (${placeholders})
+      `).all(...chunk);
+
+      for (const row of rows) {
+        const timestampMs = toActivityTimestampMs(activityColumn, row.activity_value);
+        if (Number.isFinite(timestampMs)) {
+          result.set(row.id, timestampMs);
+        }
+      }
+    }
+
+    return result;
+  } catch {
+    return new Map();
   } finally {
     db.close();
   }
