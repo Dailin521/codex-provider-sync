@@ -9,6 +9,8 @@ public sealed class ProviderCounts
 {
     public Dictionary<string, int> Sessions { get; init; } = new(StringComparer.Ordinal);
     public Dictionary<string, int> ArchivedSessions { get; init; } = new(StringComparer.Ordinal);
+    public bool Unreadable { get; init; }
+    public string? Error { get; init; }
 }
 
 public sealed class StatusSnapshot
@@ -17,6 +19,9 @@ public sealed class StatusSnapshot
     public required CurrentProviderInfo CurrentProvider { get; init; }
     public required IReadOnlyList<string> ConfiguredProviders { get; init; }
     public required ProviderCounts RolloutCounts { get; init; }
+    public required IReadOnlyList<string> LockedRolloutFiles { get; init; }
+    public required ProviderCounts EncryptedContentCounts { get; init; }
+    public string? EncryptedContentWarning { get; init; }
     public required ProviderCounts? SqliteCounts { get; init; }
     public required string BackupRoot { get; init; }
     public required BackupSummary BackupSummary { get; init; }
@@ -46,6 +51,7 @@ public sealed class SessionChange
     public required int OriginalOffset { get; init; }
     public required long OriginalFileLength { get; init; }
     public required long OriginalLastWriteTimeUtcTicks { get; init; }
+    public required string OriginalProvider { get; init; }
     public required string UpdatedFirstLine { get; init; }
 }
 
@@ -54,6 +60,7 @@ public sealed class SessionChangeCollection
     public required IReadOnlyList<SessionChange> Changes { get; init; }
     public required IReadOnlyList<string> LockedPaths { get; init; }
     public required ProviderCounts ProviderCounts { get; init; }
+    public required ProviderCounts EncryptedContentCounts { get; init; }
 }
 
 public sealed class SyncResult
@@ -67,6 +74,8 @@ public sealed class SyncResult
     public required int SqliteRowsUpdated { get; init; }
     public required bool SqlitePresent { get; init; }
     public required ProviderCounts RolloutCountsBefore { get; init; }
+    public required ProviderCounts EncryptedContentCounts { get; init; }
+    public string? EncryptedContentWarning { get; init; }
     public bool ConfigUpdated { get; init; }
     public BackupPruneResult? AutoPruneResult { get; init; }
     public string? AutoPruneWarning { get; init; }
@@ -159,4 +168,5 @@ internal sealed class SessionBackupManifestEntry
     public required string Path { get; init; }
     public required string OriginalFirstLine { get; init; }
     public required string OriginalSeparator { get; init; }
+    public long? OriginalLastWriteTimeUtcTicks { get; init; }
 }

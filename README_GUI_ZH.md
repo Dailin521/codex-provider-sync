@@ -17,6 +17,9 @@
 - 默认自动保留最近 5 份由本工具生成的备份，并支持自定义保留数
 - 支持手动清理旧备份
 - 支持从 backup 目录恢复
+- 恢复时可分别选择 config、SQLite、rollout metadata
+- 如果 EXE 双击无反应，查看 `%AppData%\codex-provider-sync\startup-error.log`，或在 PowerShell 中运行 `./CodexProviderSync.exe` 获取错误
+- 含 `encrypted_content` 的历史会话跨 provider/account 后可能只能恢复可见性，继续对话或 compact 仍可能报 `invalid_encrypted_content`
 
 ## 使用方式
 

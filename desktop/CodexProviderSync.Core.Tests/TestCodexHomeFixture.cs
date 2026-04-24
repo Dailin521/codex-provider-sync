@@ -77,6 +77,11 @@ internal sealed class TestCodexHomeFixture
         await File.WriteAllTextAsync(filePath, $"{first}\n{second}\n");
     }
 
+    public async Task AppendEncryptedContentAsync(string filePath)
+    {
+        await File.AppendAllTextAsync(filePath, "{\"type\":\"event_msg\",\"payload\":{\"encrypted_content\":\"gAAA\"}}\n");
+    }
+
     public async Task<long> WriteBackupAsync(string directoryName, params (string RelativePath, string Content)[] files)
     {
         string backupDir = BackupPath(directoryName);

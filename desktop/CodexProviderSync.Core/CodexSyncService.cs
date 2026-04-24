@@ -45,7 +45,7 @@ public sealed class CodexSyncService
         string configText = await _configFileService.ReadConfigTextAsync(_codexHomeService.ConfigPath(codexHome));
         CurrentProviderInfo currentProvider = _configFileService.ReadCurrentProviderFromConfigText(configText);
         IReadOnlyList<string> configuredProviders = _configFileService.ListConfiguredProviderIds(configText);
-        SessionChangeCollection rolloutInfo = await _sessionRolloutService.CollectSessionChangesAsync(codexHome, "__status_only__");
+        SessionChangeCollection rolloutInfo = await _sessionRolloutService.CollectSessionChangesAsync(codexHome, "__status_only__", skipLockedReads: true);
         ProviderCounts? sqliteCounts = await _sqliteStateService.ReadSqliteProviderCountsAsync(codexHome);
         BackupSummary backupSummary = await _backupService.GetBackupSummaryAsync(codexHome);
 
@@ -55,6 +55,9 @@ public sealed class CodexSyncService
             CurrentProvider = currentProvider,
             ConfiguredProviders = configuredProviders,
             RolloutCounts = rolloutInfo.ProviderCounts,
+            LockedRolloutFiles = rolloutInfo.LockedPaths,
+            EncryptedContentCounts = rolloutInfo.EncryptedContentCounts,
+            EncryptedContentWarning = BuildEncryptedContentWarning(rolloutInfo.EncryptedContentCounts, currentProvider.Provider),
             SqliteCounts = sqliteCounts,
             BackupRoot = _codexHomeService.BackupRoot(codexHome),
             BackupSummary = backupSummary
@@ -93,6 +96,7 @@ public sealed class CodexSyncService
         await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "sync");
 
         SessionChangeCollection sessionInfo = await _sessionRolloutService.CollectSessionChangesAsync(codexHome, targetProvider, skipLockedReads: true);
+        string? encryptedContentWarning = BuildEncryptedContentWarning(sessionInfo.EncryptedContentCounts, targetProvider);
         (IReadOnlyList<SessionChange> writableChanges, IReadOnlyList<SessionChange> lockedChanges) =
             await _sessionRolloutService.SplitLockedSessionChangesAsync(sessionInfo.Changes);
 
@@ -149,6 +153,8 @@ public sealed class CodexSyncService
                 SqliteRowsUpdated = updatedRows,
                 SqlitePresent = databasePresent,
                 RolloutCountsBefore = sessionInfo.ProviderCounts,
+                EncryptedContentCounts = sessionInfo.EncryptedContentCounts,
+                EncryptedContentWarning = encryptedContentWarning,
                 AutoPruneResult = autoPruneResult,
                 AutoPruneWarning = autoPruneWarning
             };
@@ -202,6 +208,8 @@ public sealed class CodexSyncService
                 SqliteRowsUpdated = result.SqliteRowsUpdated,
                 SqlitePresent = result.SqlitePresent,
                 RolloutCountsBefore = result.RolloutCountsBefore,
+                EncryptedContentCounts = result.EncryptedContentCounts,
+                EncryptedContentWarning = result.EncryptedContentWarning,
                 ConfigUpdated = true,
                 AutoPruneResult = result.AutoPruneResult,
                 AutoPruneWarning = result.AutoPruneWarning
@@ -216,6 +224,11 @@ public sealed class CodexSyncService
 
     public async Task<RestoreResult> RunRestoreAsync(string? explicitCodexHome, string backupDir)
     {
+        return await RunRestoreAsync(explicitCodexHome, backupDir, new RestoreBackupOptions());
+    }
+
+    public async Task<RestoreResult> RunRestoreAsync(string? explicitCodexHome, string backupDir, RestoreBackupOptions options)
+    {
         if (string.IsNullOrWhiteSpace(backupDir))
         {
             throw new InvalidOperationException("Missing backup path. Usage: codex-provider restore <backup-dir>");
@@ -225,7 +238,7 @@ public sealed class CodexSyncService
         await _codexHomeService.EnsureCodexHomeAsync(codexHome);
 
         await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "restore");
-        return await _backupService.RestoreBackupAsync(Path.GetFullPath(backupDir), codexHome);
+        return await _backupService.RestoreBackupAsync(Path.GetFullPath(backupDir), codexHome, options);
     }
 
     public async Task<BackupPruneResult> RunPruneBackupsAsync(
@@ -237,5 +250,24 @@ public sealed class CodexSyncService
 
         await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "prune-backups");
         return await _backupService.PruneBackupsAsync(codexHome, keepCount);
+    }
+
+    private static string? BuildEncryptedContentWarning(ProviderCounts encryptedContentCounts, string targetProvider)
+    {
+        int total = encryptedContentCounts.Sessions.Values.Sum() + encryptedContentCounts.ArchivedSessions.Values.Sum();
+        List<string> riskyProviders = encryptedContentCounts.Sessions
+            .Concat(encryptedContentCounts.ArchivedSessions)
+            .Where(pair => pair.Value > 0 && !string.Equals(pair.Key, targetProvider, StringComparison.Ordinal))
+            .Select(static pair => pair.Key)
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToList();
+
+        if (riskyProviders.Count == 0)
+        {
+            return null;
+        }
+
+        return $"Encrypted content warning: {total} rollout file(s) contain encrypted_content from provider(s) {string.Join(", ", riskyProviders)}. Visibility metadata can be synchronized to {targetProvider}, but continuing or compacting those histories may fail with invalid_encrypted_content. Return to the original provider/account or start a new session if you need reliable continuation.";
     }
 }

@@ -13,7 +13,7 @@ import {
   restoreBackup,
   updateSessionBackupManifest
 } from "../src/backup.js";
-import { getStatus, runRestore, runSwitch, runSync } from "../src/service.js";
+import { getStatus, renderStatus, runRestore, runSwitch, runSync } from "../src/service.js";
 import { DEFAULT_BACKUP_RETENTION_COUNT } from "../src/constants.js";
 import { applySessionChanges, collectSessionChanges } from "../src/session-files.js";
 
@@ -456,6 +456,40 @@ test("applySessionChanges preserves large UTF-8 session metadata", async () => {
   assert.match(rollout, /"large_blob":"数据块数据块/);
 });
 
+test("applySessionChanges restores original rollout mtime", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-mtime.jsonl");
+  await writeRollout(sessionPath, "thread-mtime", "apigather");
+  const originalTime = new Date("2026-01-02T03:04:05.000Z");
+  await fs.utimes(sessionPath, originalTime, originalTime);
+
+  const { changes } = await collectSessionChanges(codexHome, "openai");
+  const result = await applySessionChanges(changes);
+
+  assert.equal(result.appliedChanges, 1);
+  const stat = await fs.stat(sessionPath);
+  assert.equal(Math.round(stat.mtimeMs), originalTime.getTime());
+});
+
+test("collectSessionChanges reports encrypted_content counts by provider and scope", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-enc.jsonl");
+  const archivedPath = path.join(codexHome, "archived_sessions", "2026", "03", "18", "rollout-enc-archived.jsonl");
+  await writeRollout(sessionPath, "thread-enc", "apigather");
+  await fs.appendFile(sessionPath, '{"type":"event_msg","payload":{"encrypted_content":"gAAA"}}\n', "utf8");
+  await writeRollout(archivedPath, "thread-enc-archived", "openai");
+  await fs.appendFile(archivedPath, '{"type":"event_msg","payload":{"encrypted_content":"gBBB"}}\n', "utf8");
+
+  const { encryptedContentCounts } = await collectSessionChanges(codexHome, "openai");
+
+  assert.deepEqual(encryptedContentCounts, {
+    sessions: { apigather: 1 },
+    archived_sessions: { openai: 1 }
+  });
+});
+
 test("applySessionChanges skips only the rollout file that becomes locked on Windows", async () => {
   if (process.platform !== "win32") {
     return;
@@ -514,6 +548,76 @@ test("restoreBackup only restores rollout files that were actually applied", asy
 
   const rollout = await fs.readFile(sessionPath, "utf8");
   assert.match(rollout, /"model_provider":"manual"/);
+});
+
+test("restoreBackup can skip config, database, and sessions", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const configPath = path.join(codexHome, "config.toml");
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-skip.jsonl");
+  await writeRollout(sessionPath, "thread-skip", "apigather");
+  await writeStateDb(codexHome, [
+    { id: "thread-skip", model_provider: "apigather", archived: false }
+  ]);
+  const { changes } = await collectSessionChanges(codexHome, "openai");
+  const backupDir = await createBackup({ codexHome, targetProvider: "openai", sessionChanges: changes, configPath });
+
+  await writeConfig(codexHome, 'model_provider = "manual"');
+  await writeRollout(sessionPath, "thread-skip", "manual");
+  await restoreBackup(backupDir, codexHome, {
+    restoreConfig: false,
+    restoreDatabase: false,
+    restoreSessions: false
+  });
+
+  assert.match(await fs.readFile(configPath, "utf8"), /^model_provider = "manual"/m);
+  assert.match(await fs.readFile(sessionPath, "utf8"), /"model_provider":"manual"/);
+});
+
+test("runSync fails before rollout rewrite when SQLite is malformed", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-malformed-db.jsonl");
+  await writeRollout(sessionPath, "thread-malformed", "apigather");
+  await fs.writeFile(path.join(codexHome, "state_5.sqlite"), "not sqlite", "utf8");
+
+  await assert.rejects(
+    () => runSync({ codexHome }),
+    /state_5\.sqlite is malformed or unreadable/
+  );
+  assert.match(await fs.readFile(sessionPath, "utf8"), /"model_provider":"apigather"/);
+});
+
+test("status reports malformed SQLite without failing", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  await writeRollout(path.join(codexHome, "sessions", "2026", "03", "19", "rollout-status-db.jsonl"), "thread-status", "openai");
+  await fs.writeFile(path.join(codexHome, "state_5.sqlite"), "not sqlite", "utf8");
+
+  const status = await getStatus({ codexHome });
+  assert.equal(status.sqliteCounts.unreadable, true);
+  assert.match(renderStatus(status), /state_5\.sqlite is malformed or unreadable/);
+});
+
+test("status skips locked rollout files without failing", async () => {
+  if (process.platform !== "win32") {
+    return;
+  }
+
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-status-locked.jsonl");
+  await writeRollout(sessionPath, "thread-status-locked", "openai");
+
+  const lockProcess = await lockRolloutFile(sessionPath);
+  try {
+    const status = await getStatus({ codexHome });
+    assert.deepEqual(status.lockedRolloutFiles, [sessionPath]);
+    assert.match(renderStatus(status), /Locked rollout files skipped during status scan: 1/);
+  } finally {
+    lockProcess.kill();
+    await new Promise((resolve) => lockProcess.once("exit", resolve));
+  }
 });
 
 test("pruneBackups removes the oldest backup directories", async () => {

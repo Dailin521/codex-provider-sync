@@ -17,6 +17,8 @@ public sealed class SessionRolloutService
         List<string> lockedPaths = [];
         Dictionary<string, int> sessionCounts = new(StringComparer.Ordinal);
         Dictionary<string, int> archivedCounts = new(StringComparer.Ordinal);
+        Dictionary<string, int> encryptedSessionCounts = new(StringComparer.Ordinal);
+        Dictionary<string, int> encryptedArchivedCounts = new(StringComparer.Ordinal);
 
         foreach (string dirName in AppConstants.SessionDirectories)
         {
@@ -47,6 +49,22 @@ public sealed class SessionRolloutService
                 string currentProvider = payload!["model_provider"]?.GetValue<string>() ?? "(missing)";
                 Dictionary<string, int> bucket = dirName == "archived_sessions" ? archivedCounts : sessionCounts;
                 bucket[currentProvider] = bucket.TryGetValue(currentProvider, out int count) ? count + 1 : 1;
+                bool hasEncryptedContent;
+                try
+                {
+                    hasEncryptedContent = await FileHasEncryptedContentAsync(rolloutPath, record.FirstLine);
+                }
+                catch (Exception error) when (skipLockedReads && IsRolloutFileBusyError(error))
+                {
+                    lockedPaths.Add(rolloutPath);
+                    continue;
+                }
+
+                if (hasEncryptedContent)
+                {
+                    Dictionary<string, int> encryptedBucket = dirName == "archived_sessions" ? encryptedArchivedCounts : encryptedSessionCounts;
+                    encryptedBucket[currentProvider] = encryptedBucket.TryGetValue(currentProvider, out int encryptedCount) ? encryptedCount + 1 : 1;
+                }
 
                 if (!string.Equals(targetProvider, StatusOnlyProvider, StringComparison.Ordinal)
                     && !string.Equals(currentProvider, targetProvider, StringComparison.Ordinal))
@@ -63,6 +81,7 @@ public sealed class SessionRolloutService
                         OriginalOffset = record.Offset,
                         OriginalFileLength = snapshot.Length,
                         OriginalLastWriteTimeUtcTicks = snapshot.LastWriteTimeUtcTicks,
+                        OriginalProvider = currentProvider,
                         UpdatedFirstLine = root!.ToJsonString()
                     });
                 }
@@ -77,6 +96,11 @@ public sealed class SessionRolloutService
             {
                 Sessions = sessionCounts,
                 ArchivedSessions = archivedCounts
+            },
+            EncryptedContentCounts = new ProviderCounts
+            {
+                Sessions = encryptedSessionCounts,
+                ArchivedSessions = encryptedArchivedCounts
             }
         };
     }
@@ -91,6 +115,7 @@ public sealed class SessionRolloutService
         {
             if (await TryRewriteCollectedSessionChangeAsync(change))
             {
+                TryRestoreLastWriteTimeUtc(change.Path, change.OriginalLastWriteTimeUtcTicks);
                 appliedCount += 1;
                 appliedPaths.Add(change.Path);
             }
@@ -158,6 +183,7 @@ public sealed class SessionRolloutService
         foreach (SessionBackupManifestEntry entry in manifestEntries)
         {
             await RewriteFirstLineAsync(entry.Path, entry.OriginalFirstLine, entry.OriginalSeparator);
+            TryRestoreLastWriteTimeUtc(entry.Path, entry.OriginalLastWriteTimeUtcTicks);
         }
     }
 
@@ -168,7 +194,8 @@ public sealed class SessionRolloutService
             {
                 Path = change.Path,
                 OriginalFirstLine = change.OriginalFirstLine,
-                OriginalSeparator = change.OriginalSeparator
+                OriginalSeparator = change.OriginalSeparator,
+                OriginalLastWriteTimeUtcTicks = change.OriginalLastWriteTimeUtcTicks
             }));
     }
 
@@ -397,6 +424,41 @@ public sealed class SessionRolloutService
     {
         FileInfo fileInfo = new(filePath);
         return new FileSnapshot(fileInfo.Length, fileInfo.LastWriteTimeUtc.Ticks);
+    }
+
+    private static async Task<bool> FileHasEncryptedContentAsync(string filePath, string firstLine)
+    {
+        if (firstLine.Contains("encrypted_content", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        try
+        {
+            string text = await File.ReadAllTextAsync(filePath);
+            return text.Contains("encrypted_content", StringComparison.Ordinal);
+        }
+        catch (Exception error)
+        {
+            throw WrapRolloutFileBusyError(error, filePath, "scan");
+        }
+    }
+
+    private static void TryRestoreLastWriteTimeUtc(string filePath, long? ticks)
+    {
+        if (ticks is null)
+        {
+            return;
+        }
+
+        try
+        {
+            File.SetLastWriteTimeUtc(filePath, new DateTime(ticks.Value, DateTimeKind.Utc));
+        }
+        catch
+        {
+            // Best effort only; rewriting metadata is still the primary operation.
+        }
     }
 
     private static async Task<List<string>> FindLockedFilesAsync(IEnumerable<string> filePaths)

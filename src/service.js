@@ -67,6 +67,26 @@ function emitProgress(onProgress, event) {
   }
 }
 
+function sumCounts(counts) {
+  return Object.values(counts ?? {}).reduce((total, value) => total + value, 0);
+}
+
+function buildEncryptedContentWarning(encryptedContentCounts, targetProvider) {
+  const riskyProviders = new Set();
+  for (const scope of ["sessions", "archived_sessions"]) {
+    for (const [provider, count] of Object.entries(encryptedContentCounts?.[scope] ?? {})) {
+      if (count > 0 && provider !== targetProvider) {
+        riskyProviders.add(provider);
+      }
+    }
+  }
+  const total = sumCounts(encryptedContentCounts?.sessions) + sumCounts(encryptedContentCounts?.archived_sessions);
+  if (riskyProviders.size === 0) {
+    return null;
+  }
+  return `Encrypted content warning: ${total} rollout file(s) contain encrypted_content from provider(s) ${[...riskyProviders].sort().join(", ")}. Visibility metadata can be synchronized to ${targetProvider}, but continuing or compacting those histories may fail with invalid_encrypted_content. Return to the original provider/account or start a new session if you need reliable continuation.`;
+}
+
 export async function getStatus({ codexHome: explicitCodexHome } = {}) {
   const codexHome = normalizeCodexHome(explicitCodexHome);
   await ensureCodexHome(codexHome);
@@ -74,7 +94,11 @@ export async function getStatus({ codexHome: explicitCodexHome } = {}) {
   const configText = await readConfigText(configPath);
   const current = readCurrentProviderFromConfigText(configText);
   const configuredProviders = listConfiguredProviderIds(configText);
-  const { providerCounts } = await collectSessionChanges(codexHome, "__status_only__");
+  const {
+    providerCounts,
+    encryptedContentCounts,
+    lockedPaths
+  } = await collectSessionChanges(codexHome, "__status_only__", { skipLockedReads: true });
   const sqliteCounts = await readSqliteProviderCounts(codexHome);
   const backupSummary = await getBackupSummary(codexHome);
 
@@ -84,6 +108,9 @@ export async function getStatus({ codexHome: explicitCodexHome } = {}) {
     currentProviderImplicit: current.implicit,
     configuredProviders,
     rolloutCounts: summarizeProviderCounts(providerCounts),
+    lockedRolloutFiles: lockedPaths,
+    encryptedContentCounts,
+    encryptedContentWarning: buildEncryptedContentWarning(encryptedContentCounts, current.provider ?? DEFAULT_PROVIDER),
     sqliteCounts,
     backupRoot: defaultBackupRoot(codexHome),
     backupSummary
@@ -103,10 +130,22 @@ export function renderStatus(status) {
   lines.push("Rollout files:");
   lines.push(`  sessions: ${formatCounts(status.rolloutCounts.sessions)}`);
   lines.push(`  archived_sessions: ${formatCounts(status.rolloutCounts.archived_sessions)}`);
+  if (status.encryptedContentCounts) {
+    lines.push(`  encrypted_content sessions: ${formatCounts(status.encryptedContentCounts.sessions)}`);
+    lines.push(`  encrypted_content archived_sessions: ${formatCounts(status.encryptedContentCounts.archived_sessions)}`);
+  }
+  if (status.encryptedContentWarning) {
+    lines.push(`  ${status.encryptedContentWarning}`);
+  }
+  if (status.lockedRolloutFiles?.length) {
+    lines.push(`  Locked rollout files skipped during status scan: ${status.lockedRolloutFiles.length}`);
+  }
 
   lines.push("");
   lines.push("SQLite state:");
-  if (!status.sqliteCounts) {
+  if (status.sqliteCounts?.unreadable) {
+    lines.push(`  ${status.sqliteCounts.error ?? "state_5.sqlite is malformed or unreadable"}`);
+  } else if (!status.sqliteCounts) {
     lines.push("  state_5.sqlite not found");
   } else {
     lines.push(`  sessions: ${formatCounts(status.sqliteCounts.sessions)}`);
@@ -143,8 +182,10 @@ export async function runSync({
     const {
       changes,
       lockedPaths: lockedReadPaths,
-      providerCounts
+      providerCounts,
+      encryptedContentCounts
     } = await collectSessionChanges(codexHome, targetProvider, { skipLockedReads: true });
+    const encryptedContentWarning = buildEncryptedContentWarning(encryptedContentCounts, targetProvider);
     emitProgress(onProgress, {
       stage: "scan_rollout_files",
       status: "complete",
@@ -260,6 +301,8 @@ export async function runSync({
         sqliteRowsUpdated: sqliteResult.updatedRows,
         sqlitePresent: sqliteResult.databasePresent,
         rolloutCountsBefore: summarizeProviderCounts(providerCounts),
+        encryptedContentCounts,
+        encryptedContentWarning,
         autoPruneResult,
         autoPruneWarning
       };
@@ -335,7 +378,10 @@ export async function runSwitch({
 
 export async function runRestore({
   codexHome: explicitCodexHome,
-  backupDir
+  backupDir,
+  restoreConfig = true,
+  restoreDatabase = true,
+  restoreSessions = true
 }) {
   if (!backupDir) {
     throw new Error("Missing backup path. Usage: codex-provider restore <backup-dir>");
@@ -344,7 +390,11 @@ export async function runRestore({
   await ensureCodexHome(codexHome);
   const releaseLock = await acquireLock(codexHome, "restore");
   try {
-    return await restoreBackup(path.resolve(backupDir), codexHome);
+    return await restoreBackup(path.resolve(backupDir), codexHome, {
+      restoreConfig,
+      restoreDatabase,
+      restoreSessions
+    });
   } finally {
     await releaseLock();
   }

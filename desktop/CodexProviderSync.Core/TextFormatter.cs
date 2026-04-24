@@ -18,11 +18,27 @@ public static class TextFormatter
             "Rollout files:",
             $"  sessions: {FormatCounts(status.RolloutCounts.Sessions)}",
             $"  archived_sessions: {FormatCounts(status.RolloutCounts.ArchivedSessions)}",
+            $"  encrypted_content sessions: {FormatCounts(status.EncryptedContentCounts.Sessions)}",
+            $"  encrypted_content archived_sessions: {FormatCounts(status.EncryptedContentCounts.ArchivedSessions)}",
             string.Empty,
             "SQLite state:"
         ];
 
-        if (status.SqliteCounts is null)
+        if (!string.IsNullOrWhiteSpace(status.EncryptedContentWarning))
+        {
+        lines.Insert(11, $"  {status.EncryptedContentWarning}");
+        }
+
+        if (status.LockedRolloutFiles.Count > 0)
+        {
+            lines.Insert(11, $"  Locked rollout files skipped during status scan: {status.LockedRolloutFiles.Count}");
+        }
+
+        if (status.SqliteCounts?.Unreadable == true)
+        {
+            lines.Add($"  {status.SqliteCounts.Error ?? "state_5.sqlite is malformed or unreadable"}");
+        }
+        else if (status.SqliteCounts is null)
         {
             lines.Add("  state_5.sqlite not found");
         }
@@ -52,6 +68,11 @@ public static class TextFormatter
             int extraCount = result.SkippedLockedRolloutFiles.Count - Math.Min(result.SkippedLockedRolloutFiles.Count, 5);
             lines.Add($"Skipped locked rollout files: {result.SkippedLockedRolloutFiles.Count}");
             lines.Add($"Locked file(s): {preview}{(extraCount > 0 ? $" (+{extraCount} more)" : string.Empty)}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(result.EncryptedContentWarning))
+        {
+            lines.Add(result.EncryptedContentWarning);
         }
 
         if (result.AutoPruneResult is not null)

@@ -163,6 +163,7 @@ codex-provider prune-backups --keep 5
   - 手动清理旧备份，只保留最近 `n` 份由本工具管理的备份
 - `codex-provider restore <backup-dir>`
   - 从历史备份恢复
+  - 可用 `--no-config`、`--no-db`、`--no-sessions` 跳过对应恢复项
 - `codex-provider install-windows-launcher`
   - 默认在桌面生成两个文件
   - `Codex Provider Sync.vbs`：双击后隐藏执行，结束后弹窗显示结果
@@ -208,7 +209,16 @@ codex-provider restore C:\Users\you\.codex\backups_state\provider-sync\20260319T
 - 自动清理和手动清理都只会处理 `backups_state/provider-sync` 下由本工具创建的备份
 - `Codex Provider Sync.vbs` 依赖 `codex-provider` 命令本身已经可用
 - 如果 `state_5.sqlite` 被占用，先关闭 Codex / Codex App / app-server 再重试
+- 如果 `state_5.sqlite` 损坏，工具会在状态页提示 malformed/unreadable，并阻止同步；请先备份、修复或移除损坏数据库后再重试
 - 如果当前活跃会话锁住了某个 rollout 文件，`sync` 会跳过该文件并继续处理其它历史会话
+- 如果历史会话包含 `encrypted_content`，跨 provider/account 后可能只能恢复可见性，继续对话或 compact 仍可能报 `invalid_encrypted_content`；这类密文不能由本工具重新加密
+
+## EXE 双击无反应排查
+
+1. 先确认已经从压缩包完整解压，再运行 `CodexProviderSync.exe`。
+2. 如果仍无窗口，在 PowerShell 进入 EXE 所在目录后执行 `./CodexProviderSync.exe` 查看终端输出。
+3. 检查 Windows SmartScreen、Defender 或第三方杀毒软件是否拦截。
+4. 查看 `%AppData%\codex-provider-sync\startup-error.log`，启动期异常会写入这个文件。
 
 ## 给 AI / Agent 的说明
 

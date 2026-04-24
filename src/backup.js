@@ -64,7 +64,8 @@ export async function createBackup({
     files: sessionChanges.map((change) => ({
       path: change.path,
       originalFirstLine: change.originalFirstLine,
-      originalSeparator: change.originalSeparator
+      originalSeparator: change.originalSeparator,
+      originalMtimeMs: change.originalMtimeMs
     }))
   };
   await fs.writeFile(
@@ -103,7 +104,8 @@ export async function updateSessionBackupManifest(backupDir, sessionChanges) {
   sessionManifest.files = sessionChanges.map((change) => ({
     path: change.path,
     originalFirstLine: change.originalFirstLine,
-    originalSeparator: change.originalSeparator
+    originalSeparator: change.originalSeparator,
+    originalMtimeMs: change.originalMtimeMs
   }));
   metadata.changedSessionFiles = sessionChanges.length;
 

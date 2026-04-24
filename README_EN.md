@@ -162,6 +162,7 @@ Quick mapping:
   - manually removes older managed backups and keeps the newest `n`
 - `codex-provider restore <backup-dir>`
   - restores a previous backup
+  - use `--no-config`, `--no-db`, or `--no-sessions` to skip a restore target
 - `codex-provider install-windows-launcher`
   - creates two files on the Desktop by default
   - `Codex Provider Sync.vbs`: hidden double-click launcher with a result popup
@@ -208,7 +209,16 @@ It also uses:
 - Manual cleanup and auto-prune only touch backups created by this tool inside `backups_state/provider-sync`.
 - `Codex Provider Sync.vbs` assumes the `codex-provider` command is already available.
 - If `state_5.sqlite` is in use, close Codex / Codex App / app-server and retry.
+- If `state_5.sqlite` is malformed, the tool reports it as malformed/unreadable and blocks sync; back up, repair, or remove the damaged database before retrying.
 - If a live session keeps one rollout file open, `sync` skips that file and reports it. Rerun later.
+- If history contains `encrypted_content`, switching across providers/accounts may restore visibility only; continuing or compacting those sessions can still fail with `invalid_encrypted_content` because this tool cannot re-encrypt Codex history.
+
+## EXE double-click troubleshooting
+
+1. Fully extract the release archive before running `CodexProviderSync.exe`.
+2. If no window appears, open PowerShell in the EXE directory and run `./CodexProviderSync.exe`.
+3. Check Windows SmartScreen, Defender, or third-party antivirus blocks.
+4. Check `%AppData%\codex-provider-sync\startup-error.log`; startup exceptions are written there.
 
 ## For AI Agents
 

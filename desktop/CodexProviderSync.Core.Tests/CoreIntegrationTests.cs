@@ -298,6 +298,27 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
+    public async Task Status_SkipsLockedRolloutFile_WhenAnotherWriterAllowsSharing()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-status-locked.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-status-locked", "openai");
+
+        CodexSyncService service = new();
+        using FileStream writer = new(sessionPath, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete);
+        StatusSnapshot status = await service.GetStatusAsync(fixture.CodexHome);
+
+        Assert.Equal([sessionPath], status.LockedRolloutFiles);
+        Assert.Contains("Locked rollout files skipped during status scan: 1", TextFormatter.FormatStatus(status));
+    }
+
+    [Fact]
     public async Task RunPruneBackups_RemovesOldestBackupDirectories()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
@@ -410,5 +431,85 @@ public sealed class CoreIntegrationTests
         Assert.NotNull(result.AutoPruneResult);
         Assert.Equal(3, result.AutoPruneResult!.DeletedCount);
         Assert.Equal(2, result.AutoPruneResult.RemainingCount);
+    }
+
+    [Fact]
+    public async Task ApplySessionChanges_RestoresOriginalLastWriteTime()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-mtime.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-mtime", "apigather");
+        DateTime originalTime = new(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(sessionPath, originalTime);
+
+        SessionRolloutService service = new();
+        SessionChangeCollection collected = await service.CollectSessionChangesAsync(fixture.CodexHome, "openai");
+        SessionApplyResult result = await service.ApplySessionChangesAsync(collected.Changes);
+
+        Assert.Equal(1, result.AppliedCount);
+        Assert.Equal(originalTime, File.GetLastWriteTimeUtc(sessionPath));
+    }
+
+    [Fact]
+    public async Task Status_ReportsEncryptedContentCountsAndWarning()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-enc.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-enc", "apigather");
+        await fixture.AppendEncryptedContentAsync(sessionPath);
+
+        CodexSyncService service = new();
+        StatusSnapshot status = await service.GetStatusAsync(fixture.CodexHome);
+
+        Assert.Equal(1, status.EncryptedContentCounts.Sessions["apigather"]);
+        Assert.Contains("invalid_encrypted_content", status.EncryptedContentWarning);
+    }
+
+    [Fact]
+    public async Task Status_ReturnsMalformedSqliteAsUnreadable()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        await File.WriteAllTextAsync(Path.Combine(fixture.CodexHome, "state_5.sqlite"), "not sqlite");
+
+        CodexSyncService service = new();
+        StatusSnapshot status = await service.GetStatusAsync(fixture.CodexHome);
+
+        Assert.True(status.SqliteCounts!.Unreadable);
+        Assert.Contains("malformed", TextFormatter.FormatStatus(status));
+    }
+
+    [Fact]
+    public async Task RestoreBackup_CanSkipConfigDatabaseAndSessions()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-skip.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-skip", "apigather");
+
+        SessionRolloutService sessionService = new();
+        SessionChangeCollection collected = await sessionService.CollectSessionChangesAsync(fixture.CodexHome, "openai");
+        BackupService backupService = new(sessionService, new SqliteStateService());
+        string backupDir = await backupService.CreateBackupAsync(
+            fixture.CodexHome,
+            "openai",
+            collected.Changes,
+            Path.Combine(fixture.CodexHome, "config.toml"));
+
+        await fixture.WriteConfigAsync("model_provider = \"manual\"");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-skip", "manual");
+        await backupService.RestoreBackupAsync(
+            backupDir,
+            fixture.CodexHome,
+            new RestoreBackupOptions
+            {
+                RestoreConfig = false,
+                RestoreDatabase = false,
+                RestoreSessions = false
+            });
+
+        Assert.Contains("model_provider = \"manual\"", await File.ReadAllTextAsync(Path.Combine(fixture.CodexHome, "config.toml")));
+        Assert.Contains("\"model_provider\":\"manual\"", await File.ReadAllTextAsync(sessionPath));
     }
 }

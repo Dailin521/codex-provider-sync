@@ -40,6 +40,29 @@ function snapshotMatches(change, snapshot) {
     && change.originalMtimeMs === snapshot.mtimeMs;
 }
 
+function emptyEncryptedContentCounts() {
+  return {
+    sessions: {},
+    archived_sessions: {}
+  };
+}
+
+function incrementPlainCount(counts, directory, provider) {
+  counts[directory][provider] = (counts[directory][provider] ?? 0) + 1;
+}
+
+async function fileHasEncryptedContent(filePath, firstLine) {
+  if (firstLine.includes("encrypted_content")) {
+    return true;
+  }
+  try {
+    const content = await fsp.readFile(filePath, "utf8");
+    return content.includes("encrypted_content");
+  } catch (error) {
+    throw wrapRolloutFileBusyError(error, filePath, "scan");
+  }
+}
+
 async function listJsonlFiles(rootDir) {
   const entries = await fsp.readdir(rootDir, { withFileTypes: true });
   const files = [];
@@ -128,6 +151,19 @@ function parseWindowsRewriteResults(stdout, changes) {
     }
     return entry.result;
   });
+}
+
+async function restoreOriginalMtime(filePath, mtimeMs) {
+  if (!Number.isFinite(mtimeMs)) {
+    return;
+  }
+  const mtime = new Date(mtimeMs);
+  try {
+    const stat = await fsp.stat(filePath);
+    await fsp.utimes(filePath, stat.atime, mtime);
+  } catch {
+    // Best effort only; rewriting metadata is still the primary operation.
+  }
 }
 
 async function invokeWindowsExclusiveRewriteBatch(changes, { requireOriginalMatch }) {
@@ -463,6 +499,7 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
     sessions: new Map(),
     archived_sessions: new Map()
   };
+  const encryptedContentCounts = emptyEncryptedContentCounts();
 
   for (const dirName of SESSION_DIRS) {
     const rootDir = path.join(codexHome, dirName);
@@ -489,6 +526,17 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
       }
       const currentProvider = parsed.payload.model_provider ?? "(missing)";
       providerCounts[dirName].set(currentProvider, (providerCounts[dirName].get(currentProvider) ?? 0) + 1);
+      try {
+        if (await fileHasEncryptedContent(rolloutPath, record.firstLine)) {
+          incrementPlainCount(encryptedContentCounts, dirName, currentProvider);
+        }
+      } catch (error) {
+        if (skipLockedReads && isRolloutFileBusyError(error)) {
+          lockedPaths.push(rolloutPath);
+          continue;
+        }
+        throw error;
+      }
 
       if (targetProvider !== "__status_only__" && parsed.payload.model_provider !== targetProvider) {
         const snapshot = await getFileSnapshot(rolloutPath);
@@ -502,13 +550,14 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
           originalOffset: record.offset,
           originalSize: snapshot.size,
           originalMtimeMs: snapshot.mtimeMs,
+          originalProvider: currentProvider,
           updatedFirstLine: JSON.stringify(parsed)
         });
       }
     }
   }
 
-  return { changes: summaries, lockedPaths, providerCounts };
+  return { changes: summaries, lockedPaths, providerCounts, encryptedContentCounts };
 }
 
 export async function applySessionChanges(changes) {
@@ -523,6 +572,7 @@ export async function applySessionChanges(changes) {
       if (results[index] === "APPLIED") {
         appliedChanges += 1;
         appliedPaths.push(normalizedChanges[index].path);
+        await restoreOriginalMtime(normalizedChanges[index].path, normalizedChanges[index].originalMtimeMs);
       } else {
         skippedPaths.push(normalizedChanges[index].path);
       }
@@ -532,6 +582,7 @@ export async function applySessionChanges(changes) {
       if (await tryRewriteCollectedFirstLine(change)) {
         appliedChanges += 1;
         appliedPaths.push(change.path);
+        await restoreOriginalMtime(change.path, change.originalMtimeMs);
       } else {
         skippedPaths.push(change.path);
       }
@@ -606,7 +657,8 @@ export async function restoreSessionChanges(manifestEntries) {
     const changes = manifestEntries.map((entry) => ({
       path: entry.path,
       separator: entry.originalSeparator ?? "\n",
-      updatedFirstLine: entry.originalFirstLine
+      updatedFirstLine: entry.originalFirstLine,
+      originalMtimeMs: entry.originalMtimeMs
     }));
     const results = await invokeWindowsExclusiveRewriteBatch(changes, { requireOriginalMatch: false });
     const firstFailureIndex = results.findIndex((result) => result !== "APPLIED");
@@ -616,11 +668,15 @@ export async function restoreSessionChanges(manifestEntries) {
         `Unable to rewrite rollout file because it is currently in use. Close Codex and the Codex app, then retry. Locked file: ${filePath}`
       );
     }
+    for (const change of changes) {
+      await restoreOriginalMtime(change.path, change.originalMtimeMs);
+    }
     return;
   }
 
   for (const entry of manifestEntries) {
     await rewriteFirstLine(entry.path, entry.originalFirstLine, entry.originalSeparator ?? "\n");
+    await restoreOriginalMtime(entry.path, entry.originalMtimeMs);
   }
 }
 

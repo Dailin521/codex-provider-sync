@@ -24,39 +24,58 @@ public sealed class SqliteStateService
             return null;
         }
 
-        await using SqliteConnection connection = OpenConnection(dbPath);
-        await connection.OpenAsync();
-        await using SqliteCommand command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT
-              CASE
-                WHEN model_provider IS NULL OR model_provider = '' THEN '(missing)'
-                ELSE model_provider
-              END AS model_provider,
-              archived,
-              COUNT(*) AS count
-            FROM threads
-            GROUP BY model_provider, archived
-            ORDER BY archived, model_provider
-            """;
-
-        Dictionary<string, int> sessions = new(StringComparer.Ordinal);
-        Dictionary<string, int> archivedSessions = new(StringComparer.Ordinal);
-        await using SqliteDataReader reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        try
         {
-            string provider = reader.GetString(0);
-            bool archived = reader.GetInt64(1) != 0;
-            int count = reader.GetInt32(2);
-            Dictionary<string, int> bucket = archived ? archivedSessions : sessions;
-            bucket[provider] = count;
+            await using SqliteConnection connection = OpenConnection(dbPath, SqliteOpenMode.ReadOnly);
+            await connection.OpenAsync();
+            await using SqliteCommand command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT
+                  CASE
+                    WHEN model_provider IS NULL OR model_provider = '' THEN '(missing)'
+                    ELSE model_provider
+                  END AS model_provider,
+                  archived,
+                  COUNT(*) AS count
+                FROM threads
+                GROUP BY model_provider, archived
+                ORDER BY archived, model_provider
+                """;
+
+            Dictionary<string, int> sessions = new(StringComparer.Ordinal);
+            Dictionary<string, int> archivedSessions = new(StringComparer.Ordinal);
+            await using SqliteDataReader reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                string provider = reader.GetString(0);
+                bool archived = reader.GetInt64(1) != 0;
+                int count = reader.GetInt32(2);
+                Dictionary<string, int> bucket = archived ? archivedSessions : sessions;
+                bucket[provider] = count;
+            }
+
+            return new ProviderCounts
+            {
+                Sessions = sessions,
+                ArchivedSessions = archivedSessions
+            };
         }
-
-        return new ProviderCounts
+        catch (Exception error) when (IsSqliteMalformedError(error))
         {
-            Sessions = sessions,
-            ArchivedSessions = archivedSessions
-        };
+            return new ProviderCounts
+            {
+                Unreadable = true,
+                Error = "state_5.sqlite is malformed or unreadable"
+            };
+        }
+        catch (Exception error) when (IsSqliteBusyError(error))
+        {
+            return new ProviderCounts
+            {
+                Unreadable = true,
+                Error = "state_5.sqlite is currently in use"
+            };
+        }
     }
 
     public async Task<bool> AssertSqliteWritableAsync(string codexHome, int? busyTimeoutMs = null)
@@ -67,7 +86,7 @@ public sealed class SqliteStateService
             return false;
         }
 
-        await using SqliteConnection connection = OpenConnection(dbPath);
+        await using SqliteConnection connection = OpenConnection(dbPath, SqliteOpenMode.ReadWriteCreate);
         try
         {
             await connection.OpenAsync();
@@ -78,7 +97,9 @@ public sealed class SqliteStateService
         }
         catch (Exception error)
         {
-            throw WrapSqliteBusyError(error, "update session provider metadata");
+            throw WrapSqliteMalformedError(
+                WrapSqliteBusyError(error, "update session provider metadata"),
+                "update session provider metadata");
         }
     }
 
@@ -99,7 +120,7 @@ public sealed class SqliteStateService
             return (0, false);
         }
 
-        await using SqliteConnection connection = OpenConnection(dbPath);
+        await using SqliteConnection connection = OpenConnection(dbPath, SqliteOpenMode.ReadWriteCreate);
         bool transactionOpen = false;
         try
         {
@@ -140,16 +161,18 @@ public sealed class SqliteStateService
                 }
             }
 
-            throw WrapSqliteBusyError(error, "update session provider metadata");
+            throw WrapSqliteMalformedError(
+                WrapSqliteBusyError(error, "update session provider metadata"),
+                "update session provider metadata");
         }
     }
 
-    private static SqliteConnection OpenConnection(string dbPath)
+    private static SqliteConnection OpenConnection(string dbPath, SqliteOpenMode mode)
     {
         SqliteConnectionStringBuilder builder = new()
         {
             DataSource = dbPath,
-            Mode = SqliteOpenMode.ReadWriteCreate,
+            Mode = mode,
             Pooling = false
         };
         return new SqliteConnection(builder.ConnectionString);
@@ -179,5 +202,41 @@ public sealed class SqliteStateService
         return new InvalidOperationException(
             $"Unable to {action} because state_5.sqlite is currently in use. Close Codex and the Codex app, then retry. Original error: {sqliteError.Message}",
             sqliteError);
+    }
+
+    private static bool IsSqliteBusyError(Exception error)
+    {
+        if (error.InnerException is not null && IsSqliteBusyError(error.InnerException))
+        {
+            return true;
+        }
+
+        return error is SqliteException sqliteError
+            && (sqliteError.SqliteErrorCode == 5 || sqliteError.SqliteErrorCode == 6);
+    }
+
+    private static bool IsSqliteMalformedError(Exception error)
+    {
+        if (error.InnerException is not null && IsSqliteMalformedError(error.InnerException))
+        {
+            return true;
+        }
+
+        return error is SqliteException sqliteError
+            && (sqliteError.SqliteErrorCode == 11
+                || sqliteError.Message.Contains("malformed", StringComparison.OrdinalIgnoreCase)
+                || sqliteError.Message.Contains("not a database", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static Exception WrapSqliteMalformedError(Exception error, string action)
+    {
+        if (!IsSqliteMalformedError(error))
+        {
+            return error;
+        }
+
+        return new InvalidOperationException(
+            $"Unable to {action} because state_5.sqlite is malformed or unreadable. Close Codex, back up or repair the database, then retry. Original error: {error.Message}",
+            error);
     }
 }

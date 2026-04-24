@@ -21,7 +21,7 @@ Usage:
   codex-provider sync [--provider ID] [--keep N] [--codex-home PATH]
   codex-provider switch <provider-id> [--keep N] [--codex-home PATH]
   codex-provider prune-backups [--keep N] [--codex-home PATH]
-  codex-provider restore <backup-dir> [--codex-home PATH]
+  codex-provider restore <backup-dir> [--no-config] [--no-db] [--no-sessions] [--codex-home PATH]
   codex-provider install-windows-launcher [--dir PATH] [--codex-home PATH]
 `);
 }
@@ -68,6 +68,9 @@ function summarizeSync(result, label) {
     const extraCount = result.skippedLockedRolloutFiles.length - Math.min(result.skippedLockedRolloutFiles.length, 5);
     lines.push(`Skipped locked rollout files: ${result.skippedLockedRolloutFiles.length}`);
     lines.push(`Locked file(s): ${preview}${extraCount > 0 ? ` (+${extraCount} more)` : ""}`);
+  }
+  if (result.encryptedContentWarning) {
+    lines.push(result.encryptedContentWarning);
   }
   if (result.autoPruneResult) {
     lines.push(
@@ -215,7 +218,10 @@ async function main() {
     const backupDir = positionals[1] ?? flags.backup;
     const result = await runRestore({
       codexHome: flags["codex-home"],
-      backupDir
+      backupDir,
+      restoreConfig: !flags["no-config"],
+      restoreDatabase: !flags["no-db"],
+      restoreSessions: !flags["no-sessions"]
     });
     console.log(`Restored backup from ${path.resolve(backupDir)}`);
     console.log(`Codex home: ${result.codexHome}`);

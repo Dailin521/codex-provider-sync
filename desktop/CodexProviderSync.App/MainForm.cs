@@ -43,6 +43,9 @@ public sealed class MainForm : Form
         AutoSize = true,
         Margin = new Padding(0, 4, 8, 0)
     };
+    private readonly CheckBox _restoreConfigCheck = new() { Text = "恢复配置文件（config.toml）", Checked = false, AutoSize = true };
+    private readonly CheckBox _restoreDatabaseCheck = new() { Text = "恢复线程数据库（SQLite）", Checked = true, AutoSize = true };
+    private readonly CheckBox _restoreSessionsCheck = new() { Text = "恢复会话文件元数据（rollout）", Checked = true, AutoSize = true };
     private readonly Label _updateConfigLabel = new()
     {
         AutoSize = false,
@@ -257,23 +260,24 @@ public sealed class MainForm : Form
 
     private Control BuildActionGroup()
     {
-        GroupBox group = new() { Text = "执行", Dock = DockStyle.Fill, MinimumSize = new Size(380, 0) };
+        GroupBox group = new() { Text = "执行", Dock = DockStyle.Fill, MinimumSize = new Size(420, 0) };
         TableLayoutPanel panel = new()
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 10,
+            RowCount = 11,
             Padding = new Padding(12)
         };
         panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         panel.Controls.Add(new Label { Text = "目标 Provider", AutoSize = true }, 0, 0);
@@ -282,10 +286,11 @@ public sealed class MainForm : Form
         panel.Controls.Add(BuildWarningPanel(), 0, 3);
         panel.Controls.Add(BuildBackupRetentionPanel(), 0, 4);
         panel.Controls.Add(_executeButton, 0, 5);
-        panel.Controls.Add(_restoreButton, 0, 6);
-        panel.Controls.Add(_openBackupButton, 0, 7);
-        panel.Controls.Add(_pruneBackupsButton, 0, 8);
-        panel.Controls.Add(_busyLabel, 0, 9);
+        panel.Controls.Add(BuildRestoreOptionsPanel(), 0, 6);
+        panel.Controls.Add(_restoreButton, 0, 7);
+        panel.Controls.Add(_openBackupButton, 0, 8);
+        panel.Controls.Add(_pruneBackupsButton, 0, 9);
+        panel.Controls.Add(_busyLabel, 0, 10);
 
         group.Controls.Add(panel);
         return group;
@@ -339,7 +344,8 @@ public sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 3,
-            Margin = new Padding(0, 2, 0, 8)
+            Margin = new Padding(0, 2, 0, 8),
+            AutoSize = true
         };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -350,7 +356,7 @@ public sealed class MainForm : Form
             Text = "自动保留最近",
             AutoSize = true,
             Anchor = AnchorStyles.Left,
-            Margin = new Padding(0, 8, 8, 0)
+            Margin = new Padding(0, 6, 8, 0)
         }, 0, 0);
         panel.Controls.Add(_backupRetentionInput, 1, 0);
         panel.Controls.Add(new Label
@@ -358,9 +364,38 @@ public sealed class MainForm : Form
             Text = "份备份",
             AutoSize = true,
             Anchor = AnchorStyles.Left,
-            Margin = new Padding(8, 8, 0, 0)
+            Margin = new Padding(8, 6, 0, 0)
         }, 2, 0);
 
+        return panel;
+    }
+
+    private Control BuildRestoreOptionsPanel()
+    {
+        TableLayoutPanel panel = new()
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            Margin = new Padding(0, 0, 0, 6),
+            AutoSize = true
+        };
+        panel.RowCount = 4;
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        panel.Controls.Add(new Label
+        {
+            Text = "恢复内容",
+            AutoSize = true,
+            Anchor = AnchorStyles.Left,
+            Margin = new Padding(0, 2, 0, 4)
+        }, 0, 0);
+        panel.Controls.Add(_restoreConfigCheck, 0, 1);
+        panel.Controls.Add(_restoreDatabaseCheck, 0, 2);
+        panel.Controls.Add(_restoreSessionsCheck, 0, 3);
         return panel;
     }
 
@@ -541,9 +576,22 @@ public sealed class MainForm : Form
             return;
         }
 
+        if (!_restoreConfigCheck.Checked && !_restoreDatabaseCheck.Checked && !_restoreSessionsCheck.Checked)
+        {
+            MessageBox.Show(this, "请至少选择一种要恢复的内容。", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        string restoreTargets = string.Join("、", new[]
+        {
+            _restoreConfigCheck.Checked ? "配置文件（config.toml）" : null,
+            _restoreDatabaseCheck.Checked ? "线程数据库（SQLite）" : null,
+            _restoreSessionsCheck.Checked ? "会话文件元数据（rollout）" : null
+        }.Where(static item => item is not null));
+
         DialogResult confirm = MessageBox.Show(
             this,
-            $"确认恢复以下备份？{Environment.NewLine}{Environment.NewLine}{dialog.SelectedPath}{Environment.NewLine}{Environment.NewLine}这会覆盖当前的 config、SQLite 和 rollout session_meta。",
+            $"确认恢复以下备份？{Environment.NewLine}{Environment.NewLine}{dialog.SelectedPath}{Environment.NewLine}{Environment.NewLine}将覆盖当前的: {restoreTargets}。",
             Text,
             MessageBoxButtons.OKCancel,
             MessageBoxIcon.Warning);
@@ -560,7 +608,15 @@ public sealed class MainForm : Form
         await RunBusyAsync("Restoring...", async () =>
         {
             string codexHome = CurrentCodexHome();
-            RestoreResult result = await Task.Run(async () => await _syncService.RunRestoreAsync(codexHome, dialog.SelectedPath));
+            RestoreResult result = await Task.Run(async () => await _syncService.RunRestoreAsync(
+                codexHome,
+                dialog.SelectedPath,
+                new RestoreBackupOptions
+                {
+                    RestoreConfig = _restoreConfigCheck.Checked,
+                    RestoreDatabase = _restoreDatabaseCheck.Checked,
+                    RestoreSessions = _restoreSessionsCheck.Checked
+                }));
             _settings = _settingsService.UpdateState(_settings, SelectedProvider(), dialog.SelectedPath, CaptureWindowBounds(), CurrentBackupRetentionCount());
             await _settingsService.SaveAsync(_settings);
             AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 恢复完成");
@@ -770,6 +826,9 @@ public sealed class MainForm : Form
         _removeProviderButton.Enabled = !busy;
         _updateConfigCheck.Enabled = !busy;
         _backupRetentionInput.Enabled = !busy;
+        _restoreConfigCheck.Enabled = !busy;
+        _restoreDatabaseCheck.Enabled = !busy;
+        _restoreSessionsCheck.Enabled = !busy;
         _executeButton.Enabled = !busy;
         _restoreButton.Enabled = !busy;
         _openBackupButton.Enabled = !busy;

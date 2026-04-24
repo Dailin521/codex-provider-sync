@@ -29,12 +29,29 @@ function isSqliteBusyError(error) {
   return message.includes("database is locked") || message.includes("sqlite_busy") || message.includes("busy");
 }
 
+function isSqliteMalformedError(error) {
+  const message = `${error?.code ?? ""} ${error?.message ?? ""}`.toLowerCase();
+  return message.includes("database disk image is malformed")
+    || message.includes("sqlite_corrupt")
+    || message.includes("malformed")
+    || message.includes("not a database");
+}
+
 function wrapSqliteBusyError(error, action) {
   if (!isSqliteBusyError(error)) {
     return error;
   }
   return new Error(
     `Unable to ${action} because state_5.sqlite is currently in use. Close Codex and the Codex app, then retry. Original error: ${error.message}`
+  );
+}
+
+function wrapSqliteMalformedError(error, action) {
+  if (!isSqliteMalformedError(error)) {
+    return error;
+  }
+  return new Error(
+    `Unable to ${action} because state_5.sqlite is malformed or unreadable. Close Codex, back up or repair the database, then retry. Original error: ${error.message}`
   );
 }
 
@@ -46,8 +63,9 @@ export async function readSqliteProviderCounts(codexHome) {
     return null;
   }
 
-  const db = openDatabase(dbPath);
+  let db;
   try {
+    db = openDatabase(dbPath);
     const rows = db.prepare(`
       SELECT
         CASE
@@ -69,8 +87,26 @@ export async function readSqliteProviderCounts(codexHome) {
       bucket[row.model_provider] = row.count;
     }
     return result;
+  } catch (error) {
+    if (isSqliteMalformedError(error)) {
+      return {
+        sessions: {},
+        archived_sessions: {},
+        unreadable: true,
+        error: "state_5.sqlite is malformed or unreadable"
+      };
+    }
+    if (isSqliteBusyError(error)) {
+      return {
+        sessions: {},
+        archived_sessions: {},
+        unreadable: true,
+        error: "state_5.sqlite is currently in use"
+      };
+    }
+    throw error;
   } finally {
-    db.close();
+    db?.close();
   }
 }
 
@@ -82,16 +118,20 @@ export async function assertSqliteWritable(codexHome, options = {}) {
     return { databasePresent: false };
   }
 
-  const db = openDatabase(dbPath);
+  let db;
   try {
+    db = openDatabase(dbPath);
     setBusyTimeout(db, options.busyTimeoutMs);
     db.exec("BEGIN IMMEDIATE");
     db.exec("ROLLBACK");
     return { databasePresent: true };
   } catch (error) {
-    throw wrapSqliteBusyError(error, "update session provider metadata");
+    throw wrapSqliteMalformedError(
+      wrapSqliteBusyError(error, "update session provider metadata"),
+      "update session provider metadata"
+    );
   } finally {
-    db.close();
+    db?.close();
   }
 }
 
@@ -111,9 +151,10 @@ export async function updateSqliteProvider(codexHome, targetProvider, afterUpdat
     return { updatedRows: 0, databasePresent: false };
   }
 
-  const db = openDatabase(dbPath);
+  let db;
   let transactionOpen = false;
   try {
+    db = openDatabase(dbPath);
     setBusyTimeout(db, options.busyTimeoutMs);
     db.exec("BEGIN IMMEDIATE");
     transactionOpen = true;
@@ -140,8 +181,11 @@ export async function updateSqliteProvider(codexHome, targetProvider, afterUpdat
         // Ignore rollback failures and surface the original error.
       }
     }
-    throw wrapSqliteBusyError(error, "update session provider metadata");
+    throw wrapSqliteMalformedError(
+      wrapSqliteBusyError(error, "update session provider metadata"),
+      "update session provider metadata"
+    );
   } finally {
-    db.close();
+    db?.close();
   }
 }
