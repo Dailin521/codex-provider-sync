@@ -1,0 +1,97 @@
+name: Bug 报告
+description: 工具本身报错、崩溃、同步结果异常时使用
+title: "bug: "
+labels:
+  - bug
+  - needs-info
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请尽量完整填写。缺少版本、系统、状态输出或日志时，通常无法判断是工具问题、Codex Desktop 问题，还是 encrypted_content / SQLite 损坏等边界情况。
+  - type: input
+    id: version
+    attributes:
+      label: codex-provider-sync 版本
+      description: 例如 v0.2.4。GUI 版本请填写 Release 版本；CLI 版本请填写 `npm list -g codex-provider-sync` 或安装来源。
+      placeholder: v0.2.4
+    validations:
+      required: true
+  - type: dropdown
+    id: entrypoint
+    attributes:
+      label: 使用方式
+      options:
+        - Windows GUI EXE
+        - npm 全局 CLI
+        - 仓库源码运行
+        - 其它
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: 系统版本
+      placeholder: Windows 11 24H2 / Windows 10 / macOS 15.x
+    validations:
+      required: true
+  - type: input
+    id: codex
+    attributes:
+      label: Codex 使用方式和版本
+      description: 例如 Codex Desktop / Codex CLI，以及版本号或大概更新时间。
+      placeholder: Codex Desktop，版本未知
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 从 provider 切换、Refresh、Execute、sync/switch 命令开始写，尽量按时间顺序。
+      placeholder: |
+        1. 关闭 Codex Desktop
+        2. 切换 provider 到 ...
+        3. 打开 CodexProviderSync.exe，点击 Refresh
+        4. 点击 Execute 后出现 ...
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+      description: 报错文本、截图文字、终端输出都可以贴这里。
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: status / GUI Refresh 诊断文本
+      description: 优先粘贴完整输出。CLI 可运行 `codex-provider status`；GUI 请复制 Refresh 后状态区文本。
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志或错误堆栈
+      description: EXE 启动问题请贴 `%AppData%\codex-provider-sync\startup-error.log`，CLI 问题请贴终端完整输出。
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: boundary
+    attributes:
+      label: 确认事项
+      options:
+        - label: 我理解本工具只同步可见性 metadata，不处理登录、认证或 auth.json。
+          required: true
+        - label: 我理解含 encrypted_content 的历史会话跨 provider/account 后可能不能继续对话。
+          required: true
+        - label: 我理解本工具不会修改 updated_at，也不会通过改变排序来修复 Desktop 显示。
+          required: true

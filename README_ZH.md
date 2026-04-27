@@ -29,6 +29,17 @@
 - `~/.codex/sessions` 和 `~/.codex/archived_sessions`
 - `~/.codex/state_5.sqlite`
 
+## 能力边界
+
+这个工具只同步 Codex 历史会话“可见性”相关的 metadata，不会改变会话内容本身。
+
+- 会修复 rollout 文件、SQLite 线程记录和已保存项目根路径中和 provider / 可见性相关的字段
+- 不会修改消息历史、会话标题、对话内容、认证信息或 `auth.json`
+- 不会修改会话 `updated_at`，也不会通过改变历史会话排序来修复 Desktop 显示问题
+- 不会把旧会话里的 `encrypted_content` 重新加密成另一个 provider / account 可读的格式
+- 含 `encrypted_content` 的历史会话跨 provider/account 后，通常只能恢复列表可见性，继续对话或 compact 仍可能报 `invalid_encrypted_content`
+- 如果 CLI 能看到历史会话，但 Codex Desktop 项目侧仍显示“暂无对话”，可能还受 Desktop 自身的项目筛选、分页加载或路径匹配逻辑影响；请优先提供 `status` / GUI Refresh 的完整诊断文本
+
 ## Windows 图形界面
 
 如果你不想装 Node、也不想进终端，现在可以直接使用发布页里的 `CodexProviderSync.exe`。

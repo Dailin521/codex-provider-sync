@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 下载最新版本
+    url: https://github.com/Dailin521/codex-provider-sync/releases/latest
+    about: 先确认你正在使用最新版本。
+  - name: 阅读中文 README
+    url: https://github.com/Dailin521/codex-provider-sync/blob/main/README_ZH.md
+    about: 查看 sync / switch / restore 的区别和工具能力边界。

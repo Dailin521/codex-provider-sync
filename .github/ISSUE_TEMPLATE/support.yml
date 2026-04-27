@@ -1,0 +1,60 @@
+name: 使用问题 / 切换咨询
+description: 不确定该运行 sync、switch、restore，或需要确认工具边界时使用
+title: "support: "
+labels:
+  - support
+  - needs-info
+body:
+  - type: markdown
+    attributes:
+      value: |
+        如果是崩溃、报错或明确 bug，请优先使用 Bug 报告模板。如果是 Codex Desktop 项目侧不显示历史会话，请使用 Desktop 历史会话不显示模板。
+  - type: input
+    id: version
+    attributes:
+      label: codex-provider-sync 版本
+      placeholder: v0.2.4
+    validations:
+      required: true
+  - type: dropdown
+    id: goal
+    attributes:
+      label: 你想做什么
+      options:
+        - 当前 provider 不变，只恢复历史会话可见性
+        - 切换 provider 并同步历史会话
+        - 从备份恢复
+        - 不确定应该怎么选
+    validations:
+      required: true
+  - type: input
+    id: current_provider
+    attributes:
+      label: 当前 provider
+      placeholder: openai / dal / apigather
+    validations:
+      required: false
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: status / GUI Refresh 诊断文本
+      description: 有输出请完整粘贴；没有输出请说明卡在哪一步。
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: question
+    attributes:
+      label: 具体问题
+      placeholder: 描述你现在的状态、执行过什么、想达到什么结果。
+    validations:
+      required: true
+  - type: checkboxes
+    id: boundary
+    attributes:
+      label: 确认事项
+      options:
+        - label: 我理解 sync 不会切换登录账号，也不会处理 auth.json。
+          required: true
+        - label: 我理解 encrypted_content 跨 provider/account 后可能不能继续对话。
+          required: true

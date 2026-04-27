@@ -21,6 +21,14 @@
 - 如果 EXE 双击无反应，查看 `%AppData%\codex-provider-sync\startup-error.log`，或在 PowerShell 中运行 `./CodexProviderSync.exe` 获取错误
 - 含 `encrypted_content` 的历史会话跨 provider/account 后可能只能恢复可见性，继续对话或 compact 仍可能报 `invalid_encrypted_content`
 
+## 能力边界
+
+- GUI 只同步历史会话可见性相关 metadata，不会处理登录、认证或第三方 provider 切换
+- GUI 不会修改消息历史、会话标题、对话内容、认证信息或 `auth.json`
+- GUI 不会修改会话 `updated_at`，也不会通过改变历史排序来修复 Desktop 显示问题
+- 含 `encrypted_content` 的旧会话不能由本工具重新加密到另一个 provider / account
+- 如果 CLI 能看到历史会话但 Desktop 项目侧仍不显示，请优先复制并反馈 Refresh 后的完整状态文本
+
 ## 使用方式
 
 1. 打开 `CodexProviderSync.exe`
