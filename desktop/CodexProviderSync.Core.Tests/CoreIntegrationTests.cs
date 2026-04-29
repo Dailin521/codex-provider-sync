@@ -696,6 +696,50 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
+    public async Task CollectSessionChanges_StreamsLargeRolloutContent()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-streamed.jsonl");
+        object payload = new
+        {
+            id = "thread-streamed",
+            timestamp = "2026-03-19T00:00:00.000Z",
+            cwd = "C:\\AITemp",
+            source = "cli",
+            cli_version = "0.115.0",
+            model_provider = "apigather"
+        };
+        string firstLine = JsonSerializer.Serialize(new
+        {
+            timestamp = "2026-03-19T00:00:00.000Z",
+            type = "session_meta",
+            payload
+        });
+        await File.WriteAllTextAsync(sessionPath, firstLine + "\n");
+
+        const int chunkBytes = 1024 * 1024;
+        const string tokenPrefix = "encrypted_";
+        string userEvent = JsonSerializer.Serialize(new
+        {
+            type = "event_msg",
+            payload = new
+            {
+                type = "user_message",
+                message = "after large content"
+            }
+        });
+        await File.AppendAllTextAsync(
+            sessionPath,
+            $"{new string('x', chunkBytes - tokenPrefix.Length)}{tokenPrefix}content\n{userEvent}\n");
+
+        SessionRolloutService service = new();
+        SessionChangeCollection collected = await service.CollectSessionChangesAsync(fixture.CodexHome, "openai");
+
+        Assert.Equal(1, collected.EncryptedContentCounts.Sessions["apigather"]);
+        Assert.Contains("thread-streamed", collected.UserEventThreadIds);
+    }
+
+    [Fact]
     public async Task Status_ReturnsMalformedSqliteAsUnreadable()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();

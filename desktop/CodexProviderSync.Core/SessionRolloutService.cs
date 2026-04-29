@@ -7,6 +7,7 @@ namespace CodexProviderSync.Core;
 public sealed class SessionRolloutService
 {
     private const string StatusOnlyProvider = "__status_only__";
+    private const int ScanBufferSize = 1024 * 1024;
 
     public async Task<SessionChangeCollection> CollectSessionChangesAsync(
         string codexHome,
@@ -61,9 +62,9 @@ public sealed class SessionRolloutService
                 bool hasEncryptedContent;
                 try
                 {
-                    hasEncryptedContent = await FileHasEncryptedContentAsync(rolloutPath, record.FirstLine);
+                    hasEncryptedContent = await FileHasEncryptedContentAsync(rolloutPath, record.FirstLine, record.Offset);
                     if (payload["id"]?.GetValue<string>() is string threadId
-                        && await FileHasUserEventAsync(rolloutPath, record.FirstLine))
+                        && await FileHasUserEventAsync(rolloutPath, record.FirstLine, record.Offset))
                     {
                         userEventThreadIds.Add(threadId);
                     }
@@ -442,25 +443,127 @@ public sealed class SessionRolloutService
         return new FileSnapshot(fileInfo.Length, fileInfo.LastWriteTimeUtc.Ticks);
     }
 
-    private static async Task<bool> FileHasEncryptedContentAsync(string filePath, string firstLine)
+    private static async Task<bool> FileContainsTextAsync(string filePath, string text, int startOffset)
+    {
+        byte[] needle = Encoding.UTF8.GetBytes(text);
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(ScanBufferSize);
+        byte[] tail = [];
+
+        try
+        {
+            await using FileStream stream = new(
+                filePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                ScanBufferSize,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+
+            if (startOffset > 0)
+            {
+                stream.Seek(startOffset, SeekOrigin.Begin);
+            }
+
+            while (true)
+            {
+                int bytesRead = await stream.ReadAsync(buffer.AsMemory(0, ScanBufferSize));
+                if (bytesRead == 0)
+                {
+                    return false;
+                }
+
+                byte[] haystack = buffer;
+                int haystackLength = bytesRead;
+                if (tail.Length > 0)
+                {
+                    haystackLength = tail.Length + bytesRead;
+                    haystack = ArrayPool<byte>.Shared.Rent(haystackLength);
+                    Buffer.BlockCopy(tail, 0, haystack, 0, tail.Length);
+                    Buffer.BlockCopy(buffer, 0, haystack, tail.Length, bytesRead);
+                }
+
+                try
+                {
+                    if (ContainsNeedle(haystack, haystackLength, needle))
+                    {
+                        return true;
+                    }
+
+                    int keepBytes = Math.Min(Math.Max(0, needle.Length - 1), haystackLength);
+                    if (keepBytes == 0)
+                    {
+                        tail = [];
+                    }
+                    else
+                    {
+                        tail = new byte[keepBytes];
+                        Buffer.BlockCopy(haystack, haystackLength - keepBytes, tail, 0, keepBytes);
+                    }
+                }
+                finally
+                {
+                    if (!ReferenceEquals(haystack, buffer))
+                    {
+                        ArrayPool<byte>.Shared.Return(haystack);
+                    }
+                }
+            }
+        }
+        catch (Exception error)
+        {
+            throw WrapRolloutFileBusyError(error, filePath, "scan");
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    private static bool ContainsNeedle(byte[] haystack, int haystackLength, byte[] needle)
+    {
+        if (needle.Length == 0)
+        {
+            return true;
+        }
+
+        if (haystackLength < needle.Length)
+        {
+            return false;
+        }
+
+        int lastStart = haystackLength - needle.Length;
+        for (int index = 0; index <= lastStart; index += 1)
+        {
+            bool match = true;
+            for (int needleIndex = 0; needleIndex < needle.Length; needleIndex += 1)
+            {
+                if (haystack[index + needleIndex] != needle[needleIndex])
+                {
+                    match = false;
+                    break;
+                }
+            }
+
+            if (match)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static async Task<bool> FileHasEncryptedContentAsync(string filePath, string firstLine, int startOffset)
     {
         if (firstLine.Contains("encrypted_content", StringComparison.Ordinal))
         {
             return true;
         }
 
-        try
-        {
-            string text = await File.ReadAllTextAsync(filePath);
-            return text.Contains("encrypted_content", StringComparison.Ordinal);
-        }
-        catch (Exception error)
-        {
-            throw WrapRolloutFileBusyError(error, filePath, "scan");
-        }
+        return await FileContainsTextAsync(filePath, "encrypted_content", startOffset);
     }
 
-    private static async Task<bool> FileHasUserEventAsync(string filePath, string firstLine)
+    private static async Task<bool> FileHasUserEventAsync(string filePath, string firstLine, int startOffset)
     {
         try
         {
@@ -476,18 +579,34 @@ public sealed class SessionRolloutService
 
         try
         {
-            string text = await File.ReadAllTextAsync(filePath);
-            foreach (string rawLine in text.Split('\n'))
+            await using FileStream stream = new(
+                filePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                64 * 1024,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            if (startOffset > 0)
             {
-                string line = rawLine.TrimEnd('\r');
-                if (string.IsNullOrWhiteSpace(line))
+                stream.Seek(startOffset, SeekOrigin.Begin);
+            }
+
+            using StreamReader reader = new(
+                stream,
+                Encoding.UTF8,
+                detectEncodingFromByteOrderMarks: true,
+                bufferSize: 64 * 1024,
+                leaveOpen: false);
+            while (await reader.ReadLineAsync() is string rawLine)
+            {
+                if (string.IsNullOrWhiteSpace(rawLine))
                 {
                     continue;
                 }
 
                 try
                 {
-                    if (RecordHasUserEvent(JsonNode.Parse(line)))
+                    if (RecordHasUserEvent(JsonNode.Parse(rawLine)))
                     {
                         return true;
                     }
