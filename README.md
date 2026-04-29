@@ -26,7 +26,7 @@ Codex 切换 `model_provider` 后，旧会话可能在 Desktop 或 `/resume` 里
 
 ## 快速使用
 
-Windows 用户可以使用 GUI：
+Windows 用户优先下载 Release 里的 `CodexProviderSync.exe`：
 
 1. 打开 `CodexProviderSync.exe`
 2. 点击 `Refresh`
