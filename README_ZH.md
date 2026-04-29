@@ -26,14 +26,14 @@ Codex 切换 `model_provider` 后，旧会话可能在 Desktop 或 `/resume` 里
 
 ## 快速使用
 
-普通 Windows 用户优先下载 Release 里的 `CodexProviderSync.exe`：
+Windows 用户可以使用 GUI：
 
 1. 打开 `CodexProviderSync.exe`
 2. 点击 `Refresh`
 3. 选择目标 Provider
 4. 点击 `Execute`
 
-macOS 用户使用 CLI 即可：
+macOS 等环境使用 CLI：
 
 ```bash
 npm install -g github:Dailin521/codex-provider-sync

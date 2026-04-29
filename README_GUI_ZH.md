@@ -2,7 +2,7 @@
 
 ## 适用场景
 
-这是面向普通 Windows 用户的图形界面版本。
+这是 Windows 用户可用的图形界面版本。
 
 如果你不想装 Node、不想打开 PowerShell，也不想记命令，直接下载发布页里的 `CodexProviderSync.exe` 双击运行即可。
 
