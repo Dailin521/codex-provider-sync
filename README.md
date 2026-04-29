@@ -33,13 +33,14 @@ Codex 切换 `model_provider` 后，旧会话可能在 Desktop 或 `/resume` 里
 3. 选择目标 Provider
 4. 点击 `Execute`
 
-CLI 安装：
+macOS 用户使用 CLI 即可：
 
 ```bash
 npm install -g github:Dailin521/codex-provider-sync
+codex-provider sync
 ```
 
-常用命令：
+更多 CLI 常用命令：
 
 ```bash
 codex-provider status
