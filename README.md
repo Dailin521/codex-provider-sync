@@ -70,7 +70,7 @@ codex-provider prune-backups --keep 5
 
 ## Codex Desktop 最近 50 条限制
 
-目前 Codex Desktop 的 Recent/项目侧会话列表存在一个上游显示限制：前端首屏只拉取最近 `50` 条会话，不是最近 50 天。
+目前 Codex Desktop 的 Recent/项目侧会话列表存在一个上游显示限制：前端首屏只拉取最近 `50` 条会话。
 
 影响：
 

@@ -31,7 +31,7 @@
 
 ## Codex Desktop 最近 50 条限制
 
-Codex Desktop 当前首屏只拉取最近 `50` 条会话，不是最近 50 天。如果某个项目的旧会话排在全局最近 50 条之后，CLI `/resume` 可能能看到，但 Desktop 项目侧仍显示“暂无对话”。
+Codex Desktop 当前首屏只拉取最近 `50` 条会话。如果某个项目的旧会话排在全局最近 50 条之后，CLI `/resume` 可能能看到，但 Desktop 项目侧仍显示“暂无对话”。
 
 GUI Refresh 会显示项目可见性诊断，例如 `first page 0/50`、`ranks 64-77`。这表示会话存在，但没有进入 Desktop 首屏最近 50 条。本工具不会修改 `updated_at` 或历史排序来绕过这个限制。
 
