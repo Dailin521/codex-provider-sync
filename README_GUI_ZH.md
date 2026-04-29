@@ -29,6 +29,12 @@
 - 含 `encrypted_content` 的旧会话不能由本工具重新加密到另一个 provider / account
 - 如果 CLI 能看到历史会话但 Desktop 项目侧仍不显示，请优先复制并反馈 Refresh 后的完整状态文本
 
+## Codex Desktop 最近 50 条限制
+
+Codex Desktop 当前首屏只拉取最近 `50` 条会话，不是最近 50 天。如果某个项目的旧会话排在全局最近 50 条之后，CLI `/resume` 可能能看到，但 Desktop 项目侧仍显示“暂无对话”。
+
+GUI Refresh 会显示项目可见性诊断，例如 `first page 0/50`、`ranks 64-77`。这表示会话存在，但没有进入 Desktop 首屏最近 50 条。本工具不会修改 `updated_at` 或历史排序来绕过这个限制。
+
 ## 使用方式
 
 1. 打开 `CodexProviderSync.exe`
