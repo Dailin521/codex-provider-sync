@@ -36,7 +36,7 @@ Windows 用户优先下载 Release 里的 `CodexProviderSync.exe`：
 macOS 等环境使用 CLI：
 
 ```bash
-npm install -g github:Dailin521/codex-provider-sync
+npm install -g git+https://github.com/Dailin521/codex-provider-sync.git
 codex-provider sync
 ```
 

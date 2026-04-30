@@ -48,7 +48,7 @@ For GUI-specific usage notes, see [README_GUI_ZH.md](README_GUI_ZH.md).
 ## Install
 
 ```bash
-npm install -g github:Dailin521/codex-provider-sync
+npm install -g git+https://github.com/Dailin521/codex-provider-sync.git
 ```
 
 Requirements:
