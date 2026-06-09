@@ -738,7 +738,7 @@ public sealed class SessionRolloutService
         if (error is IOException ioException)
         {
             int code = ioException.HResult & 0xFFFF;
-            return code is 32 or 33;
+            return code is 32 or 33 or 35;
         }
 
         return false;

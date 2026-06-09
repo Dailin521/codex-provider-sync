@@ -84,11 +84,37 @@ public sealed class LockService
 
     private static int TryCreateDirectory(string lockPath)
     {
+        return OperatingSystem.IsWindows()
+            ? TryCreateDirectoryWindows(lockPath)
+            : TryCreateDirectoryUnix(lockPath);
+    }
+
+    private static int TryCreateDirectoryWindows(string lockPath)
+    {
         return CreateDirectory(lockPath, IntPtr.Zero) ? 0 : Marshal.GetLastWin32Error();
+    }
+
+    private static int TryCreateDirectoryUnix(string lockPath)
+    {
+        if (Mkdir(lockPath, 448) == 0)
+        {
+            return 0;
+        }
+
+        int errorCode = Marshal.GetLastWin32Error();
+        return errorCode switch
+        {
+            17 => Win32ErrorAlreadyExists,
+            1 or 13 => Win32ErrorAccessDenied,
+            _ => errorCode
+        };
     }
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern bool CreateDirectory(string lpPathName, IntPtr lpSecurityAttributes);
+
+    [DllImport("libc", SetLastError = true, EntryPoint = "mkdir")]
+    private static extern int Mkdir(string pathname, uint mode);
 
     private sealed class LockOwner
     {

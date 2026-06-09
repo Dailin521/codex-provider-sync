@@ -3,6 +3,22 @@ namespace CodexProviderSync.Core.Tests;
 public sealed class LockServiceTests
 {
     [Fact]
+    public async Task AcquireLockAsync_CreatesAndReleasesLockDirectory()
+    {
+        string codexHome = Path.Combine(Path.GetTempPath(), $"codex-provider-lock-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(codexHome);
+        string lockPath = AppConstants.LockPath(codexHome);
+
+        await using (await new LockService().AcquireLockAsync(codexHome, "test"))
+        {
+            Assert.True(Directory.Exists(lockPath));
+            Assert.True(File.Exists(Path.Combine(lockPath, "owner.json")));
+        }
+
+        Assert.False(Directory.Exists(lockPath));
+    }
+
+    [Fact]
     public async Task CreateLockDirectoryAsync_RetriesTransientAccessDeniedErrors()
     {
         int attempts = 0;
