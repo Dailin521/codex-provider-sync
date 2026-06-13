@@ -95,7 +95,11 @@ async function writeGlobalState(codexHome, value) {
 }
 
 async function writeStateDb(codexHome, rows) {
-  const dbPath = path.join(codexHome, "state_5.sqlite");
+  await writeStateDbAtPath(path.join(codexHome, "state_5.sqlite"), rows);
+}
+
+async function writeStateDbAtPath(dbPath, rows) {
+  await fs.mkdir(path.dirname(dbPath), { recursive: true });
   const db = new DatabaseSync(dbPath);
   try {
     db.exec(`
@@ -399,6 +403,101 @@ test("runSync repairs SQLite cwd from rollout session metadata", async () => {
   } finally {
     db.close();
   }
+});
+
+test("runSync updates nested sqlite state used by newer Codex Desktop", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "custom"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-nested-db.jsonl");
+  await writeCustomRollout(sessionPath, {
+    id: "thread-nested-db",
+    timestamp: "2026-03-19T00:00:00.000Z",
+    cwd: "C:\\Users\\me\\Desktop\\project-mentor",
+    source: "vscode",
+    cli_version: "0.115.0",
+    model_provider: "custom"
+  });
+  const nestedDbPath = path.join(codexHome, "sqlite", "state_5.sqlite");
+  await writeStateDbAtPath(nestedDbPath, [
+    {
+      id: "thread-nested-db",
+      model_provider: "openai",
+      archived: false,
+      cwd: "\\\\?\\C:\\Users\\me\\Desktop\\project-mentor"
+    }
+  ]);
+
+  const syncResult = await runSync({ codexHome });
+
+  assert.equal(syncResult.changedSessionFiles, 0);
+  assert.equal(syncResult.sqliteProviderRowsUpdated, 1);
+  assert.equal(syncResult.sqliteCwdRowsUpdated, 1);
+  assert.equal(syncResult.sqliteRowsUpdated, 2);
+
+  const db = new DatabaseSync(nestedDbPath);
+  try {
+    const row = db
+      .prepare("SELECT model_provider, cwd FROM threads WHERE id = ?")
+      .get("thread-nested-db");
+    assert.deepEqual({ ...row }, {
+      model_provider: "custom",
+      cwd: "C:\\Users\\me\\Desktop\\project-mentor"
+    });
+  } finally {
+    db.close();
+  }
+
+  await fs.access(path.join(syncResult.backupDir, "db", "sqlite", "state_5.sqlite"));
+
+  await runRestore({ codexHome, backupDir: syncResult.backupDir });
+
+  const restoredDb = new DatabaseSync(nestedDbPath);
+  try {
+    const row = restoredDb
+      .prepare("SELECT model_provider, cwd FROM threads WHERE id = ?")
+      .get("thread-nested-db");
+    assert.deepEqual({ ...row }, {
+      model_provider: "openai",
+      cwd: "\\\\?\\C:\\Users\\me\\Desktop\\project-mentor"
+    });
+  } finally {
+    restoredDb.close();
+  }
+});
+
+test("runSync updates both root and nested sqlite state files when both exist", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "custom"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-dual-db.jsonl");
+  await writeRollout(sessionPath, "thread-dual-db", "custom");
+  await writeStateDb(codexHome, [
+    { id: "thread-root", model_provider: "openai", archived: false }
+  ]);
+  const nestedDbPath = path.join(codexHome, "sqlite", "state_5.sqlite");
+  await writeStateDbAtPath(nestedDbPath, [
+    { id: "thread-nested", model_provider: "openai", archived: false }
+  ]);
+
+  const syncResult = await runSync({ codexHome });
+
+  assert.equal(syncResult.sqliteProviderRowsUpdated, 2);
+  assert.equal(syncResult.sqlitePresent, true);
+
+  for (const dbPath of [path.join(codexHome, "state_5.sqlite"), nestedDbPath]) {
+    const db = new DatabaseSync(dbPath);
+    try {
+      const providers = db
+        .prepare("SELECT DISTINCT model_provider FROM threads")
+        .all()
+        .map((row) => row.model_provider);
+      assert.deepEqual(providers, ["custom"]);
+    } finally {
+      db.close();
+    }
+  }
+
+  await fs.access(path.join(syncResult.backupDir, "db", "state_5.sqlite"));
+  await fs.access(path.join(syncResult.backupDir, "db", "sqlite", "state_5.sqlite"));
 });
 
 test("runSync normalizes extended rollout cwd before repairing SQLite", async () => {

@@ -6,6 +6,8 @@ namespace CodexProviderSync.Core;
 
 public sealed class GlobalStateService
 {
+    private readonly SqliteStateService _sqliteStateService = new();
+
     public string StatePath(string codexHome)
     {
         return Path.Combine(codexHome, AppConstants.GlobalStateFileBasename);
@@ -18,7 +20,7 @@ public sealed class GlobalStateService
 
     public async Task<IReadOnlyList<ThreadCwdStat>> ReadThreadCwdStatsAsync(string codexHome)
     {
-        string dbPath = Path.Combine(codexHome, AppConstants.DbFileBasename);
+        string dbPath = _sqliteStateService.StateDbPath(codexHome);
         if (!File.Exists(dbPath))
         {
             return [];
@@ -191,7 +193,7 @@ public sealed class GlobalStateService
             return [];
         }
 
-        string dbPath = Path.Combine(codexHome, AppConstants.DbFileBasename);
+        string dbPath = _sqliteStateService.StateDbPath(codexHome);
         if (!File.Exists(dbPath))
         {
             return roots

@@ -144,6 +144,97 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
+    public async Task RunSync_UpdatesNestedSqliteStateUsedByNewerCodexDesktop()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"custom\"");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-nested-db.jsonl");
+        await fixture.WriteRolloutAsync(
+            sessionPath,
+            "thread-nested-db",
+            "custom",
+            @"C:\Users\me\Desktop\project-mentor");
+        string nestedDbPath = Path.Combine(fixture.CodexHome, "sqlite", "state_5.sqlite");
+        await fixture.WriteStateDbWithCwdAtPathAsync(
+            nestedDbPath,
+        [
+            ("thread-nested-db", "openai", false, @"\\?\C:\Users\me\Desktop\project-mentor")
+        ]);
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(0, result.ChangedSessionFiles);
+        Assert.Equal(1, result.SqliteProviderRowsUpdated);
+        Assert.Equal(1, result.SqliteCwdRowsUpdated);
+        Assert.Equal(2, result.SqliteRowsUpdated);
+
+        await using (SqliteConnection connection = fixture.OpenSqliteConnection(nestedDbPath))
+        {
+            await connection.OpenAsync();
+            SqliteCommand command = connection.CreateCommand();
+            command.CommandText = "SELECT model_provider, cwd FROM threads WHERE id = 'thread-nested-db'";
+            await using SqliteDataReader reader = await command.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+            Assert.Equal("custom", reader.GetString(0));
+            Assert.Equal(@"C:\Users\me\Desktop\project-mentor", reader.GetString(1));
+        }
+
+        Assert.True(File.Exists(Path.Combine(result.BackupDir, "db", "sqlite", "state_5.sqlite")));
+
+        await service.RunRestoreAsync(fixture.CodexHome, result.BackupDir);
+
+        await using (SqliteConnection connection = fixture.OpenSqliteConnection(nestedDbPath))
+        {
+            await connection.OpenAsync();
+            SqliteCommand command = connection.CreateCommand();
+            command.CommandText = "SELECT model_provider, cwd FROM threads WHERE id = 'thread-nested-db'";
+            await using SqliteDataReader reader = await command.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+            Assert.Equal("openai", reader.GetString(0));
+            Assert.Equal(@"\\?\C:\Users\me\Desktop\project-mentor", reader.GetString(1));
+        }
+    }
+
+    [Fact]
+    public async Task RunSync_UpdatesBothRootAndNestedSqliteStateFiles()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"custom\"");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-dual-db.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-dual-db", "custom");
+        await fixture.WriteStateDbAsync(
+        [
+            ("thread-root", "openai", false)
+        ]);
+        string nestedDbPath = Path.Combine(fixture.CodexHome, "sqlite", "state_5.sqlite");
+        await fixture.WriteStateDbAtPathAsync(
+            nestedDbPath,
+        [
+            ("thread-nested", "openai", false)
+        ]);
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.True(result.SqlitePresent);
+        Assert.Equal(2, result.SqliteProviderRowsUpdated);
+
+        foreach (string dbPath in new[] { Path.Combine(fixture.CodexHome, "state_5.sqlite"), nestedDbPath })
+        {
+            await using SqliteConnection connection = fixture.OpenSqliteConnection(dbPath);
+            await connection.OpenAsync();
+            SqliteCommand command = connection.CreateCommand();
+            command.CommandText = "SELECT DISTINCT model_provider FROM threads";
+            string provider = (string)(await command.ExecuteScalarAsync())!;
+            Assert.Equal("custom", provider);
+        }
+
+        Assert.True(File.Exists(Path.Combine(result.BackupDir, "db", "state_5.sqlite")));
+        Assert.True(File.Exists(Path.Combine(result.BackupDir, "db", "sqlite", "state_5.sqlite")));
+    }
+
+    [Fact]
     public async Task RunSync_NormalizesExtendedRolloutCwd_BeforeRepairingSqlite()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();

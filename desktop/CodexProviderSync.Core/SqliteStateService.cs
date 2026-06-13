@@ -5,6 +5,11 @@ namespace CodexProviderSync.Core;
 public sealed class SqliteStateService
 {
     private const int DefaultBusyTimeoutMs = 5000;
+    private static readonly string[] StateDbRelativePaths =
+    [
+        AppConstants.DbFileBasename,
+        Path.Combine("sqlite", AppConstants.DbFileBasename)
+    ];
 
     static SqliteStateService()
     {
@@ -13,7 +18,34 @@ public sealed class SqliteStateService
 
     public string StateDbPath(string codexHome)
     {
+        string nestedPath = StateDbPathFromRelative(codexHome, StateDbRelativePaths[1]);
+        if (File.Exists(nestedPath))
+        {
+            return nestedPath;
+        }
+
         return Path.Combine(codexHome, AppConstants.DbFileBasename);
+    }
+
+    public IReadOnlyList<string> StateDbRelativePathsSnapshot()
+    {
+        return StateDbRelativePaths.ToArray();
+    }
+
+    public string StateDbPathFromRelative(string codexHome, string relativePath)
+    {
+        return Path.Combine(
+            new[] { codexHome }
+                .Concat(relativePath.Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries))
+                .ToArray());
+    }
+
+    private List<string> ExistingStateDbPaths(string codexHome)
+    {
+        return StateDbRelativePaths
+            .Select(relativePath => StateDbPathFromRelative(codexHome, relativePath))
+            .Where(File.Exists)
+            .ToList();
     }
 
     public async Task<ProviderCounts?> ReadSqliteProviderCountsAsync(string codexHome)
@@ -151,19 +183,23 @@ public sealed class SqliteStateService
 
     public async Task<bool> AssertSqliteWritableAsync(string codexHome, int? busyTimeoutMs = null)
     {
-        string dbPath = StateDbPath(codexHome);
-        if (!File.Exists(dbPath))
+        List<string> dbPaths = ExistingStateDbPaths(codexHome);
+        if (dbPaths.Count == 0)
         {
             return false;
         }
 
-        await using SqliteConnection connection = OpenConnection(dbPath, SqliteOpenMode.ReadWriteCreate);
         try
         {
-            await connection.OpenAsync();
-            await SetBusyTimeoutAsync(connection, busyTimeoutMs);
-            await ExecuteNonQueryAsync(connection, "BEGIN IMMEDIATE");
-            await ExecuteNonQueryAsync(connection, "ROLLBACK");
+            foreach (string dbPath in dbPaths)
+            {
+                await using SqliteConnection connection = OpenConnection(dbPath, SqliteOpenMode.ReadWriteCreate);
+                await connection.OpenAsync();
+                await SetBusyTimeoutAsync(connection, busyTimeoutMs);
+                await ExecuteNonQueryAsync(connection, "BEGIN IMMEDIATE");
+                await ExecuteNonQueryAsync(connection, "ROLLBACK");
+            }
+
             return true;
         }
         catch (Exception error)
@@ -182,8 +218,8 @@ public sealed class SqliteStateService
         IReadOnlyCollection<string>? userEventThreadIds = null,
         IReadOnlyDictionary<string, string>? threadCwdsById = null)
     {
-        string dbPath = StateDbPath(codexHome);
-        if (!File.Exists(dbPath))
+        List<string> dbPaths = ExistingStateDbPaths(codexHome);
+        if (dbPaths.Count == 0)
         {
             if (afterUpdate is not null)
             {
@@ -193,61 +229,67 @@ public sealed class SqliteStateService
             return (0, 0, 0, 0, false);
         }
 
-        await using SqliteConnection connection = OpenConnection(dbPath, SqliteOpenMode.ReadWriteCreate);
-        bool transactionOpen = false;
+        List<(SqliteConnection Connection, bool TransactionOpen)> openedConnections = [];
         try
         {
-            await connection.OpenAsync();
-            await SetBusyTimeoutAsync(connection, busyTimeoutMs);
-            await ExecuteNonQueryAsync(connection, "BEGIN IMMEDIATE");
-            transactionOpen = true;
-
-            await using SqliteCommand command = connection.CreateCommand();
-            command.CommandText = """
-                UPDATE threads
-                SET model_provider = $provider
-                WHERE COALESCE(model_provider, '') <> $provider
-                """;
-            command.Parameters.AddWithValue("$provider", targetProvider);
-            int providerRowsUpdated = await command.ExecuteNonQueryAsync();
+            int providerRowsUpdated = 0;
             int userEventRowsUpdated = 0;
-            if (userEventThreadIds?.Count > 0 && await TableHasColumnAsync(connection, "threads", "has_user_event"))
-            {
-                await using SqliteCommand userEventCommand = connection.CreateCommand();
-                userEventCommand.CommandText = """
-                    UPDATE threads
-                    SET has_user_event = 1
-                    WHERE id = $id AND COALESCE(has_user_event, 0) <> 1
-                    """;
-                SqliteParameter idParameter = userEventCommand.Parameters.Add("$id", SqliteType.Text);
-                foreach (string threadId in userEventThreadIds)
-                {
-                    idParameter.Value = threadId;
-                    userEventRowsUpdated += await userEventCommand.ExecuteNonQueryAsync();
-                }
-            }
-
             int cwdRowsUpdated = 0;
-            if (threadCwdsById?.Count > 0 && await TableHasColumnAsync(connection, "threads", "cwd"))
+            foreach (string dbPath in dbPaths)
             {
-                await using SqliteCommand cwdCommand = connection.CreateCommand();
-                cwdCommand.CommandText = """
-                    UPDATE threads
-                    SET cwd = $cwd
-                    WHERE id = $id AND COALESCE(cwd, '') <> $cwd
-                    """;
-                SqliteParameter cwdIdParameter = cwdCommand.Parameters.Add("$id", SqliteType.Text);
-                SqliteParameter cwdParameter = cwdCommand.Parameters.Add("$cwd", SqliteType.Text);
-                foreach ((string threadId, string cwd) in threadCwdsById)
-                {
-                    if (string.IsNullOrWhiteSpace(threadId) || string.IsNullOrWhiteSpace(cwd))
-                    {
-                        continue;
-                    }
+                SqliteConnection connection = OpenConnection(dbPath, SqliteOpenMode.ReadWriteCreate);
+                openedConnections.Add((connection, false));
+                await connection.OpenAsync();
+                await SetBusyTimeoutAsync(connection, busyTimeoutMs);
+                await ExecuteNonQueryAsync(connection, "BEGIN IMMEDIATE");
+                openedConnections[^1] = (connection, true);
 
-                    cwdIdParameter.Value = threadId;
-                    cwdParameter.Value = cwd;
-                    cwdRowsUpdated += await cwdCommand.ExecuteNonQueryAsync();
+                await using SqliteCommand command = connection.CreateCommand();
+                command.CommandText = """
+                    UPDATE threads
+                    SET model_provider = $provider
+                    WHERE COALESCE(model_provider, '') <> $provider
+                    """;
+                command.Parameters.AddWithValue("$provider", targetProvider);
+                providerRowsUpdated += await command.ExecuteNonQueryAsync();
+
+                if (userEventThreadIds?.Count > 0 && await TableHasColumnAsync(connection, "threads", "has_user_event"))
+                {
+                    await using SqliteCommand userEventCommand = connection.CreateCommand();
+                    userEventCommand.CommandText = """
+                        UPDATE threads
+                        SET has_user_event = 1
+                        WHERE id = $id AND COALESCE(has_user_event, 0) <> 1
+                        """;
+                    SqliteParameter idParameter = userEventCommand.Parameters.Add("$id", SqliteType.Text);
+                    foreach (string threadId in userEventThreadIds)
+                    {
+                        idParameter.Value = threadId;
+                        userEventRowsUpdated += await userEventCommand.ExecuteNonQueryAsync();
+                    }
+                }
+
+                if (threadCwdsById?.Count > 0 && await TableHasColumnAsync(connection, "threads", "cwd"))
+                {
+                    await using SqliteCommand cwdCommand = connection.CreateCommand();
+                    cwdCommand.CommandText = """
+                        UPDATE threads
+                        SET cwd = $cwd
+                        WHERE id = $id AND COALESCE(cwd, '') <> $cwd
+                        """;
+                    SqliteParameter cwdIdParameter = cwdCommand.Parameters.Add("$id", SqliteType.Text);
+                    SqliteParameter cwdParameter = cwdCommand.Parameters.Add("$cwd", SqliteType.Text);
+                    foreach ((string threadId, string cwd) in threadCwdsById)
+                    {
+                        if (string.IsNullOrWhiteSpace(threadId) || string.IsNullOrWhiteSpace(cwd))
+                        {
+                            continue;
+                        }
+
+                        cwdIdParameter.Value = threadId;
+                        cwdParameter.Value = cwd;
+                        cwdRowsUpdated += await cwdCommand.ExecuteNonQueryAsync();
+                    }
                 }
             }
 
@@ -258,14 +300,23 @@ public sealed class SqliteStateService
                 await afterUpdate((updatedRows, providerRowsUpdated, userEventRowsUpdated, cwdRowsUpdated, true));
             }
 
-            await ExecuteNonQueryAsync(connection, "COMMIT");
-            transactionOpen = false;
+            for (int index = 0; index < openedConnections.Count; index += 1)
+            {
+                await ExecuteNonQueryAsync(openedConnections[index].Connection, "COMMIT");
+                openedConnections[index] = (openedConnections[index].Connection, false);
+            }
+
             return (updatedRows, providerRowsUpdated, userEventRowsUpdated, cwdRowsUpdated, true);
         }
         catch (Exception error)
         {
-            if (transactionOpen)
+            foreach ((SqliteConnection connection, bool transactionOpen) in openedConnections)
             {
+                if (!transactionOpen)
+                {
+                    continue;
+                }
+
                 try
                 {
                     await ExecuteNonQueryAsync(connection, "ROLLBACK");
@@ -279,6 +330,13 @@ public sealed class SqliteStateService
             throw WrapSqliteMalformedError(
                 WrapSqliteBusyError(error, "update session provider metadata"),
                 "update session provider metadata");
+        }
+        finally
+        {
+            foreach ((SqliteConnection connection, _) in openedConnections)
+            {
+                await connection.DisposeAsync();
+            }
         }
     }
 

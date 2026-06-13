@@ -26,12 +26,18 @@ public sealed class BackupService
         Directory.CreateDirectory(dbDir);
 
         List<string> copiedDbFiles = [];
-        foreach (string suffix in new[] { string.Empty, "-shm", "-wal" })
+        foreach (string relativePath in _sqliteStateService.StateDbRelativePathsSnapshot())
         {
-            string fileName = $"{AppConstants.DbFileBasename}{suffix}";
-            if (await CopyIfPresentAsync(Path.Combine(codexHome, fileName), Path.Combine(dbDir, fileName), overwrite: false))
+            foreach (string suffix in new[] { string.Empty, "-shm", "-wal" })
             {
-                copiedDbFiles.Add(fileName);
+                string fileName = $"{relativePath}{suffix}";
+                if (await CopyIfPresentAsync(
+                    _sqliteStateService.StateDbPathFromRelative(codexHome, fileName),
+                    Path.Combine(dbDir, fileName),
+                    overwrite: false))
+                {
+                    copiedDbFiles.Add(fileName);
+                }
             }
         }
 
@@ -139,19 +145,25 @@ public sealed class BackupService
             string dbDir = Path.Combine(normalizedBackupDir, "db");
             HashSet<string> backedUpFiles = new(metadata.DbFiles, StringComparer.Ordinal);
 
-            foreach (string suffix in new[] { string.Empty, "-shm", "-wal" })
+            foreach (string relativePath in _sqliteStateService.StateDbRelativePathsSnapshot())
             {
-                string fileName = $"{AppConstants.DbFileBasename}{suffix}";
-                string targetPath = Path.Combine(codexHome, fileName);
-                if (!backedUpFiles.Contains(fileName) && File.Exists(targetPath))
+                foreach (string suffix in new[] { string.Empty, "-shm", "-wal" })
                 {
-                    File.Delete(targetPath);
+                    string fileName = $"{relativePath}{suffix}";
+                    string targetPath = _sqliteStateService.StateDbPathFromRelative(codexHome, fileName);
+                    if (!backedUpFiles.Contains(fileName) && File.Exists(targetPath))
+                    {
+                        File.Delete(targetPath);
+                    }
                 }
             }
 
             foreach (string fileName in metadata.DbFiles)
             {
-                await CopyIfPresentAsync(Path.Combine(dbDir, fileName), Path.Combine(codexHome, fileName), overwrite: true);
+                await CopyIfPresentAsync(
+                    Path.Combine(dbDir, fileName),
+                    _sqliteStateService.StateDbPathFromRelative(codexHome, fileName),
+                    overwrite: true);
             }
         }
 

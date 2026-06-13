@@ -126,8 +126,13 @@ internal sealed class TestCodexHomeFixture
 
     public async Task WriteStateDbAsync(IEnumerable<(string Id, string ModelProvider, bool Archived)> rows)
     {
-        string dbPath = Path.Combine(CodexHome, "state_5.sqlite");
-        await using SqliteConnection connection = OpenSqliteConnection();
+        await WriteStateDbAtPathAsync(Path.Combine(CodexHome, "state_5.sqlite"), rows);
+    }
+
+    public async Task WriteStateDbAtPathAsync(string dbPath, IEnumerable<(string Id, string ModelProvider, bool Archived)> rows)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
+        await using SqliteConnection connection = OpenSqliteConnection(dbPath);
         await connection.OpenAsync();
         SqliteCommand create = connection.CreateCommand();
         create.CommandText = """
@@ -223,7 +228,13 @@ internal sealed class TestCodexHomeFixture
 
     public async Task WriteStateDbWithCwdAsync(IEnumerable<(string Id, string ModelProvider, bool Archived, string Cwd)> rows)
     {
-        await using SqliteConnection connection = OpenSqliteConnection();
+        await WriteStateDbWithCwdAtPathAsync(Path.Combine(CodexHome, "state_5.sqlite"), rows);
+    }
+
+    public async Task WriteStateDbWithCwdAtPathAsync(string dbPath, IEnumerable<(string Id, string ModelProvider, bool Archived, string Cwd)> rows)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
+        await using SqliteConnection connection = OpenSqliteConnection(dbPath);
         await connection.OpenAsync();
         SqliteCommand create = connection.CreateCommand();
         create.CommandText = """
@@ -290,6 +301,11 @@ internal sealed class TestCodexHomeFixture
 
     public SqliteConnection OpenSqliteConnection()
     {
-        return new SqliteConnection($"Data Source={Path.Combine(CodexHome, "state_5.sqlite")};Mode=ReadWriteCreate;Pooling=False");
+        return OpenSqliteConnection(Path.Combine(CodexHome, "state_5.sqlite"));
+    }
+
+    public SqliteConnection OpenSqliteConnection(string dbPath)
+    {
+        return new SqliteConnection($"Data Source={dbPath};Mode=ReadWriteCreate;Pooling=False");
     }
 }
