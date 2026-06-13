@@ -20,11 +20,19 @@ export function stateDbPath(codexHome) {
 }
 
 export function stateDbPathFromRelative(codexHome, relativePath) {
-  return path.join(codexHome, ...relativePath.split("/"));
+  return path.join(codexHome, ...stateDbRelativePathSegments(relativePath));
+}
+
+export function normalizeStateDbRelativePath(relativePath) {
+  return stateDbRelativePathSegments(relativePath).join("/");
 }
 
 export function stateDbRelativePaths() {
   return [...STATE_DB_RELATIVE_PATHS];
+}
+
+function stateDbRelativePathSegments(relativePath) {
+  return `${relativePath}`.split(/[\\/]+/).filter(Boolean);
 }
 
 async function existingStateDbPaths(codexHome) {
@@ -260,10 +268,11 @@ export async function updateSqliteProvider(codexHome, targetProvider, afterUpdat
 
     for (const dbPath of dbPaths) {
       const db = openDatabase(dbPath);
-      openedDbs.push({ db, transactionOpen: false });
+      const entry = { db, transactionOpen: false };
+      openedDbs.push(entry);
       setBusyTimeout(db, options.busyTimeoutMs);
       db.exec("BEGIN IMMEDIATE");
-      openedDbs.at(-1).transactionOpen = true;
+      entry.transactionOpen = true;
 
       const stmt = db.prepare(`
         UPDATE threads

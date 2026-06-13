@@ -33,10 +33,10 @@ public sealed class BackupService
                 string fileName = $"{relativePath}{suffix}";
                 if (await CopyIfPresentAsync(
                     _sqliteStateService.StateDbPathFromRelative(codexHome, fileName),
-                    Path.Combine(dbDir, fileName),
+                    _sqliteStateService.StateDbPathFromRelative(dbDir, fileName),
                     overwrite: false))
                 {
-                    copiedDbFiles.Add(fileName);
+                    copiedDbFiles.Add(_sqliteStateService.NormalizeStateDbRelativePath(fileName));
                 }
             }
         }
@@ -143,7 +143,10 @@ public sealed class BackupService
         {
             await _sqliteStateService.AssertSqliteWritableAsync(codexHome);
             string dbDir = Path.Combine(normalizedBackupDir, "db");
-            HashSet<string> backedUpFiles = new(metadata.DbFiles, StringComparer.Ordinal);
+            List<string> dbFiles = metadata.DbFiles
+                .Select(_sqliteStateService.NormalizeStateDbRelativePath)
+                .ToList();
+            HashSet<string> backedUpFiles = new(dbFiles, StringComparer.Ordinal);
 
             foreach (string relativePath in _sqliteStateService.StateDbRelativePathsSnapshot())
             {
@@ -158,10 +161,10 @@ public sealed class BackupService
                 }
             }
 
-            foreach (string fileName in metadata.DbFiles)
+            foreach (string fileName in dbFiles)
             {
                 await CopyIfPresentAsync(
-                    Path.Combine(dbDir, fileName),
+                    _sqliteStateService.StateDbPathFromRelative(dbDir, fileName),
                     _sqliteStateService.StateDbPathFromRelative(codexHome, fileName),
                     overwrite: true);
             }

@@ -181,6 +181,13 @@ public sealed class CoreIntegrationTests
         }
 
         Assert.True(File.Exists(Path.Combine(result.BackupDir, "db", "sqlite", "state_5.sqlite")));
+        string metadataPath = Path.Combine(result.BackupDir, "metadata.json");
+        string metadataText = await File.ReadAllTextAsync(metadataPath);
+        Assert.Contains("\"sqlite/state_5.sqlite\"", metadataText);
+        Assert.DoesNotContain("\"sqlite\\\\state_5.sqlite\"", metadataText);
+        await File.WriteAllTextAsync(
+            metadataPath,
+            metadataText.Replace("sqlite/state_5.sqlite", "sqlite\\\\state_5.sqlite", StringComparison.Ordinal));
 
         await service.RunRestoreAsync(fixture.CodexHome, result.BackupDir);
 

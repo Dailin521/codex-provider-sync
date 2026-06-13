@@ -448,6 +448,14 @@ test("runSync updates nested sqlite state used by newer Codex Desktop", async ()
   }
 
   await fs.access(path.join(syncResult.backupDir, "db", "sqlite", "state_5.sqlite"));
+  const metadataPath = path.join(syncResult.backupDir, "metadata.json");
+  const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
+  assert.ok(metadata.dbFiles.includes("sqlite/state_5.sqlite"));
+  assert.equal(metadata.dbFiles.some((fileName) => fileName.includes("\\")), false);
+  metadata.dbFiles = metadata.dbFiles.map((fileName) =>
+    fileName.replace("sqlite/state_5.sqlite", "sqlite\\state_5.sqlite")
+  );
+  await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2), "utf8");
 
   await runRestore({ codexHome, backupDir: syncResult.backupDir });
 

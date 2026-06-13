@@ -8,7 +8,7 @@ public sealed class SqliteStateService
     private static readonly string[] StateDbRelativePaths =
     [
         AppConstants.DbFileBasename,
-        Path.Combine("sqlite", AppConstants.DbFileBasename)
+        $"sqlite/{AppConstants.DbFileBasename}"
     ];
 
     static SqliteStateService()
@@ -38,6 +38,13 @@ public sealed class SqliteStateService
             new[] { codexHome }
                 .Concat(relativePath.Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries))
                 .ToArray());
+    }
+
+    public string NormalizeStateDbRelativePath(string relativePath)
+    {
+        return string.Join(
+            "/",
+            relativePath.Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries));
     }
 
     private List<string> ExistingStateDbPaths(string codexHome)

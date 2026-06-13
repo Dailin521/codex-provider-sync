@@ -9,7 +9,12 @@ import {
   GLOBAL_STATE_FILE_BASENAME
 } from "./constants.js";
 import { assertSessionFilesWritable, restoreSessionChanges } from "./session-files.js";
-import { assertSqliteWritable, stateDbPathFromRelative, stateDbRelativePaths } from "./sqlite-state.js";
+import {
+  assertSqliteWritable,
+  normalizeStateDbRelativePath,
+  stateDbPathFromRelative,
+  stateDbRelativePaths
+} from "./sqlite-state.js";
 
 function timestampSlug(date = new Date()) {
   return date.toISOString().replaceAll(":", "").replaceAll("-", "").replace(".", "");
@@ -59,10 +64,10 @@ export async function createBackup({
     for (const suffix of ["", "-shm", "-wal"]) {
       const fileName = `${relativePath}${suffix}`;
       const sourcePath = stateDbPathFromRelative(codexHome, fileName);
-      const destinationPath = path.join(dbDir, ...fileName.split("/"));
+      const destinationPath = stateDbPathFromRelative(dbDir, fileName);
       const copied = await copyIfPresent(sourcePath, destinationPath);
       if (copied) {
-        copiedDbFiles.push(fileName);
+        copiedDbFiles.push(normalizeStateDbRelativePath(fileName));
       }
     }
   }
@@ -197,7 +202,7 @@ export async function restoreBackup(backupDir, codexHome, options = {}) {
     await assertSqliteWritable(codexHome);
 
     const dbDir = path.join(backupDir, "db");
-    const backedUpFiles = new Set(metadata.dbFiles ?? []);
+    const backedUpFiles = new Set((metadata.dbFiles ?? []).map(normalizeStateDbRelativePath));
     for (const relativePath of stateDbRelativePaths()) {
       for (const suffix of ["", "-shm", "-wal"]) {
         const fileName = `${relativePath}${suffix}`;
@@ -206,9 +211,10 @@ export async function restoreBackup(backupDir, codexHome, options = {}) {
         }
       }
     }
-    for (const fileName of metadata.dbFiles ?? []) {
+    for (const rawFileName of metadata.dbFiles ?? []) {
+      const fileName = normalizeStateDbRelativePath(rawFileName);
       await copyIfPresent(
-        path.join(dbDir, ...fileName.split("/")),
+        stateDbPathFromRelative(dbDir, fileName),
         stateDbPathFromRelative(codexHome, fileName)
       );
     }
