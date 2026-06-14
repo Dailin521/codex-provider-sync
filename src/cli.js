@@ -18,6 +18,8 @@ Usage:
   codex-provider status [--codex-home PATH]
   codex-provider sync [--provider ID] [--keep N] [--codex-home PATH]
   codex-provider switch <provider-id> [--keep N] [--codex-home PATH]
+  codex-provider use-official [--keep N] [--codex-home PATH]
+  codex-provider use-relay [--keep N] [--codex-home PATH]
   codex-provider prune-backups [--keep N] [--codex-home PATH]
   codex-provider restore <backup-dir> [--no-config] [--no-db] [--no-sessions] [--codex-home PATH]
   codex-provider install-windows-launcher [--dir PATH] [--codex-home PATH]
@@ -212,6 +214,28 @@ async function main() {
       onProgress: createSyncProgressReporter()
     });
     console.log(summarizeSync(result, "Switched to"));
+    return;
+  }
+
+  if (command === "use-official") {
+    const { runUseOfficial } = await loadService();
+    const result = await runUseOfficial({
+      codexHome: flags["codex-home"],
+      keepCount: parseKeepCount(flags.keep),
+      onProgress: createSyncProgressReporter()
+    });
+    console.log(summarizeSync(result, "Switched to official OpenAI"));
+    return;
+  }
+
+  if (command === "use-relay") {
+    const { runUseRelay } = await loadService();
+    const result = await runUseRelay({
+      codexHome: flags["codex-home"],
+      keepCount: parseKeepCount(flags.keep),
+      onProgress: createSyncProgressReporter()
+    });
+    console.log(summarizeSync(result, "Switched to relay"));
     return;
   }
 

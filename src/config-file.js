@@ -45,6 +45,35 @@ export function configDeclaresProvider(configText, provider) {
   return listConfiguredProviderIds(configText).includes(provider);
 }
 
+export function readProviderBlock(configText, provider) {
+  const escapedProvider = provider.replaceAll(".", "\\.");
+  const headerRegex = new RegExp(`^\\[model_providers\\.${escapedProvider}]\\s*$`, "m");
+  const headerMatch = headerRegex.exec(configText);
+  if (!headerMatch) {
+    return null;
+  }
+
+  const blockStart = headerMatch.index + headerMatch[0].length;
+  const rest = configText.slice(blockStart);
+  const nextHeaderMatch = /^\[[^\]]+]\s*$/m.exec(rest);
+  const blockEnd = nextHeaderMatch ? blockStart + nextHeaderMatch.index : configText.length;
+  return configText.slice(blockStart, blockEnd);
+}
+
+export function providerBlockHasCustomEndpoint(configText, provider) {
+  const block = readProviderBlock(configText, provider);
+  if (!block) {
+    return false;
+  }
+
+  return splitLines(block).some((line) => {
+    const trimmed = line.trim();
+    return trimmed
+      && !trimmed.startsWith("#")
+      && /^base_url\s*=\s*("[^"]+"|'[^']+')\s*$/.test(trimmed);
+  });
+}
+
 export function setRootProviderInConfigText(configText, provider) {
   const lines = splitLines(configText);
   let insertIndex = lines.length;

@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+﻿import { spawn } from "node:child_process";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
@@ -13,7 +13,7 @@ import {
   restoreBackup,
   updateSessionBackupManifest
 } from "../src/backup.js";
-import { getStatus, renderStatus, runRestore, runSwitch, runSync } from "../src/service.js";
+import { getStatus, renderStatus, runRestore, runSwitch, runSync, runUseOfficial, runUseRelay } from "../src/service.js";
 import { DEFAULT_BACKUP_RETENTION_COUNT } from "../src/constants.js";
 import { getUnsupportedNodeVersionMessage } from "../src/node-version.js";
 import { applySessionChanges, collectSessionChanges } from "../src/session-files.js";
@@ -23,7 +23,12 @@ async function makeTempCodexHome() {
   const codexHome = path.join(root, ".codex");
   await fs.mkdir(path.join(codexHome, "sessions", "2026", "03", "19"), { recursive: true });
   await fs.mkdir(path.join(codexHome, "archived_sessions", "2026", "03", "18"), { recursive: true });
+  await fs.mkdir(path.join(codexHome, "sqlite"), { recursive: true });
   return { root, codexHome };
+}
+
+function stateDbPath(codexHome) {
+  return path.join(codexHome, "sqlite", "state_5.sqlite");
 }
 
 async function writeRollout(filePath, id, provider) {
@@ -83,8 +88,11 @@ async function writeBackup(codexHome, directoryName, files) {
   return totalBytes;
 }
 
-async function writeConfig(codexHome, modelProviderLine = "") {
-  const config = `${modelProviderLine}${modelProviderLine ? "\n" : ""}sandbox_mode = "danger-full-access"\n\n[model_providers.apigather]\nbase_url = "https://example.com"\n`;
+async function writeConfig(codexHome, modelProviderLine = "", { includeRelayProvider = false, relayBaseUrl = "https://relay.example.com" } = {}) {
+  const relayBlock = includeRelayProvider
+    ? `\n[model_providers.OpenAI]\nbase_url = "${relayBaseUrl}"\n`
+    : "";
+  const config = `${modelProviderLine}${modelProviderLine ? "\n" : ""}sandbox_mode = "danger-full-access"\n\n[model_providers.apigather]\nbase_url = "https://example.com"\n${relayBlock}`;
   await fs.writeFile(path.join(codexHome, "config.toml"), config, "utf8");
 }
 
@@ -95,7 +103,7 @@ async function writeGlobalState(codexHome, value) {
 }
 
 async function writeStateDb(codexHome, rows) {
-  const dbPath = path.join(codexHome, "state_5.sqlite");
+  const dbPath = stateDbPath(codexHome);
   const db = new DatabaseSync(dbPath);
   try {
     db.exec(`
@@ -117,7 +125,7 @@ async function writeStateDb(codexHome, rows) {
 }
 
 async function writeStateDbWithUserEventColumn(codexHome, rows) {
-  const dbPath = path.join(codexHome, "state_5.sqlite");
+  const dbPath = stateDbPath(codexHome);
   const db = new DatabaseSync(dbPath);
   try {
     db.exec(`
@@ -140,7 +148,7 @@ async function writeStateDbWithUserEventColumn(codexHome, rows) {
 }
 
 async function writeStateDbForProjectVisibility(codexHome, rows) {
-  const dbPath = path.join(codexHome, "state_5.sqlite");
+  const dbPath = stateDbPath(codexHome);
   const db = new DatabaseSync(dbPath);
   try {
     db.exec(`
@@ -277,7 +285,7 @@ test("runSync rewrites rollout files and sqlite, then restore reverts both", asy
   assert.match(syncedSession, /"model_provider":"openai"/);
   assert.match(syncedArchived, /"model_provider":"openai"/);
 
-  const db = new DatabaseSync(path.join(codexHome, "state_5.sqlite"));
+  const db = new DatabaseSync(stateDbPath(codexHome));
   try {
     const providers = db
       .prepare("SELECT id, model_provider FROM threads ORDER BY id")
@@ -352,7 +360,7 @@ test("runSync repairs SQLite has_user_event from rollout user messages", async (
   assert.equal(syncResult.sqliteRowsUpdated, 1);
   assert.equal(syncResult.sqliteUserEventRowsUpdated, 1);
 
-  const db = new DatabaseSync(path.join(codexHome, "state_5.sqlite"));
+  const db = new DatabaseSync(stateDbPath(codexHome));
   try {
     const row = db
       .prepare("SELECT has_user_event FROM threads WHERE id = ?")
@@ -390,7 +398,7 @@ test("runSync repairs SQLite cwd from rollout session metadata", async () => {
   assert.equal(syncResult.sqliteRowsUpdated, 1);
   assert.equal(syncResult.sqliteCwdRowsUpdated, 1);
 
-  const db = new DatabaseSync(path.join(codexHome, "state_5.sqlite"));
+  const db = new DatabaseSync(stateDbPath(codexHome));
   try {
     const row = db
       .prepare("SELECT cwd FROM threads WHERE id = ?")
@@ -427,7 +435,7 @@ test("runSync normalizes extended rollout cwd before repairing SQLite", async ()
   assert.equal(syncResult.sqliteRowsUpdated, 1);
   assert.equal(syncResult.sqliteCwdRowsUpdated, 1);
 
-  const db = new DatabaseSync(path.join(codexHome, "state_5.sqlite"));
+  const db = new DatabaseSync(stateDbPath(codexHome));
   try {
     const row = db
       .prepare("SELECT cwd FROM threads WHERE id = ?")
@@ -515,6 +523,73 @@ test("runSwitch updates config and syncs provider metadata", async () => {
   assert.match(config, /^model_provider = "apigather"/m);
   const rollout = await fs.readFile(sessionPath, "utf8");
   assert.match(rollout, /"model_provider":"apigather"/);
+});
+
+test("runUseRelay requires a custom endpoint and syncs to uppercase OpenAI", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"', { includeRelayProvider: true });
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-relay.jsonl");
+  await writeRollout(sessionPath, "thread-relay", "openai");
+  await writeStateDb(codexHome, [
+    { id: "thread-relay", model_provider: "openai", archived: false }
+  ]);
+
+  const result = await runUseRelay({ codexHome });
+
+  assert.equal(result.targetProvider, "OpenAI");
+  assert.equal(result.configUpdated, true);
+  assert.match(await fs.readFile(path.join(codexHome, "config.toml"), "utf8"), /^model_provider = "OpenAI"/m);
+  assert.match(await fs.readFile(sessionPath, "utf8"), /"model_provider":"OpenAI"/);
+});
+
+test("runUseRelay accepts a single-quoted relay base_url", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"', {
+    includeRelayProvider: true,
+    relayBaseUrl: "https://relay.example.com"
+  });
+  let config = await fs.readFile(path.join(codexHome, "config.toml"), "utf8");
+  config = config.replace('base_url = "https://relay.example.com"', "base_url = 'https://relay.example.com'");
+  await fs.writeFile(path.join(codexHome, "config.toml"), config, "utf8");
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-relay-single-quote.jsonl");
+  await writeRollout(sessionPath, "thread-relay-single-quote", "openai");
+  await writeStateDb(codexHome, [
+    { id: "thread-relay-single-quote", model_provider: "openai", archived: false }
+  ]);
+
+  const result = await runUseRelay({ codexHome });
+
+  assert.equal(result.targetProvider, "OpenAI");
+  assert.match(await fs.readFile(path.join(codexHome, "config.toml"), "utf8"), /^model_provider = "OpenAI"/m);
+});
+
+test("runUseRelay rejects uppercase OpenAI without relay base_url", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+
+  await assert.rejects(
+    () => runUseRelay({ codexHome }),
+    /Relay provider "OpenAI"/
+  );
+
+  assert.match(await fs.readFile(path.join(codexHome, "config.toml"), "utf8"), /^model_provider = "openai"/m);
+});
+
+test("runUseOfficial syncs to lowercase openai", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "OpenAI"', { includeRelayProvider: true });
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-official.jsonl");
+  await writeRollout(sessionPath, "thread-official", "OpenAI");
+  await writeStateDb(codexHome, [
+    { id: "thread-official", model_provider: "OpenAI", archived: false }
+  ]);
+
+  const result = await runUseOfficial({ codexHome });
+
+  assert.equal(result.targetProvider, "openai");
+  assert.equal(result.configUpdated, true);
+  assert.match(await fs.readFile(path.join(codexHome, "config.toml"), "utf8"), /^model_provider = "openai"/m);
+  assert.match(await fs.readFile(sessionPath, "utf8"), /"model_provider":"openai"/);
 });
 
 test("status reports implicit default provider and rollout/sqlite counts", async () => {
@@ -624,7 +699,7 @@ test("runSync leaves rollout files and sqlite untouched when sqlite is locked", 
     { id: "thread-a", model_provider: "apigather", archived: false }
   ]);
 
-  const lockDb = new DatabaseSync(path.join(codexHome, "state_5.sqlite"));
+  const lockDb = new DatabaseSync(stateDbPath(codexHome));
   try {
     lockDb.exec("BEGIN IMMEDIATE");
     await assert.rejects(
@@ -643,7 +718,7 @@ test("runSync leaves rollout files and sqlite untouched when sqlite is locked", 
   const rollout = await fs.readFile(sessionPath, "utf8");
   assert.match(rollout, /"model_provider":"apigather"/);
 
-  const db = new DatabaseSync(path.join(codexHome, "state_5.sqlite"));
+  const db = new DatabaseSync(stateDbPath(codexHome));
   try {
     const row = db
       .prepare("SELECT model_provider FROM threads WHERE id = ?")
@@ -683,7 +758,7 @@ test("runSync skips locked rollout files and still updates sqlite", async () => 
   const rollout = await fs.readFile(sessionPath, "utf8");
   assert.match(rollout, /"model_provider":"apigather"/);
 
-  const db = new DatabaseSync(path.join(codexHome, "state_5.sqlite"));
+  const db = new DatabaseSync(stateDbPath(codexHome));
   try {
     const row = db
       .prepare("SELECT model_provider FROM threads WHERE id = ?")
@@ -720,18 +795,22 @@ test("applySessionChanges preserves large UTF-8 session metadata", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-large.jsonl");
+  const title = "\u4e2d\u6587\u4f1a\u8bdd";
+  const note = "\u4fdd\u7559 UTF-8 \u5185\u5bb9";
+  const message = "\u4f60\u597d";
+  const largeBlobPrefix = "\u6570\u636e\u5757";
   const payload = {
     id: "thread-large",
     timestamp: "2026-03-19T00:00:00.000Z",
-    cwd: "C:\\AITemp\\中文",
+    cwd: "C:\\AITemp\\\u4e2d\u6587",
     source: "cli",
     cli_version: "0.115.0",
     model_provider: "apigather",
-    title: "中文会话",
-    note: "保留 UTF-8 内容",
-    large_blob: "数据块".repeat(40000)
+    title,
+    note,
+    large_blob: largeBlobPrefix.repeat(40000)
   };
-  await writeCustomRollout(sessionPath, payload, "你好");
+  await writeCustomRollout(sessionPath, payload, message);
 
   const { changes } = await collectSessionChanges(codexHome, "openai");
   const result = await applySessionChanges(changes);
@@ -741,10 +820,10 @@ test("applySessionChanges preserves large UTF-8 session metadata", async () => {
 
   const rollout = await fs.readFile(sessionPath, "utf8");
   assert.match(rollout, /"model_provider":"openai"/);
-  assert.match(rollout, /"title":"中文会话"/);
-  assert.match(rollout, /"note":"保留 UTF-8 内容"/);
-  assert.match(rollout, /"message":"你好"/);
-  assert.match(rollout, /"large_blob":"数据块数据块/);
+  assert.match(rollout, new RegExp(`"title":"${title}"`));
+  assert.match(rollout, new RegExp(`"note":"${note}"`));
+  assert.match(rollout, new RegExp(`"message":"${message}"`));
+  assert.match(rollout, new RegExp(`"large_blob":"${largeBlobPrefix}${largeBlobPrefix}`));
 });
 
 test("applySessionChanges restores original rollout mtime", async () => {
@@ -916,7 +995,7 @@ test("runSync fails before rollout rewrite when SQLite is malformed", async () =
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-malformed-db.jsonl");
   await writeRollout(sessionPath, "thread-malformed", "apigather");
-  await fs.writeFile(path.join(codexHome, "state_5.sqlite"), "not sqlite", "utf8");
+  await fs.writeFile(stateDbPath(codexHome), "not sqlite", "utf8");
 
   await assert.rejects(
     () => runSync({ codexHome }),
@@ -929,7 +1008,7 @@ test("status reports malformed SQLite without failing", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   await writeRollout(path.join(codexHome, "sessions", "2026", "03", "19", "rollout-status-db.jsonl"), "thread-status", "openai");
-  await fs.writeFile(path.join(codexHome, "state_5.sqlite"), "not sqlite", "utf8");
+  await fs.writeFile(stateDbPath(codexHome), "not sqlite", "utf8");
 
   const status = await getStatus({ codexHome });
   assert.equal(status.sqliteCounts.unreadable, true);
@@ -961,7 +1040,7 @@ test("pruneBackups removes the oldest backup directories", async () => {
   const { codexHome } = await makeTempCodexHome();
   const oldestBytes = await writeBackup(codexHome, "20260319T000000000Z", [
     ["note.txt", "oldest"],
-    ["db/state_5.sqlite", "sqlite"]
+    ["db/sqlite/state_5.sqlite", "sqlite"]
   ]);
   await writeBackup(codexHome, "20260320T000000000Z", [["note.txt", "middle"]]);
   await writeBackup(codexHome, "20260321T000000000Z", [["note.txt", "newest"]]);

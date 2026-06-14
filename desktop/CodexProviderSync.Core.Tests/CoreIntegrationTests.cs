@@ -86,6 +86,72 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
+    public async Task RunUseRelay_RequiresCustomEndpoint_ThenSwitchesAndSyncsToOpenAI()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"", includeRelayProvider: true);
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-relay.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-relay", "openai");
+        await fixture.WriteStateDbAsync(
+        [
+            ("thread-relay", "openai", false)
+        ]);
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunUseRelayAsync(fixture.CodexHome);
+
+        Assert.Equal("OpenAI", result.TargetProvider);
+        Assert.True(result.ConfigUpdated);
+        string configText = await File.ReadAllTextAsync(Path.Combine(fixture.CodexHome, "config.toml"));
+        Assert.Contains("model_provider = \"OpenAI\"", configText);
+        Assert.Contains("base_url = \"https://relay.example.com\"", configText);
+        string rollout = await File.ReadAllTextAsync(sessionPath);
+        Assert.Contains("\"model_provider\":\"OpenAI\"", rollout);
+        Assert.Contains("\"message\":\"hi\"", rollout);
+        Assert.Equal([("thread-relay", "OpenAI")], await ReadThreadProvidersAsync(fixture));
+    }
+
+    [Fact]
+    public async Task RunUseRelay_RejectsOpenAIProviderWithoutCustomEndpoint()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+
+        CodexSyncService service = new();
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => service.RunUseRelayAsync(fixture.CodexHome));
+
+        Assert.Contains("Relay provider \"OpenAI\"", error.Message);
+        Assert.DoesNotContain("model_provider = \"OpenAI\"", await File.ReadAllTextAsync(Path.Combine(fixture.CodexHome, "config.toml")));
+    }
+
+    [Fact]
+    public async Task RunUseOfficial_SwitchesAndSyncsToLowercaseOpenai()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"OpenAI\"", includeRelayProvider: true);
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-official.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-official", "OpenAI");
+        await fixture.WriteStateDbAsync(
+        [
+            ("thread-official", "OpenAI", false)
+        ]);
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunUseOfficialAsync(fixture.CodexHome);
+
+        Assert.Equal("openai", result.TargetProvider);
+        Assert.True(result.ConfigUpdated);
+        string configText = await File.ReadAllTextAsync(Path.Combine(fixture.CodexHome, "config.toml"));
+        Assert.Contains("model_provider = \"openai\"", configText);
+        Assert.Contains("base_url = \"https://relay.example.com\"", configText);
+        string rollout = await File.ReadAllTextAsync(sessionPath);
+        Assert.Contains("\"model_provider\":\"openai\"", rollout);
+        Assert.Contains("\"message\":\"hi\"", rollout);
+        Assert.Equal([("thread-official", "openai")], await ReadThreadProvidersAsync(fixture));
+    }
+
+    [Fact]
     public async Task RunSync_RepairsSqliteHasUserEventFromRolloutUserMessages()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
@@ -555,7 +621,7 @@ public sealed class CoreIntegrationTests
         long oldestBytes = await fixture.WriteBackupAsync(
             "20260319T000000000Z",
             ("note.txt", "oldest"),
-            ("db/state_5.sqlite", "sqlite"));
+            ($"db/{AppConstants.SqliteDirBasename}/state_5.sqlite", "sqlite"));
         await fixture.WriteBackupAsync("20260320T000000000Z", ("note.txt", "middle"));
         await fixture.WriteBackupAsync("20260321T000000000Z", ("note.txt", "newest"));
 
@@ -744,7 +810,9 @@ public sealed class CoreIntegrationTests
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
         await fixture.WriteConfigAsync("model_provider = \"openai\"");
-        await File.WriteAllTextAsync(Path.Combine(fixture.CodexHome, "state_5.sqlite"), "not sqlite");
+        await File.WriteAllTextAsync(
+            Path.Combine(fixture.CodexHome, AppConstants.SqliteDirBasename, "state_5.sqlite"),
+            "not sqlite");
 
         CodexSyncService service = new();
         StatusSnapshot status = await service.GetStatusAsync(fixture.CodexHome);
@@ -784,5 +852,21 @@ public sealed class CoreIntegrationTests
 
         Assert.Contains("model_provider = \"manual\"", await File.ReadAllTextAsync(Path.Combine(fixture.CodexHome, "config.toml")));
         Assert.Contains("\"model_provider\":\"manual\"", await File.ReadAllTextAsync(sessionPath));
+    }
+
+    private static async Task<List<(string Id, string Provider)>> ReadThreadProvidersAsync(TestCodexHomeFixture fixture)
+    {
+        await using SqliteConnection connection = fixture.OpenSqliteConnection();
+        await connection.OpenAsync();
+        SqliteCommand command = connection.CreateCommand();
+        command.CommandText = "SELECT id, model_provider FROM threads ORDER BY id";
+        await using SqliteDataReader reader = await command.ExecuteReaderAsync();
+        List<(string Id, string Provider)> rows = [];
+        while (await reader.ReadAsync())
+        {
+            rows.Add((reader.GetString(0), reader.GetString(1)));
+        }
+
+        return rows;
     }
 }

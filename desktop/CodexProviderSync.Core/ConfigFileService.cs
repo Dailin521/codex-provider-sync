@@ -66,6 +66,42 @@ public sealed partial class ConfigFileService
         return ListConfiguredProviderIds(configText).Contains(provider, StringComparer.Ordinal);
     }
 
+    public string? ReadProviderBlock(string configText, string provider)
+    {
+        string escapedProvider = Regex.Escape(provider);
+        Match headerMatch = Regex.Match(
+            configText,
+            $"^\\[model_providers\\.{escapedProvider}]\\s*$",
+            RegexOptions.Multiline);
+        if (!headerMatch.Success)
+        {
+            return null;
+        }
+
+        int blockStart = headerMatch.Index + headerMatch.Length;
+        string rest = configText[blockStart..];
+        Match nextHeaderMatch = Regex.Match(rest, "^\\[[^\\]]+]\\s*$", RegexOptions.Multiline);
+        int blockEnd = nextHeaderMatch.Success ? blockStart + nextHeaderMatch.Index : configText.Length;
+        return configText[blockStart..blockEnd];
+    }
+
+    public bool ProviderBlockHasCustomEndpoint(string configText, string provider)
+    {
+        string? block = ReadProviderBlock(configText, provider);
+        if (block is null)
+        {
+            return false;
+        }
+
+        return SplitLines(block).Any(static rawLine =>
+        {
+            string trimmed = rawLine.Trim();
+            return !string.IsNullOrWhiteSpace(trimmed)
+                && !trimmed.StartsWith('#')
+                && Regex.IsMatch(trimmed, "^base_url\\s*=\\s*(\"[^\"]+\"|'[^']+')\\s*$");
+        });
+    }
+
     public string SetRootProviderInConfigText(string configText, string provider)
     {
         string newline = DetectNewline(configText);

@@ -4,12 +4,15 @@ import path from "node:path";
 import {
   DEFAULT_BACKUP_RETENTION_COUNT,
   DEFAULT_PROVIDER,
+  OFFICIAL_PROVIDER,
+  RELAY_PROVIDER,
   defaultBackupRoot,
   defaultCodexHome
 } from "./constants.js";
 import {
   configDeclaresProvider,
   listConfiguredProviderIds,
+  providerBlockHasCustomEndpoint,
   readConfigText,
   readCurrentProviderFromConfigText,
   setRootProviderInConfigText,
@@ -92,6 +95,16 @@ function buildEncryptedContentWarning(encryptedContentCounts, targetProvider) {
     return null;
   }
   return `Encrypted content warning: ${total} rollout file(s) contain encrypted_content from provider(s) ${[...riskyProviders].sort().join(", ")}. Visibility metadata can be synchronized to ${targetProvider}, but continuing or compacting those histories may fail with invalid_encrypted_content. Return to the original provider/account or start a new session if you need reliable continuation.`;
+}
+
+function assertRelayProviderConfig(configText) {
+  if (!configDeclaresProvider(configText, RELAY_PROVIDER)) {
+    throw new Error(`Relay provider "${RELAY_PROVIDER}" is not available in config.toml. Add [model_providers.${RELAY_PROVIDER}] with your custom endpoint first.`);
+  }
+
+  if (!providerBlockHasCustomEndpoint(configText, RELAY_PROVIDER)) {
+    throw new Error(`Relay provider "${RELAY_PROVIDER}" does not define base_url in config.toml. Refusing to switch because that would not use your relay endpoint.`);
+  }
 }
 
 export async function getStatus({ codexHome: explicitCodexHome } = {}) {
@@ -392,7 +405,8 @@ export async function runSwitch({
   codexHome: explicitCodexHome,
   provider,
   keepCount = DEFAULT_BACKUP_RETENTION_COUNT,
-  onProgress
+  onProgress,
+  validateConfigText
 }) {
   if (!provider) {
     throw new Error("Missing provider id. Usage: codex-provider switch <provider-id>");
@@ -402,6 +416,9 @@ export async function runSwitch({
   await ensureCodexHome(codexHome);
   const configPath = path.join(codexHome, "config.toml");
   const originalConfigText = await readConfigText(configPath);
+  if (typeof validateConfigText === "function") {
+    validateConfigText(originalConfigText);
+  }
   if (!configDeclaresProvider(originalConfigText, provider)) {
     throw new Error(`Provider "${provider}" is not available in config.toml. Configure it first or use one of: ${listConfiguredProviderIds(originalConfigText).join(", ")}`);
   }
@@ -435,6 +452,21 @@ export async function runSwitch({
     await writeConfigText(configPath, originalConfigText);
     throw error;
   }
+}
+
+export async function runUseOfficial(options = {}) {
+  return runSwitch({
+    ...options,
+    provider: OFFICIAL_PROVIDER
+  });
+}
+
+export async function runUseRelay(options = {}) {
+  return runSwitch({
+    ...options,
+    provider: RELAY_PROVIDER,
+    validateConfigText: assertRelayProviderConfig
+  });
 }
 
 export async function runRestore({

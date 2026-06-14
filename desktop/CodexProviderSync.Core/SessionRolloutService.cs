@@ -348,13 +348,14 @@ public sealed class SessionRolloutService
                 }
 
                 await collected.WriteAsync(buffer.AsMemory(0, bytesRead));
-                ReadOnlySpan<byte> current = collected.GetBuffer().AsSpan(0, (int)collected.Length);
-                int newlineIndex = current.IndexOf((byte)'\n');
+                byte[] collectedBuffer = collected.GetBuffer();
+                int collectedLength = (int)collected.Length;
+                int newlineIndex = Array.IndexOf(collectedBuffer, (byte)'\n', 0, collectedLength);
                 if (newlineIndex >= 0)
                 {
-                    bool crlf = newlineIndex > 0 && current[newlineIndex - 1] == '\r';
+                    bool crlf = newlineIndex > 0 && collectedBuffer[newlineIndex - 1] == '\r';
                     int lineLength = crlf ? newlineIndex - 1 : newlineIndex;
-                    string firstLine = Encoding.UTF8.GetString(current[..lineLength]);
+                    string firstLine = Encoding.UTF8.GetString(collectedBuffer, 0, lineLength);
                     return new FirstLineRecord(firstLine, crlf ? "\r\n" : "\n", newlineIndex + 1);
                 }
             }

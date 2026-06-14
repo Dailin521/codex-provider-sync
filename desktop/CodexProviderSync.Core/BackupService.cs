@@ -26,12 +26,16 @@ public sealed class BackupService
         Directory.CreateDirectory(dbDir);
 
         List<string> copiedDbFiles = [];
-        foreach (string suffix in new[] { string.Empty, "-shm", "-wal" })
+        string? dbPath = _sqliteStateService.ExistingStateDbPath(codexHome);
+        if (dbPath is not null)
         {
-            string fileName = $"{AppConstants.DbFileBasename}{suffix}";
-            if (await CopyIfPresentAsync(Path.Combine(codexHome, fileName), Path.Combine(dbDir, fileName), overwrite: false))
+            foreach (string suffix in new[] { string.Empty, "-shm", "-wal" })
             {
-                copiedDbFiles.Add(fileName);
+                string relativePath = DbBackupRelativePath(codexHome, dbPath, suffix);
+                if (await CopyIfPresentAsync(dbPath + suffix, Path.Combine(dbDir, relativePath), overwrite: false))
+                {
+                    copiedDbFiles.Add(relativePath);
+                }
             }
         }
 
@@ -142,8 +146,9 @@ public sealed class BackupService
             foreach (string suffix in new[] { string.Empty, "-shm", "-wal" })
             {
                 string fileName = $"{AppConstants.DbFileBasename}{suffix}";
-                string targetPath = Path.Combine(codexHome, fileName);
-                if (!backedUpFiles.Contains(fileName) && File.Exists(targetPath))
+                string relativePrimaryPath = Path.Combine(AppConstants.SqliteDirBasename, fileName);
+                string targetPath = Path.Combine(Path.GetDirectoryName(_sqliteStateService.StateDbPath(codexHome))!, fileName);
+                if (!backedUpFiles.Contains(relativePrimaryPath) && !backedUpFiles.Contains(fileName) && File.Exists(targetPath))
                 {
                     File.Delete(targetPath);
                 }
@@ -151,7 +156,7 @@ public sealed class BackupService
 
             foreach (string fileName in metadata.DbFiles)
             {
-                await CopyIfPresentAsync(Path.Combine(dbDir, fileName), Path.Combine(codexHome, fileName), overwrite: true);
+                await CopyIfPresentAsync(Path.Combine(dbDir, fileName), RestoreDbTargetPath(codexHome, fileName), overwrite: true);
             }
         }
 
@@ -303,6 +308,23 @@ public sealed class BackupService
         File.Copy(sourcePath, destinationPath, overwrite);
         await Task.CompletedTask;
         return true;
+    }
+
+    private static string DbBackupRelativePath(string codexHome, string dbPath, string suffix)
+    {
+        string relativePath = Path.GetRelativePath(codexHome, dbPath + suffix);
+        return !relativePath.StartsWith("..", StringComparison.Ordinal)
+            && !Path.IsPathRooted(relativePath)
+            ? relativePath
+            : AppConstants.DbFileBasename + suffix;
+    }
+
+    private static string RestoreDbTargetPath(string codexHome, string relativePath)
+    {
+        return relativePath.Contains(Path.DirectorySeparatorChar, StringComparison.Ordinal)
+            || relativePath.Contains(Path.AltDirectorySeparatorChar, StringComparison.Ordinal)
+            ? Path.Combine(codexHome, relativePath)
+            : Path.Combine(codexHome, AppConstants.SqliteDirBasename, relativePath);
     }
 
     private static JsonSerializerOptions JsonOptions()

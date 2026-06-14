@@ -53,6 +53,17 @@ Use `codex-provider switch <provider-id>` when:
 - the user wants to change the root `model_provider`
 - the user wants one command to both switch provider and resync history
 
+Use the dedicated two-account commands when the user only has the official OpenAI
+account and one relay account:
+
+- `codex-provider use-official` switches to the built-in official provider
+  `openai` and syncs history metadata to it.
+- `codex-provider use-relay` switches to the relay provider `OpenAI`, first
+  verifying that `[model_providers.OpenAI]` exists and contains `base_url`, then
+  syncs history metadata to it.
+- Prefer these commands over `switch openai` / `switch OpenAI` for this two-account
+  workflow to avoid confusing the case-sensitive provider IDs.
+
 Use `codex-provider restore <backup-dir>` when:
 
 - the user wants to roll back a previous sync
@@ -125,6 +136,8 @@ codex-provider status
 codex-provider sync
 codex-provider sync --keep 5
 codex-provider sync --provider openai
+codex-provider use-official
+codex-provider use-relay
 codex-provider switch apigather
 codex-provider prune-backups --keep 5
 codex-provider restore C:\Users\you\.codex\backups_state\provider-sync\20260319T042708906Z

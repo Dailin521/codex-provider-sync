@@ -143,6 +143,8 @@ Quick mapping:
 
 - inspect only: `codex-provider status`
 - fix visibility under current provider: `codex-provider sync`
+- switch to the official account and sync: `codex-provider use-official`
+- switch to the relay account and sync: `codex-provider use-relay`
 - switch provider and sync: `codex-provider switch openai`
 - install a desktop double-click launcher: `codex-provider install-windows-launcher`
 - roll back a mistake: `codex-provider restore <backup-dir>`
@@ -155,6 +157,13 @@ Quick mapping:
   - syncs history to the current provider
   - `--provider <id>` overrides the target provider
   - if root `model_provider` is missing, it falls back to `openai`
+- `codex-provider use-official`
+  - switches root `model_provider` to the official provider `openai`
+  - immediately syncs history metadata to `openai`
+- `codex-provider use-relay`
+  - switches root `model_provider` to the relay provider `OpenAI`
+  - refuses to run unless `[model_providers.OpenAI]` exists and defines `base_url`
+  - immediately syncs history metadata to `OpenAI`
 - `codex-provider switch <provider-id>`
   - updates root `model_provider` in `config.toml`
   - immediately runs a sync
@@ -176,6 +185,8 @@ codex-provider status
 codex-provider sync
 codex-provider sync --keep 5
 codex-provider sync --provider openai
+codex-provider use-official
+codex-provider use-relay
 codex-provider switch openai
 codex-provider switch apigather
 codex-provider prune-backups --keep 5

@@ -21,6 +21,7 @@ internal sealed class TestCodexHomeFixture
         string codexHome = Path.Combine(root, ".codex");
         Directory.CreateDirectory(Path.Combine(codexHome, "sessions", "2026", "03", "19"));
         Directory.CreateDirectory(Path.Combine(codexHome, "archived_sessions", "2026", "03", "18"));
+        Directory.CreateDirectory(Path.Combine(codexHome, AppConstants.SqliteDirBasename));
         return await Task.FromResult(new TestCodexHomeFixture(root, codexHome));
     }
 
@@ -39,10 +40,13 @@ internal sealed class TestCodexHomeFixture
         return Path.Combine(BackupRoot(), directoryName);
     }
 
-    public async Task WriteConfigAsync(string modelProviderLine)
+    public async Task WriteConfigAsync(string modelProviderLine, bool includeRelayProvider = false)
     {
         string prefix = string.IsNullOrWhiteSpace(modelProviderLine) ? string.Empty : modelProviderLine + "\n";
-        string configText = $"{prefix}sandbox_mode = \"danger-full-access\"\n\n[model_providers.apigather]\nbase_url = \"https://example.com\"\n";
+        string relayBlock = includeRelayProvider
+            ? "\n[model_providers.OpenAI]\nbase_url = \"https://relay.example.com\"\n"
+            : string.Empty;
+        string configText = $"{prefix}sandbox_mode = \"danger-full-access\"\n\n[model_providers.apigather]\nbase_url = \"https://example.com\"{relayBlock}";
         await File.WriteAllTextAsync(Path.Combine(CodexHome, "config.toml"), configText);
     }
 
@@ -126,7 +130,7 @@ internal sealed class TestCodexHomeFixture
 
     public async Task WriteStateDbAsync(IEnumerable<(string Id, string ModelProvider, bool Archived)> rows)
     {
-        string dbPath = Path.Combine(CodexHome, "state_5.sqlite");
+        string dbPath = Path.Combine(CodexHome, AppConstants.SqliteDirBasename, "state_5.sqlite");
         await using SqliteConnection connection = OpenSqliteConnection();
         await connection.OpenAsync();
         SqliteCommand create = connection.CreateCommand();
@@ -157,7 +161,7 @@ internal sealed class TestCodexHomeFixture
 
     public async Task WriteStateDbWithUserEventColumnAsync(IEnumerable<(string Id, string ModelProvider, bool Archived, bool HasUserEvent)> rows)
     {
-        string dbPath = Path.Combine(CodexHome, "state_5.sqlite");
+        string dbPath = Path.Combine(CodexHome, AppConstants.SqliteDirBasename, "state_5.sqlite");
         await using SqliteConnection connection = OpenSqliteConnection();
         await connection.OpenAsync();
         SqliteCommand create = connection.CreateCommand();
@@ -290,6 +294,6 @@ internal sealed class TestCodexHomeFixture
 
     public SqliteConnection OpenSqliteConnection()
     {
-        return new SqliteConnection($"Data Source={Path.Combine(CodexHome, "state_5.sqlite")};Mode=ReadWriteCreate;Pooling=False");
+        return new SqliteConnection($"Data Source={Path.Combine(CodexHome, AppConstants.SqliteDirBasename, "state_5.sqlite")};Mode=ReadWriteCreate;Pooling=False");
     }
 }

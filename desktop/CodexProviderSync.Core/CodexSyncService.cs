@@ -284,6 +284,36 @@ public sealed class CodexSyncService
         }
     }
 
+    public Task<SyncResult> RunUseOfficialAsync(
+        string? explicitCodexHome,
+        int keepCount = AppConstants.DefaultBackupRetentionCount)
+    {
+        return RunSwitchAsync(explicitCodexHome, AppConstants.OfficialProvider, keepCount);
+    }
+
+    public async Task<SyncResult> RunUseRelayAsync(
+        string? explicitCodexHome,
+        int keepCount = AppConstants.DefaultBackupRetentionCount)
+    {
+        string codexHome = _codexHomeService.NormalizeCodexHome(explicitCodexHome);
+        await _codexHomeService.EnsureCodexHomeAsync(codexHome);
+        string configPath = _codexHomeService.ConfigPath(codexHome);
+        string configText = await _configFileService.ReadConfigTextAsync(configPath);
+        if (!_configFileService.ConfigDeclaresProvider(configText, AppConstants.RelayProvider))
+        {
+            throw new InvalidOperationException(
+                $"Relay provider \"{AppConstants.RelayProvider}\" is not available in config.toml. Add it first with your custom endpoint.");
+        }
+
+        if (!_configFileService.ProviderBlockHasCustomEndpoint(configText, AppConstants.RelayProvider))
+        {
+            throw new InvalidOperationException(
+                $"Relay provider \"{AppConstants.RelayProvider}\" does not define base_url in config.toml. Refusing to switch because that would not use your relay endpoint.");
+        }
+
+        return await RunSwitchAsync(codexHome, AppConstants.RelayProvider, keepCount);
+    }
+
     public async Task<RestoreResult> RunRestoreAsync(string? explicitCodexHome, string backupDir)
     {
         return await RunRestoreAsync(explicitCodexHome, backupDir, new RestoreBackupOptions());

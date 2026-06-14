@@ -50,6 +50,8 @@ CLI 需要 Node.js `24+`。如果使用 Node 20/22，可能会看到 `node:sqlit
 codex-provider status
 codex-provider sync
 codex-provider sync --provider openai
+codex-provider use-official
+codex-provider use-relay
 codex-provider switch apigather
 codex-provider restore C:\Users\you\.codex\backups_state\provider-sync\<timestamp>
 codex-provider prune-backups --keep 5
@@ -59,6 +61,8 @@ codex-provider prune-backups --keep 5
 
 - `status`：只检查当前 provider、rollout、SQLite、项目可见性诊断。
 - `sync`：不切换登录状态，只把历史会话 metadata 同步到当前 provider。
+- `use-official`：切到官方 provider `openai`，并同步历史会话 metadata。
+- `use-relay`：切到中转 provider `OpenAI`，要求 `[model_providers.OpenAI]` 存在且包含 `base_url`，然后同步历史会话 metadata。
 - `switch <provider-id>`：修改 `config.toml` 根级 `model_provider`，然后执行同步。
 - `restore <backup-dir>`：从备份恢复，支持 `--no-config`、`--no-db`、`--no-sessions`。
 - `prune-backups --keep <n>`：只清理本工具创建的旧备份。

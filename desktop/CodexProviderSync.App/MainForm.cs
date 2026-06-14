@@ -43,6 +43,8 @@ public sealed class MainForm : Form
         AutoSize = true,
         Margin = new Padding(0, 4, 8, 0)
     };
+    private readonly Button _useOfficialButton = new() { Text = "Use Official", Dock = DockStyle.Fill, Height = 36 };
+    private readonly Button _useRelayButton = new() { Text = "Use Relay", Dock = DockStyle.Fill, Height = 36 };
     private readonly CheckBox _restoreConfigCheck = new() { Text = "恢复配置文件（config.toml）", Checked = false, AutoSize = true };
     private readonly CheckBox _restoreDatabaseCheck = new() { Text = "恢复线程数据库（SQLite）", Checked = true, AutoSize = true };
     private readonly CheckBox _restoreSessionsCheck = new() { Text = "恢复会话文件元数据（rollout）", Checked = true, AutoSize = true };
@@ -265,9 +267,10 @@ public sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 11,
+            RowCount = 12,
             Padding = new Padding(12)
         };
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -283,14 +286,15 @@ public sealed class MainForm : Form
         panel.Controls.Add(new Label { Text = "目标 Provider", AutoSize = true }, 0, 0);
         panel.Controls.Add(_selectedProviderValue, 0, 1);
         panel.Controls.Add(BuildUpdateConfigPanel(), 0, 2);
-        panel.Controls.Add(BuildWarningPanel(), 0, 3);
-        panel.Controls.Add(BuildBackupRetentionPanel(), 0, 4);
-        panel.Controls.Add(_executeButton, 0, 5);
-        panel.Controls.Add(BuildRestoreOptionsPanel(), 0, 6);
-        panel.Controls.Add(_restoreButton, 0, 7);
-        panel.Controls.Add(_openBackupButton, 0, 8);
-        panel.Controls.Add(_pruneBackupsButton, 0, 9);
-        panel.Controls.Add(_busyLabel, 0, 10);
+        panel.Controls.Add(BuildQuickSwitchPanel(), 0, 3);
+        panel.Controls.Add(BuildWarningPanel(), 0, 4);
+        panel.Controls.Add(BuildBackupRetentionPanel(), 0, 5);
+        panel.Controls.Add(_executeButton, 0, 6);
+        panel.Controls.Add(BuildRestoreOptionsPanel(), 0, 7);
+        panel.Controls.Add(_restoreButton, 0, 8);
+        panel.Controls.Add(_openBackupButton, 0, 9);
+        panel.Controls.Add(_pruneBackupsButton, 0, 10);
+        panel.Controls.Add(_busyLabel, 0, 11);
 
         group.Controls.Add(panel);
         return group;
@@ -308,6 +312,21 @@ public sealed class MainForm : Form
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         panel.Controls.Add(_updateConfigCheck, 0, 0);
         panel.Controls.Add(_updateConfigLabel, 1, 0);
+        return panel;
+    }
+
+    private Control BuildQuickSwitchPanel()
+    {
+        TableLayoutPanel panel = new()
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            Margin = new Padding(0, 2, 0, 8)
+        };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        panel.Controls.Add(_useOfficialButton, 0, 0);
+        panel.Controls.Add(_useRelayButton, 1, 0);
         return panel;
     }
 
@@ -414,6 +433,8 @@ public sealed class MainForm : Form
         _removeProviderButton.Click += async (_, _) => await RemoveManualProviderAsync();
         _backupRetentionInput.ValueChanged += async (_, _) => await PersistBackupRetentionAsync();
         _executeButton.Click += async (_, _) => await ExecuteSyncOrSwitchAsync();
+        _useOfficialButton.Click += async (_, _) => await UseOfficialAsync();
+        _useRelayButton.Click += async (_, _) => await UseRelayAsync();
         _restoreButton.Click += async (_, _) => await RestoreBackupAsync();
         _openBackupButton.Click += (_, _) => OpenBackupFolder();
         _pruneBackupsButton.Click += async (_, _) => await PruneBackupsAsync();
@@ -553,6 +574,38 @@ public sealed class MainForm : Form
             AppendLog(string.Empty);
             await RefreshStatusCoreAsync(codexHome);
             SelectProvider(provider);
+        });
+    }
+
+    private async Task UseOfficialAsync()
+    {
+        await RunQuickSwitchAsync("official OpenAI", () => _syncService.RunUseOfficialAsync(CurrentCodexHome(), CurrentBackupRetentionCount()));
+    }
+
+    private async Task UseRelayAsync()
+    {
+        await RunQuickSwitchAsync("relay OpenAI", () => _syncService.RunUseRelayAsync(CurrentCodexHome(), CurrentBackupRetentionCount()));
+    }
+
+    private async Task RunQuickSwitchAsync(string label, Func<Task<SyncResult>> action)
+    {
+        if (!ConfirmCodexClosed("Close Codex CLI, Codex App, app-server, and related terminals before switching. Continue?"))
+        {
+            return;
+        }
+
+        await RunBusyAsync($"Switching to {label}...", async () =>
+        {
+            string codexHome = CurrentCodexHome();
+            int backupRetentionCount = CurrentBackupRetentionCount();
+            SyncResult result = await Task.Run(action);
+            _settings = _settingsService.UpdateState(_settings, result.TargetProvider, result.BackupDir, CaptureWindowBounds(), backupRetentionCount);
+            await _settingsService.SaveAsync(_settings);
+            AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Switched to {label}");
+            AppendLog(TextFormatter.FormatSyncResult(result, $"Switched to {label} and synchronized"));
+            AppendLog(string.Empty);
+            await RefreshStatusCoreAsync(codexHome);
+            SelectProvider(result.TargetProvider);
         });
     }
 
@@ -830,6 +883,8 @@ public sealed class MainForm : Form
         _restoreDatabaseCheck.Enabled = !busy;
         _restoreSessionsCheck.Enabled = !busy;
         _executeButton.Enabled = !busy;
+        _useOfficialButton.Enabled = !busy;
+        _useRelayButton.Enabled = !busy;
         _restoreButton.Enabled = !busy;
         _openBackupButton.Enabled = !busy;
         _pruneBackupsButton.Enabled = !busy;

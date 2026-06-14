@@ -1,11 +1,14 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization.Metadata;
 using Microsoft.Data.Sqlite;
 
 namespace CodexProviderSync.Core;
 
 public sealed class GlobalStateService
 {
+    private readonly SqliteStateService _sqliteStateService = new();
+
     public string StatePath(string codexHome)
     {
         return Path.Combine(codexHome, AppConstants.GlobalStateFileBasename);
@@ -18,8 +21,8 @@ public sealed class GlobalStateService
 
     public async Task<IReadOnlyList<ThreadCwdStat>> ReadThreadCwdStatsAsync(string codexHome)
     {
-        string dbPath = Path.Combine(codexHome, AppConstants.DbFileBasename);
-        if (!File.Exists(dbPath))
+        string? dbPath = _sqliteStateService.ExistingStateDbPath(codexHome);
+        if (dbPath is null)
         {
             return [];
         }
@@ -191,8 +194,8 @@ public sealed class GlobalStateService
             return [];
         }
 
-        string dbPath = Path.Combine(codexHome, AppConstants.DbFileBasename);
-        if (!File.Exists(dbPath))
+        string? dbPath = _sqliteStateService.ExistingStateDbPath(codexHome);
+        if (dbPath is null)
         {
             return roots
                 .Select(static root => new ProjectThreadVisibility
@@ -518,6 +521,7 @@ public sealed class GlobalStateService
     {
         return new JsonSerializerOptions
         {
+            TypeInfoResolver = new DefaultJsonTypeInfoResolver(),
             WriteIndented = true
         };
     }

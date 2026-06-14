@@ -13,13 +13,25 @@ public sealed class SqliteStateService
 
     public string StateDbPath(string codexHome)
     {
-        return Path.Combine(codexHome, AppConstants.DbFileBasename);
+        return Path.Combine(codexHome, AppConstants.SqliteDirBasename, AppConstants.DbFileBasename);
+    }
+
+    public string? ExistingStateDbPath(string codexHome)
+    {
+        string primaryPath = StateDbPath(codexHome);
+        if (File.Exists(primaryPath))
+        {
+            return primaryPath;
+        }
+
+        string legacyPath = Path.Combine(codexHome, AppConstants.DbFileBasename);
+        return File.Exists(legacyPath) ? legacyPath : null;
     }
 
     public async Task<ProviderCounts?> ReadSqliteProviderCountsAsync(string codexHome)
     {
-        string dbPath = StateDbPath(codexHome);
-        if (!File.Exists(dbPath))
+        string? dbPath = ExistingStateDbPath(codexHome);
+        if (dbPath is null)
         {
             return null;
         }
@@ -83,8 +95,8 @@ public sealed class SqliteStateService
         IReadOnlyCollection<string>? userEventThreadIds = null,
         IReadOnlyDictionary<string, string>? threadCwdsById = null)
     {
-        string dbPath = StateDbPath(codexHome);
-        if (!File.Exists(dbPath))
+        string? dbPath = ExistingStateDbPath(codexHome);
+        if (dbPath is null)
         {
             return null;
         }
@@ -151,8 +163,8 @@ public sealed class SqliteStateService
 
     public async Task<bool> AssertSqliteWritableAsync(string codexHome, int? busyTimeoutMs = null)
     {
-        string dbPath = StateDbPath(codexHome);
-        if (!File.Exists(dbPath))
+        string? dbPath = ExistingStateDbPath(codexHome);
+        if (dbPath is null)
         {
             return false;
         }
@@ -182,8 +194,8 @@ public sealed class SqliteStateService
         IReadOnlyCollection<string>? userEventThreadIds = null,
         IReadOnlyDictionary<string, string>? threadCwdsById = null)
     {
-        string dbPath = StateDbPath(codexHome);
-        if (!File.Exists(dbPath))
+        string? dbPath = ExistingStateDbPath(codexHome);
+        if (dbPath is null)
         {
             if (afterUpdate is not null)
             {
