@@ -5,6 +5,7 @@ import {
   configDeclaresProvider,
   listConfiguredProviderIds,
   readCurrentProviderFromConfigText,
+  readSqliteHomeFromConfigText,
   setRootProviderInConfigText
 } from "../src/config-file.js";
 
@@ -53,4 +54,19 @@ base_url = "https://example.org"
   assert.deepEqual(listConfiguredProviderIds(input), ["apigather", "newapi", "openai"]);
   assert.equal(configDeclaresProvider(input, "apigather"), true);
   assert.equal(configDeclaresProvider(input, "missing"), false);
+});
+
+test("readSqliteHomeFromConfigText reads only root-level sqlite_home", () => {
+  assert.equal(readSqliteHomeFromConfigText(`
+model_provider = "openai"
+sqlite_home = "/tmp/codex-state"
+
+[features]
+sqlite_home = "/ignored"
+`), "/tmp/codex-state");
+
+  assert.equal(readSqliteHomeFromConfigText(`
+[features]
+sqlite_home = "/ignored"
+`), null);
 });

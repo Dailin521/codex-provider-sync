@@ -94,8 +94,10 @@ async function writeGlobalState(codexHome, value) {
   await fs.writeFile(path.join(codexHome, ".codex-global-state.json.bak"), text, "utf8");
 }
 
-async function writeStateDb(codexHome, rows) {
-  const dbPath = path.join(codexHome, "state_5.sqlite");
+async function writeStateDb(codexHome, rows, options = {}) {
+  const sqliteHome = options.sqliteHome ?? codexHome;
+  await fs.mkdir(sqliteHome, { recursive: true });
+  const dbPath = path.join(sqliteHome, "state_5.sqlite");
   const db = new DatabaseSync(dbPath);
   try {
     db.exec(`
@@ -116,8 +118,10 @@ async function writeStateDb(codexHome, rows) {
   }
 }
 
-async function writeStateDbWithUserEventColumn(codexHome, rows) {
-  const dbPath = path.join(codexHome, "state_5.sqlite");
+async function writeStateDbWithUserEventColumn(codexHome, rows, options = {}) {
+  const sqliteHome = options.sqliteHome ?? codexHome;
+  await fs.mkdir(sqliteHome, { recursive: true });
+  const dbPath = path.join(sqliteHome, "state_5.sqlite");
   const db = new DatabaseSync(dbPath);
   try {
     db.exec(`
@@ -139,8 +143,10 @@ async function writeStateDbWithUserEventColumn(codexHome, rows) {
   }
 }
 
-async function writeStateDbForProjectVisibility(codexHome, rows) {
-  const dbPath = path.join(codexHome, "state_5.sqlite");
+async function writeStateDbForProjectVisibility(codexHome, rows, options = {}) {
+  const sqliteHome = options.sqliteHome ?? codexHome;
+  await fs.mkdir(sqliteHome, { recursive: true });
+  const dbPath = path.join(sqliteHome, "state_5.sqlite");
   const db = new DatabaseSync(dbPath);
   try {
     db.exec(`
@@ -297,6 +303,62 @@ test("runSync rewrites rollout files and sqlite, then restore reverts both", asy
   const restoredArchived = await fs.readFile(archivedPath, "utf8");
   assert.match(restoredSession, /"model_provider":"apigather"/);
   assert.match(restoredArchived, /"model_provider":"newapi"/);
+});
+
+test("runSync uses config sqlite_home for SQLite state and backup restore", async () => {
+  const { codexHome, root } = await makeTempCodexHome();
+  const sqliteHome = path.join(root, "codex-sqlite");
+  await writeConfig(codexHome, `model_provider = "openai"\nsqlite_home = "${sqliteHome.replaceAll("\\", "\\\\")}"`);
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-sqlite-home.jsonl");
+  await writeRollout(sessionPath, "thread-sqlite-home", "apigather");
+  await writeStateDb(codexHome, [
+    { id: "thread-sqlite-home", model_provider: "apigather", archived: false }
+  ], { sqliteHome });
+
+  const result = await runSync({ codexHome, provider: "openai" });
+  assert.equal(result.sqliteDbPath, path.join(sqliteHome, "state_5.sqlite"));
+  assert.equal(result.sqliteRowsUpdated, 1);
+
+  const db = new DatabaseSync(path.join(sqliteHome, "state_5.sqlite"));
+  try {
+    const row = db.prepare("SELECT model_provider FROM threads WHERE id = ?").get("thread-sqlite-home");
+    assert.equal(row.model_provider, "openai");
+  } finally {
+    db.close();
+  }
+
+  const metadata = JSON.parse(await fs.readFile(path.join(result.backupDir, "metadata.json"), "utf8"));
+  assert.equal(metadata.dbPath, path.join(sqliteHome, "state_5.sqlite"));
+  assert.equal(metadata.dbRelativeDir, path.relative(codexHome, sqliteHome));
+
+  await runRestore({ codexHome, backupDir: result.backupDir });
+  const restoredDb = new DatabaseSync(path.join(sqliteHome, "state_5.sqlite"));
+  try {
+    const row = restoredDb.prepare("SELECT model_provider FROM threads WHERE id = ?").get("thread-sqlite-home");
+    assert.equal(row.model_provider, "apigather");
+  } finally {
+    restoredDb.close();
+  }
+});
+
+test("status and sync fall back to nested sqlite directory when root database is absent", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  const sqliteHome = path.join(codexHome, "sqlite");
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-nested-sqlite.jsonl");
+  await writeRollout(sessionPath, "thread-nested-sqlite", "apigather");
+  await writeStateDb(codexHome, [
+    { id: "thread-nested-sqlite", model_provider: "apigather", archived: false }
+  ], { sqliteHome });
+
+  const status = await getStatus({ codexHome });
+  assert.equal(status.sqliteDbPath, path.join(sqliteHome, "state_5.sqlite"));
+  assert.deepEqual(status.sqliteCounts.sessions, { apigather: 1 });
+  assert.match(renderStatus(status), new RegExp(`DB path: ${path.join(sqliteHome, "state_5.sqlite").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+
+  const result = await runSync({ codexHome, provider: "openai" });
+  assert.equal(result.sqliteDbPath, path.join(sqliteHome, "state_5.sqlite"));
+  assert.equal(result.sqliteRowsUpdated, 1);
 });
 
 test("runSync reports stage progress and backup duration", async () => {

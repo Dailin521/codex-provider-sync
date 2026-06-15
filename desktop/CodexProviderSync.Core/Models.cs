@@ -22,6 +22,7 @@ public sealed class StatusSnapshot
     public required IReadOnlyList<string> LockedRolloutFiles { get; init; }
     public required ProviderCounts EncryptedContentCounts { get; init; }
     public string? EncryptedContentWarning { get; init; }
+    public required string SqliteDbPath { get; init; }
     public required ProviderCounts? SqliteCounts { get; init; }
     public SqliteRepairStats? SqliteRepairStats { get; init; }
     public IReadOnlyList<ProjectThreadVisibility> ProjectThreadVisibility { get; init; } = [];
@@ -90,6 +91,7 @@ public sealed class SyncResult
     public required string CodexHome { get; init; }
     public required string TargetProvider { get; init; }
     public required string PreviousProvider { get; init; }
+    public required string SqliteDbPath { get; init; }
     public required string BackupDir { get; init; }
     public required int ChangedSessionFiles { get; init; }
     public required IReadOnlyList<string> SkippedLockedRolloutFiles { get; init; }
@@ -175,8 +177,11 @@ internal sealed class BackupMetadataFile
     public int Version { get; init; }
     public required string Namespace { get; init; }
     public required string CodexHome { get; init; }
+    public string? SqliteHome { get; init; }
     public required string TargetProvider { get; init; }
     public required DateTimeOffset CreatedAt { get; init; }
+    public string? DbPath { get; init; }
+    public string? DbRelativeDir { get; init; }
     public required List<string> DbFiles { get; init; }
     public int ChangedSessionFiles { get; init; }
 }

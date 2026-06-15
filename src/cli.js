@@ -56,6 +56,7 @@ function summarizeSync(result, label) {
   const lines = [
     `${label} provider: ${result.targetProvider}`,
     `Codex home: ${result.codexHome}`,
+    `SQLite state DB: ${result.sqliteDbPath}`,
     `Backup: ${result.backupDir}`,
     `Backup creation time: ${formatDuration(result.backupDurationMs ?? 0)}`,
     `Updated rollout files: ${result.changedSessionFiles}`,

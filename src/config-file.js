@@ -32,6 +32,24 @@ export function readCurrentProviderFromConfigText(configText) {
   return { provider: DEFAULT_PROVIDER, implicit: true };
 }
 
+export function readSqliteHomeFromConfigText(configText) {
+  const lines = splitLines(configText);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    if (trimmed.startsWith("[")) {
+      break;
+    }
+    const match = trimmed.match(/^sqlite_home\s*=\s*"([^"]+)"\s*$/);
+    if (match) {
+      return match[1];
+    }
+  }
+  return null;
+}
+
 export function listConfiguredProviderIds(configText) {
   const providerIds = new Set([DEFAULT_PROVIDER]);
   const regex = /^\[model_providers\.([A-Za-z0-9_.-]+)]\s*$/gm;

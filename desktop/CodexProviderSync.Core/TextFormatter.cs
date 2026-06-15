@@ -21,7 +21,8 @@ public static class TextFormatter
             $"  encrypted_content sessions: {FormatCounts(status.EncryptedContentCounts.Sessions)}",
             $"  encrypted_content archived_sessions: {FormatCounts(status.EncryptedContentCounts.ArchivedSessions)}",
             string.Empty,
-            "SQLite state:"
+            "SQLite state:",
+            $"  DB path: {status.SqliteDbPath}"
         ];
 
         if (!string.IsNullOrWhiteSpace(status.EncryptedContentWarning))
@@ -77,6 +78,7 @@ public static class TextFormatter
         [
             $"{label} provider: {result.TargetProvider}",
             $"Codex home: {result.CodexHome}",
+            $"SQLite state DB: {result.SqliteDbPath}",
             $"Backup: {result.BackupDir}",
             $"Updated rollout files: {result.ChangedSessionFiles}",
             $"Updated SQLite rows: {result.SqliteRowsUpdated}{(result.SqlitePresent ? string.Empty : " (state_5.sqlite not found)")}"

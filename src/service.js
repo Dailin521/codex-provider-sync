@@ -35,6 +35,7 @@ import {
   assertSqliteWritable,
   readSqliteProviderCounts,
   readSqliteRepairStats,
+  resolveStateDbPath,
   updateSqliteProvider
 } from "./sqlite-state.js";
 import {
@@ -109,6 +110,7 @@ export async function getStatus({ codexHome: explicitCodexHome } = {}) {
     threadCwdById
   } = await collectSessionChanges(codexHome, "__status_only__", { skipLockedReads: true });
   const sqliteCounts = await readSqliteProviderCounts(codexHome);
+  const sqliteDbPath = await resolveStateDbPath(codexHome);
   const sqliteRepairStats = sqliteCounts && !sqliteCounts.unreadable
     ? await readSqliteRepairStats(codexHome, { userEventThreadIds, threadCwdById })
     : null;
@@ -126,6 +128,7 @@ export async function getStatus({ codexHome: explicitCodexHome } = {}) {
     lockedRolloutFiles: lockedPaths,
     encryptedContentCounts,
     encryptedContentWarning: buildEncryptedContentWarning(encryptedContentCounts, current.provider ?? DEFAULT_PROVIDER),
+    sqliteDbPath,
     sqliteCounts,
     sqliteRepairStats,
     projectThreadVisibility,
@@ -160,6 +163,7 @@ export function renderStatus(status) {
 
   lines.push("");
   lines.push("SQLite state:");
+  lines.push(`  DB path: ${status.sqliteDbPath}`);
   if (status.sqliteCounts?.unreadable) {
     lines.push(`  ${status.sqliteCounts.error ?? "state_5.sqlite is malformed or unreadable"}`);
   } else if (!status.sqliteCounts) {
@@ -204,6 +208,7 @@ export async function runSync({
 
   const codexHome = normalizeCodexHome(explicitCodexHome);
   await ensureCodexHome(codexHome);
+  const sqliteDbPath = await resolveStateDbPath(codexHome);
   const configPath = path.join(codexHome, "config.toml");
   const configText = await readConfigText(configPath);
   const current = readCurrentProviderFromConfigText(configText);
@@ -337,6 +342,7 @@ export async function runSync({
       });
       return {
         codexHome,
+        sqliteDbPath,
         targetProvider,
         previousProvider: current.provider,
         backupDir,

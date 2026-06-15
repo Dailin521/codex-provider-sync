@@ -10,7 +10,7 @@ import {
   GLOBAL_STATE_FILE_BASENAME
 } from "./constants.js";
 import { assertSessionFilesWritable, restoreSessionChanges } from "./session-files.js";
-import { assertSqliteWritable } from "./sqlite-state.js";
+import { assertSqliteWritable, resolveSqliteHome } from "./sqlite-state.js";
 
 function timestampSlug(date = new Date()) {
   return date.toISOString().replaceAll(":", "").replaceAll("-", "").replace(".", "");
@@ -53,11 +53,13 @@ export async function createBackup({
   const backupDir = path.join(backupRoot, timestampSlug());
   const dbDir = path.join(backupDir, "db");
   await fs.mkdir(dbDir, { recursive: true });
+  const sqliteHome = await resolveSqliteHome(codexHome);
+  const dbRelativeDir = path.relative(codexHome, sqliteHome) || ".";
 
   const copiedDbFiles = [];
   for (const suffix of ["", "-shm", "-wal"]) {
     const fileName = `${DB_FILE_BASENAME}${suffix}`;
-    const copied = await copyIfPresent(path.join(codexHome, fileName), path.join(dbDir, fileName));
+    const copied = await copyIfPresent(path.join(sqliteHome, fileName), path.join(dbDir, fileName));
     if (copied) {
       copiedDbFiles.push(fileName);
     }
@@ -96,8 +98,11 @@ export async function createBackup({
         version: 1,
         namespace: BACKUP_NAMESPACE,
         codexHome,
+        sqliteHome,
         targetProvider,
         createdAt: sessionManifest.createdAt,
+        dbPath: path.join(sqliteHome, DB_FILE_BASENAME),
+        dbRelativeDir,
         dbFiles: copiedDbFiles,
         changedSessionFiles: sessionChanges.length
       },
@@ -191,17 +196,18 @@ export async function restoreBackup(backupDir, codexHome, options = {}) {
 
   if (restoreDatabase) {
     await assertSqliteWritable(codexHome);
+    const sqliteHome = await resolveSqliteHome(codexHome);
 
     const dbDir = path.join(backupDir, "db");
     const backedUpFiles = new Set(metadata.dbFiles ?? []);
     for (const suffix of ["", "-shm", "-wal"]) {
       const fileName = `${DB_FILE_BASENAME}${suffix}`;
       if (!backedUpFiles.has(fileName)) {
-        await removeIfPresent(path.join(codexHome, fileName));
+        await removeIfPresent(path.join(sqliteHome, fileName));
       }
     }
     for (const fileName of metadata.dbFiles ?? []) {
-      await copyIfPresent(path.join(dbDir, fileName), path.join(codexHome, fileName));
+      await copyIfPresent(path.join(dbDir, fileName), path.join(sqliteHome, fileName));
     }
   }
 

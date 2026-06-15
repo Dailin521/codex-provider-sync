@@ -5,6 +5,7 @@ namespace CodexProviderSync.Core;
 public sealed class SqliteStateService
 {
     private const int DefaultBusyTimeoutMs = 5000;
+    private readonly ConfigFileService _configFileService = new();
 
     static SqliteStateService()
     {
@@ -13,7 +14,36 @@ public sealed class SqliteStateService
 
     public string StateDbPath(string codexHome)
     {
-        return Path.Combine(codexHome, AppConstants.DbFileBasename);
+        return Path.Combine(ResolveSqliteHome(codexHome), AppConstants.DbFileBasename);
+    }
+
+    public string ResolveSqliteHome(string codexHome)
+    {
+        string configPath = Path.Combine(codexHome, "config.toml");
+        if (File.Exists(configPath))
+        {
+            string? configuredSqliteHome = _configFileService.ReadSqliteHomeFromConfigText(File.ReadAllText(configPath));
+            if (!string.IsNullOrWhiteSpace(configuredSqliteHome))
+            {
+                return Path.GetFullPath(configuredSqliteHome.Trim());
+            }
+        }
+
+        string? environmentSqliteHome = Environment.GetEnvironmentVariable("CODEX_SQLITE_HOME");
+        if (!string.IsNullOrWhiteSpace(environmentSqliteHome))
+        {
+            return Path.GetFullPath(environmentSqliteHome.Trim());
+        }
+
+        string defaultDbPath = Path.Combine(codexHome, AppConstants.DbFileBasename);
+        string nestedSqliteHome = Path.Combine(codexHome, "sqlite");
+        string nestedDbPath = Path.Combine(nestedSqliteHome, AppConstants.DbFileBasename);
+        if (!File.Exists(defaultDbPath) && File.Exists(nestedDbPath))
+        {
+            return nestedSqliteHome;
+        }
+
+        return codexHome;
     }
 
     public async Task<ProviderCounts?> ReadSqliteProviderCountsAsync(string codexHome)

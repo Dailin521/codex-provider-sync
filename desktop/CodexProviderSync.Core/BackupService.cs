@@ -24,12 +24,14 @@ public sealed class BackupService
         string backupDir = Path.Combine(backupRoot, DateTimeOffset.UtcNow.ToString("yyyyMMdd'T'HHmmssfff'Z'"));
         string dbDir = Path.Combine(backupDir, "db");
         Directory.CreateDirectory(dbDir);
+        string sqliteHome = _sqliteStateService.ResolveSqliteHome(codexHome);
+        string dbRelativeDir = Path.GetRelativePath(codexHome, sqliteHome);
 
         List<string> copiedDbFiles = [];
         foreach (string suffix in new[] { string.Empty, "-shm", "-wal" })
         {
             string fileName = $"{AppConstants.DbFileBasename}{suffix}";
-            if (await CopyIfPresentAsync(Path.Combine(codexHome, fileName), Path.Combine(dbDir, fileName), overwrite: false))
+            if (await CopyIfPresentAsync(Path.Combine(sqliteHome, fileName), Path.Combine(dbDir, fileName), overwrite: false))
             {
                 copiedDbFiles.Add(fileName);
             }
@@ -78,8 +80,11 @@ public sealed class BackupService
             Version = 1,
             Namespace = AppConstants.BackupNamespace,
             CodexHome = codexHome,
+            SqliteHome = sqliteHome,
             TargetProvider = targetProvider,
             CreatedAt = createdAt,
+            DbPath = Path.Combine(sqliteHome, AppConstants.DbFileBasename),
+            DbRelativeDir = dbRelativeDir,
             DbFiles = copiedDbFiles,
             ChangedSessionFiles = sessionChanges.Count
         };
@@ -136,13 +141,14 @@ public sealed class BackupService
         if (options.RestoreDatabase)
         {
             await _sqliteStateService.AssertSqliteWritableAsync(codexHome);
+            string sqliteHome = _sqliteStateService.ResolveSqliteHome(codexHome);
             string dbDir = Path.Combine(normalizedBackupDir, "db");
             HashSet<string> backedUpFiles = new(metadata.DbFiles, StringComparer.Ordinal);
 
             foreach (string suffix in new[] { string.Empty, "-shm", "-wal" })
             {
                 string fileName = $"{AppConstants.DbFileBasename}{suffix}";
-                string targetPath = Path.Combine(codexHome, fileName);
+                string targetPath = Path.Combine(sqliteHome, fileName);
                 if (!backedUpFiles.Contains(fileName) && File.Exists(targetPath))
                 {
                     File.Delete(targetPath);
@@ -151,7 +157,7 @@ public sealed class BackupService
 
             foreach (string fileName in metadata.DbFiles)
             {
-                await CopyIfPresentAsync(Path.Combine(dbDir, fileName), Path.Combine(codexHome, fileName), overwrite: true);
+                await CopyIfPresentAsync(Path.Combine(dbDir, fileName), Path.Combine(sqliteHome, fileName), overwrite: true);
             }
         }
 
@@ -203,8 +209,11 @@ public sealed class BackupService
             Version = metadata.Version,
             Namespace = metadata.Namespace,
             CodexHome = metadata.CodexHome,
+            SqliteHome = metadata.SqliteHome,
             TargetProvider = metadata.TargetProvider,
             CreatedAt = metadata.CreatedAt,
+            DbPath = metadata.DbPath,
+            DbRelativeDir = metadata.DbRelativeDir,
             DbFiles = metadata.DbFiles,
             ChangedSessionFiles = sessionChanges.Count
         };

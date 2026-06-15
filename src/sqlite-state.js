@@ -3,11 +3,63 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { DB_FILE_BASENAME } from "./constants.js";
+import { readConfigText, readSqliteHomeFromConfigText } from "./config-file.js";
 
 const DEFAULT_BUSY_TIMEOUT_MS = 5000;
 
 export function stateDbPath(codexHome) {
   return path.join(codexHome, DB_FILE_BASENAME);
+}
+
+export function sqliteDbPath(sqliteHome) {
+  return path.join(sqliteHome, DB_FILE_BASENAME);
+}
+
+function resolveSqliteHomeValue(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+  return path.resolve(value.trim());
+}
+
+export async function resolveSqliteHome(codexHome) {
+  const configPath = path.join(codexHome, "config.toml");
+  try {
+    const configText = await readConfigText(configPath);
+    const configuredSqliteHome = resolveSqliteHomeValue(readSqliteHomeFromConfigText(configText));
+    if (configuredSqliteHome) {
+      return configuredSqliteHome;
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  const environmentSqliteHome = resolveSqliteHomeValue(process.env.CODEX_SQLITE_HOME);
+  if (environmentSqliteHome) {
+    return environmentSqliteHome;
+  }
+
+  const defaultDbPath = stateDbPath(codexHome);
+  const nestedSqliteHome = path.join(codexHome, "sqlite");
+  const nestedDbPath = sqliteDbPath(nestedSqliteHome);
+  try {
+    await fs.access(defaultDbPath);
+  } catch {
+    try {
+      await fs.access(nestedDbPath);
+      return nestedSqliteHome;
+    } catch {
+      // Fall back to Codex's documented default when neither database is present.
+    }
+  }
+
+  return codexHome;
+}
+
+export async function resolveStateDbPath(codexHome) {
+  return sqliteDbPath(await resolveSqliteHome(codexHome));
 }
 
 function openDatabase(dbPath) {
@@ -63,7 +115,7 @@ export function wrapSqliteMalformedError(error, action) {
 }
 
 export async function readSqliteProviderCounts(codexHome) {
-  const dbPath = stateDbPath(codexHome);
+  const dbPath = await resolveStateDbPath(codexHome);
   try {
     await fs.access(dbPath);
   } catch {
@@ -118,7 +170,7 @@ export async function readSqliteProviderCounts(codexHome) {
 }
 
 export async function readSqliteRepairStats(codexHome, options = {}) {
-  const dbPath = stateDbPath(codexHome);
+  const dbPath = await resolveStateDbPath(codexHome);
   try {
     await fs.access(dbPath);
   } catch {
@@ -168,7 +220,7 @@ export async function readSqliteRepairStats(codexHome, options = {}) {
 }
 
 export async function assertSqliteWritable(codexHome, options = {}) {
-  const dbPath = stateDbPath(codexHome);
+  const dbPath = await resolveStateDbPath(codexHome);
   try {
     await fs.access(dbPath);
   } catch {
@@ -198,7 +250,7 @@ export async function updateSqliteProvider(codexHome, targetProvider, afterUpdat
     ? (maybeOptions ?? {})
     : (afterUpdateOrOptions ?? {});
 
-  const dbPath = stateDbPath(codexHome);
+  const dbPath = await resolveStateDbPath(codexHome);
   try {
     await fs.access(dbPath);
   } catch {

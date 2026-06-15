@@ -124,10 +124,9 @@ internal sealed class TestCodexHomeFixture
         return totalBytes;
     }
 
-    public async Task WriteStateDbAsync(IEnumerable<(string Id, string ModelProvider, bool Archived)> rows)
+    public async Task WriteStateDbAsync(IEnumerable<(string Id, string ModelProvider, bool Archived)> rows, string? sqliteHome = null)
     {
-        string dbPath = Path.Combine(CodexHome, "state_5.sqlite");
-        await using SqliteConnection connection = OpenSqliteConnection();
+        await using SqliteConnection connection = OpenSqliteConnection(sqliteHome);
         await connection.OpenAsync();
         SqliteCommand create = connection.CreateCommand();
         create.CommandText = """
@@ -157,7 +156,6 @@ internal sealed class TestCodexHomeFixture
 
     public async Task WriteStateDbWithUserEventColumnAsync(IEnumerable<(string Id, string ModelProvider, bool Archived, bool HasUserEvent)> rows)
     {
-        string dbPath = Path.Combine(CodexHome, "state_5.sqlite");
         await using SqliteConnection connection = OpenSqliteConnection();
         await connection.OpenAsync();
         SqliteCommand create = connection.CreateCommand();
@@ -288,8 +286,10 @@ internal sealed class TestCodexHomeFixture
         }
     }
 
-    public SqliteConnection OpenSqliteConnection()
+    public SqliteConnection OpenSqliteConnection(string? sqliteHome = null)
     {
-        return new SqliteConnection($"Data Source={Path.Combine(CodexHome, "state_5.sqlite")};Mode=ReadWriteCreate;Pooling=False");
+        string effectiveSqliteHome = sqliteHome ?? CodexHome;
+        Directory.CreateDirectory(effectiveSqliteHome);
+        return new SqliteConnection($"Data Source={Path.Combine(effectiveSqliteHome, "state_5.sqlite")};Mode=ReadWriteCreate;Pooling=False");
     }
 }

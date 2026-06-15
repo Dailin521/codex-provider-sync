@@ -62,6 +62,70 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
+    public async Task RunSync_UsesConfigSqliteHomeForSqliteStateAndBackupRestore()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        string sqliteHome = Path.Combine(fixture.Root, "codex-sqlite");
+        await fixture.WriteConfigAsync($"model_provider = \"openai\"\nsqlite_home = \"{sqliteHome.Replace('\\', '/')}\"");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-sqlite-home.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-sqlite-home", "apigather");
+        await fixture.WriteStateDbAsync(
+        [
+            ("thread-sqlite-home", "apigather", false)
+        ], sqliteHome);
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome, provider: "openai");
+
+        Assert.Equal(Path.Combine(sqliteHome, "state_5.sqlite"), result.SqliteDbPath);
+        Assert.Equal(1, result.SqliteRowsUpdated);
+
+        await using (SqliteConnection connection = fixture.OpenSqliteConnection(sqliteHome))
+        {
+            await connection.OpenAsync();
+            SqliteCommand command = connection.CreateCommand();
+            command.CommandText = "SELECT model_provider FROM threads WHERE id = 'thread-sqlite-home'";
+            Assert.Equal("openai", await command.ExecuteScalarAsync());
+        }
+
+        using JsonDocument metadata = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(result.BackupDir, "metadata.json")));
+        Assert.Equal(Path.Combine(sqliteHome, "state_5.sqlite"), metadata.RootElement.GetProperty("dbPath").GetString());
+        Assert.Equal(Path.GetRelativePath(fixture.CodexHome, sqliteHome), metadata.RootElement.GetProperty("dbRelativeDir").GetString());
+
+        await service.RunRestoreAsync(fixture.CodexHome, result.BackupDir);
+        await using SqliteConnection restoredConnection = fixture.OpenSqliteConnection(sqliteHome);
+        await restoredConnection.OpenAsync();
+        SqliteCommand restoredCommand = restoredConnection.CreateCommand();
+        restoredCommand.CommandText = "SELECT model_provider FROM threads WHERE id = 'thread-sqlite-home'";
+        Assert.Equal("apigather", await restoredCommand.ExecuteScalarAsync());
+    }
+
+    [Fact]
+    public async Task StatusAndSync_FallBackToNestedSqliteDirectoryWhenRootDatabaseIsAbsent()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        string sqliteHome = Path.Combine(fixture.CodexHome, "sqlite");
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-nested-sqlite.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-nested-sqlite", "apigather");
+        await fixture.WriteStateDbAsync(
+        [
+            ("thread-nested-sqlite", "apigather", false)
+        ], sqliteHome);
+
+        CodexSyncService service = new();
+        StatusSnapshot status = await service.GetStatusAsync(fixture.CodexHome);
+
+        Assert.Equal(Path.Combine(sqliteHome, "state_5.sqlite"), status.SqliteDbPath);
+        Assert.Equal(1, status.SqliteCounts?.Sessions["apigather"]);
+        Assert.Contains($"DB path: {Path.Combine(sqliteHome, "state_5.sqlite")}", TextFormatter.FormatStatus(status));
+
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome, provider: "openai");
+        Assert.Equal(Path.Combine(sqliteHome, "state_5.sqlite"), result.SqliteDbPath);
+        Assert.Equal(1, result.SqliteRowsUpdated);
+    }
+
+    [Fact]
     public async Task RunSwitch_UpdatesConfigAndSyncsProviderMetadata()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();

@@ -12,15 +12,33 @@ public sealed class CodexSyncService
     private readonly ProviderDiscoveryService _providerDiscoveryService;
 
     public CodexSyncService()
+        : this(CreateDefaultDependencies())
+    {
+    }
+
+    private CodexSyncService(DefaultDependencies dependencies)
         : this(
+            dependencies.CodexHomeService,
+            dependencies.ConfigFileService,
+            dependencies.SessionRolloutService,
+            dependencies.SqliteStateService,
+            dependencies.GlobalStateService,
+            dependencies.LockService,
+            dependencies.ProviderDiscoveryService)
+    {
+    }
+
+    private static DefaultDependencies CreateDefaultDependencies()
+    {
+        SqliteStateService sqliteStateService = new();
+        return new DefaultDependencies(
             new CodexHomeService(),
             new ConfigFileService(),
             new SessionRolloutService(),
-            new SqliteStateService(),
-            new GlobalStateService(),
+            sqliteStateService,
+            new GlobalStateService(sqliteStateService),
             new LockService(),
-            new ProviderDiscoveryService())
-    {
+            new ProviderDiscoveryService());
     }
 
     public CodexSyncService(
@@ -51,6 +69,7 @@ public sealed class CodexSyncService
         IReadOnlyList<string> configuredProviders = _configFileService.ListConfiguredProviderIds(configText);
         SessionChangeCollection rolloutInfo = await _sessionRolloutService.CollectSessionChangesAsync(codexHome, "__status_only__", skipLockedReads: true);
         ProviderCounts? sqliteCounts = await _sqliteStateService.ReadSqliteProviderCountsAsync(codexHome);
+        string sqliteDbPath = _sqliteStateService.StateDbPath(codexHome);
         SqliteRepairStats? sqliteRepairStats = sqliteCounts is not null && !sqliteCounts.Unreadable
             ? await _sqliteStateService.ReadSqliteRepairStatsAsync(
                 codexHome,
@@ -71,6 +90,7 @@ public sealed class CodexSyncService
             LockedRolloutFiles = rolloutInfo.LockedPaths,
             EncryptedContentCounts = rolloutInfo.EncryptedContentCounts,
             EncryptedContentWarning = BuildEncryptedContentWarning(rolloutInfo.EncryptedContentCounts, currentProvider.Provider),
+            SqliteDbPath = sqliteDbPath,
             SqliteCounts = sqliteCounts,
             SqliteRepairStats = sqliteRepairStats,
             ProjectThreadVisibility = projectThreadVisibility,
@@ -107,6 +127,7 @@ public sealed class CodexSyncService
         string configText = await _configFileService.ReadConfigTextAsync(configPath);
         CurrentProviderInfo current = _configFileService.ReadCurrentProviderFromConfigText(configText);
         string targetProvider = provider ?? current.Provider ?? AppConstants.DefaultProvider;
+        string sqliteDbPath = _sqliteStateService.StateDbPath(codexHome);
 
         await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "sync");
 
@@ -173,6 +194,7 @@ public sealed class CodexSyncService
                 CodexHome = codexHome,
                 TargetProvider = targetProvider,
                 PreviousProvider = current.Provider ?? AppConstants.DefaultProvider,
+                SqliteDbPath = sqliteDbPath,
                 BackupDir = backupDir,
                 ChangedSessionFiles = applyResult?.AppliedCount ?? 0,
                 SkippedLockedRolloutFiles = skippedRolloutFiles,
@@ -259,6 +281,7 @@ public sealed class CodexSyncService
                 CodexHome = result.CodexHome,
                 TargetProvider = result.TargetProvider,
                 PreviousProvider = result.PreviousProvider,
+                SqliteDbPath = result.SqliteDbPath,
                 BackupDir = result.BackupDir,
                 ChangedSessionFiles = result.ChangedSessionFiles,
                 SkippedLockedRolloutFiles = result.SkippedLockedRolloutFiles,
@@ -332,4 +355,13 @@ public sealed class CodexSyncService
 
         return $"Encrypted content warning: {total} rollout file(s) contain encrypted_content from provider(s) {string.Join(", ", riskyProviders)}. Visibility metadata can be synchronized to {targetProvider}, but continuing or compacting those histories may fail with invalid_encrypted_content. Return to the original provider/account or start a new session if you need reliable continuation.";
     }
+
+    private sealed record DefaultDependencies(
+        CodexHomeService CodexHomeService,
+        ConfigFileService ConfigFileService,
+        SessionRolloutService SessionRolloutService,
+        SqliteStateService SqliteStateService,
+        GlobalStateService GlobalStateService,
+        LockService LockService,
+        ProviderDiscoveryService ProviderDiscoveryService);
 }

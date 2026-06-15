@@ -46,6 +46,31 @@ public sealed partial class ConfigFileService
         return new CurrentProviderInfo(AppConstants.DefaultProvider, true);
     }
 
+    public string? ReadSqliteHomeFromConfigText(string configText)
+    {
+        foreach (string rawLine in SplitLines(configText))
+        {
+            string trimmed = rawLine.Trim();
+            if (string.IsNullOrWhiteSpace(trimmed) || trimmed.StartsWith('#'))
+            {
+                continue;
+            }
+
+            if (trimmed.StartsWith('['))
+            {
+                break;
+            }
+
+            Match match = Regex.Match(trimmed, "^sqlite_home\\s*=\\s*\"([^\"]+)\"\\s*$");
+            if (match.Success)
+            {
+                return match.Groups[1].Value;
+            }
+        }
+
+        return null;
+    }
+
     public IReadOnlyList<string> ListConfiguredProviderIds(string configText)
     {
         HashSet<string> providerIds = new(StringComparer.Ordinal)

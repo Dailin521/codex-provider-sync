@@ -46,6 +46,7 @@ public sealed class SettingsAndDiscoveryTests
             },
             LockedRolloutFiles = [],
             EncryptedContentCounts = new ProviderCounts(),
+            SqliteDbPath = "C:\\Users\\Administrator\\.codex\\state_5.sqlite",
             SqliteCounts = new ProviderCounts
             {
                 Sessions = new Dictionary<string, int>(StringComparer.Ordinal),
