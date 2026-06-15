@@ -26,12 +26,16 @@ public sealed class BackupService
         Directory.CreateDirectory(dbDir);
 
         List<string> copiedDbFiles = [];
-        foreach (string suffix in new[] { string.Empty, "-shm", "-wal" })
+        foreach (string dbPath in _sqliteStateService.StateDbPaths(codexHome))
         {
-            string fileName = $"{AppConstants.DbFileBasename}{suffix}";
-            if (await CopyIfPresentAsync(Path.Combine(codexHome, fileName), Path.Combine(dbDir, fileName), overwrite: false))
+            string relativeDbPath = Path.GetRelativePath(codexHome, dbPath);
+            foreach (string suffix in new[] { string.Empty, "-shm", "-wal" })
             {
-                copiedDbFiles.Add(fileName);
+                string relativePath = $"{relativeDbPath}{suffix}";
+                if (await CopyIfPresentAsync(Path.Combine(codexHome, relativePath), Path.Combine(dbDir, relativePath), overwrite: false))
+                {
+                    copiedDbFiles.Add(relativePath);
+                }
             }
         }
 
@@ -139,13 +143,17 @@ public sealed class BackupService
             string dbDir = Path.Combine(normalizedBackupDir, "db");
             HashSet<string> backedUpFiles = new(metadata.DbFiles, StringComparer.Ordinal);
 
-            foreach (string suffix in new[] { string.Empty, "-shm", "-wal" })
+            foreach (string dbPath in _sqliteStateService.StateDbPaths(codexHome))
             {
-                string fileName = $"{AppConstants.DbFileBasename}{suffix}";
-                string targetPath = Path.Combine(codexHome, fileName);
-                if (!backedUpFiles.Contains(fileName) && File.Exists(targetPath))
+                string relativeDbPath = Path.GetRelativePath(codexHome, dbPath);
+                foreach (string suffix in new[] { string.Empty, "-shm", "-wal" })
                 {
-                    File.Delete(targetPath);
+                    string relativePath = $"{relativeDbPath}{suffix}";
+                    string targetPath = Path.Combine(codexHome, relativePath);
+                    if (!backedUpFiles.Contains(relativePath) && File.Exists(targetPath))
+                    {
+                        File.Delete(targetPath);
+                    }
                 }
             }
 

@@ -95,7 +95,11 @@ async function writeGlobalState(codexHome, value) {
 }
 
 async function writeStateDb(codexHome, rows) {
-  const dbPath = path.join(codexHome, "state_5.sqlite");
+  return writeStateDbAtPath(path.join(codexHome, "state_5.sqlite"), rows);
+}
+
+async function writeStateDbAtPath(dbPath, rows) {
+  await fs.mkdir(path.dirname(dbPath), { recursive: true });
   const db = new DatabaseSync(dbPath);
   try {
     db.exec(`
@@ -166,6 +170,15 @@ async function writeStateDbForProjectVisibility(codexHome, rows) {
         row.updated_at_ms ?? 0
       );
     }
+  } finally {
+    db.close();
+  }
+}
+
+function readThreadProvider(dbPath, threadId) {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    return db.prepare("SELECT model_provider FROM threads WHERE id = ?").get(threadId)?.model_provider;
   } finally {
     db.close();
   }
@@ -297,6 +310,30 @@ test("runSync rewrites rollout files and sqlite, then restore reverts both", asy
   const restoredArchived = await fs.readFile(archivedPath, "utf8");
   assert.match(restoredSession, /"model_provider":"apigather"/);
   assert.match(restoredArchived, /"model_provider":"newapi"/);
+});
+
+test("runSync rewrites root and nested sqlite databases", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "oneapi"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-nested-db.jsonl");
+  await writeRollout(sessionPath, "thread-nested", "oneapi");
+  await writeStateDb(codexHome, [
+    { id: "thread-nested", model_provider: "openai", archived: false }
+  ]);
+  await writeStateDbAtPath(path.join(codexHome, "sqlite", "state_5.sqlite"), [
+    { id: "thread-nested", model_provider: "openai", archived: false }
+  ]);
+
+  const syncResult = await runSync({ codexHome });
+
+  assert.equal(syncResult.sqliteRowsUpdated, 2);
+  assert.equal(readThreadProvider(path.join(codexHome, "state_5.sqlite"), "thread-nested"), "oneapi");
+  assert.equal(readThreadProvider(path.join(codexHome, "sqlite", "state_5.sqlite"), "thread-nested"), "oneapi");
+
+  await runRestore({ codexHome, backupDir: syncResult.backupDir });
+
+  assert.equal(readThreadProvider(path.join(codexHome, "state_5.sqlite"), "thread-nested"), "openai");
+  assert.equal(readThreadProvider(path.join(codexHome, "sqlite", "state_5.sqlite"), "thread-nested"), "openai");
 });
 
 test("runSync reports stage progress and backup duration", async () => {

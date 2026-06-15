@@ -10,6 +10,23 @@ export function stateDbPath(codexHome) {
   return path.join(codexHome, DB_FILE_BASENAME);
 }
 
+export async function stateDbPaths(codexHome) {
+  const candidates = [
+    stateDbPath(codexHome),
+    path.join(codexHome, "sqlite", DB_FILE_BASENAME)
+  ];
+  const existing = [];
+  for (const candidate of candidates) {
+    try {
+      await fs.access(candidate);
+      existing.push(candidate);
+    } catch {
+      // Missing SQLite files are allowed.
+    }
+  }
+  return [...new Set(existing)];
+}
+
 function openDatabase(dbPath) {
   return new DatabaseSync(dbPath);
 }
@@ -63,35 +80,38 @@ export function wrapSqliteMalformedError(error, action) {
 }
 
 export async function readSqliteProviderCounts(codexHome) {
-  const dbPath = stateDbPath(codexHome);
-  try {
-    await fs.access(dbPath);
-  } catch {
+  const dbPaths = await stateDbPaths(codexHome);
+  if (dbPaths.length === 0) {
     return null;
   }
 
-  let db;
   try {
-    db = openDatabase(dbPath);
-    const rows = db.prepare(`
-      SELECT
-        CASE
-          WHEN model_provider IS NULL OR model_provider = '' THEN '(missing)'
-          ELSE model_provider
-        END AS model_provider,
-        archived,
-        COUNT(*) AS count
-      FROM threads
-      GROUP BY model_provider, archived
-      ORDER BY archived, model_provider
-    `).all();
     const result = {
       sessions: {},
       archived_sessions: {}
     };
-    for (const row of rows) {
-      const bucket = row.archived ? result.archived_sessions : result.sessions;
-      bucket[row.model_provider] = row.count;
+    for (const dbPath of dbPaths) {
+      const db = openDatabase(dbPath);
+      try {
+        const rows = db.prepare(`
+          SELECT
+            CASE
+              WHEN model_provider IS NULL OR model_provider = '' THEN '(missing)'
+              ELSE model_provider
+            END AS model_provider,
+            archived,
+            COUNT(*) AS count
+          FROM threads
+          GROUP BY model_provider, archived
+          ORDER BY archived, model_provider
+        `).all();
+        for (const row of rows) {
+          const bucket = row.archived ? result.archived_sessions : result.sessions;
+          bucket[row.model_provider] = (bucket[row.model_provider] ?? 0) + row.count;
+        }
+      } finally {
+        db.close();
+      }
     }
     return result;
   } catch (error) {
@@ -112,8 +132,6 @@ export async function readSqliteProviderCounts(codexHome) {
       };
     }
     throw error;
-  } finally {
-    db?.close();
   }
 }
 
@@ -168,27 +186,28 @@ export async function readSqliteRepairStats(codexHome, options = {}) {
 }
 
 export async function assertSqliteWritable(codexHome, options = {}) {
-  const dbPath = stateDbPath(codexHome);
-  try {
-    await fs.access(dbPath);
-  } catch {
+  const dbPaths = await stateDbPaths(codexHome);
+  if (dbPaths.length === 0) {
     return { databasePresent: false };
   }
 
-  let db;
   try {
-    db = openDatabase(dbPath);
-    setBusyTimeout(db, options.busyTimeoutMs);
-    db.exec("BEGIN IMMEDIATE");
-    db.exec("ROLLBACK");
+    for (const dbPath of dbPaths) {
+      const db = openDatabase(dbPath);
+      try {
+        setBusyTimeout(db, options.busyTimeoutMs);
+        db.exec("BEGIN IMMEDIATE");
+        db.exec("ROLLBACK");
+      } finally {
+        db.close();
+      }
+    }
     return { databasePresent: true };
   } catch (error) {
     throw wrapSqliteMalformedError(
       wrapSqliteBusyError(error, "update session provider metadata"),
       "update session provider metadata"
     );
-  } finally {
-    db?.close();
   }
 }
 
@@ -198,10 +217,8 @@ export async function updateSqliteProvider(codexHome, targetProvider, afterUpdat
     ? (maybeOptions ?? {})
     : (afterUpdateOrOptions ?? {});
 
-  const dbPath = stateDbPath(codexHome);
-  try {
-    await fs.access(dbPath);
-  } catch {
+  const dbPaths = await stateDbPaths(codexHome);
+  if (dbPaths.length === 0) {
     if (afterUpdate) {
       await afterUpdate({
         updatedRows: 0,
@@ -220,69 +237,82 @@ export async function updateSqliteProvider(codexHome, targetProvider, afterUpdat
     };
   }
 
-  let db;
+  const dbs = [];
   let transactionOpen = false;
   try {
-    db = openDatabase(dbPath);
-    setBusyTimeout(db, options.busyTimeoutMs);
-    db.exec("BEGIN IMMEDIATE");
+    for (const dbPath of dbPaths) {
+      const db = openDatabase(dbPath);
+      dbs.push(db);
+      setBusyTimeout(db, options.busyTimeoutMs);
+      db.exec("BEGIN IMMEDIATE");
+    }
     transactionOpen = true;
-    const stmt = db.prepare(`
-      UPDATE threads
-      SET model_provider = ?
-      WHERE COALESCE(model_provider, '') <> ?
-    `);
-    const result = stmt.run(targetProvider, targetProvider);
+    let providerRowsUpdated = 0;
     let userEventUpdatedRows = 0;
-    if (tableHasColumn(db, "threads", "has_user_event") && options.userEventThreadIds?.size) {
-      const userEventStmt = db.prepare(`
-        UPDATE threads
-        SET has_user_event = 1
-        WHERE id = ? AND COALESCE(has_user_event, 0) <> 1
-      `);
-      for (const threadId of options.userEventThreadIds) {
-        userEventUpdatedRows += userEventStmt.run(threadId).changes ?? 0;
-      }
-    }
     let cwdUpdatedRows = 0;
-    if (tableHasColumn(db, "threads", "cwd") && options.threadCwdById?.size) {
-      const cwdStmt = db.prepare(`
+    for (const db of dbs) {
+      const stmt = db.prepare(`
         UPDATE threads
-        SET cwd = ?
-        WHERE id = ? AND COALESCE(cwd, '') <> ?
+        SET model_provider = ?
+        WHERE COALESCE(model_provider, '') <> ?
       `);
-      for (const [threadId, cwd] of options.threadCwdById) {
-        if (typeof threadId !== "string" || !threadId || typeof cwd !== "string" || !cwd.trim()) {
-          continue;
+      const result = stmt.run(targetProvider, targetProvider);
+      providerRowsUpdated += result.changes ?? 0;
+
+      if (tableHasColumn(db, "threads", "has_user_event") && options.userEventThreadIds?.size) {
+        const userEventStmt = db.prepare(`
+          UPDATE threads
+          SET has_user_event = 1
+          WHERE id = ? AND COALESCE(has_user_event, 0) <> 1
+        `);
+        for (const threadId of options.userEventThreadIds) {
+          userEventUpdatedRows += userEventStmt.run(threadId).changes ?? 0;
         }
-        cwdUpdatedRows += cwdStmt.run(cwd, threadId, cwd).changes ?? 0;
+      }
+
+      if (tableHasColumn(db, "threads", "cwd") && options.threadCwdById?.size) {
+        const cwdStmt = db.prepare(`
+          UPDATE threads
+          SET cwd = ?
+          WHERE id = ? AND COALESCE(cwd, '') <> ?
+        `);
+        for (const [threadId, cwd] of options.threadCwdById) {
+          if (typeof threadId !== "string" || !threadId || typeof cwd !== "string" || !cwd.trim()) {
+            continue;
+          }
+          cwdUpdatedRows += cwdStmt.run(cwd, threadId, cwd).changes ?? 0;
+        }
       }
     }
-    const updatedRows = (result.changes ?? 0) + userEventUpdatedRows + cwdUpdatedRows;
+    const updatedRows = providerRowsUpdated + userEventUpdatedRows + cwdUpdatedRows;
     if (afterUpdate) {
       await afterUpdate({
         updatedRows,
-        providerRowsUpdated: result.changes ?? 0,
+        providerRowsUpdated,
         userEventRowsUpdated: userEventUpdatedRows,
         cwdRowsUpdated: cwdUpdatedRows,
         databasePresent: true
       });
     }
-    db.exec("COMMIT");
+    for (const db of dbs) {
+      db.exec("COMMIT");
+    }
     transactionOpen = false;
     return {
       updatedRows,
-      providerRowsUpdated: result.changes ?? 0,
+      providerRowsUpdated,
       userEventRowsUpdated: userEventUpdatedRows,
       cwdRowsUpdated: cwdUpdatedRows,
       databasePresent: true
     };
   } catch (error) {
     if (transactionOpen) {
-      try {
-        db.exec("ROLLBACK");
-      } catch {
-        // Ignore rollback failures and surface the original error.
+      for (const db of dbs) {
+        try {
+          db.exec("ROLLBACK");
+        } catch {
+          // Ignore rollback failures and surface the original error.
+        }
       }
     }
     throw wrapSqliteMalformedError(
@@ -290,6 +320,8 @@ export async function updateSqliteProvider(codexHome, targetProvider, afterUpdat
       "update session provider metadata"
     );
   } finally {
-    db?.close();
+    for (const db of dbs) {
+      db.close();
+    }
   }
 }

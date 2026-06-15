@@ -62,6 +62,38 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
+    public async Task RunSync_RewritesRootAndNestedSqliteDatabases()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"oneapi\"");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-nested-db.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-nested", "oneapi");
+        await fixture.WriteStateDbAsync(
+        [
+            ("thread-nested", "openai", false)
+        ]);
+        await fixture.WriteStateDbAsync(
+            Path.Combine("sqlite", "state_5.sqlite"),
+        [
+            ("thread-nested", "openai", false)
+        ]);
+
+        CodexSyncService service = new();
+        SyncResult syncResult = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(2, syncResult.SqliteRowsUpdated);
+        Assert.True(syncResult.SqlitePresent);
+        await AssertSqliteProviderAsync(fixture, "state_5.sqlite", "thread-nested", "oneapi");
+        await AssertSqliteProviderAsync(fixture, Path.Combine("sqlite", "state_5.sqlite"), "thread-nested", "oneapi");
+
+        RestoreResult restoreResult = await service.RunRestoreAsync(fixture.CodexHome, syncResult.BackupDir);
+
+        Assert.Equal("oneapi", restoreResult.TargetProvider);
+        await AssertSqliteProviderAsync(fixture, "state_5.sqlite", "thread-nested", "openai");
+        await AssertSqliteProviderAsync(fixture, Path.Combine("sqlite", "state_5.sqlite"), "thread-nested", "openai");
+    }
+
+    [Fact]
     public async Task RunSwitch_UpdatesConfigAndSyncsProviderMetadata()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
@@ -784,5 +816,20 @@ public sealed class CoreIntegrationTests
 
         Assert.Contains("model_provider = \"manual\"", await File.ReadAllTextAsync(Path.Combine(fixture.CodexHome, "config.toml")));
         Assert.Contains("\"model_provider\":\"manual\"", await File.ReadAllTextAsync(sessionPath));
+    }
+
+    private static async Task AssertSqliteProviderAsync(
+        TestCodexHomeFixture fixture,
+        string relativeDbPath,
+        string threadId,
+        string expectedProvider)
+    {
+        await using SqliteConnection connection = fixture.OpenSqliteConnection(relativeDbPath);
+        await connection.OpenAsync();
+        SqliteCommand command = connection.CreateCommand();
+        command.CommandText = "SELECT model_provider FROM threads WHERE id = $id";
+        command.Parameters.AddWithValue("$id", threadId);
+        string provider = (string)(await command.ExecuteScalarAsync())!;
+        Assert.Equal(expectedProvider, provider);
     }
 }

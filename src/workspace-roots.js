@@ -7,7 +7,7 @@ import {
   GLOBAL_STATE_FILE_BASENAME
 } from "./constants.js";
 import {
-  stateDbPath,
+  stateDbPaths,
   wrapSqliteBusyError,
   wrapSqliteMalformedError
 } from "./sqlite-state.js";
@@ -164,10 +164,8 @@ function copyResolvedObjectKeys(input, cwdStats) {
 }
 
 export async function readThreadCwdStats(codexHome) {
-  const dbPath = stateDbPath(codexHome);
-  try {
-    await fs.access(dbPath);
-  } catch {
+  const dbPath = (await stateDbPaths(codexHome)).at(-1);
+  if (!dbPath) {
     return [];
   }
 
@@ -258,10 +256,8 @@ export async function readProjectThreadVisibility(codexHome, options = {}) {
     return [];
   }
 
-  const dbPath = stateDbPath(codexHome);
-  try {
-    await fs.access(dbPath);
-  } catch {
+  const dbPath = (await stateDbPaths(codexHome)).at(-1);
+  if (!dbPath) {
     return roots.map((root) => ({
       root,
       interactiveThreads: 0,

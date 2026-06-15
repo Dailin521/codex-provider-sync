@@ -126,8 +126,12 @@ internal sealed class TestCodexHomeFixture
 
     public async Task WriteStateDbAsync(IEnumerable<(string Id, string ModelProvider, bool Archived)> rows)
     {
-        string dbPath = Path.Combine(CodexHome, "state_5.sqlite");
-        await using SqliteConnection connection = OpenSqliteConnection();
+        await WriteStateDbAsync("state_5.sqlite", rows);
+    }
+
+    public async Task WriteStateDbAsync(string relativeDbPath, IEnumerable<(string Id, string ModelProvider, bool Archived)> rows)
+    {
+        await using SqliteConnection connection = OpenSqliteConnection(relativeDbPath);
         await connection.OpenAsync();
         SqliteCommand create = connection.CreateCommand();
         create.CommandText = """
@@ -290,6 +294,13 @@ internal sealed class TestCodexHomeFixture
 
     public SqliteConnection OpenSqliteConnection()
     {
-        return new SqliteConnection($"Data Source={Path.Combine(CodexHome, "state_5.sqlite")};Mode=ReadWriteCreate;Pooling=False");
+        return OpenSqliteConnection("state_5.sqlite");
+    }
+
+    public SqliteConnection OpenSqliteConnection(string relativeDbPath)
+    {
+        string dbPath = Path.Combine(CodexHome, relativeDbPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
+        return new SqliteConnection($"Data Source={dbPath};Mode=ReadWriteCreate;Pooling=False");
     }
 }

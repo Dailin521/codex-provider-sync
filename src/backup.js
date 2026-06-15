@@ -10,7 +10,7 @@ import {
   GLOBAL_STATE_FILE_BASENAME
 } from "./constants.js";
 import { assertSessionFilesWritable, restoreSessionChanges } from "./session-files.js";
-import { assertSqliteWritable } from "./sqlite-state.js";
+import { assertSqliteWritable, stateDbPaths } from "./sqlite-state.js";
 
 function timestampSlug(date = new Date()) {
   return date.toISOString().replaceAll(":", "").replaceAll("-", "").replace(".", "");
@@ -22,6 +22,7 @@ async function copyIfPresent(sourcePath, destinationPath) {
   } catch {
     return false;
   }
+  await fs.mkdir(path.dirname(destinationPath), { recursive: true });
   await fs.copyFile(sourcePath, destinationPath);
   return true;
 }
@@ -55,11 +56,14 @@ export async function createBackup({
   await fs.mkdir(dbDir, { recursive: true });
 
   const copiedDbFiles = [];
-  for (const suffix of ["", "-shm", "-wal"]) {
-    const fileName = `${DB_FILE_BASENAME}${suffix}`;
-    const copied = await copyIfPresent(path.join(codexHome, fileName), path.join(dbDir, fileName));
-    if (copied) {
-      copiedDbFiles.push(fileName);
+  for (const dbPath of await stateDbPaths(codexHome)) {
+    const relativeDbPath = path.relative(codexHome, dbPath);
+    for (const suffix of ["", "-shm", "-wal"]) {
+      const relativePath = `${relativeDbPath}${suffix}`;
+      const copied = await copyIfPresent(path.join(codexHome, relativePath), path.join(dbDir, relativePath));
+      if (copied) {
+        copiedDbFiles.push(relativePath);
+      }
     }
   }
 
@@ -194,10 +198,13 @@ export async function restoreBackup(backupDir, codexHome, options = {}) {
 
     const dbDir = path.join(backupDir, "db");
     const backedUpFiles = new Set(metadata.dbFiles ?? []);
-    for (const suffix of ["", "-shm", "-wal"]) {
-      const fileName = `${DB_FILE_BASENAME}${suffix}`;
-      if (!backedUpFiles.has(fileName)) {
-        await removeIfPresent(path.join(codexHome, fileName));
+    for (const dbPath of await stateDbPaths(codexHome)) {
+      const relativeDbPath = path.relative(codexHome, dbPath);
+      for (const suffix of ["", "-shm", "-wal"]) {
+        const relativePath = `${relativeDbPath}${suffix}`;
+        if (!backedUpFiles.has(relativePath)) {
+          await removeIfPresent(path.join(codexHome, relativePath));
+        }
       }
     }
     for (const fileName of metadata.dbFiles ?? []) {
