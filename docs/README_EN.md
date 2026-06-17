@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)](https://github.com/Dailin521/codex-provider-sync)
-[![Node](https://img.shields.io/badge/node-24%2B-brightgreen.svg)](https://nodejs.org/)
+[![Node](https://img.shields.io/badge/node-16%2B-brightgreen.svg)](https://nodejs.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
 [![Community](https://img.shields.io/badge/community-LINUX%20DO-2ea043.svg)](https://linux.do/)
 
@@ -55,8 +55,8 @@ npm install -g git+https://github.com/Dailin521/codex-provider-sync.git
 
 Requirements:
 
-- Node.js `24+`
-- Node.js 20/22 can fail with a missing `node:sqlite` built-in module.
+- Node.js `16+`
+- Node.js 24+ uses the built-in `node:sqlite` module; older Node.js releases use the optional `better-sqlite3` dependency.
 - standard `~/.codex` layout
 - Windows is the primary tested target for now
 

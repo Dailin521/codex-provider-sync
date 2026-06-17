@@ -1,8 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
 
 import { DB_FILE_BASENAME, SQLITE_DIR_BASENAME } from "./constants.js";
+import { openDatabase } from "./sqlite.js";
 
 const DEFAULT_BUSY_TIMEOUT_MS = 5000;
 
@@ -43,10 +43,6 @@ export async function detectStateDb(codexHome) {
 
 export async function existingStateDbPath(codexHome) {
   return (await detectStateDb(codexHome))?.path ?? null;
-}
-
-function openDatabase(dbPath) {
-  return new DatabaseSync(dbPath);
 }
 
 function tableHasColumn(db, tableName, columnName) {
@@ -105,7 +101,7 @@ export async function readSqliteProviderCounts(codexHome) {
 
   let db;
   try {
-    db = openDatabase(dbPath);
+    db = await openDatabase(dbPath);
     const rows = db.prepare(`
       SELECT
         CASE
@@ -158,7 +154,7 @@ export async function readSqliteRepairStats(codexHome, options = {}) {
 
   let db;
   try {
-    db = openDatabase(dbPath);
+    db = await openDatabase(dbPath);
     let userEventRowsNeedingRepair = 0;
     if (tableHasColumn(db, "threads", "has_user_event") && options.userEventThreadIds?.size) {
       const stmt = db.prepare("SELECT has_user_event FROM threads WHERE id = ?");
@@ -206,7 +202,7 @@ export async function assertSqliteWritable(codexHome, options = {}) {
 
   let db;
   try {
-    db = openDatabase(dbPath);
+    db = await openDatabase(dbPath);
     setBusyTimeout(db, options.busyTimeoutMs);
     db.exec("BEGIN IMMEDIATE");
     db.exec("ROLLBACK");
@@ -250,7 +246,7 @@ export async function updateSqliteProvider(codexHome, targetProvider, afterUpdat
   let db;
   let transactionOpen = false;
   try {
-    db = openDatabase(dbPath);
+    db = await openDatabase(dbPath);
     setBusyTimeout(db, options.busyTimeoutMs);
     db.exec("BEGIN IMMEDIATE");
     transactionOpen = true;

@@ -1,11 +1,11 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
 
 import {
   GLOBAL_STATE_BACKUP_FILE_BASENAME,
   GLOBAL_STATE_FILE_BASENAME
 } from "./constants.js";
+import { openDatabase } from "./sqlite.js";
 import {
   existingStateDbPath,
   wrapSqliteBusyError,
@@ -171,7 +171,7 @@ export async function readThreadCwdStats(codexHome) {
 
   let db;
   try {
-    db = new DatabaseSync(dbPath, { readOnly: true });
+    db = await openDatabase(dbPath, { readOnly: true });
     if (!tableHasColumn(db, "threads", "cwd")) {
       return [];
     }
@@ -272,7 +272,7 @@ export async function readProjectThreadVisibility(codexHome, options = {}) {
 
   let db;
   try {
-    db = new DatabaseSync(dbPath, { readOnly: true });
+    db = await openDatabase(dbPath, { readOnly: true });
     const columns = new Set(db.prepare('PRAGMA table_info("threads")').all().map((column) => column.name));
     if (!columns.has("cwd")) {
       return [];

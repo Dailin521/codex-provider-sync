@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)](https://github.com/Dailin521/codex-provider-sync)
-[![Node](https://img.shields.io/badge/node-24%2B-brightgreen.svg)](https://nodejs.org/)
+[![Node](https://img.shields.io/badge/node-16%2B-brightgreen.svg)](https://nodejs.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 中文 | [English](docs/README_EN.md)
@@ -42,7 +42,7 @@ npm install -g git+https://github.com/Dailin521/codex-provider-sync.git
 codex-provider sync
 ```
 
-CLI 需要 Node.js `24+`。如果使用 Node 20/22，可能会看到 `node:sqlite` 不存在的错误。
+CLI 需要 Node.js `16+`。Node 24+ 会优先使用内置 `node:sqlite`；旧版 Node 会使用可选依赖 `better-sqlite3`。
 
 更多 CLI 常用命令：
 
