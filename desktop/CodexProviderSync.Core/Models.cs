@@ -76,6 +76,15 @@ public sealed class SessionChange
     public required long OriginalFileLength { get; init; }
     public required long OriginalLastWriteTimeUtcTicks { get; init; }
     public required string OriginalProvider { get; init; }
+    // The model that the rollout's first `turn_context` event
+    // currently advertises. Used by the rewrite pass to know which
+    // value to swap out across every turn_context line in the file
+    // so that the Codex GUI bottom-right of an old conversation
+    // reflects the active provider's model. Null when the rollout
+    // does not expose a model field we recognise (e.g. legacy or
+    // unusually formatted files), in which case the model rewrite
+    // pass is a no-op.
+    public string? OriginalModel { get; init; }
     public required string UpdatedFirstLine { get; init; }
 }
 

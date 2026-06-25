@@ -94,6 +94,70 @@ internal sealed class TestCodexHomeFixture
         await File.WriteAllTextAsync(filePath, $"{first}\n{second}\n");
     }
 
+    public async Task WriteRolloutWithTurnContextAsync(string filePath, string id, string provider, string model)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
+        object payload = new
+        {
+            id,
+            timestamp = "2026-06-09T09:16:03.878Z",
+            cwd = "C:\\AITemp",
+            source = "cli",
+            cli_version = "0.115.0",
+            model_provider = provider
+        };
+        string first = JsonSerializer.Serialize(new
+        {
+            timestamp = "2026-06-09T09:16:03.878Z",
+            type = "session_meta",
+            payload
+        });
+        string turnContext = JsonSerializer.Serialize(new
+        {
+            timestamp = "2026-06-09T09:16:03.880Z",
+            type = "turn_context",
+            payload = new
+            {
+                turn_id = "019eabaa-e391-7e21-89cd-e761b5dee114",
+                cwd = "C:\\AITemp",
+                current_date = "2026-06-09",
+                model,
+                collaboration_mode = new
+                {
+                    mode = "default",
+                    settings = new
+                    {
+                        model,
+                        reasoning_effort = "xhigh"
+                    }
+                }
+            }
+        });
+        string heartbeat = JsonSerializer.Serialize(new
+        {
+            timestamp = "2026-06-09T10:16:03.880Z",
+            type = "turn_context",
+            payload = new
+            {
+                turn_id = "019eabaa-e391-7e21-89cd-e761b5dee115",
+                cwd = "C:\\AITemp",
+                current_date = "2026-06-09",
+                model,
+                collaboration_mode = new
+                {
+                    mode = "default",
+                    settings = new
+                    {
+                        model,
+                        reasoning_effort = "xhigh"
+                    }
+                }
+            }
+        });
+
+        await File.WriteAllTextAsync(filePath, $"{first}\n{turnContext}\n{heartbeat}\n");
+    }
+
     public async Task AppendEncryptedContentAsync(string filePath)
     {
         await File.AppendAllTextAsync(filePath, "{\"type\":\"event_msg\",\"payload\":{\"encrypted_content\":\"gAAA\"}}\n");
