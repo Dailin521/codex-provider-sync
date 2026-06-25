@@ -212,10 +212,11 @@ public sealed class SqliteStateService
         }
     }
 
-    public async Task<(int UpdatedRows, int ProviderRowsUpdated, int UserEventRowsUpdated, int CwdRowsUpdated, bool DatabasePresent)> UpdateSqliteProviderAsync(
+    public async Task<(int UpdatedRows, int ProviderRowsUpdated, int ModelRowsUpdated, int UserEventRowsUpdated, int CwdRowsUpdated, bool DatabasePresent)> UpdateSqliteProviderAsync(
         string codexHome,
         string targetProvider,
-        Func<(int UpdatedRows, int ProviderRowsUpdated, int UserEventRowsUpdated, int CwdRowsUpdated, bool DatabasePresent), Task>? afterUpdate = null,
+        string? targetModel = null,
+        Func<(int UpdatedRows, int ProviderRowsUpdated, int ModelRowsUpdated, int UserEventRowsUpdated, int CwdRowsUpdated, bool DatabasePresent), Task>? afterUpdate = null,
         int? busyTimeoutMs = null,
         IReadOnlyCollection<string>? userEventThreadIds = null,
         IReadOnlyDictionary<string, string>? threadCwdsById = null)
@@ -225,10 +226,10 @@ public sealed class SqliteStateService
         {
             if (afterUpdate is not null)
             {
-                await afterUpdate((0, 0, 0, 0, false));
+                await afterUpdate((0, 0, 0, 0, 0, false));
             }
 
-            return (0, 0, 0, 0, false);
+            return (0, 0, 0, 0, 0, false);
         }
 
         await using SqliteConnection connection = OpenConnection(dbPath, SqliteOpenMode.ReadWriteCreate);
@@ -248,6 +249,26 @@ public sealed class SqliteStateService
                 """;
             command.Parameters.AddWithValue("$provider", targetProvider);
             int providerRowsUpdated = await command.ExecuteNonQueryAsync();
+
+            // When a target model is provided, align every thread's `model`
+            // column with it alongside `model_provider`. This is what makes
+            // the bottom-right of the Codex UI show the active model for old
+            // sessions, instead of the name that was in effect when each
+            // thread was originally created. The `model` column is only
+            // present in newer Codex schemas, so guard with TableHasColumn
+            // to keep legacy layouts working.
+            int modelRowsUpdated = 0;
+            if (!string.IsNullOrEmpty(targetModel) && await TableHasColumnAsync(connection, "threads", "model"))
+            {
+                await using SqliteCommand modelCommand = connection.CreateCommand();
+                modelCommand.CommandText = """
+                    UPDATE threads
+                    SET model = $model
+                    WHERE COALESCE(model, '') <> $model
+                    """;
+                modelCommand.Parameters.AddWithValue("$model", targetModel);
+                modelRowsUpdated = await modelCommand.ExecuteNonQueryAsync();
+            }
             int userEventRowsUpdated = 0;
             if (userEventThreadIds?.Count > 0 && await TableHasColumnAsync(connection, "threads", "has_user_event"))
             {
@@ -289,16 +310,16 @@ public sealed class SqliteStateService
                 }
             }
 
-            int updatedRows = providerRowsUpdated + userEventRowsUpdated + cwdRowsUpdated;
+            int updatedRows = providerRowsUpdated + modelRowsUpdated + userEventRowsUpdated + cwdRowsUpdated;
 
             if (afterUpdate is not null)
             {
-                await afterUpdate((updatedRows, providerRowsUpdated, userEventRowsUpdated, cwdRowsUpdated, true));
+                await afterUpdate((updatedRows, providerRowsUpdated, modelRowsUpdated, userEventRowsUpdated, cwdRowsUpdated, true));
             }
 
             await ExecuteNonQueryAsync(connection, "COMMIT");
             transactionOpen = false;
-            return (updatedRows, providerRowsUpdated, userEventRowsUpdated, cwdRowsUpdated, true);
+            return (updatedRows, providerRowsUpdated, modelRowsUpdated, userEventRowsUpdated, cwdRowsUpdated, true);
         }
         catch (Exception error)
         {

@@ -97,7 +97,8 @@ public sealed class CodexSyncService
         string? provider = null,
         string? configBackupText = null,
         int keepCount = AppConstants.DefaultBackupRetentionCount,
-        int? sqliteBusyTimeoutMs = null)
+        int? sqliteBusyTimeoutMs = null,
+        string? model = null)
     {
         if (keepCount < 1)
         {
@@ -110,6 +111,17 @@ public sealed class CodexSyncService
         string configText = await _configFileService.ReadConfigTextAsync(configPath);
         CurrentProviderInfo current = _configFileService.ReadCurrentProviderFromConfigText(configText);
         string targetProvider = provider ?? current.Provider ?? AppConstants.DefaultProvider;
+
+        // When the caller did not pin a model, mirror the active root-level
+        // `model = "..."` field from config.toml into the per-thread SQLite
+        // `model` column. Without this, old sessions keep showing the model
+        // they were created with in Codex's bottom-right UI label, even after
+        // the root-level `model` changes.
+        string? targetModel = model;
+        if (string.IsNullOrEmpty(targetModel))
+        {
+            targetModel = _configFileService.ReadRootModelFromConfigText(configText);
+        }
 
         await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "sync");
 
@@ -141,9 +153,10 @@ public sealed class CodexSyncService
         try
         {
             SessionApplyResult? applyResult = null;
-            (int updatedRows, int providerRowsUpdated, int userEventRowsUpdated, int cwdRowsUpdated, bool databasePresent) = await _sqliteStateService.UpdateSqliteProviderAsync(
+            (int updatedRows, int providerRowsUpdated, int modelRowsUpdated, int userEventRowsUpdated, int cwdRowsUpdated, bool databasePresent) = await _sqliteStateService.UpdateSqliteProviderAsync(
                 codexHome,
                 targetProvider,
+                targetModel,
                 async _ =>
                 {
                     if (writableChanges.Count > 0)
@@ -186,6 +199,7 @@ public sealed class CodexSyncService
                 SkippedUnreadableRolloutFiles = skippedUnreadableRolloutFiles,
                 SqliteRowsUpdated = updatedRows,
                 SqliteProviderRowsUpdated = providerRowsUpdated,
+                SqliteModelRowsUpdated = modelRowsUpdated,
                 SqliteUserEventRowsUpdated = userEventRowsUpdated,
                 SqliteCwdRowsUpdated = cwdRowsUpdated,
                 UpdatedWorkspaceRoots = workspaceRootResult.UpdatedWorkspaceRoots,
@@ -269,7 +283,12 @@ public sealed class CodexSyncService
 
         try
         {
-            SyncResult result = await RunSyncAsync(codexHome, provider, originalConfigText, keepCount);
+            // Forward the resolved model to RunSyncAsync so the per-thread
+            // SQLite `model` column also gets aligned with the new value. If
+            // the switch did not apply a model (keepRootModel, no model
+            // found, etc.), pass null so the legacy behaviour is preserved.
+            string? modelForThreads = modelSync.Applied ? modelSync.Model : null;
+            SyncResult result = await RunSyncAsync(codexHome, provider, originalConfigText, keepCount, model: modelForThreads);
             return new SyncResult
             {
                 CodexHome = result.CodexHome,
@@ -281,6 +300,7 @@ public sealed class CodexSyncService
                 SkippedUnreadableRolloutFiles = result.SkippedUnreadableRolloutFiles,
                 SqliteRowsUpdated = result.SqliteRowsUpdated,
                 SqliteProviderRowsUpdated = result.SqliteProviderRowsUpdated,
+                SqliteModelRowsUpdated = result.SqliteModelRowsUpdated,
                 SqliteUserEventRowsUpdated = result.SqliteUserEventRowsUpdated,
                 SqliteCwdRowsUpdated = result.SqliteCwdRowsUpdated,
                 UpdatedWorkspaceRoots = result.UpdatedWorkspaceRoots,

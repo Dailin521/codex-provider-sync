@@ -136,6 +136,11 @@ internal sealed class TestCodexHomeFixture
 
     public async Task WriteStateDbAsync(IEnumerable<(string Id, string ModelProvider, bool Archived)> rows)
     {
+        await WriteStateDbAsync(rows, model: null);
+    }
+
+    public async Task WriteStateDbAsync(IEnumerable<(string Id, string ModelProvider, bool Archived)> rows, string? model)
+    {
         await using SqliteConnection connection = OpenSqliteConnection();
         await connection.OpenAsync();
         SqliteCommand create = connection.CreateCommand();
@@ -145,7 +150,8 @@ internal sealed class TestCodexHomeFixture
               model_provider TEXT,
               cwd TEXT NOT NULL DEFAULT '',
               archived INTEGER NOT NULL DEFAULT 0,
-              first_user_message TEXT NOT NULL DEFAULT ''
+              first_user_message TEXT NOT NULL DEFAULT '',
+              model TEXT
             )
             """;
         await create.ExecuteNonQueryAsync();
@@ -154,12 +160,13 @@ internal sealed class TestCodexHomeFixture
         {
             SqliteCommand insert = connection.CreateCommand();
             insert.CommandText = """
-                INSERT INTO threads (id, model_provider, cwd, archived, first_user_message)
-                VALUES ($id, $provider, 'C:\AITemp', $archived, 'hello')
+                INSERT INTO threads (id, model_provider, cwd, archived, first_user_message, model)
+                VALUES ($id, $provider, 'C:\AITemp', $archived, 'hello', $model)
                 """;
             insert.Parameters.AddWithValue("$id", id);
             insert.Parameters.AddWithValue("$provider", modelProvider);
             insert.Parameters.AddWithValue("$archived", archived ? 1 : 0);
+            insert.Parameters.AddWithValue("$model", (object?)model ?? DBNull.Value);
             await insert.ExecuteNonQueryAsync();
         }
     }

@@ -101,6 +101,10 @@ public static class TextFormatter
         {
             lines.Add($"Updated SQLite user-event flags: {result.SqliteUserEventRowsUpdated}");
         }
+        if (result.SqliteModelRowsUpdated > 0)
+        {
+            lines.Add($"Updated SQLite per-thread models: {result.SqliteModelRowsUpdated}");
+        }
         if (result.SqliteCwdRowsUpdated > 0)
         {
             lines.Add($"Updated SQLite cwd paths: {result.SqliteCwdRowsUpdated}");

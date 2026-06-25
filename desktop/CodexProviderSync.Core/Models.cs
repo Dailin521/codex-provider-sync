@@ -101,6 +101,7 @@ public sealed class SyncResult
     public required IReadOnlyList<string> SkippedUnreadableRolloutFiles { get; init; }
     public required int SqliteRowsUpdated { get; init; }
     public int SqliteProviderRowsUpdated { get; init; }
+    public int SqliteModelRowsUpdated { get; init; }
     public int SqliteUserEventRowsUpdated { get; init; }
     public int SqliteCwdRowsUpdated { get; init; }
     public int UpdatedWorkspaceRoots { get; init; }

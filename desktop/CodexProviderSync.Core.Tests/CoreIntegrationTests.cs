@@ -812,6 +812,99 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
+    public async Task RunSync_RewritesPerThreadModelColumnFromConfig()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\nmodel = \"MiniMax-M3\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-a", "openai");
+        await fixture.WriteStateDbAsync(
+        [
+            ("thread-a", "openai", false)
+        ],
+            model: "gpt-5.4-mini");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(1, result.SqliteModelRowsUpdated);
+        await using SqliteConnection connection = new($"Data Source={fixture.StateDbPath()};Mode=ReadOnly;Pooling=False");
+        await connection.OpenAsync();
+        await using SqliteCommand command = connection.CreateCommand();
+        command.CommandText = "SELECT model, model_provider FROM threads WHERE id = 'thread-a'";
+        await using SqliteDataReader reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal("MiniMax-M3", reader.GetString(0));
+        Assert.Equal("openai", reader.GetString(1));
+    }
+
+    [Fact]
+    public async Task RunSync_LeavesPerThreadModelAlone_WhenNoRootModelConfigured()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-a", "openai");
+        await fixture.WriteStateDbAsync(
+        [
+            ("thread-a", "openai", false)
+        ],
+            model: "gpt-5.4-mini");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(0, result.SqliteModelRowsUpdated);
+        await using SqliteConnection connection = new($"Data Source={fixture.StateDbPath()};Mode=ReadOnly;Pooling=False");
+        await connection.OpenAsync();
+        await using SqliteCommand command = connection.CreateCommand();
+        command.CommandText = "SELECT model FROM threads WHERE id = 'thread-a'";
+        Assert.Equal("gpt-5.4-mini", Convert.ToString(await command.ExecuteScalarAsync()));
+    }
+
+    [Fact]
+    public async Task RunSwitch_PropagatesNewModelToSqlitePerThreadColumn()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("""
+            model_provider = "openai"
+            model = "gpt-5.4"
+
+            [model_providers.apigather]
+            name = "apigather"
+            base_url = "https://example.com"
+            model = "MiniMax-M3"
+            """);
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-a", "openai");
+        await fixture.WriteStateDbAsync(
+        [
+            ("thread-a", "openai", false)
+        ],
+            model: "gpt-5.4");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSwitchAsync(
+            fixture.CodexHome,
+            "apigather",
+            keepRootModel: false,
+            model: null);
+
+        Assert.True(result.ModelSync.Applied);
+        Assert.Equal("MiniMax-M3", result.ModelSync.Model);
+        Assert.Equal(1, result.SqliteModelRowsUpdated);
+
+        await using SqliteConnection connection = new($"Data Source={fixture.StateDbPath()};Mode=ReadOnly;Pooling=False");
+        await connection.OpenAsync();
+        await using SqliteCommand command = connection.CreateCommand();
+        command.CommandText = "SELECT model, model_provider FROM threads WHERE id = 'thread-a'";
+        await using SqliteDataReader reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal("MiniMax-M3", reader.GetString(0));
+        Assert.Equal("apigather", reader.GetString(1));
+    }
+
+    [Fact]
     public async Task Status_ReturnsMalformedSqliteAsUnreadable()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
