@@ -12,6 +12,8 @@ import {
   listConfiguredProviderIds,
   readConfigText,
   readCurrentProviderFromConfigText,
+  readProviderModel,
+  setRootModelInConfigText,
   setRootProviderInConfigText,
   writeConfigText
 } from "./config-file.js";
@@ -205,7 +207,8 @@ export async function runSync({
   configBackupText,
   keepCount = DEFAULT_BACKUP_RETENTION_COUNT,
   sqliteBusyTimeoutMs,
-  onProgress
+  onProgress,
+  model = null
 } = {}) {
   if (!Number.isInteger(keepCount) || keepCount < 1) {
     throw new Error(`Invalid automatic keep count: ${keepCount}. Expected an integer greater than or equal to 1.`);
@@ -309,7 +312,7 @@ export async function runSync({
           workspaceRootResult = await syncWorkspaceRoots(codexHome, { cwdStats });
           globalStateRestoreNeeded = workspaceRootResult.updated;
         },
-        { busyTimeoutMs: sqliteBusyTimeoutMs, userEventThreadIds, threadCwdById }
+        { busyTimeoutMs: sqliteBusyTimeoutMs, userEventThreadIds, threadCwdById, targetModel: model }
       );
       emitProgress(onProgress, {
         stage: "rewrite_rollout_files",
@@ -400,6 +403,8 @@ export async function runSync({
 export async function runSwitch({
   codexHome: explicitCodexHome,
   provider,
+  model,
+  keepRootModel = false,
   keepCount = DEFAULT_BACKUP_RETENTION_COUNT,
   onProgress
 }) {
@@ -415,7 +420,34 @@ export async function runSwitch({
     throw new Error(`Provider "${provider}" is not available in config.toml. Configure it first or use one of: ${listConfiguredProviderIds(originalConfigText).join(", ")}`);
   }
 
-  const nextConfigText = setRootProviderInConfigText(originalConfigText, provider);
+  if (model !== undefined && model !== null && keepRootModel) {
+    throw new Error("--model and --keep-root-model are mutually exclusive. Pick one.");
+  }
+
+  let nextConfigText = setRootProviderInConfigText(originalConfigText, provider);
+  let modelSync = { applied: false, source: "none", model: null, warning: null };
+
+  if (model !== undefined && model !== null) {
+    if (typeof model !== "string" || model.length === 0) {
+      throw new Error(`Invalid --model value: ${model}. Expected a non-empty string.`);
+    }
+    nextConfigText = setRootModelInConfigText(nextConfigText, model);
+    modelSync = { applied: true, source: "explicit", model, warning: null };
+  } else if (!keepRootModel) {
+    const providerModel = readProviderModel(originalConfigText, provider);
+    if (providerModel) {
+      nextConfigText = setRootModelInConfigText(nextConfigText, providerModel);
+      modelSync = { applied: true, source: "provider-section", model: providerModel, warning: null };
+    } else if (provider !== DEFAULT_PROVIDER) {
+      modelSync = {
+        applied: false,
+        source: "none",
+        model: null,
+        warning: `Provider "${provider}" has no model field in [model_providers.${provider}]; root-level model left unchanged. Use --model <name> to set it explicitly, or --keep-root-model to suppress this warning.`
+      };
+    }
+  }
+
   emitProgress(onProgress, {
     stage: "update_config",
     status: "start",
@@ -429,16 +461,28 @@ export async function runSwitch({
   });
 
   try {
+    // After the config update, `nextConfigText` has the final root-level
+    // `model` value. We use that to drive the per-thread `model` column
+    // rewrite so old sessions pick up the same model that new ones will.
+    let modelForThreads = null;
+    if (modelSync.applied && modelSync.model) {
+      modelForThreads = modelSync.model;
+    } else {
+      const rootModelMatch = nextConfigText.match(/^\s*model\s*=\s*"([^"]+)"\s*$/m);
+      modelForThreads = rootModelMatch ? rootModelMatch[1] : null;
+    }
     const syncResult = await runSync({
       codexHome,
       provider,
       configBackupText: originalConfigText,
       keepCount,
-      onProgress
+      onProgress,
+      model: modelForThreads
     });
     return {
       ...syncResult,
-      configUpdated: true
+      configUpdated: true,
+      modelSync
     };
   } catch (error) {
     await writeConfigText(configPath, originalConfigText);
