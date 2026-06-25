@@ -50,6 +50,46 @@ async function writeCustomRollout(filePath, payload, message = "hi") {
   await fs.writeFile(filePath, `${lines.join("\n")}\n`, "utf8");
 }
 
+async function writeRolloutWithTurnContext(filePath, { id, provider, model }) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const metaPayload = {
+    id,
+    timestamp: "2026-06-09T09:16:03.878Z",
+    cwd: "C:\\AITemp",
+    source: "cli",
+    cli_version: "0.115.0",
+    model_provider: provider
+  };
+  const turnContext = {
+    timestamp: "2026-06-09T09:16:03.880Z",
+    type: "turn_context",
+    payload: {
+      turn_id: "019eabaa-e391-7e21-89cd-e761b5dee114",
+      cwd: "C:\\AITemp",
+      current_date: "2026-06-09",
+      model,
+      collaboration_mode: { mode: "default", settings: { model, reasoning_effort: "xhigh" } }
+    }
+  };
+  const heartBeat = {
+    timestamp: "2026-06-09T10:16:03.880Z",
+    type: "turn_context",
+    payload: {
+      turn_id: "019eabaa-e391-7e21-89cd-e761b5dee115",
+      cwd: "C:\\AITemp",
+      current_date: "2026-06-09",
+      model,
+      collaboration_mode: { mode: "default", settings: { model, reasoning_effort: "xhigh" } }
+    }
+  };
+  const lines = [
+    JSON.stringify({ timestamp: metaPayload.timestamp, type: "session_meta", payload: metaPayload }),
+    JSON.stringify(turnContext),
+    JSON.stringify(heartBeat)
+  ];
+  await fs.writeFile(filePath, `${lines.join("\n")}\n`, "utf8");
+}
+
 function backupRoot(codexHome) {
   return path.join(codexHome, "backups_state", "provider-sync");
 }
@@ -644,6 +684,54 @@ test("runSync leaves the per-thread model column untouched when no model is prov
     assert.equal(row.model_provider, "openai");
   } finally {
     db.close();
+  }
+});
+
+test("runSync rewrites the per-turn turn_context model field in rollout files", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "MiniMax-M3"\n');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "06", "09", "rollout-a.jsonl");
+  await writeRolloutWithTurnContext(sessionPath, {
+    id: "thread-a",
+    provider: "apigather",
+    model: "gpt-5.4"
+  });
+
+  const result = await runSync({ codexHome, model: "MiniMax-M3" });
+  assert.equal(result.changedSessionFiles, 1);
+
+  const lines = (await fs.readFile(sessionPath, "utf8")).split("\n").filter(Boolean);
+  const turnContextLines = lines
+    .map((line) => JSON.parse(line))
+    .filter((entry) => entry.type === "turn_context");
+  assert.equal(turnContextLines.length, 2);
+  for (const entry of turnContextLines) {
+    assert.equal(entry.payload.model, "MiniMax-M3");
+    assert.equal(entry.payload.collaboration_mode.settings.model, "MiniMax-M3");
+  }
+});
+
+test("runSync leaves turn_context model field alone when no model is provided", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"\n');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "06", "09", "rollout-a.jsonl");
+  await writeRolloutWithTurnContext(sessionPath, {
+    id: "thread-a",
+    provider: "apigather",
+    model: "gpt-5.4"
+  });
+
+  // No `model` arg → caller doesn't want to align the per-turn
+  // model field, so even though we are rewriting `model_provider`
+  // from apigather → openai, the turn_context model is left alone.
+  await runSync({ codexHome });
+
+  const lines = (await fs.readFile(sessionPath, "utf8")).split("\n").filter(Boolean);
+  const turnContextLines = lines
+    .map((line) => JSON.parse(line))
+    .filter((entry) => entry.type === "turn_context");
+  for (const entry of turnContextLines) {
+    assert.equal(entry.payload.model, "gpt-5.4", "turn_context model must stay put when caller does not pass a target");
   }
 });
 

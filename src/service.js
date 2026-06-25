@@ -303,7 +303,7 @@ export async function runSync({
         targetProvider,
         async () => {
           if (writableChanges.length > 0) {
-            applyResult = await applySessionChanges(writableChanges);
+            applyResult = await applySessionChanges(writableChanges, { targetModel: model });
             const appliedPathSet = new Set(applyResult.appliedPaths ?? []);
             appliedSessionChanges = writableChanges.filter((change) => appliedPathSet.has(change.path));
             sessionRestoreNeeded = appliedSessionChanges.length > 0;
