@@ -359,6 +359,7 @@ public sealed class MainForm : Form
         _modelKeepRadio.CheckedChanged += (_, _) => UpdateModelOptionsEnabled();
         _modelCustomRadio.CheckedChanged += (_, _) => UpdateModelOptionsEnabled();
         _updateConfigCheck.CheckedChanged += (_, _) => UpdateModelOptionsEnabled();
+        UpdateModelOptionsEnabled();
         return panel;
     }
 
