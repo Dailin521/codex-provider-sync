@@ -233,8 +233,8 @@ async function main() {
       once: Boolean(flags.once)
     });
     await new Promise((resolve) => {
-      const stop = () => {
-        handle.stop();
+      const stop = async () => {
+        await handle.stop();
         resolve();
       };
       process.once("SIGINT", stop);

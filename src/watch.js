@@ -109,28 +109,39 @@ export async function runWatch({
   let stopped = false;
   let watchers = [];
   let stateDbInfo = null;
+  // Track the currently-running sync (if any) so that stop()/SIGINT can
+  // wait for it to drain instead of yanking the watcher out from under
+  // a half-written SQLite transaction.
+  let inFlight = null;
 
-  const debouncedSync = makeDebouncer(debounceMs, async (reason) => {
+  const debouncedSync = makeDebouncer(debounceMs, (reason) => {
     if (stopped) {
       return;
     }
     log(`[${new Date().toISOString()}] Detected change (${reason}); running sync...`);
-    try {
-      const result = await invokeSync(reason);
-      log(`[${new Date().toISOString()}] Sync complete: provider=${result.targetProvider}, rollout_files=${result.changedSessionFiles}, sqlite_rows=${result.sqliteRowsUpdated}${result.skippedLockedRolloutFiles?.length ? `, skipped_locked=${result.skippedLockedRolloutFiles.length}` : ""}`);
-      if (once) {
-        await shutdown("once-mode-complete");
+    const task = (async () => {
+      try {
+        const result = await invokeSync(reason);
+        log(`[${new Date().toISOString()}] Sync complete: provider=${result.targetProvider}, rollout_files=${result.changedSessionFiles}, sqlite_rows=${result.sqliteRowsUpdated}${result.skippedLockedRolloutFiles?.length ? `, skipped_locked=${result.skippedLockedRolloutFiles.length}` : ""}`);
+        if (once) {
+          await shutdown("once-mode-complete");
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // SQLite being in use is a normal transient condition while Codex
+        // is actively writing. Don't crash; just retry on the next event.
+        if (/state_5\.sqlite is currently in use/i.test(message)) {
+          log(`[${new Date().toISOString()}] Sync skipped: ${message} (will retry on next change)`);
+        } else {
+          log(`[${new Date().toISOString()}] Sync failed: ${message}`);
+        }
+      } finally {
+        if (inFlight === task) {
+          inFlight = null;
+        }
       }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      // SQLite being in use is a normal transient condition while Codex
-      // is actively writing. Don't crash; just retry on the next event.
-      if (/state_5\.sqlite is currently in use/i.test(message)) {
-        log(`[${new Date().toISOString()}] Sync skipped: ${message} (will retry on next change)`);
-      } else {
-        log(`[${new Date().toISOString()}] Sync failed: ${message}`);
-      }
-    }
+    })();
+    inFlight = task;
   });
 
   const configWatcher = fs.watch(configPath, { persistent: true }, (eventType, filename) => {
@@ -142,31 +153,43 @@ export async function runWatch({
   });
   watchers.push(configWatcher);
 
-  if (includeStateDb) {
-    try {
-      stateDbInfo = await detectStateDb(codexHome);
-    } catch (error) {
-      log(`[${new Date().toISOString()}] Could not locate state database: ${error.message}`);
-    }
-    if (stateDbInfo?.path) {
-      const stateDir = path.dirname(stateDbInfo.path);
-      const exists = await pathExists(stateDir);
-      if (exists) {
-        const stateWatcher = fs.watch(stateDir, { persistent: true }, (eventType, filename) => {
-          if (stopped) {
-            return;
-          }
-          if (!filename) {
-            return;
-          }
-          if (!/state.*\.sqlite(-wal|-shm)?$/i.test(filename)) {
-            return;
-          }
-          log(`[${new Date().toISOString()}] state_db ${describeEvent(eventType, filename)}`);
-          debouncedSync("state_db");
-        });
-        watchers.push(stateWatcher);
-      } else {
+    if (includeStateDb) {
+      try {
+        stateDbInfo = await detectStateDb(codexHome);
+      } catch (error) {
+        log(`[${new Date().toISOString()}] Could not locate state database: ${error.message}`);
+      }
+      if (stateDbInfo?.path) {
+        const stateDir = path.dirname(stateDbInfo.path);
+        const exists = await pathExists(stateDir);
+        if (exists) {
+          // Accept the SQLite file plus its WAL/SHM siblings. The basename
+          // is taken from the actual state db path so we never match
+          // unrelated "state*.sqlite" files that happen to share the dir.
+          const stateBase = path.basename(stateDbInfo.path);
+          const allowed = new Set([
+            stateBase,
+            `${stateBase}-wal`,
+            `${stateBase}-shm`,
+            `${stateBase}-journal`
+          ]);
+          const stateWatcher = fs.watch(stateDir, { persistent: true }, (eventType, filename) => {
+            if (stopped) {
+              return;
+            }
+            // fs.watch on Windows frequently reports filename === null.
+            // Treat null as "something in the dir changed" and fall back to
+            // comparing against the full path; the event is harmless to
+            // trigger a sync even if it was a neighbouring file.
+            const eventFile = filename ?? stateBase;
+            if (!allowed.has(eventFile)) {
+              return;
+            }
+            log(`[${new Date().toISOString()}] state_db ${describeEvent(eventType, filename ?? stateBase)}`);
+            debouncedSync("state_db");
+          });
+          watchers.push(stateWatcher);
+        } else {
         log(`[${new Date().toISOString()}] State directory ${stateDir} not found yet; watching only config.toml`);
       }
     }
@@ -184,6 +207,15 @@ export async function runWatch({
         watcher.close();
       } catch {
         // best-effort
+      }
+    }
+    // Drain any sync that is still in flight so we do not yank the watcher
+    // out from under a half-written SQLite transaction or backup.
+    if (inFlight) {
+      try {
+        await inFlight;
+      } catch {
+        // errors are already logged by the debouncedSync handler
       }
     }
     log(`[${new Date().toISOString()}] Watcher stopped (${reason})`);
