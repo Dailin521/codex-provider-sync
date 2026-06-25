@@ -207,7 +207,8 @@ export async function runSync({
   configBackupText,
   keepCount = DEFAULT_BACKUP_RETENTION_COUNT,
   sqliteBusyTimeoutMs,
-  onProgress
+  onProgress,
+  model = null
 } = {}) {
   if (!Number.isInteger(keepCount) || keepCount < 1) {
     throw new Error(`Invalid automatic keep count: ${keepCount}. Expected an integer greater than or equal to 1.`);
@@ -311,7 +312,7 @@ export async function runSync({
           workspaceRootResult = await syncWorkspaceRoots(codexHome, { cwdStats });
           globalStateRestoreNeeded = workspaceRootResult.updated;
         },
-        { busyTimeoutMs: sqliteBusyTimeoutMs, userEventThreadIds, threadCwdById }
+        { busyTimeoutMs: sqliteBusyTimeoutMs, userEventThreadIds, threadCwdById, targetModel: model }
       );
       emitProgress(onProgress, {
         stage: "rewrite_rollout_files",
@@ -460,12 +461,23 @@ export async function runSwitch({
   });
 
   try {
+    // After the config update, `nextConfigText` has the final root-level
+    // `model` value. We use that to drive the per-thread `model` column
+    // rewrite so old sessions pick up the same model that new ones will.
+    let modelForThreads = null;
+    if (modelSync.applied && modelSync.model) {
+      modelForThreads = modelSync.model;
+    } else {
+      const rootModelMatch = nextConfigText.match(/^\s*model\s*=\s*"([^"]+)"\s*$/m);
+      modelForThreads = rootModelMatch ? rootModelMatch[1] : null;
+    }
     const syncResult = await runSync({
       codexHome,
       provider,
       configBackupText: originalConfigText,
       keepCount,
-      onProgress
+      onProgress,
+      model: modelForThreads
     });
     return {
       ...syncResult,

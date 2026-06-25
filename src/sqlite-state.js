@@ -222,6 +222,11 @@ export async function updateSqliteProvider(codexHome, targetProvider, afterUpdat
   const options = typeof afterUpdateOrOptions === "function"
     ? (maybeOptions ?? {})
     : (afterUpdateOrOptions ?? {});
+  // When provided, the per-thread `model` column is rewritten alongside
+  // `model_provider` so old sessions pick up the new active model in
+  // the Codex UI's bottom-right label. Pass null to leave the column
+  // untouched (legacy behaviour for callers that do not track model).
+  const targetModel = options.targetModel ?? null;
 
   const dbPath = await existingStateDbPath(codexHome);
   if (!dbPath) {
@@ -250,12 +255,24 @@ export async function updateSqliteProvider(codexHome, targetProvider, afterUpdat
     setBusyTimeout(db, options.busyTimeoutMs);
     db.exec("BEGIN IMMEDIATE");
     transactionOpen = true;
-    const stmt = db.prepare(`
-      UPDATE threads
-      SET model_provider = ?
-      WHERE COALESCE(model_provider, '') <> ?
-    `);
-    const result = stmt.run(targetProvider, targetProvider);
+    // When a target model is provided, align every thread's `model` column
+    // with it alongside `model_provider`. This is what makes the bottom-right
+    // of the Codex UI show the active model for old sessions, instead of the
+    // name that was in effect when each thread was originally created.
+    // The `model` column is only present in newer Codex schemas, so guard
+    // with tableHasColumn to keep legacy layouts working.
+    const wantsModel = targetModel != null && targetModel.length > 0
+      && tableHasColumn(db, "threads", "model");
+    const stmt = db.prepare(wantsModel
+      ? `UPDATE threads
+         SET model_provider = ?, model = ?
+         WHERE COALESCE(model_provider, '') <> ? OR COALESCE(model, '') <> ?`
+      : `UPDATE threads
+         SET model_provider = ?
+         WHERE COALESCE(model_provider, '') <> ?`);
+    const result = wantsModel
+      ? stmt.run(targetProvider, targetModel, targetProvider, targetModel)
+      : stmt.run(targetProvider, targetProvider);
     let userEventUpdatedRows = 0;
     if (tableHasColumn(db, "threads", "has_user_event") && options.userEventThreadIds?.size) {
       const userEventStmt = db.prepare(`

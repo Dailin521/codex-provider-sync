@@ -196,11 +196,29 @@ async function main() {
 
   if (command === "sync") {
     const { runSync } = await loadService();
+    const { defaultCodexHome } = await import("./constants.js");
+    const { readConfigText } = await import("./config-file.js");
+    const codexHome = path.resolve(
+      flags["codex-home"] ?? process.env.CODEX_HOME ?? defaultCodexHome()
+    );
+    const configPath = path.join(codexHome, "config.toml");
+    let rootModel = null;
+    try {
+      const cfg = await readConfigText(configPath);
+      const m = cfg.match(/^\s*model\s*=\s*"([^"]+)"\s*$/m);
+      if (m) {
+        rootModel = m[1];
+      }
+    } catch {
+      // config may be missing in degraded scenarios; carry on without a
+      // model rewrite so the rest of the sync still runs.
+    }
     const result = await runSync({
       codexHome: flags["codex-home"],
       provider: flags.provider,
       keepCount: parseKeepCount(flags.keep),
-      onProgress: createSyncProgressReporter()
+      onProgress: createSyncProgressReporter(),
+      model: rootModel
     });
     console.log(summarizeSync(result, "Synchronized"));
     return;

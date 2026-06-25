@@ -113,12 +113,13 @@ async function writeStateDb(codexHome, rows) {
         model_provider TEXT,
         cwd TEXT NOT NULL DEFAULT '',
         archived INTEGER NOT NULL DEFAULT 0,
-        first_user_message TEXT NOT NULL DEFAULT ''
+        first_user_message TEXT NOT NULL DEFAULT '',
+        model TEXT
       )
     `);
-    const stmt = db.prepare("INSERT INTO threads (id, model_provider, cwd, archived, first_user_message) VALUES (?, ?, ?, ?, ?)");
+    const stmt = db.prepare("INSERT INTO threads (id, model_provider, cwd, archived, first_user_message, model) VALUES (?, ?, ?, ?, ?, ?)");
     for (const row of rows) {
-      stmt.run(row.id, row.model_provider, row.cwd ?? "C:\\AITemp", row.archived ? 1 : 0, row.first_user_message ?? "hello");
+      stmt.run(row.id, row.model_provider, row.cwd ?? "C:\\AITemp", row.archived ? 1 : 0, row.first_user_message ?? "hello", row.model ?? null);
     }
   } finally {
     db.close();
@@ -601,6 +602,49 @@ test("runSwitch rejects --model and --keep-root-model together", async () => {
   // Confirm the file on disk was not mutated by the failed call.
   const after = await fs.readFile(path.join(codexHome, "config.toml"), "utf8");
   assert.equal(after, before);
+});
+
+test("runSync rewrites the per-thread model column when a model is provided", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "gpt-5.4"\n');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");
+  await writeRollout(sessionPath, "thread-a", "openai");
+  await writeStateDb(codexHome, [
+    { id: "thread-a", model_provider: "openai", model: "gpt-5.4-mini", archived: false }
+  ]);
+
+  const result = await runSync({ codexHome, model: "MiniMax-M3" });
+  assert.ok(result.sqliteRowsUpdated >= 1, "model column should be updated");
+
+  const db = await openDatabase(path.join(codexHome, "sqlite", "state_5.sqlite"));
+  try {
+    const row = db.prepare("SELECT model, model_provider FROM threads WHERE id = ?").get("thread-a");
+    assert.equal(row.model, "MiniMax-M3");
+    assert.equal(row.model_provider, "openai");
+  } finally {
+    db.close();
+  }
+});
+
+test("runSync leaves the per-thread model column untouched when no model is provided", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "gpt-5.4"\n');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");
+  await writeRollout(sessionPath, "thread-a", "openai");
+  await writeStateDb(codexHome, [
+    { id: "thread-a", model_provider: "openai", model: "gpt-5.4-mini", archived: false }
+  ]);
+
+  await runSync({ codexHome });
+
+  const db = await openDatabase(path.join(codexHome, "sqlite", "state_5.sqlite"));
+  try {
+    const row = db.prepare("SELECT model, model_provider FROM threads WHERE id = ?").get("thread-a");
+    assert.equal(row.model, "gpt-5.4-mini", "model must remain unchanged when caller does not pass one");
+    assert.equal(row.model_provider, "openai");
+  } finally {
+    db.close();
+  }
 });
 
 test("status reports implicit default provider and rollout/sqlite counts", async () => {
