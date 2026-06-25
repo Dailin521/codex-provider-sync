@@ -238,7 +238,9 @@ public sealed class CodexSyncService
     public async Task<SyncResult> RunSwitchAsync(
         string? explicitCodexHome,
         string provider,
-        int keepCount = AppConstants.DefaultBackupRetentionCount)
+        int keepCount = AppConstants.DefaultBackupRetentionCount,
+        string? model = null,
+        bool keepRootModel = false)
     {
         if (string.IsNullOrWhiteSpace(provider))
         {
@@ -257,6 +259,12 @@ public sealed class CodexSyncService
         }
 
         string nextConfigText = _configFileService.SetRootProviderInConfigText(originalConfigText, provider);
+        ModelSyncOutcome modelSync = ResolveModelSyncOutcome(originalConfigText, provider, model, keepRootModel);
+        if (modelSync.Applied)
+        {
+            nextConfigText = _configFileService.SetRootModelInConfigText(nextConfigText, modelSync.Model!);
+        }
+
         await _configFileService.WriteConfigTextAsync(configPath, nextConfigText);
 
         try
@@ -282,6 +290,7 @@ public sealed class CodexSyncService
                 EncryptedContentCounts = result.EncryptedContentCounts,
                 EncryptedContentWarning = result.EncryptedContentWarning,
                 ConfigUpdated = true,
+                ModelSync = modelSync,
                 AutoPruneResult = result.AutoPruneResult,
                 AutoPruneWarning = result.AutoPruneWarning
             };
@@ -291,6 +300,44 @@ public sealed class CodexSyncService
             await _configFileService.WriteConfigTextAsync(configPath, originalConfigText);
             throw;
         }
+    }
+
+    private static ModelSyncOutcome ResolveModelSyncOutcome(
+        string originalConfigText,
+        string provider,
+        string? model,
+        bool keepRootModel)
+    {
+        if (model is not null)
+        {
+            if (model.Length == 0)
+            {
+                throw new ArgumentException(
+                    "Invalid --model value. Expected a non-empty string.",
+                    nameof(model));
+            }
+            return ModelSyncOutcome.CreateApplied("explicit", model);
+        }
+
+        if (keepRootModel)
+        {
+            return ModelSyncOutcome.CreateSkipped("keep-root-model", warning: null);
+        }
+
+        string? providerModel = new ConfigFileService().ReadProviderModel(originalConfigText, provider);
+        if (providerModel is not null)
+        {
+            return ModelSyncOutcome.CreateApplied("provider-section", providerModel);
+        }
+
+        if (!string.Equals(provider, AppConstants.DefaultProvider, StringComparison.Ordinal))
+        {
+            return ModelSyncOutcome.CreateSkipped(
+                "none",
+                warning: $"Provider \"{provider}\" has no model field in [model_providers.{provider}]; root-level model left unchanged. Use --model <name> to set it explicitly, or pass keepRootModel to suppress this warning.");
+        }
+
+        return ModelSyncOutcome.CreateSkipped("none", warning: null);
     }
 
     public async Task<RestoreResult> RunRestoreAsync(string? explicitCodexHome, string backupDir)

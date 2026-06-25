@@ -110,8 +110,37 @@ public sealed class SyncResult
     public required ProviderCounts EncryptedContentCounts { get; init; }
     public string? EncryptedContentWarning { get; init; }
     public bool ConfigUpdated { get; init; }
+    public ModelSyncOutcome ModelSync { get; init; } = ModelSyncOutcome.NotApplicable();
     public BackupPruneResult? AutoPruneResult { get; init; }
     public string? AutoPruneWarning { get; init; }
+}
+
+public sealed class ModelSyncOutcome
+{
+    public required bool Applied { get; init; }
+    public string Source { get; init; } = "none";
+    public string? Model { get; init; }
+    public string? Warning { get; init; }
+
+    public static ModelSyncOutcome CreateApplied(string source, string model) => new()
+    {
+        Applied = true,
+        Source = source,
+        Model = model
+    };
+
+    public static ModelSyncOutcome CreateSkipped(string source, string? warning) => new()
+    {
+        Applied = false,
+        Source = source,
+        Warning = warning
+    };
+
+    public static ModelSyncOutcome NotApplicable() => new()
+    {
+        Applied = false,
+        Source = "not-applicable"
+    };
 }
 
 public sealed class SessionApplyResult
