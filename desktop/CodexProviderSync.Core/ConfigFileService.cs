@@ -11,6 +11,9 @@ public sealed partial class ConfigFileService
     [GeneratedRegex("""^\[model_providers\.([A-Za-z0-9_.-]+)]\s*$""", RegexOptions.Multiline)]
     private static partial Regex ProviderRegex();
 
+    [GeneratedRegex("""^\s*model\s*=\s*"([^"]+)"\s*$""")]
+    private static partial Regex ModelAssignmentRegex();
+
     public Task<string> ReadConfigTextAsync(string configPath)
     {
         return File.ReadAllTextAsync(configPath);
@@ -149,25 +152,23 @@ public sealed partial class ConfigFileService
             return null;
         }
 
-        string? sectionStart = null;
+        List<string> lines = SplitLines(configText).ToList();
+        string sectionHeader = $"[model_providers.{Regex.Escape(provider)}]";
         int sectionStartIndex = -1;
-        for (int index = 0; index < SplitLines(configText).Count(); index += 1)
+        for (int index = 0; index < lines.Count; index += 1)
         {
-            string trimmed = SplitLines(configText).ElementAt(index).Trim();
-            if (trimmed.Equals($"[model_providers.{provider}]", StringComparison.Ordinal))
+            if (lines[index].Trim().Equals(sectionHeader, StringComparison.Ordinal))
             {
-                sectionStart = $"[model_providers.{provider}]";
                 sectionStartIndex = index;
                 break;
             }
         }
 
-        if (sectionStart is null)
+        if (sectionStartIndex < 0)
         {
             return null;
         }
 
-        List<string> lines = SplitLines(configText).ToList();
         for (int index = sectionStartIndex + 1; index < lines.Count; index += 1)
         {
             string trimmed = lines[index].Trim();
@@ -175,7 +176,7 @@ public sealed partial class ConfigFileService
             {
                 break;
             }
-            Match match = Regex.Match(lines[index], "^\\s*model\\s*=\\s*\"([^\"]+)\"\\s*$");
+            Match match = ModelAssignmentRegex().Match(lines[index]);
             if (match.Success)
             {
                 return match.Groups[1].Value;
