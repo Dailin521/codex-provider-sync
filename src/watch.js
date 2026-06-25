@@ -91,19 +91,36 @@ export async function runWatch({
   };
 
   const invokeSync = async (reason) => {
+    // Read the current root-level model on every fire so the per-thread
+    // model rewrite picks up the latest value the user has in config.toml.
+    let rootModel = null;
+    try {
+      const { readConfigText } = await import("./config-file.js");
+      const cfg = await readConfigText(path.join(codexHome, "config.toml"));
+      const m = cfg.match(/^\s*model\s*=\s*"([^"]+)"\s*$/m);
+      if (m) {
+        rootModel = m[1];
+      }
+    } catch {
+      // Missing/unreadable config; carry on with a null model.
+    }
     if (typeof onSync === "function") {
-      return onSync({ reason, codexHome });
+      return onSync({ reason, codexHome, model: rootModel });
     }
     if (typeof runSyncImpl === "function") {
-      return runSyncImpl({ codexHome, reason });
+      return runSyncImpl({ codexHome, reason, model: rootModel });
     }
     // Lazy import to avoid pulling in the full service module until needed.
     const { runSync } = await import("./service.js");
-    return runSync({ codexHome, onProgress: (event) => {
-      if (event?.stage && event.status === "start") {
-        log(`  · ${event.stage}`);
+    return runSync({
+      codexHome,
+      model: rootModel,
+      onProgress: (event) => {
+        if (event?.stage && event.status === "start") {
+          log(`  · ${event.stage}`);
+        }
       }
-    } });
+    });
   };
 
   let stopped = false;
