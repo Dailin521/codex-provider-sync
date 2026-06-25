@@ -588,6 +588,21 @@ test("runSwitch emits a warning when the new provider has no model field", async
   assert.match(next, /^model = "gpt-5.4-mini"/m);
 });
 
+test("runSwitch rejects --model and --keep-root-model together", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome);
+  const before = await fs.readFile(path.join(codexHome, "config.toml"), "utf8");
+
+  await assert.rejects(
+    () => runSwitch({ codexHome, provider: "apigather", model: "X", keepRootModel: true }),
+    /--model and --keep-root-model are mutually exclusive/
+  );
+
+  // Confirm the file on disk was not mutated by the failed call.
+  const after = await fs.readFile(path.join(codexHome, "config.toml"), "utf8");
+  assert.equal(after, before);
+});
+
 test("status reports implicit default provider and rollout/sqlite counts", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome);
