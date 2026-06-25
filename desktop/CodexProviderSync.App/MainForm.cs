@@ -43,6 +43,30 @@ public sealed class MainForm : Form
         AutoSize = true,
         Margin = new Padding(0, 4, 8, 0)
     };
+    private readonly RadioButton _modelAutoRadio = new()
+    {
+        Text = "跟随 provider 里的 model (默认)",
+        AutoSize = true,
+        Checked = true,
+        Margin = new Padding(0, 2, 12, 2)
+    };
+    private readonly RadioButton _modelKeepRadio = new()
+    {
+        Text = "保留当前顶层 model",
+        AutoSize = true,
+        Margin = new Padding(0, 2, 12, 2)
+    };
+    private readonly RadioButton _modelCustomRadio = new()
+    {
+        Text = "自定义:",
+        AutoSize = true,
+        Margin = new Padding(0, 2, 6, 2)
+    };
+    private readonly TextBox _modelCustomText = new()
+    {
+        Width = 240,
+        Margin = new Padding(0, 0, 0, 2)
+    };
     private readonly CheckBox _restoreConfigCheck = new() { Text = "恢复配置文件（config.toml）", Checked = false, AutoSize = true };
     private readonly CheckBox _restoreDatabaseCheck = new() { Text = "恢复线程数据库（SQLite）", Checked = true, AutoSize = true };
     private readonly CheckBox _restoreSessionsCheck = new() { Text = "恢复会话文件元数据（rollout）", Checked = true, AutoSize = true };
@@ -308,7 +332,43 @@ public sealed class MainForm : Form
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         panel.Controls.Add(_updateConfigCheck, 0, 0);
         panel.Controls.Add(_updateConfigLabel, 1, 0);
+
+        FlowLayoutPanel modelOptions = new()
+        {
+            FlowDirection = FlowDirection.LeftToRight,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Margin = new Padding(24, 0, 0, 0),
+            Dock = DockStyle.Fill
+        };
+        Label modelHeader = new()
+        {
+            Text = "顶层 model:",
+            AutoSize = true,
+            Margin = new Padding(0, 4, 8, 0)
+        };
+        modelOptions.Controls.Add(modelHeader);
+        modelOptions.Controls.Add(_modelAutoRadio);
+        modelOptions.Controls.Add(_modelKeepRadio);
+        modelOptions.Controls.Add(_modelCustomRadio);
+        modelOptions.Controls.Add(_modelCustomText);
+        panel.Controls.Add(modelOptions, 0, 1);
+        panel.SetColumnSpan(modelOptions, 2);
+
+        _modelAutoRadio.CheckedChanged += (_, _) => UpdateModelOptionsEnabled();
+        _modelKeepRadio.CheckedChanged += (_, _) => UpdateModelOptionsEnabled();
+        _modelCustomRadio.CheckedChanged += (_, _) => UpdateModelOptionsEnabled();
+        _updateConfigCheck.CheckedChanged += (_, _) => UpdateModelOptionsEnabled();
         return panel;
+    }
+
+    private void UpdateModelOptionsEnabled()
+    {
+        bool enabled = _updateConfigCheck.Checked;
+        _modelAutoRadio.Enabled = enabled;
+        _modelKeepRadio.Enabled = enabled;
+        _modelCustomRadio.Enabled = enabled;
+        _modelCustomText.Enabled = enabled && _modelCustomRadio.Checked;
     }
 
     private Control BuildWarningPanel()
@@ -542,14 +602,33 @@ public sealed class MainForm : Form
         {
             string codexHome = CurrentCodexHome();
             int backupRetentionCount = CurrentBackupRetentionCount();
-            SyncResult result = _updateConfigCheck.Checked
-                ? await Task.Run(async () => await _syncService.RunSwitchAsync(codexHome, provider, backupRetentionCount))
-                : await Task.Run(async () => await _syncService.RunSyncAsync(codexHome, provider: provider, keepCount: backupRetentionCount));
+            SyncResult result;
+            if (_updateConfigCheck.Checked)
+            {
+                bool keepRootModel = _modelKeepRadio.Checked;
+                string? explicitModel = _modelCustomRadio.Checked ? _modelCustomText.Text.Trim() : null;
+                if (_modelCustomRadio.Checked && string.IsNullOrEmpty(explicitModel))
+                {
+                    MessageBox.Show(this, "请填写自定义 model 名称,或改成 \"跟随 provider\"。", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                result = await Task.Run(async () => await _syncService.RunSwitchAsync(
+                    codexHome,
+                    provider,
+                    backupRetentionCount,
+                    model: explicitModel,
+                    keepRootModel: keepRootModel));
+            }
+            else
+            {
+                result = await Task.Run(async () => await _syncService.RunSyncAsync(codexHome, provider: provider, keepCount: backupRetentionCount));
+            }
 
             _settings = _settingsService.UpdateState(_settings, provider, result.BackupDir, CaptureWindowBounds(), backupRetentionCount);
             await _settingsService.SaveAsync(_settings);
             AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 执行完成");
             AppendLog(TextFormatter.FormatSyncResult(result, _updateConfigCheck.Checked ? "已切换并同步" : "已同步"));
+            AppendLog(FormatModelSyncOutcome(result.ModelSync));
             AppendLog(string.Empty);
             await RefreshStatusCoreAsync(codexHome);
             SelectProvider(provider);
@@ -848,6 +927,23 @@ public sealed class MainForm : Form
         _logBox.AppendText(message);
         _logBox.SelectionStart = _logBox.TextLength;
         _logBox.ScrollToCaret();
+    }
+
+    private static string FormatModelSyncOutcome(ModelSyncOutcome outcome)
+    {
+        if (outcome.Source == "not-applicable")
+        {
+            return string.Empty;
+        }
+        if (outcome.Applied)
+        {
+            return $"顶层 model: {outcome.Model} (来源: {outcome.Source})";
+        }
+        if (!string.IsNullOrEmpty(outcome.Warning))
+        {
+            return $"顶层 model: 未改写 ({outcome.Warning})";
+        }
+        return "顶层 model: 未改写 (已请求保留)";
     }
 
     private bool ConfirmCodexClosed(string message)
