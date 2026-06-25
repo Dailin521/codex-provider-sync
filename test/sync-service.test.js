@@ -533,6 +533,61 @@ test("runSwitch updates config and syncs provider metadata", async () => {
   assert.match(rollout, /"model_provider":"apigather"/);
 });
 
+test("runSwitch copies root-level model from the new provider section", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  const config = `model_provider = "openai"\nmodel = "gpt-5.4-mini"\n\n[model_providers.apigather]\nmodel = "apigather-prod"\nbase_url = "https://example.com"\n`;
+  await fs.writeFile(path.join(codexHome, "config.toml"), config, "utf8");
+
+  const result = await runSwitch({ codexHome, provider: "apigather" });
+  assert.equal(result.modelSync.applied, true);
+  assert.equal(result.modelSync.source, "provider-section");
+  assert.equal(result.modelSync.model, "apigather-prod");
+
+  const next = await fs.readFile(path.join(codexHome, "config.toml"), "utf8");
+  assert.match(next, /^model_provider = "apigather"/m);
+  assert.match(next, /^model = "apigather-prod"/m);
+});
+
+test("runSwitch keeps existing model when --keep-root-model is set", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  const config = `model_provider = "openai"\nmodel = "gpt-5.4-mini"\n\n[model_providers.apigather]\nmodel = "apigather-prod"\nbase_url = "https://example.com"\n`;
+  await fs.writeFile(path.join(codexHome, "config.toml"), config, "utf8");
+
+  const result = await runSwitch({ codexHome, provider: "apigather", keepRootModel: true });
+  assert.equal(result.modelSync.applied, false);
+  assert.equal(result.modelSync.source, "none");
+
+  const next = await fs.readFile(path.join(codexHome, "config.toml"), "utf8");
+  assert.match(next, /^model_provider = "apigather"/m);
+  assert.match(next, /^model = "gpt-5.4-mini"/m);
+});
+
+test("runSwitch applies --model override and writes it to config.toml", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model = "gpt-5.4-mini"');
+
+  const result = await runSwitch({ codexHome, provider: "apigather", model: "Custom-Large" });
+  assert.equal(result.modelSync.applied, true);
+  assert.equal(result.modelSync.source, "explicit");
+  assert.equal(result.modelSync.model, "Custom-Large");
+
+  const next = await fs.readFile(path.join(codexHome, "config.toml"), "utf8");
+  assert.match(next, /^model = "Custom-Large"/m);
+});
+
+test("runSwitch emits a warning when the new provider has no model field", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  const config = `model_provider = "openai"\nmodel = "gpt-5.4-mini"\n\n[model_providers.apigather]\nbase_url = "https://example.com"\n`;
+  await fs.writeFile(path.join(codexHome, "config.toml"), config, "utf8");
+
+  const result = await runSwitch({ codexHome, provider: "apigather" });
+  assert.equal(result.modelSync.applied, false);
+  assert.match(result.modelSync.warning ?? "", /no model field/);
+
+  const next = await fs.readFile(path.join(codexHome, "config.toml"), "utf8");
+  assert.match(next, /^model = "gpt-5.4-mini"/m);
+});
+
 test("status reports implicit default provider and rollout/sqlite counts", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome);

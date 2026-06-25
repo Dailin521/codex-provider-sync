@@ -17,10 +17,14 @@ function printHelp() {
 Usage:
   codex-provider status [--codex-home PATH]
   codex-provider sync [--provider ID] [--keep N] [--codex-home PATH]
-  codex-provider switch <provider-id> [--keep N] [--codex-home PATH]
+  codex-provider switch <provider-id> [--model NAME] [--keep-root-model] [--keep N] [--codex-home PATH]
   codex-provider prune-backups [--keep N] [--codex-home PATH]
   codex-provider restore <backup-dir> [--no-config] [--no-db] [--no-sessions] [--codex-home PATH]
   codex-provider install-windows-launcher [--dir PATH] [--codex-home PATH]
+
+switch flags:
+  --model NAME         override root-level model field with NAME (e.g. "MiniMax-M3")
+  --keep-root-model    do not touch the root-level model field; only switch model_provider
 `);
 }
 
@@ -208,10 +212,22 @@ async function main() {
     const result = await runSwitch({
       codexHome: flags["codex-home"],
       provider,
+      model: flags.model,
+      keepRootModel: Boolean(flags["keep-root-model"]),
       keepCount: parseKeepCount(flags.keep),
       onProgress: createSyncProgressReporter()
     });
     console.log(summarizeSync(result, "Switched to"));
+    if (result.modelSync) {
+      const { applied, source, model, warning } = result.modelSync;
+      if (applied) {
+        console.log(`Root-level model: ${model} (source: ${source})`);
+      } else if (warning) {
+        console.log(`Root-level model: unchanged (${warning})`);
+      } else {
+        console.log("Root-level model: unchanged (keep-root-model flag set)");
+      }
+    }
     return;
   }
 
