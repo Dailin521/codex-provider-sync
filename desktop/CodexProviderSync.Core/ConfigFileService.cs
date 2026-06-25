@@ -69,6 +69,48 @@ public sealed partial class ConfigFileService
         return ListConfiguredProviderIds(configText).Contains(provider, StringComparer.Ordinal);
     }
 
+    public string? ReadRootModelFromConfigText(string configText)
+    {
+        if (string.IsNullOrEmpty(configText))
+        {
+            return null;
+        }
+
+        // The root-level `model` field lives in the preamble before any
+        // [table] header. We scan line-by-line, stop at the first [section],
+        // and return the value of `model = "..."` if present. This mirrors
+        // the JS side's `^\s*model\s*=\s*"([^"]+)"\s*$/m` walk, and is what
+        // Sync uses to mirror the active model into the per-thread SQLite
+        // `model` column. Commented-out lines (starting with `#`) and blank
+        // lines are skipped, matching the JS behavior.
+        foreach (string raw in SplitLines(configText))
+        {
+            string line = raw.Trim();
+            if (line.Length == 0)
+            {
+                continue;
+            }
+
+            if (line.StartsWith('#'))
+            {
+                continue;
+            }
+
+            if (line.StartsWith('['))
+            {
+                break;
+            }
+
+            Match match = ModelAssignmentRegex().Match(line);
+            if (match.Success)
+            {
+                return match.Groups[1].Value;
+            }
+        }
+
+        return null;
+    }
+
     public string SetRootProviderInConfigText(string configText, string provider)
     {
         string newline = DetectNewline(configText);
