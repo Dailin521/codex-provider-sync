@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace CodexProviderSync.Core;
@@ -97,6 +98,12 @@ public sealed class SessionRolloutService
                 {
                     FileSnapshot snapshot = GetFileSnapshot(rolloutPath);
                     payload["model_provider"] = targetProvider;
+                    // Peek at the first turn_context event in the rollout
+                    // to capture the per-turn `model` field that the
+                    // Codex GUI bottom-right of an old conversation
+                    // reads. This is the value the model rewrite pass
+                    // will swap to the active root-level model.
+                    string? originalModel = await ReadFirstTurnContextModelAsync(rolloutPath, record);
                     changes.Add(new SessionChange
                     {
                         Path = rolloutPath,
@@ -108,6 +115,7 @@ public sealed class SessionRolloutService
                         OriginalFileLength = snapshot.Length,
                         OriginalLastWriteTimeUtcTicks = snapshot.LastWriteTimeUtcTicks,
                         OriginalProvider = currentProvider,
+                        OriginalModel = originalModel,
                         UpdatedFirstLine = root!.ToJsonString()
                     });
                 }
@@ -134,7 +142,9 @@ public sealed class SessionRolloutService
         };
     }
 
-    public async Task<SessionApplyResult> ApplySessionChangesAsync(IEnumerable<SessionChange> changes)
+    public async Task<SessionApplyResult> ApplySessionChangesAsync(
+        IEnumerable<SessionChange> changes,
+        string? targetModel = null)
     {
         int appliedCount = 0;
         List<string> appliedPaths = [];
@@ -147,6 +157,16 @@ public sealed class SessionRolloutService
                 TryRestoreLastWriteTimeUtc(change.Path, change.OriginalLastWriteTimeUtcTicks);
                 appliedCount += 1;
                 appliedPaths.Add(change.Path);
+                // After the first-line rewrite succeeds, do a
+                // second pass that updates the per-turn `model`
+                // field in every turn_context event of the file.
+                // The Codex GUI bottom-right of an old conversation
+                // reads that field, so we have to keep it in sync
+                // with the active root-level model.
+                if (!string.IsNullOrEmpty(targetModel))
+                {
+                    await TryRewriteRolloutModelFieldAsync(change, targetModel);
+                }
             }
             else
             {
@@ -378,6 +398,210 @@ public sealed class SessionRolloutService
         {
             ArrayPool<byte>.Shared.Return(buffer);
         }
+    }
+
+    // Scan the start of a rollout file looking for the first
+    // `turn_context` event and return its `payload.model` field.
+    // This is the field that the Codex GUI bottom-right of an old
+    // conversation reads, so we have to capture it here and rewrite
+    // it (along with `payload.collaboration_mode.settings.model`)
+    // on every sync, in addition to the per-thread SQLite `model`
+    // column. We peek at the first 64 KB only — the first
+    // `turn_context` after the leading `session_meta` line is
+    // enough to know what model the rest of the file uses.
+    private static async Task<string?> ReadFirstTurnContextModelAsync(
+        string rolloutPath,
+        FirstLineRecord record)
+    {
+        try
+        {
+            await using FileStream stream = new(
+                rolloutPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            stream.Seek(record.Offset, SeekOrigin.Begin);
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(64 * 1024);
+            try
+            {
+                int bytesRead = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length));
+                if (bytesRead == 0)
+                {
+                    return null;
+                }
+
+                string text = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                using StringReader reader = new(text);
+                string? line;
+                while ((line = reader.ReadLine()) is not null)
+                {
+                    if (!line.Contains("\"turn_context\"", StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        JsonNode? node = JsonNode.Parse(line);
+                        if (node is null)
+                        {
+                            continue;
+                        }
+
+                        string? type = node["type"]?.GetValue<string>();
+                        if (!string.Equals(type, "turn_context", StringComparison.Ordinal))
+                        {
+                            continue;
+                        }
+
+                        string? model = node["payload"]?["model"]?.GetValue<string>();
+                        if (!string.IsNullOrEmpty(model))
+                        {
+                            return model;
+                        }
+                    }
+                    catch (JsonException)
+                    {
+                        // Skip malformed lines and keep scanning.
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
+        catch (Exception error) when (IsRolloutFileBusyError(error))
+        {
+            throw WrapRolloutFileBusyError(error, rolloutPath, "read");
+        }
+    }
+
+    // Rewrite the per-turn `model` field in every `turn_context`
+    // event of the rollout. The Codex GUI bottom-right of an old
+    // conversation reads that field, so we have to keep it aligned
+    // with the active root-level model. We do a line-by-line
+    // regex rewrite instead of round-tripping the JSON tree to
+    // avoid mangling the multi-megabyte `developer_instructions`
+    // blob Codex writes into every `turn_context`.
+    private async Task TryRewriteRolloutModelFieldAsync(SessionChange change, string targetModel)
+    {
+        if (string.IsNullOrEmpty(change.OriginalModel))
+        {
+            return;
+        }
+        if (string.IsNullOrEmpty(targetModel))
+        {
+            return;
+        }
+        if (string.Equals(change.OriginalModel, targetModel, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        // Snapshot the file as it stands after the first-line
+        // rewrite. We cannot compare against `change.OriginalFileLength`
+        // because the first-line rewrite already changed the size
+        // (the new first line is often a different length than the
+        // original one).
+        FileInfo beforeInfo = new(change.Path);
+        long beforeSize = beforeInfo.Length;
+        DateTime beforeMtimeUtc = beforeInfo.LastWriteTimeUtc;
+
+        string tempPath = $"{change.Path}.provider-sync-model.{Environment.ProcessId}.{DateTime.UtcNow.Ticks}.{Guid.NewGuid():N}.tmp";
+        // If a previous run left a leftover at the same path (which
+        // shouldn't normally happen because of the Guid suffix, but
+        // can occur when tests share a process and timestamps
+        // collide), clean it up before opening.
+        if (File.Exists(tempPath))
+        {
+            File.Delete(tempPath);
+        }
+
+        bool replacements = false;
+        try
+        {
+            await using (FileStream sourceStream = OpenExclusiveRewriteStream(change.Path))
+            {
+                await using FileStream writeStream = new(
+                    tempPath,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None);
+                await using StreamWriter writer = new(writeStream, new UTF8Encoding(false));
+                using StreamReader reader = new(sourceStream, Encoding.UTF8, false, 64 * 1024, leaveOpen: true);
+                bool firstLine = true;
+                string? line;
+                while ((line = await reader.ReadLineAsync()) is not null)
+                {
+                    string next = firstLine
+                        ? line
+                        : RewriteTurnContextModelInLine(line, change.OriginalModel!, targetModel);
+                    if (!string.Equals(next, line, StringComparison.Ordinal))
+                    {
+                        replacements = true;
+                    }
+                    if (!firstLine)
+                    {
+                        await writer.WriteAsync('\n');
+                    }
+                    firstLine = false;
+                    await writer.WriteAsync(next);
+                }
+            }
+
+            if (!replacements)
+            {
+                File.Delete(tempPath);
+                return;
+            }
+
+            // Refuse to swap in the new file if Codex appended
+            // anything between our snapshot and the rename, so we
+            // do not silently drop trailing events.
+            FileInfo afterInfo = new(change.Path);
+            if (afterInfo.Length != beforeSize || afterInfo.LastWriteTimeUtc != beforeMtimeUtc)
+            {
+                File.Delete(tempPath);
+                return;
+            }
+
+            File.Move(tempPath, change.Path, overwrite: true);
+        }
+        catch (Exception error)
+        {
+            try
+            {
+                File.Delete(tempPath);
+            }
+            catch
+            {
+                // Ignore cleanup failures and surface the original error.
+            }
+            throw WrapRolloutFileBusyError(error, change.Path, "rewrite model field");
+        }
+    }
+
+    private static string RewriteTurnContextModelInLine(string line, string oldModel, string newModel)
+    {
+        if (!line.Contains("\"turn_context\"", StringComparison.Ordinal))
+        {
+            return line;
+        }
+        string escapedOld = EscapeForJsonString(oldModel);
+        string escapedNew = EscapeForJsonString(newModel);
+        return System.Text.RegularExpressions.Regex.Replace(
+            line,
+            "\"model\"\\s*:\\s*\"" + escapedOld + "\"",
+            m => "\"model\":\"" + escapedNew + "\"");
+    }
+
+    private static string EscapeForJsonString(string value)
+    {
+        return value
+            .Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("\"", "\\\"", StringComparison.Ordinal);
     }
 
     private static async Task RewriteFirstLineAsync(

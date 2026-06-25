@@ -161,7 +161,7 @@ public sealed class CodexSyncService
                 {
                     if (writableChanges.Count > 0)
                     {
-                        applyResult = await _sessionRolloutService.ApplySessionChangesAsync(writableChanges);
+                        applyResult = await _sessionRolloutService.ApplySessionChangesAsync(writableChanges, targetModel);
                         HashSet<string> appliedPathSet = new(applyResult.AppliedPaths, StringComparer.Ordinal);
                         appliedSessionChanges = writableChanges.Where(change => appliedPathSet.Contains(change.Path)).ToList();
                         sessionRestoreNeeded = appliedSessionChanges.Count > 0;

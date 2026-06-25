@@ -905,6 +905,73 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
+    public async Task RunSync_RewritesTurnContextModelFieldInRolloutFiles()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\nmodel = \"MiniMax-M3\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutWithTurnContextAsync(sessionPath, "thread-a", "apigather", "gpt-5.4");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(1, result.ChangedSessionFiles);
+        string rewritten = await File.ReadAllTextAsync(sessionPath);
+        using StringReader reader = new(rewritten);
+        string? line;
+        int turnContextCount = 0;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            if (!line.Contains("\"turn_context\"", StringComparison.Ordinal))
+            {
+                continue;
+            }
+            using JsonDocument doc = JsonDocument.Parse(line);
+            string model = doc.RootElement.GetProperty("payload").GetProperty("model").GetString()!;
+            string collabModel = doc.RootElement
+                .GetProperty("payload")
+                .GetProperty("collaboration_mode")
+                .GetProperty("settings")
+                .GetProperty("model")
+                .GetString()!;
+            Assert.Equal("MiniMax-M3", model);
+            Assert.Equal("MiniMax-M3", collabModel);
+            turnContextCount += 1;
+        }
+        Assert.Equal(2, turnContextCount);
+    }
+
+    [Fact]
+    public async Task RunSync_LeavesTurnContextModelFieldAlone_WhenNoRootModelConfigured()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutWithTurnContextAsync(sessionPath, "thread-a", "apigather", "gpt-5.4");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(1, result.ChangedSessionFiles);
+        string rewritten = await File.ReadAllTextAsync(sessionPath);
+        using StringReader reader = new(rewritten);
+        string? line;
+        int turnContextCount = 0;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            if (!line.Contains("\"turn_context\"", StringComparison.Ordinal))
+            {
+                continue;
+            }
+            using JsonDocument doc = JsonDocument.Parse(line);
+            string model = doc.RootElement.GetProperty("payload").GetProperty("model").GetString()!;
+            Assert.Equal("gpt-5.4", model);
+            turnContextCount += 1;
+        }
+        Assert.Equal(2, turnContextCount);
+    }
+
+    [Fact]
     public async Task Status_ReturnsMalformedSqliteAsUnreadable()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
