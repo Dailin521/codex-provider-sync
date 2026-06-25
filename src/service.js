@@ -419,6 +419,10 @@ export async function runSwitch({
     throw new Error(`Provider "${provider}" is not available in config.toml. Configure it first or use one of: ${listConfiguredProviderIds(originalConfigText).join(", ")}`);
   }
 
+  if (model !== undefined && model !== null && keepRootModel) {
+    throw new Error("--model and --keep-root-model are mutually exclusive. Pick one.");
+  }
+
   let nextConfigText = setRootProviderInConfigText(originalConfigText, provider);
   let modelSync = { applied: false, source: "none", model: null, warning: null };
 

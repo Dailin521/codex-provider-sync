@@ -62,14 +62,6 @@ to leave the root-level `model` untouched, or
 the new provider section has no `model` field of its own, or when the
 user wants to call a non-default model through a relay provider).
 
-Use `codex-provider watch` when:
-
-- the user wants the tool to keep rollout + SQLite aligned with the
-  current `config.toml` automatically, without manually running `sync`
-  after each provider change
-- another tool (Echobird, Codex Desktop, hand edits) is also editing
-  `config.toml` and the user wants the sync to follow
-
 Use `codex-provider restore <backup-dir>` when:
 
 - the user wants to roll back a previous sync
@@ -148,8 +140,6 @@ codex-provider sync --provider openai
 codex-provider switch apigather
 codex-provider switch apigather --model "MiniMax-M3"
 codex-provider switch apigather --keep-root-model
-codex-provider watch
-codex-provider watch --once
 codex-provider prune-backups --keep 5
 codex-provider restore C:\Users\you\.codex\backups_state\provider-sync\20260319T042708906Z
 ```
