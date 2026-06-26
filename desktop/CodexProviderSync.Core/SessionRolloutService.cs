@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace CodexProviderSync.Core;
 
@@ -13,7 +14,8 @@ public sealed class SessionRolloutService
     public async Task<SessionChangeCollection> CollectSessionChangesAsync(
         string codexHome,
         string targetProvider,
-        bool skipLockedReads = false)
+        bool skipLockedReads = false,
+        string? targetModel = null)
     {
         List<SessionChange> changes = [];
         List<string> lockedPaths = [];
@@ -113,8 +115,19 @@ public sealed class SessionRolloutService
                 // the per-turn model drifted. Skipping the no-op
                 // case keeps us from rewriting rollout files when
                 // they are already on the right provider + model,
-                // which would otherwise spam mtime on every sync.
-                bool modelNeedsUpdate = !string.IsNullOrEmpty(originalModel);
+                // which would otherwise spam mtime on every sync
+                // and create a useless backup on every run.
+                //
+                // We compare `originalModel` against `targetModel`
+                // so that a plain `sync` whose root-level model
+                // already matches every rollout produces zero
+                // changes, no backups, and no entries in `changed
+                // files`. Without this gate, every sync would
+                // have rewritten every rollout file just to write
+                // the same content back.
+                bool modelNeedsUpdate = !string.IsNullOrEmpty(originalModel)
+                    && !string.IsNullOrEmpty(targetModel)
+                    && !string.Equals(originalModel, targetModel, StringComparison.Ordinal);
                 if (!providerNeedsUpdate && !modelNeedsUpdate)
                 {
                     continue;
@@ -439,12 +452,30 @@ public sealed class SessionRolloutService
     // Scan the start of a rollout file looking for the first
     // `turn_context` event and return its `payload.model` field.
     // This is the field that the Codex GUI bottom-right of an old
-    // conversation reads, so we have to capture it here and rewrite
-    // it (along with `payload.collaboration_mode.settings.model`)
-    // on every sync, in addition to the per-thread SQLite `model`
-    // column. We peek at the first 64 KB only — the first
-    // `turn_context` after the leading `session_meta` line is
-    // enough to know what model the rest of the file uses.
+    // We stream line-by-line because individual `turn_context`
+    // lines can easily exceed 64 KB once Codex includes the
+    // `developer_instructions` blob — the previous code that
+    // capped the read at 64 KB silently missed those, which made
+    // the rollout model rewrite a no-op for sessions whose first
+    // turn was a long planning step. We deliberately extract
+    // `payload.model` with a regex on the raw JSON text instead
+    // of `JsonNode.Parse`-ing the entire line: Codex writes
+    // opaque multi-KB strings (`developer_instructions`, raw tool
+    // output, etc.) into the payload, and round-tripping those
+    // through `JsonNode.Parse` -> `node.ToJsonString()` would
+    // silently mangle embedded escape sequences. A regex
+    // anchored on `"type":"turn_context"` and then the first
+    // `"model":"<value>"` that follows within the same line is
+    // enough to pick up the model field of the first
+    // `turn_context` event we see, because rollout lines are
+    // single JSON objects.
+    private static readonly Regex TurnContextStartRegex = new(
+        "\"type\"\\s*:\\s*\"turn_context\"",
+        RegexOptions.Compiled);
+    private static readonly Regex ModelFieldRegex = new(
+        "\"model\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"",
+        RegexOptions.Compiled);
+
     private static async Task<string?> ReadFirstTurnContextModelAsync(
         string rolloutPath,
         FirstLineRecord record)
@@ -457,56 +488,22 @@ public sealed class SessionRolloutService
                 FileAccess.Read,
                 FileShare.ReadWrite | FileShare.Delete);
             stream.Seek(record.Offset, SeekOrigin.Begin);
-            byte[] buffer = ArrayPool<byte>.Shared.Rent(64 * 1024);
-            try
+            using StreamReader reader = new(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, bufferSize: 4096, leaveOpen: true);
+            string? line;
+            while ((line = await reader.ReadLineAsync()) is not null)
             {
-                int bytesRead = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length));
-                if (bytesRead == 0)
+                if (!TurnContextStartRegex.IsMatch(line))
                 {
-                    return null;
+                    continue;
                 }
 
-                string text = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                using StringReader reader = new(text);
-                string? line;
-                while ((line = reader.ReadLine()) is not null)
+                Match match = ModelFieldRegex.Match(line);
+                if (match.Success && match.Groups[1].Value.Length > 0)
                 {
-                    if (!line.Contains("\"turn_context\"", StringComparison.Ordinal))
-                    {
-                        continue;
-                    }
-
-                    try
-                    {
-                        JsonNode? node = JsonNode.Parse(line);
-                        if (node is null)
-                        {
-                            continue;
-                        }
-
-                        string? type = node["type"]?.GetValue<string>();
-                        if (!string.Equals(type, "turn_context", StringComparison.Ordinal))
-                        {
-                            continue;
-                        }
-
-                        string? model = node["payload"]?["model"]?.GetValue<string>();
-                        if (!string.IsNullOrEmpty(model))
-                        {
-                            return model;
-                        }
-                    }
-                    catch (JsonException)
-                    {
-                        // Skip malformed lines and keep scanning.
-                    }
+                    return match.Groups[1].Value;
                 }
-                return null;
             }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(buffer);
-            }
+            return null;
         }
         catch (Exception error) when (IsRolloutFileBusyError(error))
         {

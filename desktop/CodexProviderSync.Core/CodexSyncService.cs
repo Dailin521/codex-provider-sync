@@ -125,7 +125,15 @@ public sealed class CodexSyncService
 
         await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "sync");
 
-        SessionChangeCollection sessionInfo = await _sessionRolloutService.CollectSessionChangesAsync(codexHome, targetProvider, skipLockedReads: true);
+        SessionChangeCollection sessionInfo = await _sessionRolloutService.CollectSessionChangesAsync(
+            codexHome,
+            targetProvider,
+            skipLockedReads: true,
+            // Plumb the resolved root-level model down to the rollout
+            // collector so it can skip rollouts whose `turn_context.model`
+            // already matches the active target — no rewrite, no
+            // backup, no `changed files` entry.
+            targetModel: targetModel);
         IReadOnlyList<ThreadCwdStat> workspaceCwdStats = await _globalStateService.ReadThreadCwdStatsAsync(codexHome);
         string? encryptedContentWarning = BuildEncryptedContentWarning(sessionInfo.EncryptedContentCounts, targetProvider);
         (IReadOnlyList<SessionChange> writableChanges, IReadOnlyList<SessionChange> lockedChanges) =

@@ -1062,6 +1062,82 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
+    public async Task RunSync_RewritesTurnContextModelFieldInRolloutLinesLargerThan64KB()
+    {
+        // Regression guard: previously the rollout scanner capped
+        // its read window at 64 KB, so any rollout whose first
+        // `turn_context` line was longer than that (which happens
+        // when Codex embeds a `developer_instructions` blob)
+        // silently skipped the model-field rewrite and left the
+        // Codex GUI bottom-right showing the stale model name.
+        // This test forces the first `turn_context` line to be
+        // well past 64 KB.
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\nmodel = \"MiniMax-M3\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-long.jsonl");
+        await fixture.WriteLongTurnContextRolloutAsync(sessionPath, "thread-long", "apigather", "gpt-5.4", paddingBytes: 200 * 1024);
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(1, result.ChangedSessionFiles);
+        string rewritten = await File.ReadAllTextAsync(sessionPath);
+        using StringReader reader = new(rewritten);
+        string? line;
+        int turnContextCount = 0;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            if (!line.Contains("\"turn_context\"", StringComparison.Ordinal))
+            {
+                continue;
+            }
+            Assert.True(line.Length > 64 * 1024, $"turn_context line must stay >64 KB after rewrite; got {line.Length}");
+            using JsonDocument doc = JsonDocument.Parse(line);
+            string model = doc.RootElement.GetProperty("payload").GetProperty("model").GetString()!;
+            Assert.Equal("MiniMax-M3", model);
+            turnContextCount += 1;
+        }
+        Assert.Equal(1, turnContextCount);
+    }
+
+    [Fact]
+    public async Task RunSync_SkipsRolloutRewrite_WhenTurnContextModelAlreadyMatchesTarget()
+    {
+        // Regression guard: a plain `sync` (no provider switch)
+        // used to rewrite every rollout on disk just to write the
+        // same content back, creating useless backups and
+        // polluting `changed files`. The gate is: if the first
+        // `turn_context` model already matches the root-level
+        // `model` from config.toml AND the provider already
+        // matches, the rollout must be left alone — no change
+        // entry, no backup.
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\nmodel = \"MiniMax-M3\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutWithTurnContextAsync(sessionPath, "thread-a", "openai", "MiniMax-M3");
+        string original = await File.ReadAllTextAsync(sessionPath);
+        DateTime originalMtimeUtc = File.GetLastWriteTimeUtc(sessionPath);
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(0, result.ChangedSessionFiles);
+        Assert.Empty(result.SkippedLockedRolloutFiles);
+        Assert.Equal(original, await File.ReadAllTextAsync(sessionPath));
+        Assert.Equal(originalMtimeUtc, File.GetLastWriteTimeUtc(sessionPath));
+
+        string backupRootDir = Path.Combine(fixture.CodexHome, "backups_state", "provider-sync");
+        if (Directory.Exists(backupRootDir))
+        {
+            foreach (string entry in Directory.EnumerateDirectories(backupRootDir))
+            {
+                string sessionBackupPath = Path.Combine(entry, "sessions", Path.GetFileName(sessionPath));
+                Assert.False(File.Exists(sessionBackupPath), $"no rollout backup must be written for an already-on-target session (saw {sessionBackupPath})");
+            }
+        }
+    }
+
+    [Fact]
     public async Task Status_ReturnsMalformedSqliteAsUnreadable()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
