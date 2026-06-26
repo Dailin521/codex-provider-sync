@@ -247,7 +247,14 @@ export async function runSync({
       encryptedContentCounts,
       userEventThreadIds,
       threadCwdById
-    } = await collectSessionChanges(codexHome, targetProvider, { skipLockedReads: true });
+    } = await collectSessionChanges(codexHome, targetProvider, {
+      skipLockedReads: true,
+      // Plumb the resolved root-level model down to the rollout
+      // collector so it can skip rollouts whose `turn_context.model`
+      // already matches the active target — no rewrite, no
+      // backup, no `changed files` entry.
+      targetModel: model
+    });
     const cwdStats = await readThreadCwdStats(codexHome);
     const encryptedContentWarning = buildEncryptedContentWarning(encryptedContentCounts, targetProvider);
     emitProgress(onProgress, {
