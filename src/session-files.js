@@ -275,43 +275,48 @@ function parseSessionMetaRecord(firstLine) {
 // to know what model the rest of the file uses. We deliberately stop as
 // soon as we find one, so the scan is O(1) for the common case and does
 // not load multi-MB rollouts into memory just to read a header.
+// We stream line-by-line because individual `turn_context` lines
+// can easily exceed 64 KB once Codex includes the
+// `developer_instructions` blob — the previous code that capped
+// the read at 64 KB silently missed those, which made the
+// rollout model rewrite a no-op for sessions whose first turn
+// was a long planning step. We deliberately extract `payload.model`
+// with a regex on the raw JSON text instead of `JSON.parse`-ing
+// the entire line: Codex writes opaque multi-KB strings
+// (`developer_instructions`, raw tool output, etc.) into the
+// payload, and round-tripping those through `JSON.parse` ->
+// `JSON.stringify` would silently mangle embedded escape
+// sequences. A regex anchored on `"type":"turn_context"` and
+// then the first `"model":"<value>"` that follows within the
+// same line is enough to pick up the model field of the first
+// `turn_context` event we see, because rollout lines are
+// single JSON objects.
 async function readFirstTurnContextModel(rolloutPath, { firstLineOffset, firstLineLength } = {}) {
   let handle;
   try {
     handle = await fsp.open(rolloutPath, "r");
-    const headerSkip = firstLineOffset ?? 0;
-    const headerLength = firstLineLength ?? 0;
-    const scanLimit = 64 * 1024; // first 64 KB is plenty for one turn_context
-    const chunk = Buffer.alloc(scanLimit);
-    const start = headerSkip + headerLength;
-    const { bytesRead } = await handle.read(chunk, 0, chunk.length, start);
-    if (bytesRead === 0) {
-      return null;
-    }
+    const headerSkip = (firstLineOffset ?? 0) + (firstLineLength ?? 0);
+    const stream = handle.createReadStream({ encoding: "utf8", start: headerSkip });
+    const reader = readline.createInterface({ input: stream, crlfDelay: Infinity });
 
-    const text = chunk.subarray(0, bytesRead).toString("utf8");
-    // Each line in a rollout is a single JSON object. We split on
-    // newlines and look for the first line whose top-level `type`
-    // is `turn_context`, then parse it. A regex that tries to
-    // match the surrounding `{}` of a deeply nested payload will
-    // stop at the first inner `}` and miss the real outer one, so
-    // per-line scanning is much more robust here.
-    for (const line of text.split(/\r?\n/)) {
-      if (!line.includes('"turn_context"')) {
-        continue;
-      }
-      try {
-        const parsed = JSON.parse(line);
-        if (parsed?.type === "turn_context"
-            && typeof parsed?.payload?.model === "string"
-            && parsed.payload.model.length > 0) {
-          return parsed.payload.model;
+    const turnContextStart = /"type"\s*:\s*"turn_context"/;
+    const modelField = /"model"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/;
+
+    try {
+      for await (const line of reader) {
+        if (!turnContextStart.test(line)) {
+          continue;
         }
-      } catch {
-        // Skip lines that look like turn_context but fail to parse.
+        const match = line.match(modelField);
+        if (match && match[1].length > 0) {
+          return match[1];
+        }
       }
+      return null;
+    } finally {
+      reader.close();
+      stream.destroy();
     }
-    return null;
   } catch (error) {
     throw wrapRolloutFileBusyError(error, rolloutPath, "read");
   } finally {
@@ -782,7 +787,16 @@ async function findLockedFilesOnWindows(filePaths) {
 
 export async function collectSessionChanges(codexHome, targetProvider, options = {}) {
   const {
-    skipLockedReads = false
+    skipLockedReads = false,
+    // Optional target model. When set, rollouts whose per-turn
+    // `turn_context.model` already matches this value are skipped
+    // entirely — no first-line rewrite, no model rewrite, no
+    // backup, no entry in `changed files`. Without this gate the
+    // sync would create meaningless backups and rewrite identical
+    // content for every old session whenever the user happened to
+    // leave the root-level `model` line unchanged across a
+    // `sync` (no switch).
+    targetModel = null
   } = options;
   const summaries = [];
   const lockedPaths = [];
@@ -857,7 +871,18 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
         // has updated the root-level `model` in config.toml but
         // their old rollouts still advertise the old name on
         // every `turn_context` line.
-        const modelNeedsUpdate = typeof originalModel === "string" && originalModel.length > 0;
+        //
+        // We compare `originalModel` against `targetModel` so
+        // that a plain `sync` whose root-level model already
+        // matches every rollout produces zero changes, no
+        // backups, and no entries in `changed files`. Without
+        // this gate, every sync would have rewritten every
+        // rollout file just to write the same content back.
+        const modelNeedsUpdate = typeof originalModel === "string"
+          && originalModel.length > 0
+          && typeof targetModel === "string"
+          && targetModel.length > 0
+          && originalModel !== targetModel;
         if (!providerNeedsUpdate && !modelNeedsUpdate) {
           continue;
         }

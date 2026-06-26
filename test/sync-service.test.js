@@ -90,6 +90,43 @@ async function writeRolloutWithTurnContext(filePath, { id, provider, model }) {
   await fs.writeFile(filePath, `${lines.join("\n")}\n`, "utf8");
 }
 
+// Write a rollout whose first `turn_context` payload carries a
+// `developer_instructions` blob large enough that the line blows
+// past 64 KB on its own. This is the regression case behind the
+// `collectSessionChanges` fix that switched from a fixed-window
+// read to a streaming line-by-line scan.
+async function writeLongTurnContextRollout(filePath, { id, provider, model, paddingBytes }) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const padding = "x".repeat(Math.max(0, paddingBytes));
+  const metaPayload = {
+    id,
+    timestamp: "2026-06-09T09:16:03.878Z",
+    cwd: "C:\\AITemp",
+    source: "cli",
+    cli_version: "0.115.0",
+    model_provider: provider
+  };
+  const turnContext = {
+    timestamp: "2026-06-09T09:16:03.880Z",
+    type: "turn_context",
+    payload: {
+      turn_id: "019eabaa-e391-7e21-89cd-e761b5dee114",
+      cwd: "C:\\AITemp",
+      current_date: "2026-06-09",
+      model,
+      developer_instructions: padding,
+      collaboration_mode: { mode: "default", settings: { model, reasoning_effort: "xhigh" } }
+    }
+  };
+  const metaLine = JSON.stringify({ timestamp: metaPayload.timestamp, type: "session_meta", payload: metaPayload });
+  const tcLine = JSON.stringify(turnContext);
+  if (tcLine.length < 64 * 1024 + 1) {
+    throw new Error(`Test setup error: long turn_context line is only ${tcLine.length} bytes; bump paddingBytes`);
+  }
+  await fs.writeFile(filePath, `${metaLine}\n${tcLine}\n`, "utf8");
+  return { metaLine, tcLine };
+}
+
 function backupRoot(codexHome) {
   return path.join(codexHome, "backups_state", "provider-sync");
 }
@@ -823,6 +860,76 @@ test("runSync leaves turn_context model field alone when no model is provided", 
     .filter((entry) => entry.type === "turn_context");
   for (const entry of turnContextLines) {
     assert.equal(entry.payload.model, "gpt-5.4", "turn_context model must stay put when caller does not pass a target");
+  }
+});
+
+test("runSync rewrites turn_context model field in rollout lines larger than 64 KB", async () => {
+  // Regression guard: previously the rollout scanner capped its
+  // read window at 64 KB, so any rollout whose first
+  // `turn_context` line was longer than that (which happens when
+  // Codex embeds a `developer_instructions` blob) silently
+  // skipped the model-field rewrite and left the Codex GUI
+  // bottom-right showing the stale model name. This test forces
+  // the first `turn_context` line to be well past 64 KB.
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "MiniMax-M3"\n');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "06", "09", "rollout-long.jsonl");
+  const { tcLine } = await writeLongTurnContextRollout(sessionPath, {
+    id: "thread-long",
+    provider: "apigather",
+    model: "gpt-5.4",
+    paddingBytes: 200 * 1024
+  });
+  assert.ok(tcLine.length > 64 * 1024, `synthetic turn_context line must exceed 64 KB; got ${tcLine.length}`);
+
+  const result = await runSync({ codexHome });
+  assert.equal(result.changedSessionFiles, 1, "long-line rollout must be picked up by the scanner");
+
+  const lines = (await fs.readFile(sessionPath, "utf8")).split("\n").filter(Boolean);
+  const turnContextLines = lines
+    .map((line) => JSON.parse(line))
+    .filter((entry) => entry.type === "turn_context");
+  assert.ok(turnContextLines.length >= 1, "turn_context must still parse cleanly after rewrite");
+  for (const entry of turnContextLines) {
+    assert.equal(entry.payload.model, "MiniMax-M3", "long-line turn_context.model must be rewritten");
+    assert.equal(entry.payload.model_provider ?? undefined, undefined,
+      "long-line payload must not have a spurious model_provider field injected");
+  }
+});
+
+test("runSync skips rollout rewrite when turn_context model already matches the target", async () => {
+  // Regression guard: a plain `sync` (no provider switch) used
+  // to rewrite every rollout on disk just to write the same
+  // content back, creating useless backups and polluting
+  // `changed files`. The gate is: if the first `turn_context`
+  // model already matches the root-level `model` from
+  // config.toml AND the provider already matches, the rollout
+  // must be left alone — no change entry, no backup.
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "MiniMax-M3"\n');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "06", "09", "rollout-a.jsonl");
+  await writeRolloutWithTurnContext(sessionPath, {
+    id: "thread-a",
+    provider: "openai",
+    model: "MiniMax-M3"
+  });
+  const originalContent = await fs.readFile(sessionPath, "utf8");
+  const originalMtimeMs = (await fs.stat(sessionPath)).mtimeMs;
+
+  const result = await runSync({ codexHome });
+  assert.equal(result.changedSessionFiles, 0, "rollout already on target must not count as changed");
+  assert.equal(result.skippedLockedRolloutFiles.length, 0);
+  const after = await fs.readFile(sessionPath, "utf8");
+  assert.equal(after, originalContent, "rollout bytes must be untouched when already on target");
+  const afterMtimeMs = (await fs.stat(sessionPath)).mtimeMs;
+  assert.equal(afterMtimeMs, originalMtimeMs, "rollout mtime must not be bumped when already on target");
+
+  const backupRootDir = path.join(codexHome, "backups_state", "provider-sync");
+  const backupEntries = await fs.readdir(backupRootDir).catch(() => []);
+  for (const entry of backupEntries) {
+    const sessionBackupPath = path.join(backupRootDir, entry, "sessions", "2026", "06", "09", "rollout-a.jsonl");
+    const exists = await fs.access(sessionBackupPath).then(() => true).catch(() => false);
+    assert.equal(exists, false, `no rollout backup must be written for an already-on-target session (saw ${sessionBackupPath})`);
   }
 });
 
