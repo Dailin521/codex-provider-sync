@@ -220,6 +220,20 @@ export async function runSync({
   const configText = await readConfigText(configPath);
   const current = readCurrentProviderFromConfigText(configText);
   const targetProvider = provider ?? current.provider ?? DEFAULT_PROVIDER;
+  // When the caller does not pin a model, fall back to the
+  // active root-level `model = "..."` from config.toml. This
+  // is what makes a plain `codex-provider sync` keep the per-
+  // turn `turn_context.model` field on old rollout files in
+  // sync with the rest of the toolchain, so the Codex GUI
+  // bottom-right of an old conversation shows the model that
+  // is actually in use today instead of the one the thread was
+  // created with.
+  if (model == null) {
+    const rootModelMatch = configText.match(/^\s*model\s*=\s*"([^"]+)"\s*$/m);
+    if (rootModelMatch) {
+      model = rootModelMatch[1];
+    }
+  }
 
   const releaseLock = await acquireLock(codexHome, "sync");
   let backupDir = null;
@@ -303,7 +317,7 @@ export async function runSync({
         targetProvider,
         async () => {
           if (writableChanges.length > 0) {
-            applyResult = await applySessionChanges(writableChanges);
+            applyResult = await applySessionChanges(writableChanges, { targetModel: model });
             const appliedPathSet = new Set(applyResult.appliedPaths ?? []);
             appliedSessionChanges = writableChanges.filter((change) => appliedPathSet.has(change.path));
             sessionRestoreNeeded = appliedSessionChanges.length > 0;

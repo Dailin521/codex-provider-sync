@@ -50,6 +50,46 @@ async function writeCustomRollout(filePath, payload, message = "hi") {
   await fs.writeFile(filePath, `${lines.join("\n")}\n`, "utf8");
 }
 
+async function writeRolloutWithTurnContext(filePath, { id, provider, model }) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const metaPayload = {
+    id,
+    timestamp: "2026-06-09T09:16:03.878Z",
+    cwd: "C:\\AITemp",
+    source: "cli",
+    cli_version: "0.115.0",
+    model_provider: provider
+  };
+  const turnContext = {
+    timestamp: "2026-06-09T09:16:03.880Z",
+    type: "turn_context",
+    payload: {
+      turn_id: "019eabaa-e391-7e21-89cd-e761b5dee114",
+      cwd: "C:\\AITemp",
+      current_date: "2026-06-09",
+      model,
+      collaboration_mode: { mode: "default", settings: { model, reasoning_effort: "xhigh" } }
+    }
+  };
+  const heartBeat = {
+    timestamp: "2026-06-09T10:16:03.880Z",
+    type: "turn_context",
+    payload: {
+      turn_id: "019eabaa-e391-7e21-89cd-e761b5dee115",
+      cwd: "C:\\AITemp",
+      current_date: "2026-06-09",
+      model,
+      collaboration_mode: { mode: "default", settings: { model, reasoning_effort: "xhigh" } }
+    }
+  };
+  const lines = [
+    JSON.stringify({ timestamp: metaPayload.timestamp, type: "session_meta", payload: metaPayload }),
+    JSON.stringify(turnContext),
+    JSON.stringify(heartBeat)
+  ];
+  await fs.writeFile(filePath, `${lines.join("\n")}\n`, "utf8");
+}
+
 function backupRoot(codexHome) {
   return path.join(codexHome, "backups_state", "provider-sync");
 }
@@ -104,6 +144,33 @@ function legacyStateDbPath(codexHome) {
 
 async function writeStateDb(codexHome, rows) {
   const dbPath = stateDbPath(codexHome);
+  await fs.mkdir(path.dirname(dbPath), { recursive: true });
+  const db = await openDatabase(dbPath);
+  try {
+    db.exec(`
+      CREATE TABLE threads (
+        id TEXT PRIMARY KEY,
+        model_provider TEXT,
+        cwd TEXT NOT NULL DEFAULT '',
+        archived INTEGER NOT NULL DEFAULT 0,
+        first_user_message TEXT NOT NULL DEFAULT '',
+        model TEXT
+      )
+    `);
+    const stmt = db.prepare("INSERT INTO threads (id, model_provider, cwd, archived, first_user_message, model) VALUES (?, ?, ?, ?, ?, ?)");
+    for (const row of rows) {
+      stmt.run(row.id, row.model_provider, row.cwd ?? "C:\\AITemp", row.archived ? 1 : 0, row.first_user_message ?? "hello", row.model ?? null);
+    }
+  } finally {
+    db.close();
+  }
+}
+
+// Codex stores its state database in two locations on disk:
+// `<home>/sqlite/state_5.sqlite` (new) and `<home>/state_5.sqlite`
+// (legacy). The legacy location is still read by the Codex App
+// GUI for older project sessions, so a sync has to update both.
+async function writeStateDbAtPath(dbPath, rows) {
   await fs.mkdir(path.dirname(dbPath), { recursive: true });
   const db = await openDatabase(dbPath);
   try {
@@ -626,9 +693,12 @@ test("runSync rewrites the per-thread model column when a model is provided", as
   }
 });
 
-test("runSync leaves the per-thread model column untouched when no model is provided", async () => {
+test("runSync leaves the per-thread model column untouched when no model is configured", async () => {
   const { codexHome } = await makeTempCodexHome();
-  await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "gpt-5.4"\n');
+  // No `model = "..."` line in config.toml — sync must not
+  // touch the per-thread `model` column because there is no
+  // active target model to align to.
+  await writeConfig(codexHome, 'model_provider = "openai"\n');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");
   await writeRollout(sessionPath, "thread-a", "openai");
   await writeStateDb(codexHome, [
@@ -640,10 +710,119 @@ test("runSync leaves the per-thread model column untouched when no model is prov
   const db = await openDatabase(path.join(codexHome, "sqlite", "state_5.sqlite"));
   try {
     const row = db.prepare("SELECT model, model_provider FROM threads WHERE id = ?").get("thread-a");
-    assert.equal(row.model, "gpt-5.4-mini", "model must remain unchanged when caller does not pass one");
+    assert.equal(row.model, "gpt-5.4-mini", "model must remain unchanged when there is no root-level model in config");
     assert.equal(row.model_provider, "openai");
   } finally {
     db.close();
+  }
+});
+
+test("runSync rewrites the per-turn turn_context model field in rollout files", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "MiniMax-M3"\n');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "06", "09", "rollout-a.jsonl");
+  await writeRolloutWithTurnContext(sessionPath, {
+    id: "thread-a",
+    provider: "apigather",
+    model: "gpt-5.4"
+  });
+
+  const result = await runSync({ codexHome, model: "MiniMax-M3" });
+  assert.equal(result.changedSessionFiles, 1);
+
+  const lines = (await fs.readFile(sessionPath, "utf8")).split("\n").filter(Boolean);
+  const turnContextLines = lines
+    .map((line) => JSON.parse(line))
+    .filter((entry) => entry.type === "turn_context");
+  assert.equal(turnContextLines.length, 2);
+  for (const entry of turnContextLines) {
+    assert.equal(entry.payload.model, "MiniMax-M3");
+    assert.equal(entry.payload.collaboration_mode.settings.model, "MiniMax-M3");
+  }
+});
+
+test("runSync updates both legacy-root and new sqlite state databases", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "MiniMax-M3"\n');
+
+  // Plant the same thread in BOTH the legacy root database and
+  // the newer `sqlite/state_5.sqlite` location, the way real
+  // Codex installs do.
+  await writeStateDbAtPath(legacyStateDbPath(codexHome), [
+    { id: "legacy-thread", model_provider: "codexzh", archived: false }
+  ]);
+  await writeStateDb(codexHome, [
+    { id: "modern-thread", model_provider: "apigather", archived: false }
+  ]);
+
+  const result = await runSync({ codexHome });
+  assert.equal(result.sqliteRowsUpdated >= 2, true);
+
+  // Both databases must now agree on the active provider + model.
+  const legacy = await openDatabase(legacyStateDbPath(codexHome));
+  try {
+    const row = legacy.prepare("SELECT model_provider, model FROM threads WHERE id = 'legacy-thread'").get();
+    assert.equal(row.model_provider, "openai");
+  } finally {
+    legacy.close();
+  }
+  const modern = await openDatabase(stateDbPath(codexHome));
+  try {
+    const row = modern.prepare("SELECT model_provider FROM threads WHERE id = 'modern-thread'").get();
+    assert.equal(row.model_provider, "openai");
+  } finally {
+    modern.close();
+  }
+});
+
+test("runSync rewrites turn_context model field even when provider already matches", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "MiniMax-M3"\n');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "06", "09", "rollout-a.jsonl");
+  await writeRolloutWithTurnContext(sessionPath, {
+    id: "thread-a",
+    provider: "openai",
+    model: "gpt-5.4"
+  });
+
+  // Provider is already on target, but the per-turn model is
+  // still the old one. The sync must rewrite the rollout
+  // anyway, because the Codex GUI bottom-right of an old
+  // conversation reads `turn_context.model` and not anything
+  // from SQLite or config.toml.
+  const result = await runSync({ codexHome });
+  assert.equal(result.changedSessionFiles, 1);
+
+  const lines = (await fs.readFile(sessionPath, "utf8")).split("\n").filter(Boolean);
+  const turnContextLines = lines
+    .map((line) => JSON.parse(line))
+    .filter((entry) => entry.type === "turn_context");
+  for (const entry of turnContextLines) {
+    assert.equal(entry.payload.model, "MiniMax-M3");
+  }
+});
+
+test("runSync leaves turn_context model field alone when no model is provided", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"\n');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "06", "09", "rollout-a.jsonl");
+  await writeRolloutWithTurnContext(sessionPath, {
+    id: "thread-a",
+    provider: "apigather",
+    model: "gpt-5.4"
+  });
+
+  // No `model` arg → caller doesn't want to align the per-turn
+  // model field, so even though we are rewriting `model_provider`
+  // from apigather → openai, the turn_context model is left alone.
+  await runSync({ codexHome });
+
+  const lines = (await fs.readFile(sessionPath, "utf8")).split("\n").filter(Boolean);
+  const turnContextLines = lines
+    .map((line) => JSON.parse(line))
+    .filter((entry) => entry.type === "turn_context");
+  for (const entry of turnContextLines) {
+    assert.equal(entry.payload.model, "gpt-5.4", "turn_context model must stay put when caller does not pass a target");
   }
 });
 
