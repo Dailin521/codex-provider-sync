@@ -840,9 +840,8 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
         throw error;
       }
 
-      if (targetProvider !== "__status_only__" && parsed.payload.model_provider !== targetProvider) {
-        const snapshot = await getFileSnapshot(rolloutPath);
-        parsed.payload.model_provider = targetProvider;
+      if (targetProvider !== "__status_only__") {
+        const providerNeedsUpdate = parsed.payload.model_provider !== targetProvider;
         // Peek at the first `turn_context` event to capture the
         // per-turn model that the Codex GUI bottom-right reads. We
         // keep this on the summary so the rewrite step knows what
@@ -852,6 +851,22 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
           firstLineOffset: 0,
           firstLineLength: record.offset
         });
+        // The rollout file needs editing when either the provider
+        // drifted OR the per-turn model drifted. The model-only
+        // case happens after a `sync` (no switch) where the user
+        // has updated the root-level `model` in config.toml but
+        // their old rollouts still advertise the old name on
+        // every `turn_context` line.
+        const modelNeedsUpdate = typeof originalModel === "string" && originalModel.length > 0;
+        if (!providerNeedsUpdate && !modelNeedsUpdate) {
+          continue;
+        }
+        const snapshot = await getFileSnapshot(rolloutPath);
+        let updatedFirstLine = null;
+        if (providerNeedsUpdate) {
+          parsed.payload.model_provider = targetProvider;
+          updatedFirstLine = JSON.stringify(parsed);
+        }
         summaries.push({
           path: rolloutPath,
           threadId: parsed.payload.id ?? null,
@@ -863,7 +878,8 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
           originalMtimeMs: snapshot.mtimeMs,
           originalProvider: currentProvider,
           originalModel,
-          updatedFirstLine: JSON.stringify(parsed)
+          providerNeedsUpdate,
+          updatedFirstLine
         });
       }
     }
@@ -880,26 +896,44 @@ export async function applySessionChanges(changes, options = {}) {
   let appliedChanges = 0;
 
   if (process.platform === "win32") {
-    const results = await invokeWindowsExclusiveRewriteBatch(normalizedChanges, { requireOriginalMatch: true });
-    for (let index = 0; index < normalizedChanges.length; index += 1) {
+    // Split the batch into provider-rewrite work (which the
+    // PowerShell script can do efficiently, including the
+    // exclusive lock dance) and model-only work (which we run
+    // in pure Node because the PowerShell batch does not know how
+    // to skip the first-line rewrite while still walking the
+    // body for `turn_context.model` updates).
+    const providerChanges = normalizedChanges.filter((change) => change.providerNeedsUpdate !== false);
+    const modelOnlyChanges = normalizedChanges.filter((change) => change.providerNeedsUpdate === false);
+    const results = await invokeWindowsExclusiveRewriteBatch(providerChanges, { requireOriginalMatch: true });
+    for (let index = 0; index < providerChanges.length; index += 1) {
+      const change = providerChanges[index];
       if (results[index] === "APPLIED") {
-        appliedChanges += 1;
-        appliedPaths.push(normalizedChanges[index].path);
-        await restoreOriginalMtime(normalizedChanges[index].path, normalizedChanges[index].originalMtimeMs);
-        // After the first-line rewrite, do a second pass that
-        // updates the per-turn `model` field. This is what the
-        // Codex GUI bottom-right of an old conversation reads.
-        await rewriteRolloutModelField(normalizedChanges[index], targetModel);
-      } else {
-        skippedPaths.push(normalizedChanges[index].path);
-      }
-    }
-  } else {
-    for (const change of normalizedChanges) {
-      if (await tryRewriteCollectedFirstLine(change)) {
         appliedChanges += 1;
         appliedPaths.push(change.path);
         await restoreOriginalMtime(change.path, change.originalMtimeMs);
+        await rewriteRolloutModelField(change, targetModel);
+      } else {
+        skippedPaths.push(change.path);
+      }
+    }
+
+    for (const change of modelOnlyChanges) {
+      appliedChanges += 1;
+      appliedPaths.push(change.path);
+      await rewriteRolloutModelField(change, targetModel);
+    }
+  } else {
+    for (const change of normalizedChanges) {
+      let providerRewritten = true;
+      if (change.providerNeedsUpdate !== false) {
+        providerRewritten = await tryRewriteCollectedFirstLine(change);
+      }
+      if (providerRewritten) {
+        if (change.providerNeedsUpdate !== false) {
+          await restoreOriginalMtime(change.path, change.originalMtimeMs);
+        }
+        appliedChanges += 1;
+        appliedPaths.push(change.path);
         await rewriteRolloutModelField(change, targetModel);
       } else {
         skippedPaths.push(change.path);
