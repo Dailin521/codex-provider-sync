@@ -93,32 +93,55 @@ public sealed class SessionRolloutService
                     encryptedBucket[currentProvider] = encryptedBucket.TryGetValue(currentProvider, out int encryptedCount) ? encryptedCount + 1 : 1;
                 }
 
-                if (!string.Equals(targetProvider, StatusOnlyProvider, StringComparison.Ordinal)
-                    && !string.Equals(currentProvider, targetProvider, StringComparison.Ordinal))
+                if (string.Equals(targetProvider, StatusOnlyProvider, StringComparison.Ordinal))
                 {
-                    FileSnapshot snapshot = GetFileSnapshot(rolloutPath);
-                    payload["model_provider"] = targetProvider;
-                    // Peek at the first turn_context event in the rollout
-                    // to capture the per-turn `model` field that the
-                    // Codex GUI bottom-right of an old conversation
-                    // reads. This is the value the model rewrite pass
-                    // will swap to the active root-level model.
-                    string? originalModel = await ReadFirstTurnContextModelAsync(rolloutPath, record);
-                    changes.Add(new SessionChange
-                    {
-                        Path = rolloutPath,
-                        ThreadId = payload["id"]?.GetValue<string>(),
-                        Directory = dirName,
-                        OriginalFirstLine = record.FirstLine,
-                        OriginalSeparator = record.Separator,
-                        OriginalOffset = record.Offset,
-                        OriginalFileLength = snapshot.Length,
-                        OriginalLastWriteTimeUtcTicks = snapshot.LastWriteTimeUtcTicks,
-                        OriginalProvider = currentProvider,
-                        OriginalModel = originalModel,
-                        UpdatedFirstLine = root!.ToJsonString()
-                    });
+                    continue;
                 }
+
+                FileSnapshot snapshot = GetFileSnapshot(rolloutPath);
+                bool providerNeedsUpdate = !string.Equals(currentProvider, targetProvider, StringComparison.Ordinal);
+
+                // Peek at the first turn_context event in the rollout
+                // to capture the per-turn `model` field that the
+                // Codex GUI bottom-right of an old conversation
+                // reads. This is the value the model rewrite pass
+                // will swap to the active root-level model.
+                string? originalModel = await ReadFirstTurnContextModelAsync(rolloutPath, record);
+
+                // Only queue a change if the rollout file actually
+                // needs editing: either the provider drifted, or
+                // the per-turn model drifted. Skipping the no-op
+                // case keeps us from rewriting rollout files when
+                // they are already on the right provider + model,
+                // which would otherwise spam mtime on every sync.
+                bool modelNeedsUpdate = !string.IsNullOrEmpty(originalModel);
+                if (!providerNeedsUpdate && !modelNeedsUpdate)
+                {
+                    continue;
+                }
+
+                string? updatedFirstLine = null;
+                if (providerNeedsUpdate)
+                {
+                    payload["model_provider"] = targetProvider;
+                    updatedFirstLine = root!.ToJsonString();
+                }
+
+                changes.Add(new SessionChange
+                {
+                    Path = rolloutPath,
+                    ThreadId = payload["id"]?.GetValue<string>(),
+                    Directory = dirName,
+                    OriginalFirstLine = record.FirstLine,
+                    OriginalSeparator = record.Separator,
+                    OriginalOffset = record.Offset,
+                    OriginalFileLength = snapshot.Length,
+                    OriginalLastWriteTimeUtcTicks = snapshot.LastWriteTimeUtcTicks,
+                    OriginalProvider = currentProvider,
+                    OriginalModel = originalModel,
+                    ProviderNeedsUpdate = providerNeedsUpdate,
+                    UpdatedFirstLine = updatedFirstLine
+                });
             }
         }
 
@@ -152,17 +175,30 @@ public sealed class SessionRolloutService
 
         foreach (SessionChange change in changes)
         {
-            if (await TryRewriteCollectedSessionChangeAsync(change))
+            bool providerRewritten = true;
+            if (change.ProviderNeedsUpdate)
             {
-                TryRestoreLastWriteTimeUtc(change.Path, change.OriginalLastWriteTimeUtcTicks);
+                providerRewritten = await TryRewriteCollectedSessionChangeAsync(change);
+            }
+
+            if (providerRewritten)
+            {
+                if (change.ProviderNeedsUpdate)
+                {
+                    TryRestoreLastWriteTimeUtc(change.Path, change.OriginalLastWriteTimeUtcTicks);
+                }
                 appliedCount += 1;
                 appliedPaths.Add(change.Path);
-                // After the first-line rewrite succeeds, do a
+                // After the first-line rewrite succeeds (or when
+                // there is nothing to rewrite on the first line
+                // because the provider is already correct), do a
                 // second pass that updates the per-turn `model`
                 // field in every turn_context event of the file.
                 // The Codex GUI bottom-right of an old conversation
                 // reads that field, so we have to keep it in sync
-                // with the active root-level model.
+                // with the active root-level model — even when the
+                // provider line in session_meta is already on
+                // target.
                 if (!string.IsNullOrEmpty(targetModel))
                 {
                     await TryRewriteRolloutModelFieldAsync(change, targetModel);

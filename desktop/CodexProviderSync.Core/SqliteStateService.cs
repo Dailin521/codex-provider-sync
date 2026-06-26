@@ -221,8 +221,21 @@ public sealed class SqliteStateService
         IReadOnlyCollection<string>? userEventThreadIds = null,
         IReadOnlyDictionary<string, string>? threadCwdsById = null)
     {
-        string? dbPath = ExistingStateDbPath(codexHome);
-        if (dbPath is null)
+        // Walk every candidate database, not just the first one. Codex
+        // stores its state database in two locations (`~/.codex/sqlite/
+        // state_5.sqlite` for newer installs and `~/.codex/state_5.sqlite`
+        // for older installs), and the Codex App GUI keeps the legacy
+        // root database alive as long as it is on disk — including
+        // for the older project sessions it created before the new
+        // location was introduced. If we only update the first hit,
+        // the GUI keeps reading stale `model_provider` / `model`
+        // values for those older sessions and either shows the old
+        // provider label or sends requests with the wrong model name.
+        List<StateDbLocation> candidates = StateDbCandidates(codexHome)
+            .Where(static c => File.Exists(c.Path))
+            .ToList();
+
+        if (candidates.Count == 0)
         {
             if (afterUpdate is not null)
             {
@@ -232,6 +245,51 @@ public sealed class SqliteStateService
             return (0, 0, 0, 0, 0, false);
         }
 
+        int totalUpdatedRows = 0;
+        int totalProviderRowsUpdated = 0;
+        int totalModelRowsUpdated = 0;
+        int totalUserEventRowsUpdated = 0;
+        int totalCwdRowsUpdated = 0;
+
+        foreach (StateDbLocation candidate in candidates)
+        {
+            (int updatedRows, int providerRowsUpdated, int modelRowsUpdated, int userEventRowsUpdated, int cwdRowsUpdated, bool databasePresent) = await UpdateSingleSqliteDatabaseAsync(
+                candidate.Path,
+                targetProvider,
+                targetModel,
+                busyTimeoutMs,
+                userEventThreadIds,
+                threadCwdsById);
+
+            totalUpdatedRows += updatedRows;
+            totalProviderRowsUpdated += providerRowsUpdated;
+            totalModelRowsUpdated += modelRowsUpdated;
+            totalUserEventRowsUpdated += userEventRowsUpdated;
+            totalCwdRowsUpdated += cwdRowsUpdated;
+        }
+
+        if (afterUpdate is not null)
+        {
+            // Run the rollout rewrite once, after both candidate
+            // databases have been updated. The rewrite is keyed off
+            // the session change collection, not the SQLite state,
+            // so it does not matter whether the data lives in the
+            // new or the legacy database — we only want to do it
+            // once, after the SQLite phase is fully done.
+            await afterUpdate((totalUpdatedRows, totalProviderRowsUpdated, totalModelRowsUpdated, totalUserEventRowsUpdated, totalCwdRowsUpdated, candidates.Count > 0));
+        }
+
+        return (totalUpdatedRows, totalProviderRowsUpdated, totalModelRowsUpdated, totalUserEventRowsUpdated, totalCwdRowsUpdated, candidates.Count > 0);
+    }
+
+    private async Task<(int UpdatedRows, int ProviderRowsUpdated, int ModelRowsUpdated, int UserEventRowsUpdated, int CwdRowsUpdated, bool DatabasePresent)> UpdateSingleSqliteDatabaseAsync(
+        string dbPath,
+        string targetProvider,
+        string? targetModel,
+        int? busyTimeoutMs,
+        IReadOnlyCollection<string>? userEventThreadIds,
+        IReadOnlyDictionary<string, string>? threadCwdsById)
+    {
         await using SqliteConnection connection = OpenConnection(dbPath, SqliteOpenMode.ReadWriteCreate);
         bool transactionOpen = false;
         try
@@ -311,11 +369,6 @@ public sealed class SqliteStateService
             }
 
             int updatedRows = providerRowsUpdated + modelRowsUpdated + userEventRowsUpdated + cwdRowsUpdated;
-
-            if (afterUpdate is not null)
-            {
-                await afterUpdate((updatedRows, providerRowsUpdated, modelRowsUpdated, userEventRowsUpdated, cwdRowsUpdated, true));
-            }
 
             await ExecuteNonQueryAsync(connection, "COMMIT");
             transactionOpen = false;

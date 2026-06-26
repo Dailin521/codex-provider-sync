@@ -85,7 +85,13 @@ public sealed class SessionChange
     // unusually formatted files), in which case the model rewrite
     // pass is a no-op.
     public string? OriginalModel { get; init; }
-    public required string UpdatedFirstLine { get; init; }
+    // True when the provider line in `session_meta` needs to be
+    // rewritten to the new provider; false when the rollout is
+    // already on the right provider and only the per-turn `model`
+    // field has drifted. When false, `UpdatedFirstLine` is null and
+    // the first-line rewrite pass is skipped.
+    public bool ProviderNeedsUpdate { get; init; } = true;
+    public string? UpdatedFirstLine { get; init; }
 }
 
 public sealed class SessionChangeCollection

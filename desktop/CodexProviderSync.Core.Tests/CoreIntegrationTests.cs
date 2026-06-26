@@ -942,6 +942,96 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
+    public async Task RunSync_UpdatesBothLegacyRootAndNewSqliteStateDatabases()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\nmodel = \"MiniMax-M3\"\n");
+
+        // Plant a thread in BOTH the legacy root database and the
+        // newer `sqlite/state_5.sqlite` location. Codex keeps the
+        // legacy database alive as long as it is on disk, and the
+        // GUI still reads from it for older project sessions.
+        await fixture.WriteStateDbAsync(
+        [
+            ("legacy-thread", "codexzh", false)
+        ],
+            model: "gpt-5.4");
+        Directory.CreateDirectory(Path.GetDirectoryName(fixture.LegacyStateDbPath())!);
+        await using (SqliteConnection legacy = new($"Data Source={fixture.LegacyStateDbPath()};Mode=ReadWriteCreate;Pooling=False"))
+        {
+            await legacy.OpenAsync();
+            using SqliteCommand create = legacy.CreateCommand();
+            create.CommandText = """
+                CREATE TABLE threads (
+                  id TEXT PRIMARY KEY,
+                  model_provider TEXT,
+                  cwd TEXT NOT NULL DEFAULT '',
+                  archived INTEGER NOT NULL DEFAULT 0,
+                  first_user_message TEXT NOT NULL DEFAULT '',
+                  model TEXT
+                )
+                """;
+            await create.ExecuteNonQueryAsync();
+            using SqliteCommand insert = legacy.CreateCommand();
+            insert.CommandText = """
+                INSERT INTO threads (id, model_provider, cwd, archived, first_user_message, model)
+                VALUES ($id, $provider, 'C:\AITemp', 0, 'hi', $model)
+                """;
+            insert.Parameters.AddWithValue("$id", "legacy-thread");
+            insert.Parameters.AddWithValue("$provider", "codexzh");
+            insert.Parameters.AddWithValue("$model", "gpt-5.4");
+            await insert.ExecuteNonQueryAsync();
+        }
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.True(result.SqlitePresent);
+        // The provider + model column on the legacy row must now
+        // match the active root-level values, otherwise the GUI
+        // will keep showing the old provider label for the older
+        // project sessions it loaded from this database.
+        await using SqliteConnection legacyReader = new($"Data Source={fixture.LegacyStateDbPath()};Mode=ReadOnly;Pooling=False");
+        await legacyReader.OpenAsync();
+        await using SqliteCommand legacyCommand = legacyReader.CreateCommand();
+        legacyCommand.CommandText = "SELECT model_provider, model FROM threads WHERE id = 'legacy-thread'";
+        await using SqliteDataReader reader = await legacyCommand.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal("openai", reader.GetString(0));
+        Assert.Equal("MiniMax-M3", reader.GetString(1));
+    }
+
+    [Fact]
+    public async Task RunSync_RewritesTurnContextModelFieldWhenProviderAlreadyMatches()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\nmodel = \"MiniMax-M3\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutWithTurnContextAsync(sessionPath, "thread-a", "openai", "gpt-5.4");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(1, result.ChangedSessionFiles);
+        string rewritten = await File.ReadAllTextAsync(sessionPath);
+        using StringReader reader = new(rewritten);
+        string? line;
+        int turnContextCount = 0;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            if (!line.Contains("\"turn_context\"", StringComparison.Ordinal))
+            {
+                continue;
+            }
+            using JsonDocument doc = JsonDocument.Parse(line);
+            string model = doc.RootElement.GetProperty("payload").GetProperty("model").GetString()!;
+            Assert.Equal("MiniMax-M3", model);
+            turnContextCount += 1;
+        }
+        Assert.Equal(2, turnContextCount);
+    }
+
+    [Fact]
     public async Task RunSync_LeavesTurnContextModelFieldAlone_WhenNoRootModelConfigured()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
