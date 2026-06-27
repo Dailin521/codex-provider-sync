@@ -9,12 +9,13 @@
 //             useful for one-shot automation without keeping a process around.
 // --no-state-db : only watch config.toml, ignore SQLite state events.
 
-import fs from "node:fs";
+import fs, { existsSync } from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
 import { defaultCodexHome } from "./constants.js";
-import { detectStateDb } from "./sqlite-state.js";
+import { detectStateDb, stateDbCandidates } from "./sqlite-state.js";
+import { readConfigText, readRootModelFromConfigText } from "./config-file.js";
 
 function normalizeCodexHome(explicitCodexHome) {
   return path.resolve(explicitCodexHome ?? process.env.CODEX_HOME ?? defaultCodexHome());
@@ -95,12 +96,8 @@ export async function runWatch({
     // model rewrite picks up the latest value the user has in config.toml.
     let rootModel = null;
     try {
-      const { readConfigText } = await import("./config-file.js");
       const cfg = await readConfigText(path.join(codexHome, "config.toml"));
-      const m = cfg.match(/^\s*model\s*=\s*"([^"]+)"\s*$/m);
-      if (m) {
-        rootModel = m[1];
-      }
+      rootModel = readRootModelFromConfigText(cfg);
     } catch {
       // Missing/unreadable config; carry on with a null model.
     }
@@ -130,6 +127,15 @@ export async function runWatch({
   // wait for it to drain instead of yanking the watcher out from under
   // a half-written SQLite transaction.
   let inFlight = null;
+  // Counter of consecutive non-busy sync failures. A "busy" SQLite
+  // error is normal transient behaviour (Codex has the DB open);
+  // anything else (config corruption, codex home moved, disk
+  // full, permission denied, ...) would otherwise fire on every
+  // config/state event forever. We shut the watcher down after a
+  // small threshold so the user gets a clean exit signal instead
+  // of a log-spamming daemon.
+  let consecutiveNonBusyFailures = 0;
+  const MAX_CONSECUTIVE_NON_BUSY_FAILURES = 5;
 
   const debouncedSync = makeDebouncer(debounceMs, (reason) => {
     if (stopped) {
@@ -140,8 +146,12 @@ export async function runWatch({
       try {
         const result = await invokeSync(reason);
         log(`[${new Date().toISOString()}] Sync complete: provider=${result.targetProvider}, rollout_files=${result.changedSessionFiles}, sqlite_rows=${result.sqliteRowsUpdated}${result.skippedLockedRolloutFiles?.length ? `, skipped_locked=${result.skippedLockedRolloutFiles.length}` : ""}`);
+        // A successful sync resets the consecutive-failure counter
+        // so a transient error followed by recovery does not
+        // poison subsequent invocations.
+        consecutiveNonBusyFailures = 0;
         if (once) {
-          await shutdown("once-mode-complete");
+          await shutdown("once-mode-complete", task);
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -149,8 +159,27 @@ export async function runWatch({
         // is actively writing. Don't crash; just retry on the next event.
         if (/state_5\.sqlite is currently in use/i.test(message)) {
           log(`[${new Date().toISOString()}] Sync skipped: ${message} (will retry on next change)`);
+          // Busy is normal — reset the consecutive-failure counter
+          // so a long-running Codex session that keeps the DB open
+          // for many seconds does not push us toward the auto-shutdown
+          // threshold once Codex finally releases the lock.
+          consecutiveNonBusyFailures = 0;
         } else {
           log(`[${new Date().toISOString()}] Sync failed: ${message}`);
+          // Other errors (config corruption, disk full, codex home
+          // moved, permission denied, ...) would otherwise fire on
+          // every config/state event forever, hammering the failure
+          // surface without ever recovering. Track consecutive
+          // non-busy failures and shut the watcher down once we
+          // exceed the threshold so the user notices via the
+          // `codex-provider watch` exit instead of finding the log
+          // spammed at 3am.
+          consecutiveNonBusyFailures += 1;
+          if (consecutiveNonBusyFailures >= MAX_CONSECUTIVE_NON_BUSY_FAILURES) {
+            log(`[${new Date().toISOString()}] Watcher giving up after ${consecutiveNonBusyFailures} consecutive non-busy failures; shutting down. Rerun "codex-provider watch" once the underlying issue is fixed.`);
+            await shutdown("consecutive-failures", task);
+            return;
+          }
         }
       } finally {
         if (inFlight === task) {
@@ -170,51 +199,76 @@ export async function runWatch({
   });
   watchers.push(configWatcher);
 
-    if (includeStateDb) {
-      try {
-        stateDbInfo = await detectStateDb(codexHome);
-      } catch (error) {
-        log(`[${new Date().toISOString()}] Could not locate state database: ${error.message}`);
+  if (includeStateDb) {
+    try {
+      stateDbInfo = await detectStateDb(codexHome);
+    } catch (error) {
+      log(`[${new Date().toISOString()}] Could not locate state database: ${error.message}`);
+    }
+    if (stateDbInfo?.path) {
+      // Walk every candidate database, not just the first one. The
+      // Codex App keeps both `<home>/sqlite/state_5.sqlite` (newer
+      // layout) and `<home>/state_5.sqlite` (legacy root) alive for
+      // older project sessions, so watching only the first hit means
+      // changes to the other DB never trigger a sync. We register
+      // one watcher per existing DB directory and accept events
+      // for either basename.
+      const candidates = stateDbCandidates(codexHome).filter((c) => existsSync(c.path));
+      const watchedDirs = new Set();
+      for (const candidate of candidates) {
+        const stateDir = path.dirname(candidate.path);
+        const stateBase = path.basename(candidate.path);
+        const dirExists = await pathExists(stateDir);
+        if (!dirExists) {
+          log(`[${new Date().toISOString()}] State directory ${stateDir} does not exist yet; skipping watcher`);
+          continue;
+        }
+        if (watchedDirs.has(stateDir)) {
+          // Defence-in-depth: the legacy root DB and the new sqlite
+          // DB never share a directory, but `stateDbCandidates`
+          // could in theory return two entries pointing at the same
+          // folder — dedupe so we only register one watcher per dir.
+          continue;
+        }
+        watchedDirs.add(stateDir);
+        // Accept the SQLite file plus its WAL/SHM siblings. The
+        // basename is taken from the actual state db path so we
+        // never match unrelated "state*.sqlite" files that happen
+        // to share the dir.
+        const allowed = new Set([
+          stateBase,
+          `${stateBase}-wal`,
+          `${stateBase}-shm`,
+          `${stateBase}-journal`
+        ]);
+        const stateWatcher = fs.watch(stateDir, { persistent: true }, (eventType, filename) => {
+          if (stopped) {
+            return;
+          }
+          // fs.watch on Windows frequently reports filename === null.
+          // Treat null as "something in the dir changed" and fall back to
+          // comparing against the full path; the event is harmless to
+          // trigger a sync even if it was a neighbouring file.
+          const eventFile = filename ?? stateBase;
+          if (!allowed.has(eventFile)) {
+            return;
+          }
+          log(`[${new Date().toISOString()}] state_db ${describeEvent(eventType, filename ?? stateBase)}`);
+          debouncedSync("state_db");
+        });
+        watchers.push(stateWatcher);
       }
-      if (stateDbInfo?.path) {
-        const stateDir = path.dirname(stateDbInfo.path);
-        const exists = await pathExists(stateDir);
-        if (exists) {
-          // Accept the SQLite file plus its WAL/SHM siblings. The basename
-          // is taken from the actual state db path so we never match
-          // unrelated "state*.sqlite" files that happen to share the dir.
-          const stateBase = path.basename(stateDbInfo.path);
-          const allowed = new Set([
-            stateBase,
-            `${stateBase}-wal`,
-            `${stateBase}-shm`,
-            `${stateBase}-journal`
-          ]);
-          const stateWatcher = fs.watch(stateDir, { persistent: true }, (eventType, filename) => {
-            if (stopped) {
-              return;
-            }
-            // fs.watch on Windows frequently reports filename === null.
-            // Treat null as "something in the dir changed" and fall back to
-            // comparing against the full path; the event is harmless to
-            // trigger a sync even if it was a neighbouring file.
-            const eventFile = filename ?? stateBase;
-            if (!allowed.has(eventFile)) {
-              return;
-            }
-            log(`[${new Date().toISOString()}] state_db ${describeEvent(eventType, filename ?? stateBase)}`);
-            debouncedSync("state_db");
-          });
-          watchers.push(stateWatcher);
-        } else {
-        log(`[${new Date().toISOString()}] State directory ${stateDir} not found yet; watching only config.toml`);
+      if (candidates.length === 0) {
+        log(`[${new Date().toISOString()}] No state database found in ${codexHome}; skipping watcher`);
       }
+    } else {
+      log(`[${new Date().toISOString()}] No state database found in ${codexHome}; skipping watcher`);
     }
   }
 
   log(`[${new Date().toISOString()}] Watching ${configPath}${includeStateDb && stateDbInfo?.path ? ` and ${stateDbInfo.path}` : ""} (debounce ${debounceMs}ms${once ? ", once" : ""})`);
 
-  const shutdown = async (reason) => {
+  const shutdown = async (reason, currentTask = null) => {
     if (stopped) {
       return;
     }
@@ -228,7 +282,10 @@ export async function runWatch({
     }
     // Drain any sync that is still in flight so we do not yank the watcher
     // out from under a half-written SQLite transaction or backup.
-    if (inFlight) {
+    // Skip the caller's own task to avoid self-deadlock when shutdown
+    // is invoked from inside the task's catch block (e.g. the
+    // consecutive-failure path).
+    if (inFlight && inFlight !== currentTask) {
       try {
         await inFlight;
       } catch {
@@ -241,11 +298,23 @@ export async function runWatch({
     }
   };
 
-  if (signal) {
-    const abortHandler = () => shutdown("signal");
+  // Wire up an optional AbortSignal so the caller can shut the
+// watcher down from anywhere (e.g. an outer SIGINT handler that
+// fans out to multiple long-running tasks). We expose the
+// pending shutdown promise on the returned handle as
+// `signalPromise` so the caller can `await` it from outside
+// instead of having to call `stop()` manually. The previous
+// implementation only added an abort listener and never awaited
+// it, so the signal path was effectively a no-op for callers
+// relying on graceful shutdown.
+let signalPromise = null;
+if (signal) {
     if (signal.aborted) {
-      await shutdown("signal");
+      signalPromise = shutdown("signal");
     } else {
+      const abortHandler = () => {
+        signalPromise = shutdown("signal");
+      };
       signal.addEventListener("abort", abortHandler, { once: true });
     }
   }
@@ -254,6 +323,7 @@ export async function runWatch({
     codexHome,
     watchedConfigPath: configPath,
     watchedStateDbPath: stateDbInfo?.path ?? null,
-    stop: () => shutdown("external")
+    stop: () => shutdown("external"),
+    signalPromise
   };
 }
