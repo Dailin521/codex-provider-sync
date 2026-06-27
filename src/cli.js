@@ -3,6 +3,7 @@
 import path from "node:path";
 
 import { DEFAULT_BACKUP_RETENTION_COUNT } from "./constants.js";
+import { readRootModelFromConfigText } from "./config-file.js";
 import { installWindowsLauncher } from "./launcher.js";
 import { assertSupportedNodeVersion } from "./node-version.js";
 
@@ -18,6 +19,7 @@ Usage:
   codex-provider status [--codex-home PATH]
   codex-provider sync [--provider ID] [--keep N] [--codex-home PATH]
   codex-provider switch <provider-id> [--model NAME] [--keep-root-model] [--keep N] [--codex-home PATH]
+  codex-provider watch [--codex-home PATH] [--debounce-ms N] [--once] [--no-state-db]
   codex-provider prune-backups [--keep N] [--codex-home PATH]
   codex-provider restore <backup-dir> [--no-config] [--no-db] [--no-sessions] [--codex-home PATH]
   codex-provider install-windows-launcher [--dir PATH] [--codex-home PATH]
@@ -25,6 +27,11 @@ Usage:
 switch flags:
   --model NAME         override root-level model field with NAME (e.g. "MiniMax-M3")
   --keep-root-model    do not touch the root-level model field; only switch model_provider
+
+watch flags:
+  --debounce-ms N      wait N milliseconds after a change before running sync (default 750)
+  --once               exit after the first successful sync
+  --no-state-db        do not watch the SQLite state database; only config.toml
 `);
 }
 
@@ -79,6 +86,12 @@ function summarizeSync(result, label) {
     const extraCount = result.skippedLockedRolloutFiles.length - Math.min(result.skippedLockedRolloutFiles.length, 5);
     lines.push(`Skipped locked rollout files: ${result.skippedLockedRolloutFiles.length}`);
     lines.push(`Locked file(s): ${preview}${extraCount > 0 ? ` (+${extraCount} more)` : ""}`);
+  }
+  if (result.partialRewriteRolloutFiles?.length) {
+    const preview = result.partialRewriteRolloutFiles.slice(0, 5).join(", ");
+    const extraCount = result.partialRewriteRolloutFiles.length - Math.min(result.partialRewriteRolloutFiles.length, 5);
+    lines.push(`Partially rewritten rollout files: ${result.partialRewriteRolloutFiles.length} (provider changed; turn_context model pass could not finish; rerun sync to finish)`);
+    lines.push(`Partial file(s): ${preview}${extraCount > 0 ? ` (+${extraCount} more)` : ""}`);
   }
   if (result.encryptedContentWarning) {
     lines.push(result.encryptedContentWarning);
@@ -205,10 +218,7 @@ async function main() {
     let rootModel = null;
     try {
       const cfg = await readConfigText(configPath);
-      const m = cfg.match(/^\s*model\s*=\s*"([^"]+)"\s*$/m);
-      if (m) {
-        rootModel = m[1];
-      }
+      rootModel = readRootModelFromConfigText(cfg);
     } catch {
       // config may be missing in degraded scenarios; carry on without a
       // model rewrite so the rest of the sync still runs.
@@ -246,6 +256,28 @@ async function main() {
         console.log("Root-level model: unchanged (keep-root-model flag set)");
       }
     }
+    return;
+  }
+
+  if (command === "watch") {
+    const { runWatch } = await import("./watch.js");
+    const debounceMs = flags["debounce-ms"] !== undefined
+      ? parseKeepCount(flags["debounce-ms"], { allowZero: true })
+      : undefined;
+    const handle = await runWatch({
+      codexHome: flags["codex-home"],
+      debounceMs,
+      includeStateDb: !flags["no-state-db"],
+      once: Boolean(flags.once)
+    });
+    await new Promise((resolve) => {
+      const stop = async () => {
+        await handle.stop();
+        resolve();
+      };
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+    });
     return;
   }
 

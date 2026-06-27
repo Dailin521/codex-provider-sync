@@ -95,127 +95,153 @@ export function wrapSqliteMalformedError(error, action) {
 }
 
 export async function readSqliteProviderCounts(codexHome) {
-  const dbPath = await existingStateDbPath(codexHome);
-  if (!dbPath) {
+  // Walk every candidate database, not just the first one. The
+  // newer Codex layout puts the DB in `<home>/sqlite/state_5.sqlite`,
+  // but the legacy root DB at `<home>/state_5.sqlite` is still kept
+  // around by the Codex App for older project sessions. Summing
+  // counts from both locations gives an accurate distribution for
+  // `status` reports; without this, the user sees half the picture
+  // when both databases coexist.
+  const candidates = stateDbCandidates(codexHome).filter((c) => existsSync(c.path));
+  if (candidates.length === 0) {
     return null;
   }
 
-  let db;
-  try {
-    db = await openDatabase(dbPath);
-    const rows = db.prepare(`
-      SELECT
-        CASE
-          WHEN model_provider IS NULL OR model_provider = '' THEN '(missing)'
-          ELSE model_provider
-        END AS model_provider,
-        archived,
-        COUNT(*) AS count
-      FROM threads
-      GROUP BY model_provider, archived
-      ORDER BY archived, model_provider
-    `).all();
-    const result = {
-      sessions: {},
-      archived_sessions: {}
-    };
-    for (const row of rows) {
-      const bucket = row.archived ? result.archived_sessions : result.sessions;
-      bucket[row.model_provider] = row.count;
+  const aggregated = {
+    sessions: {},
+    archived_sessions: {}
+  };
+  let sawUnreadable = false;
+  let unreadableMessage = null;
+
+  for (const candidate of candidates) {
+    let db;
+    try {
+      db = await openDatabase(candidate.path);
+      const rows = db.prepare(`
+        SELECT
+          CASE
+            WHEN model_provider IS NULL OR model_provider = '' THEN '(missing)'
+            ELSE model_provider
+          END AS model_provider,
+          archived,
+          COUNT(*) AS count
+        FROM threads
+        GROUP BY model_provider, archived
+        ORDER BY archived, model_provider
+      `).all();
+      for (const row of rows) {
+        const bucket = row.archived ? aggregated.archived_sessions : aggregated.sessions;
+        bucket[row.model_provider] = (bucket[row.model_provider] ?? 0) + row.count;
+      }
+    } catch (error) {
+      if (isSqliteMalformedError(error)) {
+        sawUnreadable = true;
+        unreadableMessage = "state_5.sqlite is malformed or unreadable";
+      } else if (isSqliteBusyError(error)) {
+        sawUnreadable = true;
+        unreadableMessage = "state_5.sqlite is currently in use";
+      } else {
+        throw error;
+      }
+    } finally {
+      db?.close();
     }
-    return result;
-  } catch (error) {
-    if (isSqliteMalformedError(error)) {
-      return {
-        sessions: {},
-        archived_sessions: {},
-        unreadable: true,
-        error: "state_5.sqlite is malformed or unreadable"
-      };
-    }
-    if (isSqliteBusyError(error)) {
-      return {
-        sessions: {},
-        archived_sessions: {},
-        unreadable: true,
-        error: "state_5.sqlite is currently in use"
-      };
-    }
-    throw error;
-  } finally {
-    db?.close();
   }
+
+  if (sawUnreadable) {
+    return {
+      sessions: aggregated.sessions,
+      archived_sessions: aggregated.archived_sessions,
+      unreadable: true,
+      error: unreadableMessage
+    };
+  }
+  return aggregated;
 }
 
 export async function readSqliteRepairStats(codexHome, options = {}) {
-  const dbPath = await existingStateDbPath(codexHome);
-  if (!dbPath) {
+  // Same multi-DB story as readSqliteProviderCounts: aggregate
+  // repair diagnostics across both candidate databases so the
+  // CLI can flag every thread that needs attention, not just the
+  // ones in the database the user happens to open first.
+  const candidates = stateDbCandidates(codexHome).filter((c) => existsSync(c.path));
+  if (candidates.length === 0) {
     return null;
   }
 
-  let db;
-  try {
-    db = await openDatabase(dbPath);
-    let userEventRowsNeedingRepair = 0;
-    if (tableHasColumn(db, "threads", "has_user_event") && options.userEventThreadIds?.size) {
-      const stmt = db.prepare("SELECT has_user_event FROM threads WHERE id = ?");
-      for (const threadId of options.userEventThreadIds) {
-        const row = stmt.get(threadId);
-        if (row && Number(row.has_user_event) !== 1) {
-          userEventRowsNeedingRepair += 1;
+  let userEventRowsNeedingRepair = 0;
+  let cwdRowsNeedingRepair = 0;
+
+  for (const candidate of candidates) {
+    let db;
+    try {
+      db = await openDatabase(candidate.path);
+      if (tableHasColumn(db, "threads", "has_user_event") && options.userEventThreadIds?.size) {
+        const stmt = db.prepare("SELECT has_user_event FROM threads WHERE id = ?");
+        for (const threadId of options.userEventThreadIds) {
+          const row = stmt.get(threadId);
+          if (row && Number(row.has_user_event) !== 1) {
+            userEventRowsNeedingRepair += 1;
+          }
         }
       }
-    }
 
-    let cwdRowsNeedingRepair = 0;
-    if (tableHasColumn(db, "threads", "cwd") && options.threadCwdById?.size) {
-      const stmt = db.prepare("SELECT cwd FROM threads WHERE id = ?");
-      for (const [threadId, cwd] of options.threadCwdById) {
-        if (typeof threadId !== "string" || !threadId || typeof cwd !== "string" || !cwd.trim()) {
-          continue;
-        }
-        const row = stmt.get(threadId);
-        if (row && row.cwd !== cwd) {
-          cwdRowsNeedingRepair += 1;
+      if (tableHasColumn(db, "threads", "cwd") && options.threadCwdById?.size) {
+        const stmt = db.prepare("SELECT cwd FROM threads WHERE id = ?");
+        for (const [threadId, cwd] of options.threadCwdById) {
+          if (typeof threadId !== "string" || !threadId || typeof cwd !== "string" || !cwd.trim()) {
+            continue;
+          }
+          const row = stmt.get(threadId);
+          if (row && row.cwd !== cwd) {
+            cwdRowsNeedingRepair += 1;
+          }
         }
       }
+    } catch (error) {
+      throw wrapSqliteMalformedError(
+        wrapSqliteBusyError(error, "read SQLite repair diagnostics"),
+        "read SQLite repair diagnostics"
+      );
+    } finally {
+      db?.close();
     }
-
-    return {
-      userEventRowsNeedingRepair,
-      cwdRowsNeedingRepair
-    };
-  } catch (error) {
-    throw wrapSqliteMalformedError(
-      wrapSqliteBusyError(error, "read SQLite repair diagnostics"),
-      "read SQLite repair diagnostics"
-    );
-  } finally {
-    db?.close();
   }
+
+  return {
+    userEventRowsNeedingRepair,
+    cwdRowsNeedingRepair
+  };
 }
 
 export async function assertSqliteWritable(codexHome, options = {}) {
-  const dbPath = await existingStateDbPath(codexHome);
-  if (!dbPath) {
+  // The writable check must cover every candidate database
+  // too — otherwise the user could pass the assert on the new
+  // sqlite/state_5.sqlite and then hit BUSY during sync on the
+  // legacy root database (or vice versa).
+  const candidates = stateDbCandidates(codexHome).filter((c) => existsSync(c.path));
+  if (candidates.length === 0) {
     return { databasePresent: false };
   }
 
-  let db;
-  try {
-    db = await openDatabase(dbPath);
-    setBusyTimeout(db, options.busyTimeoutMs);
-    db.exec("BEGIN IMMEDIATE");
-    db.exec("ROLLBACK");
-    return { databasePresent: true };
-  } catch (error) {
-    throw wrapSqliteMalformedError(
-      wrapSqliteBusyError(error, "update session provider metadata"),
-      "update session provider metadata"
-    );
-  } finally {
-    db?.close();
+  for (const candidate of candidates) {
+    let db;
+    try {
+      db = await openDatabase(candidate.path);
+      setBusyTimeout(db, options.busyTimeoutMs);
+      db.exec("BEGIN IMMEDIATE");
+      db.exec("ROLLBACK");
+    } catch (error) {
+      throw wrapSqliteMalformedError(
+        wrapSqliteBusyError(error, "update session provider metadata"),
+        "update session provider metadata"
+      );
+    } finally {
+      db?.close();
+    }
   }
+  return { databasePresent: true };
 }
 
 export async function updateSqliteProvider(codexHome, targetProvider, afterUpdateOrOptions, maybeOptions) {

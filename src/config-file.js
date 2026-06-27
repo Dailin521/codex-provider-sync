@@ -90,6 +90,32 @@ export function readProviderModel(configText, provider) {
   return null;
 }
 
+// Return the root-level `model` value from config.toml, or null
+// when the file does not declare one. Used by `runSync`,
+// `runSwitch`, and `runWatch` to keep the per-thread model rewrite
+// aligned with the active top-level model. Single source of truth
+// for the regex so we do not end up with three slightly different
+// parsers disagreeing about what counts as a valid model name.
+export function readRootModelFromConfigText(configText) {
+  const lines = splitLines(configText);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    if (trimmed.startsWith("[")) {
+      // Stop at the first table header; `model` is only valid at
+      // the root level, not inside a `[model_providers.X]` section.
+      break;
+    }
+    const match = trimmed.match(/^model\s*=\s*"([^"]+)"\s*$/);
+    if (match) {
+      return match[1];
+    }
+  }
+  return null;
+}
+
 export function setRootProviderInConfigText(configText, provider) {
   const lines = splitLines(configText);
   let insertIndex = lines.length;
@@ -106,14 +132,19 @@ export function setRootProviderInConfigText(configText, provider) {
     }
     if (/^model_provider\s*=/.test(trimmed)) {
       lines[index] = `model_provider = "${escapeTomlString(provider)}"`;
-      return `${lines.join("\n")}${configText.endsWith("\n") ? "\n" : ""}`.replace(/\n\n$/, "\n");
+      // Preserve the input's trailing-newline state so we do not
+      // silently rewrite `\n\n\n` to `\n\n` (or `\n` to nothing)
+      // — the previous `.replace(/\n\n$/, "\n")` only handled the
+      // two-trailing-newline case, which is now caught earlier
+      // by the helper.
+      return finalizeTrailingNewline(lines.join("\n"), configText);
     }
     insertIndex = index + 1;
   }
 
   lines.splice(insertIndex, 0, `model_provider = "${escapeTomlString(provider)}"`);
   const nextText = lines.join("\n");
-  return configText.endsWith("\n") ? `${nextText}\n` : nextText;
+  return finalizeTrailingNewline(nextText, configText);
 }
 
 export function setRootModelInConfigText(configText, model) {
@@ -132,14 +163,28 @@ export function setRootModelInConfigText(configText, model) {
     }
     if (/^model\s*=/.test(trimmed)) {
       lines[index] = `model = "${escapeTomlString(model)}"`;
-      return `${lines.join("\n")}${configText.endsWith("\n") ? "\n" : ""}`.replace(/\n\n$/, "\n");
+      return finalizeTrailingNewline(lines.join("\n"), configText);
     }
     insertIndex = index + 1;
   }
 
   lines.splice(insertIndex, 0, `model = "${escapeTomlString(model)}"`);
   const nextText = lines.join("\n");
-  return configText.endsWith("\n") ? `${nextText}\n` : nextText;
+  return finalizeTrailingNewline(nextText, configText);
+}
+
+// Match the input's trailing-newline state so a config that
+// ended in `\n\n` (rare but happens after manual edits) is not
+// silently collapsed to a single `\n` by the surrounding logic.
+// Returning the joined lines unchanged when the input had no
+// trailing newline also matches the C# `ConfigFileService`
+// implementation and avoids surprising the user with byte-level
+// diffs to their config.
+function finalizeTrailingNewline(joinedLines, originalConfigText) {
+  if (originalConfigText.endsWith("\n")) {
+    return joinedLines.endsWith("\n") ? joinedLines : `${joinedLines}\n`;
+  }
+  return joinedLines.endsWith("\n") ? joinedLines.slice(0, -1) : joinedLines;
 }
 
 export async function writeConfigText(configPath, configText) {

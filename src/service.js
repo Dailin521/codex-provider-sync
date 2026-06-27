@@ -13,6 +13,7 @@ import {
   readConfigText,
   readCurrentProviderFromConfigText,
   readProviderModel,
+  readRootModelFromConfigText,
   setRootModelInConfigText,
   setRootProviderInConfigText,
   writeConfigText
@@ -229,10 +230,7 @@ export async function runSync({
   // is actually in use today instead of the one the thread was
   // created with.
   if (model == null) {
-    const rootModelMatch = configText.match(/^\s*model\s*=\s*"([^"]+)"\s*$/m);
-    if (rootModelMatch) {
-      model = rootModelMatch[1];
-    }
+    model = readRootModelFromConfigText(configText);
   }
 
   const releaseLock = await acquireLock(codexHome, "sync");
@@ -312,7 +310,12 @@ export async function runSync({
       savedWorkspaceRootCount: 0
     };
     try {
-      let applyResult = { appliedChanges: 0, appliedPaths: [], skippedPaths: [] };
+      let applyResult = {
+        appliedChanges: 0,
+        appliedPaths: [],
+        skippedPaths: [],
+        partialRewritePaths: []
+      };
       emitProgress(onProgress, { stage: "update_sqlite", status: "start" });
       emitProgress(onProgress, {
         stage: "rewrite_rollout_files",
@@ -350,6 +353,7 @@ export async function runSync({
         ...skippedRolloutFiles,
         ...applyResult.skippedPaths
       ])].sort((left, right) => left.localeCompare(right));
+      const partialRewriteRolloutFiles = (applyResult.partialRewritePaths ?? []).slice().sort((left, right) => left.localeCompare(right));
       let autoPruneResult = null;
       let autoPruneWarning = null;
       emitProgress(onProgress, {
@@ -376,6 +380,7 @@ export async function runSync({
         backupDurationMs,
         changedSessionFiles: applyResult.appliedChanges,
         skippedLockedRolloutFiles,
+        partialRewriteRolloutFiles,
         sqliteRowsUpdated: sqliteResult.updatedRows,
         sqliteProviderRowsUpdated: sqliteResult.providerRowsUpdated,
         sqliteUserEventRowsUpdated: sqliteResult.userEventRowsUpdated,
@@ -469,6 +474,50 @@ export async function runSwitch({
     }
   }
 
+  // If the request would not change either the provider or the
+  // top-level model, do not touch the config file or run the sync.
+  // A no-op `switch` used to write `originalConfigText` back to
+  // disk (which would still bump mtime), create a backup, and run
+  // a full sync whose result was "0 changed files" — visible to
+  // the user as `Switched to <provider> …` even though nothing
+  // actually changed. Skipping here makes the CLI honest about
+  // what happened.
+  const currentProviderInConfig = readCurrentProviderFromConfigText(originalConfigText).provider;
+  const currentModelInConfig = readRootModelFromConfigText(originalConfigText);
+  const nextModelInConfig = readRootModelFromConfigText(nextConfigText);
+  if (currentProviderInConfig === provider && currentModelInConfig === nextModelInConfig) {
+    emitProgress(onProgress, {
+      stage: "update_config",
+      status: "skipped",
+      provider,
+      reason: "already-on-target"
+    });
+    return {
+      codexHome,
+      targetProvider: provider,
+      previousProvider: currentProviderInConfig,
+      configUpdated: false,
+      modelSync,
+      changedSessionFiles: 0,
+      skippedLockedRolloutFiles: [],
+      partialRewriteRolloutFiles: [],
+      backupDir: null,
+      backupDurationMs: 0,
+      sqliteRowsUpdated: 0,
+      sqliteProviderRowsUpdated: 0,
+      sqliteUserEventRowsUpdated: 0,
+      sqliteCwdRowsUpdated: 0,
+      sqlitePresent: false,
+      rolloutCountsBefore: { sessions: {}, archived_sessions: {} },
+      encryptedContentCounts: { sessions: {}, archived_sessions: {} },
+      encryptedContentWarning: null,
+      updatedWorkspaceRoots: 0,
+      savedWorkspaceRootCount: 0,
+      autoPruneResult: null,
+      autoPruneWarning: null
+    };
+  }
+
   emitProgress(onProgress, {
     stage: "update_config",
     status: "start",
@@ -489,8 +538,7 @@ export async function runSwitch({
     if (modelSync.applied && modelSync.model) {
       modelForThreads = modelSync.model;
     } else {
-      const rootModelMatch = nextConfigText.match(/^\s*model\s*=\s*"([^"]+)"\s*$/m);
-      modelForThreads = rootModelMatch ? rootModelMatch[1] : null;
+      modelForThreads = readRootModelFromConfigText(nextConfigText);
     }
     const syncResult = await runSync({
       codexHome,

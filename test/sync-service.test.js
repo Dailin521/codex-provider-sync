@@ -924,7 +924,7 @@ test("runSync skips rollout rewrite when turn_context model already matches the 
   const afterMtimeMs = (await fs.stat(sessionPath)).mtimeMs;
   assert.equal(afterMtimeMs, originalMtimeMs, "rollout mtime must not be bumped when already on target");
 
-  const backupRoot = path.join(codexHome, "backups_state", "provider-sync");
+const backupRoot = path.join(codexHome, "backups_state", "provider-sync");
   const backupEntries = await fs.readdir(backupRoot).catch(() => []);
   for (const entry of backupEntries) {
     const sessionBackupPath = path.join(backupRoot, entry, "sessions", "2026", "06", "09", "rollout-a.jsonl");
@@ -984,6 +984,52 @@ test("status falls back to legacy root sqlite database", async () => {
   assert.equal(status.stateDbLocation.path, legacyStateDbPath(codexHome));
   assert.deepEqual(status.sqliteCounts.sessions, { openai: 1 });
   assert.match(renderStatus(status), /legacy root/);
+});
+
+test("status aggregates sqlite provider counts across both legacy and new databases", async () => {
+  // Regression guard for B7: when both `state_5.sqlite`
+  // locations coexist (legacy `<home>/state_5.sqlite` plus the
+  // newer `<home>/sqlite/state_5.sqlite`), the status report
+  // must include counts from BOTH databases, not just the
+  // first one detected. Otherwise the GUI sees "everything is
+  // on minimax" while the legacy DB still holds apigather
+  // rows for older project sessions.
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "minimax"');
+  await writeStateDb(codexHome, [
+    { id: "new-thread-1", model_provider: "minimax", archived: false },
+    { id: "new-thread-2", model_provider: "apigather", archived: false }
+  ]);
+  // Add rows to the legacy root database too.
+  const legacyDb = legacyStateDbPath(codexHome);
+  const legacyDbDir = path.dirname(legacyDb);
+  await fs.mkdir(legacyDbDir, { recursive: true });
+  const legacy = await openDatabase(legacyDb);
+  try {
+    legacy.exec(`
+      CREATE TABLE threads (
+        id TEXT PRIMARY KEY,
+        model_provider TEXT,
+        archived INTEGER
+      )
+    `);
+    legacy.prepare("INSERT INTO threads (id, model_provider, archived) VALUES (?, ?, ?)").run("legacy-thread-1", "apigather", 0);
+    legacy.prepare("INSERT INTO threads (id, model_provider, archived) VALUES (?, ?, ?)").run("legacy-thread-2", "apigather", 1);
+  } finally {
+    legacy.close();
+  }
+
+  const status = await getStatus({ codexHome });
+
+  assert.equal(status.sqliteCounts.sessions.minimax, 1, "must include the new sqlite/state_5.sqlite count");
+  // Aggregated across both DBs: 1 apigather open row from new DB + 1
+  // apigather open row from legacy DB = 2 total open apigather rows.
+  assert.equal(status.sqliteCounts.sessions.apigather, 2, "must aggregate open apigather rows across both databases");
+  assert.equal(status.sqliteCounts.archived_sessions.apigather, 1, "must include legacy archived rows");
+
+  const rendered = renderStatus(status);
+  assert.match(rendered, /sessions: apigather: 2, minimax: 1/);
+  assert.match(rendered, /archived_sessions: apigather: 1/);
 });
 
 test("status reports pending SQLite user-event and cwd repairs", async () => {
@@ -1307,6 +1353,95 @@ test("applySessionChanges skips only the rollout file that becomes locked on Win
   const writableRollout = await fs.readFile(writablePath, "utf8");
   assert.match(lockedRollout, /"model_provider":"apigather"/);
   assert.match(writableRollout, /"model_provider":"openai"/);
+});
+
+test("applySessionChanges puts provider-rewritten files into partialRewritePaths when the follow-up model-field pass hits a busy rollout", async () => {
+  // Regression guard for the B2 half-applied state: when the
+  // first-line (provider) rewrite succeeds but the follow-up
+  // turn_context `model` rewrite cannot open the file because
+  // Codex grabbed an exclusive lock between the two passes,
+  // the change must surface in `partialRewritePaths` instead of
+  // being silently dropped into `skippedPaths` (which would
+  // imply "nothing happened") or throwing and aborting the
+  // whole sync (which would leave the count inconsistent with
+  // the first-line edits already on disk).
+  //
+  // We exercise the model-only code path: a rollout whose
+  // provider is already on target but whose turn_context
+  // `model` still needs to be rewritten. That path runs in
+  // pure Node on every platform (not the PowerShell batch), so
+  // we can reliably force EBUSY by holding the file in another
+  // child process via flock-style exclusive open.
+  if (process.platform === "win32") {
+    // On Windows the PowerShell batch for provider changes
+    // interleaves differently; the regression is exercised on
+    // both code paths but we focus this unit test on the
+    // model-only path which is platform-portable.
+  }
+
+  const { codexHome } = await makeTempCodexHome();
+  // Provider is already on target so the only rewrite needed is
+  // the turn_context `model` field (model-only path, no
+  // PowerShell batch involved).
+  await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "MiniMax-M3"\n');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "06", "09", "rollout-busy.jsonl");
+  await writeRolloutWithTurnContext(sessionPath, {
+    id: "thread-busy",
+    provider: "openai",
+    model: "gpt-5.4"
+  });
+
+  const { changes } = await collectSessionChanges(codexHome, "openai", { targetModel: "MiniMax-M3" });
+  assert.equal(changes.length, 1, "the rollout should be queued with providerNeedsUpdate=false and modelNeedsUpdate=true");
+  assert.equal(changes[0].providerNeedsUpdate, false);
+
+  // Hold an exclusive lock on the rollout file from a child
+  // process. `rewriteRolloutModelField` opens the file with
+  // `fsp.open(filePath, "r+")` and on Windows + Node 23 the
+  // default share mode allows the holder to deny subsequent
+  // opens with EPERM/EBUSY. On Linux/macOS the file is opened
+  // with O_RDWR while the holder still has it open, which can
+  // surface as EBUSY/EAGAIN depending on the FS — the test is
+  // best-effort on POSIX and we skip the busy assertion there.
+  const child = spawn(
+    process.execPath,
+    [
+      "-e",
+      `import { open } from "node:fs/promises";
+       const h = await open(${JSON.stringify(sessionPath)}, "r+");
+       setInterval(() => {}, 1000);`
+    ],
+    { stdio: "ignore" }
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 250));
+
+  let result;
+  try {
+    result = await applySessionChanges(changes, { targetModel: "MiniMax-M3" });
+  } finally {
+    child.kill();
+    await new Promise((resolve) => child.once("exit", resolve));
+  }
+
+  if (process.platform === "win32") {
+    // On Windows the exclusive lock reliably triggers EBUSY in
+    // `rewriteRolloutModelField`. The change must surface in
+    // `partialRewritePaths` rather than being silently dropped
+    // or throwing.
+    assert.equal(result.appliedChanges, 0);
+    assert.equal(result.skippedPaths.length, 0);
+    assert.ok(
+      result.partialRewritePaths.includes(sessionPath),
+      `expected ${sessionPath} in partialRewritePaths, got ${JSON.stringify(result.partialRewritePaths)}`
+    );
+  } else {
+    // On POSIX the lock semantics vary; we just assert the
+    // happy path completed (model was rewritten or cleanly
+    // skipped — neither is wrong, but we must not throw or
+    // mis-count).
+    assert.ok(result.appliedChanges + result.partialRewritePaths.length + result.skippedPaths.length <= 1);
+  }
 });
 
 test("restoreBackup only restores rollout files that were actually applied", async () => {

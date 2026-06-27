@@ -329,10 +329,22 @@ function rewriteTurnContextModelInLine(line, oldModel, newModel) {
   if (!line || !line.includes('"turn_context"')) {
     return line;
   }
-  const escapedOld = oldModel.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
-  const escapedNew = newModel.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
-  const pattern = new RegExp(`"model"\\s*:\\s*"${escapedOld}"`, "g");
-  return line.replace(pattern, `"model":"${escapedNew}"`);
+  // We need TWO escapes here:
+  //   - JSON-string escape so the old/new model name can be embedded
+  //     back into a JSON string value (handle `\` and `"`).
+  //   - regex escape so model names that happen to contain regex
+  //     metacharacters (`.`, `+`, `*`, `?`, `(`, `)`, `|`, `[`, `]`,
+  //     `{`, `}`, `^`, `$`, `\`) do not over-match or break the
+  //     pattern. Without this, a model named `gpt-5.4-mini` would
+  //     also match `gpt-5X4Xmini` and a model named `foo+bar` would
+  //     either fail to compile or behave unexpectedly.
+  // The order matters: regex-escape first so the JSON-string
+  // escape of `\` (which inserts a backslash before every `\`) does
+  // not double up the regex escapes we just inserted.
+  const jsonEscape = (value) => value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
+  const regexEscape = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`"model"\\s*:\\s*"${regexEscape(jsonEscape(oldModel))}"`, "g");
+  return line.replace(pattern, `"model":"${jsonEscape(newModel)}"`);
 }
 
 function isValidWindowsRewriteResult(result) {
@@ -913,7 +925,30 @@ export async function applySessionChanges(changes, options = {}) {
   const { targetModel = null } = options ?? {};
   const skippedPaths = [];
   const appliedPaths = [];
+  // Files where the provider/first-line rewrite succeeded but the
+  // follow-up turn_context `model` rewrite could not finish (typically
+  // because Codex grabbed an exclusive lock on the rollout between the
+  // two passes). The user will see them in the "Skipped locked rollout
+  // files" message so they know to rerun sync later; the first-line
+  // change is durable and will not be lost.
+  const partialRewritePaths = [];
   let appliedChanges = 0;
+
+  // Run a turn_context model-field rewrite for one change, surfacing
+  // busy/locked errors as `false` so the caller can move the change
+  // out of `appliedPaths` and into `partialRewritePaths` instead of
+  // letting the exception bubble up and leave the count inconsistent.
+  async function tryRewriteModelField(change) {
+    try {
+      await rewriteRolloutModelField(change, targetModel);
+      return { ok: true };
+    } catch (error) {
+      if (isRolloutFileBusyError(error)) {
+        return { ok: false, busy: true, error };
+      }
+      throw error;
+    }
+  }
 
   if (process.platform === "win32") {
     // Split the batch into provider-rewrite work (which the
@@ -928,19 +963,32 @@ export async function applySessionChanges(changes, options = {}) {
     for (let index = 0; index < providerChanges.length; index += 1) {
       const change = providerChanges[index];
       if (results[index] === "APPLIED") {
-        appliedChanges += 1;
-        appliedPaths.push(change.path);
-        await restoreOriginalMtime(change.path, change.originalMtimeMs);
-        await rewriteRolloutModelField(change, targetModel);
+        const modelResult = await tryRewriteModelField(change);
+        if (modelResult.ok) {
+          appliedChanges += 1;
+          appliedPaths.push(change.path);
+          await restoreOriginalMtime(change.path, change.originalMtimeMs);
+        } else {
+          // First-line was already rewritten; do NOT silently put
+          // the change in `skippedPaths` (that would imply "nothing
+          // happened"). Track it separately so the CLI can surface
+          // "Updated N rollout files, N partially rewritten (run
+          // sync again later to finish the turn_context pass)".
+          partialRewritePaths.push(change.path);
+        }
       } else {
         skippedPaths.push(change.path);
       }
     }
 
     for (const change of modelOnlyChanges) {
-      appliedChanges += 1;
-      appliedPaths.push(change.path);
-      await rewriteRolloutModelField(change, targetModel);
+      const modelResult = await tryRewriteModelField(change);
+      if (modelResult.ok) {
+        appliedChanges += 1;
+        appliedPaths.push(change.path);
+      } else {
+        partialRewritePaths.push(change.path);
+      }
     }
   } else {
     for (const change of normalizedChanges) {
@@ -949,12 +997,16 @@ export async function applySessionChanges(changes, options = {}) {
         providerRewritten = await tryRewriteCollectedFirstLine(change);
       }
       if (providerRewritten) {
-        if (change.providerNeedsUpdate !== false) {
-          await restoreOriginalMtime(change.path, change.originalMtimeMs);
+        const modelResult = await tryRewriteModelField(change);
+        if (modelResult.ok) {
+          if (change.providerNeedsUpdate !== false) {
+            await restoreOriginalMtime(change.path, change.originalMtimeMs);
+          }
+          appliedChanges += 1;
+          appliedPaths.push(change.path);
+        } else {
+          partialRewritePaths.push(change.path);
         }
-        appliedChanges += 1;
-        appliedPaths.push(change.path);
-        await rewriteRolloutModelField(change, targetModel);
       } else {
         skippedPaths.push(change.path);
       }
@@ -963,10 +1015,12 @@ export async function applySessionChanges(changes, options = {}) {
 
   appliedPaths.sort((left, right) => left.localeCompare(right));
   skippedPaths.sort((left, right) => left.localeCompare(right));
+  partialRewritePaths.sort((left, right) => left.localeCompare(right));
   return {
     appliedChanges,
     appliedPaths,
-    skippedPaths
+    skippedPaths,
+    partialRewritePaths
   };
 }
 

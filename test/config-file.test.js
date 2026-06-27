@@ -98,11 +98,13 @@ model = "X"
 test("setRootModelInConfigText inserts a new root-level model before the first table", () => {
   const input = `model_provider = "codexzh"\n\n[features]\napps = true\n`;
   const next = setRootModelInConfigText(input, "LongCat-2.0-Preview");
-  // Inserts at the position where [features] would have been, preserving the
-  // blank line that was already there. Trailing newline is preserved.
+  // Inserts at the position where [features] would have been, preserving
+  // the blank line that was already there. The output's trailing
+  // newline exactly matches the input's trailing newline so the
+  // config file's byte-level shape is preserved.
   assert.equal(
     next,
-    `model_provider = "codexzh"\n\nmodel = "LongCat-2.0-Preview"\n[features]\napps = true\n\n`
+    `model_provider = "codexzh"\n\nmodel = "LongCat-2.0-Preview"\n[features]\napps = true\n`
   );
 });
 
