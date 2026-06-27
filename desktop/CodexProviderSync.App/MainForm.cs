@@ -143,6 +143,32 @@ public sealed class MainForm : Form
         await LoadStateAsync();
     }
 
+    /// <summary>
+    /// Brings the running form back to the foreground. Invoked by the
+    /// single-instance focus broker when a second copy of CodexProviderSync
+    /// is launched and asks the first copy to take focus. We name it
+    /// `RequestBringToFront` rather than overriding `Form.BringToFront`
+    /// with the `new` keyword so we do not silently break if a future
+    /// .NET version changes the base signature or marks it virtual.
+    /// </summary>
+    public void RequestBringToFront()
+    {
+        if (InvokeRequired)
+        {
+            BeginInvoke(new Action(RequestBringToFront));
+            return;
+        }
+        if (WindowState == FormWindowState.Minimized)
+        {
+            WindowState = FormWindowState.Normal;
+        }
+        Show();
+        Activate();
+        TopMost = true;
+        TopMost = false;
+        Focus();
+    }
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         PersistUiState();

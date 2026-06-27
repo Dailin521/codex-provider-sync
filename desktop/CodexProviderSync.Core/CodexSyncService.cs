@@ -330,7 +330,7 @@ public sealed class CodexSyncService
         }
     }
 
-    private static ModelSyncOutcome ResolveModelSyncOutcome(
+    private ModelSyncOutcome ResolveModelSyncOutcome(
         string originalConfigText,
         string provider,
         string? model,
@@ -352,7 +352,7 @@ public sealed class CodexSyncService
             return ModelSyncOutcome.CreateSkipped("keep-root-model", warning: null);
         }
 
-        string? providerModel = new ConfigFileService().ReadProviderModel(originalConfigText, provider);
+        string? providerModel = _configFileService.ReadProviderModel(originalConfigText, provider);
         if (providerModel is not null)
         {
             return ModelSyncOutcome.CreateApplied("provider-section", providerModel);

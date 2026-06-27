@@ -367,7 +367,7 @@ public sealed class SessionRolloutService
             await RewriteFirstLineAsync(
                 sourceStream,
                 change.Path,
-                change.UpdatedFirstLine,
+                change.UpdatedFirstLine!,
                 change.OriginalSeparator,
                 change.OriginalOffset,
                 headerOnly: change.OriginalOffset >= change.OriginalFileLength);
@@ -622,7 +622,22 @@ public sealed class SessionRolloutService
         {
             return line;
         }
-        string escapedOld = EscapeForJsonString(oldModel);
+        // We need TWO escapes here:
+        //   - JSON-string escape so the old/new model name can be
+        //     embedded back into a JSON string value (handle `\` and
+        //     `"`).
+        //   - regex escape so model names that happen to contain
+        //     regex metacharacters (`.`, `+`, `*`, `?`, `(`, `)`,
+        //     `|`, `[`, `]`, `{`, `}`, `^`, `$`, `\`) do not
+        //     over-match or break the pattern. Without this, a
+        //     model named `gpt-5.4-mini` would also match
+        //     `gpt-5X4Xmini` and a model named `foo+bar` would
+        //     either fail to compile or behave unexpectedly.
+        // The order matters: regex-escape first so the JSON-string
+        // escape of `\` (which inserts a backslash before every
+        // `\`) does not double up the regex escapes we just
+        // inserted.
+        string escapedOld = System.Text.RegularExpressions.Regex.Escape(EscapeForJsonString(oldModel));
         string escapedNew = EscapeForJsonString(newModel);
         return System.Text.RegularExpressions.Regex.Replace(
             line,
