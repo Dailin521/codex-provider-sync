@@ -12,6 +12,9 @@ import {
   listConfiguredProviderIds,
   readConfigText,
   readCurrentProviderFromConfigText,
+  readProviderModel,
+  readRootModelFromConfigText,
+  setRootModelInConfigText,
   setRootProviderInConfigText,
   writeConfigText
 } from "./config-file.js";
@@ -205,7 +208,8 @@ export async function runSync({
   configBackupText,
   keepCount = DEFAULT_BACKUP_RETENTION_COUNT,
   sqliteBusyTimeoutMs,
-  onProgress
+  onProgress,
+  model = null
 } = {}) {
   if (!Number.isInteger(keepCount) || keepCount < 1) {
     throw new Error(`Invalid automatic keep count: ${keepCount}. Expected an integer greater than or equal to 1.`);
@@ -217,6 +221,17 @@ export async function runSync({
   const configText = await readConfigText(configPath);
   const current = readCurrentProviderFromConfigText(configText);
   const targetProvider = provider ?? current.provider ?? DEFAULT_PROVIDER;
+  // When the caller does not pin a model, fall back to the
+  // active root-level `model = "..."` from config.toml. This
+  // is what makes a plain `codex-provider sync` keep the per-
+  // turn `turn_context.model` field on old rollout files in
+  // sync with the rest of the toolchain, so the Codex GUI
+  // bottom-right of an old conversation shows the model that
+  // is actually in use today instead of the one the thread was
+  // created with.
+  if (model == null) {
+    model = readRootModelFromConfigText(configText);
+  }
 
   const releaseLock = await acquireLock(codexHome, "sync");
   let backupDir = null;
@@ -230,7 +245,14 @@ export async function runSync({
       encryptedContentCounts,
       userEventThreadIds,
       threadCwdById
-    } = await collectSessionChanges(codexHome, targetProvider, { skipLockedReads: true });
+    } = await collectSessionChanges(codexHome, targetProvider, {
+      skipLockedReads: true,
+      // Plumb the resolved root-level model down to the rollout
+      // collector so it can skip rollouts whose `turn_context.model`
+      // already matches the active target — no rewrite, no
+      // backup, no `changed files` entry.
+      targetModel: model
+    });
     const cwdStats = await readThreadCwdStats(codexHome);
     const encryptedContentWarning = buildEncryptedContentWarning(encryptedContentCounts, targetProvider);
     emitProgress(onProgress, {
@@ -288,7 +310,12 @@ export async function runSync({
       savedWorkspaceRootCount: 0
     };
     try {
-      let applyResult = { appliedChanges: 0, appliedPaths: [], skippedPaths: [] };
+      let applyResult = {
+        appliedChanges: 0,
+        appliedPaths: [],
+        skippedPaths: [],
+        partialRewritePaths: []
+      };
       emitProgress(onProgress, { stage: "update_sqlite", status: "start" });
       emitProgress(onProgress, {
         stage: "rewrite_rollout_files",
@@ -300,7 +327,7 @@ export async function runSync({
         targetProvider,
         async () => {
           if (writableChanges.length > 0) {
-            applyResult = await applySessionChanges(writableChanges);
+            applyResult = await applySessionChanges(writableChanges, { targetModel: model });
             const appliedPathSet = new Set(applyResult.appliedPaths ?? []);
             appliedSessionChanges = writableChanges.filter((change) => appliedPathSet.has(change.path));
             sessionRestoreNeeded = appliedSessionChanges.length > 0;
@@ -309,7 +336,7 @@ export async function runSync({
           workspaceRootResult = await syncWorkspaceRoots(codexHome, { cwdStats });
           globalStateRestoreNeeded = workspaceRootResult.updated;
         },
-        { busyTimeoutMs: sqliteBusyTimeoutMs, userEventThreadIds, threadCwdById }
+        { busyTimeoutMs: sqliteBusyTimeoutMs, userEventThreadIds, threadCwdById, targetModel: model }
       );
       emitProgress(onProgress, {
         stage: "rewrite_rollout_files",
@@ -326,6 +353,7 @@ export async function runSync({
         ...skippedRolloutFiles,
         ...applyResult.skippedPaths
       ])].sort((left, right) => left.localeCompare(right));
+      const partialRewriteRolloutFiles = (applyResult.partialRewritePaths ?? []).slice().sort((left, right) => left.localeCompare(right));
       let autoPruneResult = null;
       let autoPruneWarning = null;
       emitProgress(onProgress, {
@@ -352,6 +380,7 @@ export async function runSync({
         backupDurationMs,
         changedSessionFiles: applyResult.appliedChanges,
         skippedLockedRolloutFiles,
+        partialRewriteRolloutFiles,
         sqliteRowsUpdated: sqliteResult.updatedRows,
         sqliteProviderRowsUpdated: sqliteResult.providerRowsUpdated,
         sqliteUserEventRowsUpdated: sqliteResult.userEventRowsUpdated,
@@ -400,6 +429,8 @@ export async function runSync({
 export async function runSwitch({
   codexHome: explicitCodexHome,
   provider,
+  model,
+  keepRootModel = false,
   keepCount = DEFAULT_BACKUP_RETENTION_COUNT,
   onProgress
 }) {
@@ -415,7 +446,78 @@ export async function runSwitch({
     throw new Error(`Provider "${provider}" is not available in config.toml. Configure it first or use one of: ${listConfiguredProviderIds(originalConfigText).join(", ")}`);
   }
 
-  const nextConfigText = setRootProviderInConfigText(originalConfigText, provider);
+  if (model !== undefined && model !== null && keepRootModel) {
+    throw new Error("--model and --keep-root-model are mutually exclusive. Pick one.");
+  }
+
+  let nextConfigText = setRootProviderInConfigText(originalConfigText, provider);
+  let modelSync = { applied: false, source: "none", model: null, warning: null };
+
+  if (model !== undefined && model !== null) {
+    if (typeof model !== "string" || model.length === 0) {
+      throw new Error(`Invalid --model value: ${model}. Expected a non-empty string.`);
+    }
+    nextConfigText = setRootModelInConfigText(nextConfigText, model);
+    modelSync = { applied: true, source: "explicit", model, warning: null };
+  } else if (!keepRootModel) {
+    const providerModel = readProviderModel(originalConfigText, provider);
+    if (providerModel) {
+      nextConfigText = setRootModelInConfigText(nextConfigText, providerModel);
+      modelSync = { applied: true, source: "provider-section", model: providerModel, warning: null };
+    } else if (provider !== DEFAULT_PROVIDER) {
+      modelSync = {
+        applied: false,
+        source: "none",
+        model: null,
+        warning: `Provider "${provider}" has no model field in [model_providers.${provider}]; root-level model left unchanged. Use --model <name> to set it explicitly, or --keep-root-model to suppress this warning.`
+      };
+    }
+  }
+
+  // If the request would not change either the provider or the
+  // top-level model, do not touch the config file or run the sync.
+  // A no-op `switch` used to write `originalConfigText` back to
+  // disk (which would still bump mtime), create a backup, and run
+  // a full sync whose result was "0 changed files" — visible to
+  // the user as `Switched to <provider> …` even though nothing
+  // actually changed. Skipping here makes the CLI honest about
+  // what happened.
+  const currentProviderInConfig = readCurrentProviderFromConfigText(originalConfigText).provider;
+  const currentModelInConfig = readRootModelFromConfigText(originalConfigText);
+  const nextModelInConfig = readRootModelFromConfigText(nextConfigText);
+  if (currentProviderInConfig === provider && currentModelInConfig === nextModelInConfig) {
+    emitProgress(onProgress, {
+      stage: "update_config",
+      status: "skipped",
+      provider,
+      reason: "already-on-target"
+    });
+    return {
+      codexHome,
+      targetProvider: provider,
+      previousProvider: currentProviderInConfig,
+      configUpdated: false,
+      modelSync,
+      changedSessionFiles: 0,
+      skippedLockedRolloutFiles: [],
+      partialRewriteRolloutFiles: [],
+      backupDir: null,
+      backupDurationMs: 0,
+      sqliteRowsUpdated: 0,
+      sqliteProviderRowsUpdated: 0,
+      sqliteUserEventRowsUpdated: 0,
+      sqliteCwdRowsUpdated: 0,
+      sqlitePresent: false,
+      rolloutCountsBefore: { sessions: {}, archived_sessions: {} },
+      encryptedContentCounts: { sessions: {}, archived_sessions: {} },
+      encryptedContentWarning: null,
+      updatedWorkspaceRoots: 0,
+      savedWorkspaceRootCount: 0,
+      autoPruneResult: null,
+      autoPruneWarning: null
+    };
+  }
+
   emitProgress(onProgress, {
     stage: "update_config",
     status: "start",
@@ -429,16 +531,27 @@ export async function runSwitch({
   });
 
   try {
+    // After the config update, `nextConfigText` has the final root-level
+    // `model` value. We use that to drive the per-thread `model` column
+    // rewrite so old sessions pick up the same model that new ones will.
+    let modelForThreads = null;
+    if (modelSync.applied && modelSync.model) {
+      modelForThreads = modelSync.model;
+    } else {
+      modelForThreads = readRootModelFromConfigText(nextConfigText);
+    }
     const syncResult = await runSync({
       codexHome,
       provider,
       configBackupText: originalConfigText,
       keepCount,
-      onProgress
+      onProgress,
+      model: modelForThreads
     });
     return {
       ...syncResult,
-      configUpdated: true
+      configUpdated: true,
+      modelSync
     };
   } catch (error) {
     await writeConfigText(configPath, originalConfigText);

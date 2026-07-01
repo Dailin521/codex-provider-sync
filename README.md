@@ -51,6 +51,8 @@ codex-provider status
 codex-provider sync
 codex-provider sync --provider openai
 codex-provider switch apigather
+codex-provider switch apigather --model "MiniMax-M3"     # 同时改顶层 model
+codex-provider switch apigather --keep-root-model        # 只改 model_provider，不动顶层 model
 codex-provider restore C:\Users\you\.codex\backups_state\provider-sync\<timestamp>
 codex-provider prune-backups --keep 5
 ```
@@ -59,7 +61,7 @@ codex-provider prune-backups --keep 5
 
 - `status`：只检查当前 provider、rollout、SQLite、项目可见性诊断。
 - `sync`：不切换登录状态，只把历史会话 metadata 同步到当前 provider。
-- `switch <provider-id>`：修改 `config.toml` 根级 `model_provider`，然后执行同步。
+- `switch <provider-id>`：修改 `config.toml` 根级 `model_provider` 并默认把顶层 `model` 同步到新 provider section 里的 `model`（可用 `--keep-root-model` 关闭，或用 `--model <NAME>` 显式覆盖），然后执行同步。
 - `restore <backup-dir>`：从备份恢复，支持 `--no-config`、`--no-db`、`--no-sessions`。
 - `prune-backups --keep <n>`：只清理本工具创建的旧备份。
 
