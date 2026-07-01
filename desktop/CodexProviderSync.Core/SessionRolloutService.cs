@@ -1,6 +1,8 @@
 using System.Buffers;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace CodexProviderSync.Core;
 
@@ -12,7 +14,8 @@ public sealed class SessionRolloutService
     public async Task<SessionChangeCollection> CollectSessionChangesAsync(
         string codexHome,
         string targetProvider,
-        bool skipLockedReads = false)
+        bool skipLockedReads = false,
+        string? targetModel = null)
     {
         List<SessionChange> changes = [];
         List<string> lockedPaths = [];
@@ -92,25 +95,66 @@ public sealed class SessionRolloutService
                     encryptedBucket[currentProvider] = encryptedBucket.TryGetValue(currentProvider, out int encryptedCount) ? encryptedCount + 1 : 1;
                 }
 
-                if (!string.Equals(targetProvider, StatusOnlyProvider, StringComparison.Ordinal)
-                    && !string.Equals(currentProvider, targetProvider, StringComparison.Ordinal))
+                if (string.Equals(targetProvider, StatusOnlyProvider, StringComparison.Ordinal))
                 {
-                    FileSnapshot snapshot = GetFileSnapshot(rolloutPath);
-                    payload["model_provider"] = targetProvider;
-                    changes.Add(new SessionChange
-                    {
-                        Path = rolloutPath,
-                        ThreadId = payload["id"]?.GetValue<string>(),
-                        Directory = dirName,
-                        OriginalFirstLine = record.FirstLine,
-                        OriginalSeparator = record.Separator,
-                        OriginalOffset = record.Offset,
-                        OriginalFileLength = snapshot.Length,
-                        OriginalLastWriteTimeUtcTicks = snapshot.LastWriteTimeUtcTicks,
-                        OriginalProvider = currentProvider,
-                        UpdatedFirstLine = root!.ToJsonString()
-                    });
+                    continue;
                 }
+
+                FileSnapshot snapshot = GetFileSnapshot(rolloutPath);
+                bool providerNeedsUpdate = !string.Equals(currentProvider, targetProvider, StringComparison.Ordinal);
+
+                // Peek at the first turn_context event in the rollout
+                // to capture the per-turn `model` field that the
+                // Codex GUI bottom-right of an old conversation
+                // reads. This is the value the model rewrite pass
+                // will swap to the active root-level model.
+                string? originalModel = await ReadFirstTurnContextModelAsync(rolloutPath, record);
+
+                // Only queue a change if the rollout file actually
+                // needs editing: either the provider drifted, or
+                // the per-turn model drifted. Skipping the no-op
+                // case keeps us from rewriting rollout files when
+                // they are already on the right provider + model,
+                // which would otherwise spam mtime on every sync
+                // and create a useless backup on every run.
+                //
+                // We compare `originalModel` against `targetModel`
+                // so that a plain `sync` whose root-level model
+                // already matches every rollout produces zero
+                // changes, no backups, and no entries in `changed
+                // files`. Without this gate, every sync would
+                // have rewritten every rollout file just to write
+                // the same content back.
+                bool modelNeedsUpdate = !string.IsNullOrEmpty(originalModel)
+                    && !string.IsNullOrEmpty(targetModel)
+                    && !string.Equals(originalModel, targetModel, StringComparison.Ordinal);
+                if (!providerNeedsUpdate && !modelNeedsUpdate)
+                {
+                    continue;
+                }
+
+                string? updatedFirstLine = null;
+                if (providerNeedsUpdate)
+                {
+                    payload["model_provider"] = targetProvider;
+                    updatedFirstLine = root!.ToJsonString();
+                }
+
+                changes.Add(new SessionChange
+                {
+                    Path = rolloutPath,
+                    ThreadId = payload["id"]?.GetValue<string>(),
+                    Directory = dirName,
+                    OriginalFirstLine = record.FirstLine,
+                    OriginalSeparator = record.Separator,
+                    OriginalOffset = record.Offset,
+                    OriginalFileLength = snapshot.Length,
+                    OriginalLastWriteTimeUtcTicks = snapshot.LastWriteTimeUtcTicks,
+                    OriginalProvider = currentProvider,
+                    OriginalModel = originalModel,
+                    ProviderNeedsUpdate = providerNeedsUpdate,
+                    UpdatedFirstLine = updatedFirstLine
+                });
             }
         }
 
@@ -134,7 +178,9 @@ public sealed class SessionRolloutService
         };
     }
 
-    public async Task<SessionApplyResult> ApplySessionChangesAsync(IEnumerable<SessionChange> changes)
+    public async Task<SessionApplyResult> ApplySessionChangesAsync(
+        IEnumerable<SessionChange> changes,
+        string? targetModel = null)
     {
         int appliedCount = 0;
         List<string> appliedPaths = [];
@@ -142,11 +188,34 @@ public sealed class SessionRolloutService
 
         foreach (SessionChange change in changes)
         {
-            if (await TryRewriteCollectedSessionChangeAsync(change))
+            bool providerRewritten = true;
+            if (change.ProviderNeedsUpdate)
             {
-                TryRestoreLastWriteTimeUtc(change.Path, change.OriginalLastWriteTimeUtcTicks);
+                providerRewritten = await TryRewriteCollectedSessionChangeAsync(change);
+            }
+
+            if (providerRewritten)
+            {
+                if (change.ProviderNeedsUpdate)
+                {
+                    TryRestoreLastWriteTimeUtc(change.Path, change.OriginalLastWriteTimeUtcTicks);
+                }
                 appliedCount += 1;
                 appliedPaths.Add(change.Path);
+                // After the first-line rewrite succeeds (or when
+                // there is nothing to rewrite on the first line
+                // because the provider is already correct), do a
+                // second pass that updates the per-turn `model`
+                // field in every turn_context event of the file.
+                // The Codex GUI bottom-right of an old conversation
+                // reads that field, so we have to keep it in sync
+                // with the active root-level model — even when the
+                // provider line in session_meta is already on
+                // target.
+                if (!string.IsNullOrEmpty(targetModel))
+                {
+                    await TryRewriteRolloutModelFieldAsync(change, targetModel);
+                }
             }
             else
             {
@@ -298,7 +367,7 @@ public sealed class SessionRolloutService
             await RewriteFirstLineAsync(
                 sourceStream,
                 change.Path,
-                change.UpdatedFirstLine,
+                change.UpdatedFirstLine!,
                 change.OriginalSeparator,
                 change.OriginalOffset,
                 headerOnly: change.OriginalOffset >= change.OriginalFileLength);
@@ -378,6 +447,209 @@ public sealed class SessionRolloutService
         {
             ArrayPool<byte>.Shared.Return(buffer);
         }
+    }
+
+    // Scan the start of a rollout file looking for the first
+    // `turn_context` event and return its `payload.model` field.
+    // This is the field that the Codex GUI bottom-right of an old
+    // We stream line-by-line because individual `turn_context`
+    // lines can easily exceed 64 KB once Codex includes the
+    // `developer_instructions` blob — the previous code that
+    // capped the read at 64 KB silently missed those, which made
+    // the rollout model rewrite a no-op for sessions whose first
+    // turn was a long planning step. We deliberately extract
+    // `payload.model` with a regex on the raw JSON text instead
+    // of `JsonNode.Parse`-ing the entire line: Codex writes
+    // opaque multi-KB strings (`developer_instructions`, raw tool
+    // output, etc.) into the payload, and round-tripping those
+    // through `JsonNode.Parse` -> `node.ToJsonString()` would
+    // silently mangle embedded escape sequences. A regex
+    // anchored on `"type":"turn_context"` and then the first
+    // `"model":"<value>"` that follows within the same line is
+    // enough to pick up the model field of the first
+    // `turn_context` event we see, because rollout lines are
+    // single JSON objects.
+    private static readonly Regex TurnContextStartRegex = new(
+        "\"type\"\\s*:\\s*\"turn_context\"",
+        RegexOptions.Compiled);
+    private static readonly Regex ModelFieldRegex = new(
+        "\"model\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"",
+        RegexOptions.Compiled);
+
+    private static async Task<string?> ReadFirstTurnContextModelAsync(
+        string rolloutPath,
+        FirstLineRecord record)
+    {
+        try
+        {
+            await using FileStream stream = new(
+                rolloutPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            stream.Seek(record.Offset, SeekOrigin.Begin);
+            using StreamReader reader = new(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, bufferSize: 4096, leaveOpen: true);
+            string? line;
+            while ((line = await reader.ReadLineAsync()) is not null)
+            {
+                if (!TurnContextStartRegex.IsMatch(line))
+                {
+                    continue;
+                }
+
+                Match match = ModelFieldRegex.Match(line);
+                if (match.Success && match.Groups[1].Value.Length > 0)
+                {
+                    return match.Groups[1].Value;
+                }
+            }
+            return null;
+        }
+        catch (Exception error) when (IsRolloutFileBusyError(error))
+        {
+            throw WrapRolloutFileBusyError(error, rolloutPath, "read");
+        }
+    }
+
+    // Rewrite the per-turn `model` field in every `turn_context`
+    // event of the rollout. The Codex GUI bottom-right of an old
+    // conversation reads that field, so we have to keep it aligned
+    // with the active root-level model. We do a line-by-line
+    // regex rewrite instead of round-tripping the JSON tree to
+    // avoid mangling the multi-megabyte `developer_instructions`
+    // blob Codex writes into every `turn_context`.
+    private async Task TryRewriteRolloutModelFieldAsync(SessionChange change, string targetModel)
+    {
+        if (string.IsNullOrEmpty(change.OriginalModel))
+        {
+            return;
+        }
+        if (string.IsNullOrEmpty(targetModel))
+        {
+            return;
+        }
+        if (string.Equals(change.OriginalModel, targetModel, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        // Snapshot the file as it stands after the first-line
+        // rewrite. We cannot compare against `change.OriginalFileLength`
+        // because the first-line rewrite already changed the size
+        // (the new first line is often a different length than the
+        // original one).
+        FileInfo beforeInfo = new(change.Path);
+        long beforeSize = beforeInfo.Length;
+        DateTime beforeMtimeUtc = beforeInfo.LastWriteTimeUtc;
+
+        string tempPath = $"{change.Path}.provider-sync-model.{Environment.ProcessId}.{DateTime.UtcNow.Ticks}.{Guid.NewGuid():N}.tmp";
+        // If a previous run left a leftover at the same path (which
+        // shouldn't normally happen because of the Guid suffix, but
+        // can occur when tests share a process and timestamps
+        // collide), clean it up before opening.
+        if (File.Exists(tempPath))
+        {
+            File.Delete(tempPath);
+        }
+
+        bool replacements = false;
+        try
+        {
+            await using (FileStream sourceStream = OpenExclusiveRewriteStream(change.Path))
+            {
+                await using FileStream writeStream = new(
+                    tempPath,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None);
+                await using StreamWriter writer = new(writeStream, new UTF8Encoding(false));
+                using StreamReader reader = new(sourceStream, Encoding.UTF8, false, 64 * 1024, leaveOpen: true);
+                bool firstLine = true;
+                string? line;
+                while ((line = await reader.ReadLineAsync()) is not null)
+                {
+                    string next = firstLine
+                        ? line
+                        : RewriteTurnContextModelInLine(line, change.OriginalModel!, targetModel);
+                    if (!string.Equals(next, line, StringComparison.Ordinal))
+                    {
+                        replacements = true;
+                    }
+                    if (!firstLine)
+                    {
+                        await writer.WriteAsync('\n');
+                    }
+                    firstLine = false;
+                    await writer.WriteAsync(next);
+                }
+            }
+
+            if (!replacements)
+            {
+                File.Delete(tempPath);
+                return;
+            }
+
+            // Refuse to swap in the new file if Codex appended
+            // anything between our snapshot and the rename, so we
+            // do not silently drop trailing events.
+            FileInfo afterInfo = new(change.Path);
+            if (afterInfo.Length != beforeSize || afterInfo.LastWriteTimeUtc != beforeMtimeUtc)
+            {
+                File.Delete(tempPath);
+                return;
+            }
+
+            File.Move(tempPath, change.Path, overwrite: true);
+        }
+        catch (Exception error)
+        {
+            try
+            {
+                File.Delete(tempPath);
+            }
+            catch
+            {
+                // Ignore cleanup failures and surface the original error.
+            }
+            throw WrapRolloutFileBusyError(error, change.Path, "rewrite model field");
+        }
+    }
+
+    private static string RewriteTurnContextModelInLine(string line, string oldModel, string newModel)
+    {
+        if (!line.Contains("\"turn_context\"", StringComparison.Ordinal))
+        {
+            return line;
+        }
+        // We need TWO escapes here:
+        //   - JSON-string escape so the old/new model name can be
+        //     embedded back into a JSON string value (handle `\` and
+        //     `"`).
+        //   - regex escape so model names that happen to contain
+        //     regex metacharacters (`.`, `+`, `*`, `?`, `(`, `)`,
+        //     `|`, `[`, `]`, `{`, `}`, `^`, `$`, `\`) do not
+        //     over-match or break the pattern. Without this, a
+        //     model named `gpt-5.4-mini` would also match
+        //     `gpt-5X4Xmini` and a model named `foo+bar` would
+        //     either fail to compile or behave unexpectedly.
+        // The order matters: regex-escape first so the JSON-string
+        // escape of `\` (which inserts a backslash before every
+        // `\`) does not double up the regex escapes we just
+        // inserted.
+        string escapedOld = System.Text.RegularExpressions.Regex.Escape(EscapeForJsonString(oldModel));
+        string escapedNew = EscapeForJsonString(newModel);
+        return System.Text.RegularExpressions.Regex.Replace(
+            line,
+            "\"model\"\\s*:\\s*\"" + escapedOld + "\"",
+            m => "\"model\":\"" + escapedNew + "\"");
+    }
+
+    private static string EscapeForJsonString(string value)
+    {
+        return value
+            .Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("\"", "\\\"", StringComparison.Ordinal);
     }
 
     private static async Task RewriteFirstLineAsync(

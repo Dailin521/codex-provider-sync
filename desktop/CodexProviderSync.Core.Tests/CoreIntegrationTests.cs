@@ -812,6 +812,332 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
+    public async Task RunSync_RewritesPerThreadModelColumnFromConfig()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\nmodel = \"MiniMax-M3\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-a", "openai");
+        await fixture.WriteStateDbAsync(
+        [
+            ("thread-a", "openai", false)
+        ],
+            model: "gpt-5.4-mini");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(1, result.SqliteModelRowsUpdated);
+        await using SqliteConnection connection = new($"Data Source={fixture.StateDbPath()};Mode=ReadOnly;Pooling=False");
+        await connection.OpenAsync();
+        await using SqliteCommand command = connection.CreateCommand();
+        command.CommandText = "SELECT model, model_provider FROM threads WHERE id = 'thread-a'";
+        await using SqliteDataReader reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal("MiniMax-M3", reader.GetString(0));
+        Assert.Equal("openai", reader.GetString(1));
+    }
+
+    [Fact]
+    public async Task RunSync_LeavesPerThreadModelAlone_WhenNoRootModelConfigured()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-a", "openai");
+        await fixture.WriteStateDbAsync(
+        [
+            ("thread-a", "openai", false)
+        ],
+            model: "gpt-5.4-mini");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(0, result.SqliteModelRowsUpdated);
+        await using SqliteConnection connection = new($"Data Source={fixture.StateDbPath()};Mode=ReadOnly;Pooling=False");
+        await connection.OpenAsync();
+        await using SqliteCommand command = connection.CreateCommand();
+        command.CommandText = "SELECT model FROM threads WHERE id = 'thread-a'";
+        Assert.Equal("gpt-5.4-mini", Convert.ToString(await command.ExecuteScalarAsync()));
+    }
+
+    [Fact]
+    public async Task RunSwitch_PropagatesNewModelToSqlitePerThreadColumn()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("""
+            model_provider = "openai"
+            model = "gpt-5.4"
+
+            [model_providers.apigather]
+            name = "apigather"
+            base_url = "https://example.com"
+            model = "MiniMax-M3"
+            """);
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-a", "openai");
+        await fixture.WriteStateDbAsync(
+        [
+            ("thread-a", "openai", false)
+        ],
+            model: "gpt-5.4");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSwitchAsync(
+            fixture.CodexHome,
+            "apigather",
+            keepRootModel: false,
+            model: null);
+
+        Assert.True(result.ModelSync.Applied);
+        Assert.Equal("MiniMax-M3", result.ModelSync.Model);
+        Assert.Equal(1, result.SqliteModelRowsUpdated);
+
+        await using SqliteConnection connection = new($"Data Source={fixture.StateDbPath()};Mode=ReadOnly;Pooling=False");
+        await connection.OpenAsync();
+        await using SqliteCommand command = connection.CreateCommand();
+        command.CommandText = "SELECT model, model_provider FROM threads WHERE id = 'thread-a'";
+        await using SqliteDataReader reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal("MiniMax-M3", reader.GetString(0));
+        Assert.Equal("apigather", reader.GetString(1));
+    }
+
+    [Fact]
+    public async Task RunSync_RewritesTurnContextModelFieldInRolloutFiles()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\nmodel = \"MiniMax-M3\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutWithTurnContextAsync(sessionPath, "thread-a", "apigather", "gpt-5.4");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(1, result.ChangedSessionFiles);
+        string rewritten = await File.ReadAllTextAsync(sessionPath);
+        using StringReader reader = new(rewritten);
+        string? line;
+        int turnContextCount = 0;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            if (!line.Contains("\"turn_context\"", StringComparison.Ordinal))
+            {
+                continue;
+            }
+            using JsonDocument doc = JsonDocument.Parse(line);
+            string model = doc.RootElement.GetProperty("payload").GetProperty("model").GetString()!;
+            string collabModel = doc.RootElement
+                .GetProperty("payload")
+                .GetProperty("collaboration_mode")
+                .GetProperty("settings")
+                .GetProperty("model")
+                .GetString()!;
+            Assert.Equal("MiniMax-M3", model);
+            Assert.Equal("MiniMax-M3", collabModel);
+            turnContextCount += 1;
+        }
+        Assert.Equal(2, turnContextCount);
+    }
+
+    [Fact]
+    public async Task RunSync_UpdatesBothLegacyRootAndNewSqliteStateDatabases()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\nmodel = \"MiniMax-M3\"\n");
+
+        // Plant a thread in BOTH the legacy root database and the
+        // newer `sqlite/state_5.sqlite` location. Codex keeps the
+        // legacy database alive as long as it is on disk, and the
+        // GUI still reads from it for older project sessions.
+        await fixture.WriteStateDbAsync(
+        [
+            ("legacy-thread", "codexzh", false)
+        ],
+            model: "gpt-5.4");
+        Directory.CreateDirectory(Path.GetDirectoryName(fixture.LegacyStateDbPath())!);
+        await using (SqliteConnection legacy = new($"Data Source={fixture.LegacyStateDbPath()};Mode=ReadWriteCreate;Pooling=False"))
+        {
+            await legacy.OpenAsync();
+            using SqliteCommand create = legacy.CreateCommand();
+            create.CommandText = """
+                CREATE TABLE threads (
+                  id TEXT PRIMARY KEY,
+                  model_provider TEXT,
+                  cwd TEXT NOT NULL DEFAULT '',
+                  archived INTEGER NOT NULL DEFAULT 0,
+                  first_user_message TEXT NOT NULL DEFAULT '',
+                  model TEXT
+                )
+                """;
+            await create.ExecuteNonQueryAsync();
+            using SqliteCommand insert = legacy.CreateCommand();
+            insert.CommandText = """
+                INSERT INTO threads (id, model_provider, cwd, archived, first_user_message, model)
+                VALUES ($id, $provider, 'C:\AITemp', 0, 'hi', $model)
+                """;
+            insert.Parameters.AddWithValue("$id", "legacy-thread");
+            insert.Parameters.AddWithValue("$provider", "codexzh");
+            insert.Parameters.AddWithValue("$model", "gpt-5.4");
+            await insert.ExecuteNonQueryAsync();
+        }
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.True(result.SqlitePresent);
+        // The provider + model column on the legacy row must now
+        // match the active root-level values, otherwise the GUI
+        // will keep showing the old provider label for the older
+        // project sessions it loaded from this database.
+        await using SqliteConnection legacyReader = new($"Data Source={fixture.LegacyStateDbPath()};Mode=ReadOnly;Pooling=False");
+        await legacyReader.OpenAsync();
+        await using SqliteCommand legacyCommand = legacyReader.CreateCommand();
+        legacyCommand.CommandText = "SELECT model_provider, model FROM threads WHERE id = 'legacy-thread'";
+        await using SqliteDataReader reader = await legacyCommand.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal("openai", reader.GetString(0));
+        Assert.Equal("MiniMax-M3", reader.GetString(1));
+    }
+
+    [Fact]
+    public async Task RunSync_RewritesTurnContextModelFieldWhenProviderAlreadyMatches()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\nmodel = \"MiniMax-M3\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutWithTurnContextAsync(sessionPath, "thread-a", "openai", "gpt-5.4");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(1, result.ChangedSessionFiles);
+        string rewritten = await File.ReadAllTextAsync(sessionPath);
+        using StringReader reader = new(rewritten);
+        string? line;
+        int turnContextCount = 0;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            if (!line.Contains("\"turn_context\"", StringComparison.Ordinal))
+            {
+                continue;
+            }
+            using JsonDocument doc = JsonDocument.Parse(line);
+            string model = doc.RootElement.GetProperty("payload").GetProperty("model").GetString()!;
+            Assert.Equal("MiniMax-M3", model);
+            turnContextCount += 1;
+        }
+        Assert.Equal(2, turnContextCount);
+    }
+
+    [Fact]
+    public async Task RunSync_LeavesTurnContextModelFieldAlone_WhenNoRootModelConfigured()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutWithTurnContextAsync(sessionPath, "thread-a", "apigather", "gpt-5.4");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(1, result.ChangedSessionFiles);
+        string rewritten = await File.ReadAllTextAsync(sessionPath);
+        using StringReader reader = new(rewritten);
+        string? line;
+        int turnContextCount = 0;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            if (!line.Contains("\"turn_context\"", StringComparison.Ordinal))
+            {
+                continue;
+            }
+            using JsonDocument doc = JsonDocument.Parse(line);
+            string model = doc.RootElement.GetProperty("payload").GetProperty("model").GetString()!;
+            Assert.Equal("gpt-5.4", model);
+            turnContextCount += 1;
+        }
+        Assert.Equal(2, turnContextCount);
+    }
+
+    [Fact]
+    public async Task RunSync_RewritesTurnContextModelFieldInRolloutLinesLargerThan64KB()
+    {
+        // Regression guard: previously the rollout scanner capped
+        // its read window at 64 KB, so any rollout whose first
+        // `turn_context` line was longer than that (which happens
+        // when Codex embeds a `developer_instructions` blob)
+        // silently skipped the model-field rewrite and left the
+        // Codex GUI bottom-right showing the stale model name.
+        // This test forces the first `turn_context` line to be
+        // well past 64 KB.
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\nmodel = \"MiniMax-M3\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-long.jsonl");
+        await fixture.WriteLongTurnContextRolloutAsync(sessionPath, "thread-long", "apigather", "gpt-5.4", paddingBytes: 200 * 1024);
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(1, result.ChangedSessionFiles);
+        string rewritten = await File.ReadAllTextAsync(sessionPath);
+        using StringReader reader = new(rewritten);
+        string? line;
+        int turnContextCount = 0;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            if (!line.Contains("\"turn_context\"", StringComparison.Ordinal))
+            {
+                continue;
+            }
+            Assert.True(line.Length > 64 * 1024, $"turn_context line must stay >64 KB after rewrite; got {line.Length}");
+            using JsonDocument doc = JsonDocument.Parse(line);
+            string model = doc.RootElement.GetProperty("payload").GetProperty("model").GetString()!;
+            Assert.Equal("MiniMax-M3", model);
+            turnContextCount += 1;
+        }
+        Assert.Equal(1, turnContextCount);
+    }
+
+    [Fact]
+    public async Task RunSync_SkipsRolloutRewrite_WhenTurnContextModelAlreadyMatchesTarget()
+    {
+        // Regression guard: a plain `sync` (no provider switch)
+        // used to rewrite every rollout on disk just to write the
+        // same content back, creating useless backups and
+        // polluting `changed files`. The gate is: if the first
+        // `turn_context` model already matches the root-level
+        // `model` from config.toml AND the provider already
+        // matches, the rollout must be left alone — no change
+        // entry, no backup.
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\nmodel = \"MiniMax-M3\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutWithTurnContextAsync(sessionPath, "thread-a", "openai", "MiniMax-M3");
+        string original = await File.ReadAllTextAsync(sessionPath);
+        DateTime originalMtimeUtc = File.GetLastWriteTimeUtc(sessionPath);
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(0, result.ChangedSessionFiles);
+        Assert.Empty(result.SkippedLockedRolloutFiles);
+        Assert.Equal(original, await File.ReadAllTextAsync(sessionPath));
+        Assert.Equal(originalMtimeUtc, File.GetLastWriteTimeUtc(sessionPath));
+
+        string backupRootDir = Path.Combine(fixture.CodexHome, "backups_state", "provider-sync");
+        if (Directory.Exists(backupRootDir))
+        {
+            foreach (string entry in Directory.EnumerateDirectories(backupRootDir))
+            {
+                string sessionBackupPath = Path.Combine(entry, "sessions", Path.GetFileName(sessionPath));
+                Assert.False(File.Exists(sessionBackupPath), $"no rollout backup must be written for an already-on-target session (saw {sessionBackupPath})");
+            }
+        }
+    }
+
+    [Fact]
     public async Task Status_ReturnsMalformedSqliteAsUnreadable()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();

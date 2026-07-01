@@ -212,25 +212,84 @@ public sealed class SqliteStateService
         }
     }
 
-    public async Task<(int UpdatedRows, int ProviderRowsUpdated, int UserEventRowsUpdated, int CwdRowsUpdated, bool DatabasePresent)> UpdateSqliteProviderAsync(
+    public async Task<(int UpdatedRows, int ProviderRowsUpdated, int ModelRowsUpdated, int UserEventRowsUpdated, int CwdRowsUpdated, bool DatabasePresent)> UpdateSqliteProviderAsync(
         string codexHome,
         string targetProvider,
-        Func<(int UpdatedRows, int ProviderRowsUpdated, int UserEventRowsUpdated, int CwdRowsUpdated, bool DatabasePresent), Task>? afterUpdate = null,
+        string? targetModel = null,
+        Func<(int UpdatedRows, int ProviderRowsUpdated, int ModelRowsUpdated, int UserEventRowsUpdated, int CwdRowsUpdated, bool DatabasePresent), Task>? afterUpdate = null,
         int? busyTimeoutMs = null,
         IReadOnlyCollection<string>? userEventThreadIds = null,
         IReadOnlyDictionary<string, string>? threadCwdsById = null)
     {
-        string? dbPath = ExistingStateDbPath(codexHome);
-        if (dbPath is null)
+        // Walk every candidate database, not just the first one. Codex
+        // stores its state database in two locations (`~/.codex/sqlite/
+        // state_5.sqlite` for newer installs and `~/.codex/state_5.sqlite`
+        // for older installs), and the Codex App GUI keeps the legacy
+        // root database alive as long as it is on disk — including
+        // for the older project sessions it created before the new
+        // location was introduced. If we only update the first hit,
+        // the GUI keeps reading stale `model_provider` / `model`
+        // values for those older sessions and either shows the old
+        // provider label or sends requests with the wrong model name.
+        List<StateDbLocation> candidates = StateDbCandidates(codexHome)
+            .Where(static c => File.Exists(c.Path))
+            .ToList();
+
+        if (candidates.Count == 0)
         {
             if (afterUpdate is not null)
             {
-                await afterUpdate((0, 0, 0, 0, false));
+                await afterUpdate((0, 0, 0, 0, 0, false));
             }
 
-            return (0, 0, 0, 0, false);
+            return (0, 0, 0, 0, 0, false);
         }
 
+        int totalUpdatedRows = 0;
+        int totalProviderRowsUpdated = 0;
+        int totalModelRowsUpdated = 0;
+        int totalUserEventRowsUpdated = 0;
+        int totalCwdRowsUpdated = 0;
+
+        foreach (StateDbLocation candidate in candidates)
+        {
+            (int updatedRows, int providerRowsUpdated, int modelRowsUpdated, int userEventRowsUpdated, int cwdRowsUpdated, bool databasePresent) = await UpdateSingleSqliteDatabaseAsync(
+                candidate.Path,
+                targetProvider,
+                targetModel,
+                busyTimeoutMs,
+                userEventThreadIds,
+                threadCwdsById);
+
+            totalUpdatedRows += updatedRows;
+            totalProviderRowsUpdated += providerRowsUpdated;
+            totalModelRowsUpdated += modelRowsUpdated;
+            totalUserEventRowsUpdated += userEventRowsUpdated;
+            totalCwdRowsUpdated += cwdRowsUpdated;
+        }
+
+        if (afterUpdate is not null)
+        {
+            // Run the rollout rewrite once, after both candidate
+            // databases have been updated. The rewrite is keyed off
+            // the session change collection, not the SQLite state,
+            // so it does not matter whether the data lives in the
+            // new or the legacy database — we only want to do it
+            // once, after the SQLite phase is fully done.
+            await afterUpdate((totalUpdatedRows, totalProviderRowsUpdated, totalModelRowsUpdated, totalUserEventRowsUpdated, totalCwdRowsUpdated, candidates.Count > 0));
+        }
+
+        return (totalUpdatedRows, totalProviderRowsUpdated, totalModelRowsUpdated, totalUserEventRowsUpdated, totalCwdRowsUpdated, candidates.Count > 0);
+    }
+
+    private async Task<(int UpdatedRows, int ProviderRowsUpdated, int ModelRowsUpdated, int UserEventRowsUpdated, int CwdRowsUpdated, bool DatabasePresent)> UpdateSingleSqliteDatabaseAsync(
+        string dbPath,
+        string targetProvider,
+        string? targetModel,
+        int? busyTimeoutMs,
+        IReadOnlyCollection<string>? userEventThreadIds,
+        IReadOnlyDictionary<string, string>? threadCwdsById)
+    {
         await using SqliteConnection connection = OpenConnection(dbPath, SqliteOpenMode.ReadWriteCreate);
         bool transactionOpen = false;
         try
@@ -248,6 +307,26 @@ public sealed class SqliteStateService
                 """;
             command.Parameters.AddWithValue("$provider", targetProvider);
             int providerRowsUpdated = await command.ExecuteNonQueryAsync();
+
+            // When a target model is provided, align every thread's `model`
+            // column with it alongside `model_provider`. This is what makes
+            // the bottom-right of the Codex UI show the active model for old
+            // sessions, instead of the name that was in effect when each
+            // thread was originally created. The `model` column is only
+            // present in newer Codex schemas, so guard with TableHasColumn
+            // to keep legacy layouts working.
+            int modelRowsUpdated = 0;
+            if (!string.IsNullOrEmpty(targetModel) && await TableHasColumnAsync(connection, "threads", "model"))
+            {
+                await using SqliteCommand modelCommand = connection.CreateCommand();
+                modelCommand.CommandText = """
+                    UPDATE threads
+                    SET model = $model
+                    WHERE COALESCE(model, '') <> $model
+                    """;
+                modelCommand.Parameters.AddWithValue("$model", targetModel);
+                modelRowsUpdated = await modelCommand.ExecuteNonQueryAsync();
+            }
             int userEventRowsUpdated = 0;
             if (userEventThreadIds?.Count > 0 && await TableHasColumnAsync(connection, "threads", "has_user_event"))
             {
@@ -289,16 +368,11 @@ public sealed class SqliteStateService
                 }
             }
 
-            int updatedRows = providerRowsUpdated + userEventRowsUpdated + cwdRowsUpdated;
-
-            if (afterUpdate is not null)
-            {
-                await afterUpdate((updatedRows, providerRowsUpdated, userEventRowsUpdated, cwdRowsUpdated, true));
-            }
+            int updatedRows = providerRowsUpdated + modelRowsUpdated + userEventRowsUpdated + cwdRowsUpdated;
 
             await ExecuteNonQueryAsync(connection, "COMMIT");
             transactionOpen = false;
-            return (updatedRows, providerRowsUpdated, userEventRowsUpdated, cwdRowsUpdated, true);
+            return (updatedRows, providerRowsUpdated, modelRowsUpdated, userEventRowsUpdated, cwdRowsUpdated, true);
         }
         catch (Exception error)
         {

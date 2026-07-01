@@ -76,7 +76,22 @@ public sealed class SessionChange
     public required long OriginalFileLength { get; init; }
     public required long OriginalLastWriteTimeUtcTicks { get; init; }
     public required string OriginalProvider { get; init; }
-    public required string UpdatedFirstLine { get; init; }
+    // The model that the rollout's first `turn_context` event
+    // currently advertises. Used by the rewrite pass to know which
+    // value to swap out across every turn_context line in the file
+    // so that the Codex GUI bottom-right of an old conversation
+    // reflects the active provider's model. Null when the rollout
+    // does not expose a model field we recognise (e.g. legacy or
+    // unusually formatted files), in which case the model rewrite
+    // pass is a no-op.
+    public string? OriginalModel { get; init; }
+    // True when the provider line in `session_meta` needs to be
+    // rewritten to the new provider; false when the rollout is
+    // already on the right provider and only the per-turn `model`
+    // field has drifted. When false, `UpdatedFirstLine` is null and
+    // the first-line rewrite pass is skipped.
+    public bool ProviderNeedsUpdate { get; init; } = true;
+    public string? UpdatedFirstLine { get; init; }
 }
 
 public sealed class SessionChangeCollection
@@ -101,6 +116,7 @@ public sealed class SyncResult
     public required IReadOnlyList<string> SkippedUnreadableRolloutFiles { get; init; }
     public required int SqliteRowsUpdated { get; init; }
     public int SqliteProviderRowsUpdated { get; init; }
+    public int SqliteModelRowsUpdated { get; init; }
     public int SqliteUserEventRowsUpdated { get; init; }
     public int SqliteCwdRowsUpdated { get; init; }
     public int UpdatedWorkspaceRoots { get; init; }
@@ -110,8 +126,37 @@ public sealed class SyncResult
     public required ProviderCounts EncryptedContentCounts { get; init; }
     public string? EncryptedContentWarning { get; init; }
     public bool ConfigUpdated { get; init; }
+    public ModelSyncOutcome ModelSync { get; init; } = ModelSyncOutcome.NotApplicable();
     public BackupPruneResult? AutoPruneResult { get; init; }
     public string? AutoPruneWarning { get; init; }
+}
+
+public sealed class ModelSyncOutcome
+{
+    public required bool Applied { get; init; }
+    public string Source { get; init; } = "none";
+    public string? Model { get; init; }
+    public string? Warning { get; init; }
+
+    public static ModelSyncOutcome CreateApplied(string source, string model) => new()
+    {
+        Applied = true,
+        Source = source,
+        Model = model
+    };
+
+    public static ModelSyncOutcome CreateSkipped(string source, string? warning) => new()
+    {
+        Applied = false,
+        Source = source,
+        Warning = warning
+    };
+
+    public static ModelSyncOutcome NotApplicable() => new()
+    {
+        Applied = false,
+        Source = "not-applicable"
+    };
 }
 
 public sealed class SessionApplyResult

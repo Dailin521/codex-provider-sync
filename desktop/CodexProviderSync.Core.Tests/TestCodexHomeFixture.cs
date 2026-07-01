@@ -94,6 +94,123 @@ internal sealed class TestCodexHomeFixture
         await File.WriteAllTextAsync(filePath, $"{first}\n{second}\n");
     }
 
+    public async Task WriteRolloutWithTurnContextAsync(string filePath, string id, string provider, string model)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
+        object payload = new
+        {
+            id,
+            timestamp = "2026-06-09T09:16:03.878Z",
+            cwd = "C:\\AITemp",
+            source = "cli",
+            cli_version = "0.115.0",
+            model_provider = provider
+        };
+        string first = JsonSerializer.Serialize(new
+        {
+            timestamp = "2026-06-09T09:16:03.878Z",
+            type = "session_meta",
+            payload
+        });
+        string turnContext = JsonSerializer.Serialize(new
+        {
+            timestamp = "2026-06-09T09:16:03.880Z",
+            type = "turn_context",
+            payload = new
+            {
+                turn_id = "019eabaa-e391-7e21-89cd-e761b5dee114",
+                cwd = "C:\\AITemp",
+                current_date = "2026-06-09",
+                model,
+                collaboration_mode = new
+                {
+                    mode = "default",
+                    settings = new
+                    {
+                        model,
+                        reasoning_effort = "xhigh"
+                    }
+                }
+            }
+        });
+        string heartbeat = JsonSerializer.Serialize(new
+        {
+            timestamp = "2026-06-09T10:16:03.880Z",
+            type = "turn_context",
+            payload = new
+            {
+                turn_id = "019eabaa-e391-7e21-89cd-e761b5dee115",
+                cwd = "C:\\AITemp",
+                current_date = "2026-06-09",
+                model,
+                collaboration_mode = new
+                {
+                    mode = "default",
+                    settings = new
+                    {
+                        model,
+                        reasoning_effort = "xhigh"
+                    }
+                }
+            }
+        });
+
+        await File.WriteAllTextAsync(filePath, $"{first}\n{turnContext}\n{heartbeat}\n");
+    }
+
+    // Write a rollout whose first `turn_context` payload carries a
+    // `developer_instructions` blob large enough that the line
+    // blows past 64 KB on its own. This is the regression case
+    // behind the `ReadFirstTurnContextModelAsync` fix that
+    // switched from a fixed-window read to a streaming line reader.
+    public async Task WriteLongTurnContextRolloutAsync(string filePath, string id, string provider, string model, int paddingBytes)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
+        string padding = new('x', Math.Max(0, paddingBytes));
+        object metaPayload = new
+        {
+            id,
+            timestamp = "2026-06-09T09:16:03.878Z",
+            cwd = "C:\\AITemp",
+            source = "cli",
+            cli_version = "0.115.0",
+            model_provider = provider
+        };
+        string meta = JsonSerializer.Serialize(new
+        {
+            timestamp = "2026-06-09T09:16:03.878Z",
+            type = "session_meta",
+            payload = metaPayload
+        });
+        string turnContext = JsonSerializer.Serialize(new
+        {
+            timestamp = "2026-06-09T09:16:03.880Z",
+            type = "turn_context",
+            payload = new
+            {
+                turn_id = "019eabaa-e391-7e21-89cd-e761b5dee114",
+                cwd = "C:\\AITemp",
+                current_date = "2026-06-09",
+                model,
+                developer_instructions = padding,
+                collaboration_mode = new
+                {
+                    mode = "default",
+                    settings = new
+                    {
+                        model,
+                        reasoning_effort = "xhigh"
+                    }
+                }
+            }
+        });
+        if (turnContext.Length < 64 * 1024 + 1)
+        {
+            throw new InvalidOperationException($"Test setup error: long turn_context line is only {turnContext.Length} bytes; bump paddingBytes");
+        }
+        await File.WriteAllTextAsync(filePath, $"{meta}\n{turnContext}\n");
+    }
+
     public async Task AppendEncryptedContentAsync(string filePath)
     {
         await File.AppendAllTextAsync(filePath, "{\"type\":\"event_msg\",\"payload\":{\"encrypted_content\":\"gAAA\"}}\n");
@@ -136,6 +253,11 @@ internal sealed class TestCodexHomeFixture
 
     public async Task WriteStateDbAsync(IEnumerable<(string Id, string ModelProvider, bool Archived)> rows)
     {
+        await WriteStateDbAsync(rows, model: null);
+    }
+
+    public async Task WriteStateDbAsync(IEnumerable<(string Id, string ModelProvider, bool Archived)> rows, string? model)
+    {
         await using SqliteConnection connection = OpenSqliteConnection();
         await connection.OpenAsync();
         SqliteCommand create = connection.CreateCommand();
@@ -145,7 +267,8 @@ internal sealed class TestCodexHomeFixture
               model_provider TEXT,
               cwd TEXT NOT NULL DEFAULT '',
               archived INTEGER NOT NULL DEFAULT 0,
-              first_user_message TEXT NOT NULL DEFAULT ''
+              first_user_message TEXT NOT NULL DEFAULT '',
+              model TEXT
             )
             """;
         await create.ExecuteNonQueryAsync();
@@ -154,12 +277,13 @@ internal sealed class TestCodexHomeFixture
         {
             SqliteCommand insert = connection.CreateCommand();
             insert.CommandText = """
-                INSERT INTO threads (id, model_provider, cwd, archived, first_user_message)
-                VALUES ($id, $provider, 'C:\AITemp', $archived, 'hello')
+                INSERT INTO threads (id, model_provider, cwd, archived, first_user_message, model)
+                VALUES ($id, $provider, 'C:\AITemp', $archived, 'hello', $model)
                 """;
             insert.Parameters.AddWithValue("$id", id);
             insert.Parameters.AddWithValue("$provider", modelProvider);
             insert.Parameters.AddWithValue("$archived", archived ? 1 : 0);
+            insert.Parameters.AddWithValue("$model", (object?)model ?? DBNull.Value);
             await insert.ExecuteNonQueryAsync();
         }
     }

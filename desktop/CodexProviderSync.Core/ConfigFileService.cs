@@ -11,6 +11,9 @@ public sealed partial class ConfigFileService
     [GeneratedRegex("""^\[model_providers\.([A-Za-z0-9_.-]+)]\s*$""", RegexOptions.Multiline)]
     private static partial Regex ProviderRegex();
 
+    [GeneratedRegex("""^\s*model\s*=\s*"([^"]+)"\s*$""")]
+    private static partial Regex ModelAssignmentRegex();
+
     public Task<string> ReadConfigTextAsync(string configPath)
     {
         return File.ReadAllTextAsync(configPath);
@@ -66,6 +69,48 @@ public sealed partial class ConfigFileService
         return ListConfiguredProviderIds(configText).Contains(provider, StringComparer.Ordinal);
     }
 
+    public string? ReadRootModelFromConfigText(string configText)
+    {
+        if (string.IsNullOrEmpty(configText))
+        {
+            return null;
+        }
+
+        // The root-level `model` field lives in the preamble before any
+        // [table] header. We scan line-by-line, stop at the first [section],
+        // and return the value of `model = "..."` if present. This mirrors
+        // the JS side's `^\s*model\s*=\s*"([^"]+)"\s*$/m` walk, and is what
+        // Sync uses to mirror the active model into the per-thread SQLite
+        // `model` column. Commented-out lines (starting with `#`) and blank
+        // lines are skipped, matching the JS behavior.
+        foreach (string raw in SplitLines(configText))
+        {
+            string line = raw.Trim();
+            if (line.Length == 0)
+            {
+                continue;
+            }
+
+            if (line.StartsWith('#'))
+            {
+                continue;
+            }
+
+            if (line.StartsWith('['))
+            {
+                break;
+            }
+
+            Match match = ModelAssignmentRegex().Match(line);
+            if (match.Success)
+            {
+                return match.Groups[1].Value;
+            }
+        }
+
+        return null;
+    }
+
     public string SetRootProviderInConfigText(string configText, string provider)
     {
         string newline = DetectNewline(configText);
@@ -99,6 +144,88 @@ public sealed partial class ConfigFileService
         lines.Insert(insertIndex, $"model_provider = \"{EscapeTomlString(provider)}\"");
         string nextText = string.Join(newline, lines);
         return configText.EndsWith(newline, StringComparison.Ordinal) ? nextText + newline : nextText;
+    }
+
+    public string SetRootModelInConfigText(string configText, string model)
+    {
+        if (string.IsNullOrEmpty(model))
+        {
+            throw new ArgumentException("Model must be a non-empty string.", nameof(model));
+        }
+
+        string newline = DetectNewline(configText);
+        List<string> lines = SplitLines(configText).ToList();
+        int insertIndex = lines.Count;
+
+        for (int index = 0; index < lines.Count; index += 1)
+        {
+            string trimmed = lines[index].Trim();
+            if (string.IsNullOrWhiteSpace(trimmed) || trimmed.StartsWith('#'))
+            {
+                insertIndex = index + 1;
+                continue;
+            }
+
+            if (trimmed.StartsWith('['))
+            {
+                insertIndex = index;
+                break;
+            }
+
+            if (trimmed.StartsWith("model =", StringComparison.Ordinal))
+            {
+                lines[index] = $"model = \"{EscapeTomlString(model)}\"";
+                return string.Join(newline, lines) + (configText.EndsWith(newline, StringComparison.Ordinal) ? newline : string.Empty);
+            }
+
+            insertIndex = index + 1;
+        }
+
+        lines.Insert(insertIndex, $"model = \"{EscapeTomlString(model)}\"");
+        string nextText = string.Join(newline, lines);
+        return configText.EndsWith(newline, StringComparison.Ordinal) ? nextText + newline : nextText;
+    }
+
+    public string? ReadProviderModel(string configText, string provider)
+    {
+        if (string.Equals(provider, AppConstants.DefaultProvider, StringComparison.Ordinal))
+        {
+            // Built-in openai has no [model_providers.openai] section.
+            return null;
+        }
+
+        List<string> lines = SplitLines(configText).ToList();
+        string sectionHeader = $"[model_providers.{Regex.Escape(provider)}]";
+        int sectionStartIndex = -1;
+        for (int index = 0; index < lines.Count; index += 1)
+        {
+            if (lines[index].Trim().Equals(sectionHeader, StringComparison.Ordinal))
+            {
+                sectionStartIndex = index;
+                break;
+            }
+        }
+
+        if (sectionStartIndex < 0)
+        {
+            return null;
+        }
+
+        for (int index = sectionStartIndex + 1; index < lines.Count; index += 1)
+        {
+            string trimmed = lines[index].Trim();
+            if (trimmed.StartsWith('['))
+            {
+                break;
+            }
+            Match match = ModelAssignmentRegex().Match(lines[index]);
+            if (match.Success)
+            {
+                return match.Groups[1].Value;
+            }
+        }
+
+        return null;
     }
 
     private static IEnumerable<string> SplitLines(string text)
