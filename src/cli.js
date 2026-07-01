@@ -18,9 +18,15 @@ Usage:
   codex-provider status [--codex-home PATH]
   codex-provider sync [--provider ID] [--keep N] [--codex-home PATH]
   codex-provider switch <provider-id> [--keep N] [--codex-home PATH]
+  codex-provider watch [--codex-home PATH] [--debounce-ms N] [--once] [--no-state-db]
   codex-provider prune-backups [--keep N] [--codex-home PATH]
   codex-provider restore <backup-dir> [--no-config] [--no-db] [--no-sessions] [--codex-home PATH]
   codex-provider install-windows-launcher [--dir PATH] [--codex-home PATH]
+
+watch flags:
+  --debounce-ms N      wait N milliseconds after a change before running sync (default 750)
+  --once               exit after the first successful sync
+  --no-state-db        do not watch the SQLite state database; only config.toml
 `);
 }
 
@@ -212,6 +218,28 @@ async function main() {
       onProgress: createSyncProgressReporter()
     });
     console.log(summarizeSync(result, "Switched to"));
+    return;
+  }
+
+  if (command === "watch") {
+    const { runWatch } = await import("./watch.js");
+    const debounceMs = flags["debounce-ms"] !== undefined
+      ? parseKeepCount(flags["debounce-ms"], { allowZero: true })
+      : undefined;
+    const handle = await runWatch({
+      codexHome: flags["codex-home"],
+      debounceMs,
+      includeStateDb: !flags["no-state-db"],
+      once: Boolean(flags.once)
+    });
+    await new Promise((resolve) => {
+      const stop = async () => {
+        await handle.stop();
+        resolve();
+      };
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+    });
     return;
   }
 

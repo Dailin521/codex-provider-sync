@@ -264,6 +264,82 @@ function parseSessionMetaRecord(firstLine) {
   }
 }
 
+// Scan the start of a rollout file looking for the first `turn_context`
+// event and return its `payload.model` field. This is the field that the
+// Codex GUI bottom-right uses to label old conversations, so we have to
+// rewrite it (along with `payload.collaboration_mode.settings.model`) on
+// every sync in addition to the per-thread SQLite `model` column.
+//
+// We only need to peek at the first few KB of the file: the very first
+// `turn_context` event after the leading `session_meta` line is enough
+// to know what model the rest of the file uses. We deliberately stop as
+// soon as we find one, so the scan is O(1) for the common case and does
+// not load multi-MB rollouts into memory just to read a header.
+// We stream line-by-line because individual `turn_context` lines
+// can easily exceed 64 KB once Codex includes the
+// `developer_instructions` blob — the previous code that capped
+// the read at 64 KB silently missed those, which made the
+// rollout model rewrite a no-op for sessions whose first turn
+// was a long planning step. We deliberately extract `payload.model`
+// with a regex on the raw JSON text instead of `JSON.parse`-ing
+// the entire line: Codex writes opaque multi-KB strings
+// (`developer_instructions`, raw tool output, etc.) into the
+// payload, and round-tripping those through `JSON.parse` ->
+// `JSON.stringify` would silently mangle embedded escape
+// sequences. A regex anchored on `"type":"turn_context"` and
+// then the first `"model":"<value>"` that follows within the
+// same line is enough to pick up the model field of the first
+// `turn_context` event we see, because rollout lines are
+// single JSON objects.
+async function readFirstTurnContextModel(rolloutPath, { firstLineOffset, firstLineLength } = {}) {
+  let handle;
+  try {
+    handle = await fsp.open(rolloutPath, "r");
+    const headerSkip = (firstLineOffset ?? 0) + (firstLineLength ?? 0);
+    const stream = handle.createReadStream({ encoding: "utf8", start: headerSkip });
+    const reader = readline.createInterface({ input: stream, crlfDelay: Infinity });
+
+    const turnContextStart = /"type"\s*:\s*"turn_context"/;
+    const modelField = /"model"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/;
+
+    try {
+      for await (const line of reader) {
+        if (!turnContextStart.test(line)) {
+          continue;
+        }
+        const match = line.match(modelField);
+        if (match && match[1].length > 0) {
+          return match[1];
+        }
+      }
+      return null;
+    } finally {
+      reader.close();
+      stream.destroy();
+    }
+  } catch (error) {
+    throw wrapRolloutFileBusyError(error, rolloutPath, "read");
+  } finally {
+    await handle?.close();
+  }
+}
+
+// Replace `"model":"oldModel"` with `"model":"newModel"` in lines that
+// represent a `turn_context` event. We intentionally do a per-line
+// regex rewrite (rather than re-serializing the full JSON tree) because
+// rollout files can be tens of megabytes, and Codex writes a lot of
+// opaque payload (e.g. `developer_instructions`) that round-tripping
+// through `JSON.parse`+`JSON.stringify` would silently mangle.
+function rewriteTurnContextModelInLine(line, oldModel, newModel) {
+  if (!line || !line.includes('"turn_context"')) {
+    return line;
+  }
+  const escapedOld = oldModel.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
+  const escapedNew = newModel.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
+  const pattern = new RegExp(`"model"\\s*:\\s*"${escapedOld}"`, "g");
+  return line.replace(pattern, `"model":"${escapedNew}"`);
+}
+
 function isValidWindowsRewriteResult(result) {
   return result === "APPLIED" || result === "SKIP_BUSY" || result === "SKIP_CHANGED";
 }
@@ -580,6 +656,93 @@ async function tryRewriteCollectedFirstLine(change) {
   }
 }
 
+// Rewrite the per-turn `model` field in every `turn_context` event of
+// the rollout. This is what the Codex GUI bottom-right of an old
+// conversation reads, so we have to keep it in sync with the
+// root-level `model` from config.toml on every sync, not just the
+// per-thread SQLite `model` column. We do this as a separate
+// line-by-line pass (rather than re-serializing the whole JSON tree)
+// to avoid round-tripping the multi-MB `developer_instructions` blob
+// Codex writes into every `turn_context`, which can lose embedded
+// backslashes or escape sequences when run through `JSON.stringify`.
+async function rewriteRolloutModelField(change, targetModel) {
+  if (!change || typeof change.originalModel !== "string" || change.originalModel.length === 0) {
+    return false;
+  }
+  if (typeof targetModel !== "string" || targetModel.length === 0) {
+    return false;
+  }
+  if (change.originalModel === targetModel) {
+    return false;
+  }
+
+  const filePath = change.path;
+  // Snapshot the file as it stands after the first-line rewrite so
+  // we can detect concurrent appends by Codex while we read+rewrite.
+  // The original `change` snapshot no longer matches because the
+  // first-line rewrite already mutated size and mtime, so we
+  // intentionally don't compare to `change.originalSize` here.
+  const beforeStat = await fsp.stat(filePath);
+  const beforeSnapshot = {
+    size: beforeStat.size,
+    mtimeMs: beforeStat.mtimeMs
+  };
+
+  let handle;
+  try {
+    handle = await fsp.open(filePath, "r+");
+    const stream = handle.createReadStream({ encoding: "utf8" });
+    const reader = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    const tmpPath = `${filePath}.provider-sync-model.${process.pid}.${Date.now()}.tmp`;
+    const writer = fs.createWriteStream(tmpPath, { encoding: "utf8" });
+    let firstLine = true;
+    let replacements = 0;
+
+    await new Promise((resolve, reject) => {
+      reader.on("error", reject);
+      writer.on("error", reject);
+      reader.on("line", (line) => {
+        const next = firstLine
+          ? line
+          : rewriteTurnContextModelInLine(line, change.originalModel, targetModel);
+        if (next !== line) {
+          replacements += 1;
+        }
+        if (!firstLine) {
+          writer.write("\n");
+        }
+        firstLine = false;
+        writer.write(next);
+      });
+      reader.on("close", () => {
+        writer.end();
+      });
+      writer.on("finish", resolve);
+    });
+
+    if (replacements === 0) {
+      await fsp.rm(tmpPath, { force: true });
+      return false;
+    }
+
+    // Refuse to swap in the new file if Codex appended anything
+    // between our snapshot and the rename — otherwise we would
+    // silently drop those trailing events.
+    const afterStat = await fsp.stat(filePath);
+    if (afterStat.size !== beforeSnapshot.size || afterStat.mtimeMs !== beforeSnapshot.mtimeMs) {
+      await fsp.rm(tmpPath, { force: true });
+      return false;
+    }
+
+    await fsp.rename(tmpPath, filePath);
+    return true;
+  } catch (error) {
+    throw wrapRolloutFileBusyError(error, filePath, "rewrite model field");
+  } finally {
+    await handle?.close();
+  }
+}
+
 async function findLockedFilesOnWindows(filePaths) {
   if (!filePaths.length) {
     return [];
@@ -624,7 +787,16 @@ async function findLockedFilesOnWindows(filePaths) {
 
 export async function collectSessionChanges(codexHome, targetProvider, options = {}) {
   const {
-    skipLockedReads = false
+    skipLockedReads = false,
+    // Optional target model. When set, rollouts whose per-turn
+    // `turn_context.model` already matches this value are skipped
+    // entirely — no first-line rewrite, no model rewrite, no
+    // backup, no entry in `changed files`. Without this gate the
+    // sync would create meaningless backups and rewrite identical
+    // content for every old session whenever the user happened to
+    // leave the root-level `model` line unchanged across a
+    // `sync` (no switch).
+    targetModel = null
   } = options;
   const summaries = [];
   const lockedPaths = [];
@@ -682,9 +854,44 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
         throw error;
       }
 
-      if (targetProvider !== "__status_only__" && parsed.payload.model_provider !== targetProvider) {
+      if (targetProvider !== "__status_only__") {
+        const providerNeedsUpdate = parsed.payload.model_provider !== targetProvider;
+        // Peek at the first `turn_context` event to capture the
+        // per-turn model that the Codex GUI bottom-right reads. We
+        // keep this on the summary so the rewrite step knows what
+        // value to swap out, without making collectSessionChanges
+        // require a target model.
+        const originalModel = await readFirstTurnContextModel(rolloutPath, {
+          firstLineOffset: 0,
+          firstLineLength: record.offset
+        });
+        // The rollout file needs editing when either the provider
+        // drifted OR the per-turn model drifted. The model-only
+        // case happens after a `sync` (no switch) where the user
+        // has updated the root-level `model` in config.toml but
+        // their old rollouts still advertise the old name on
+        // every `turn_context` line.
+        //
+        // We compare `originalModel` against `targetModel` so
+        // that a plain `sync` whose root-level model already
+        // matches every rollout produces zero changes, no
+        // backups, and no entries in `changed files`. Without
+        // this gate, every sync would have rewritten every
+        // rollout file just to write the same content back.
+        const modelNeedsUpdate = typeof originalModel === "string"
+          && originalModel.length > 0
+          && typeof targetModel === "string"
+          && targetModel.length > 0
+          && originalModel !== targetModel;
+        if (!providerNeedsUpdate && !modelNeedsUpdate) {
+          continue;
+        }
         const snapshot = await getFileSnapshot(rolloutPath);
-        parsed.payload.model_provider = targetProvider;
+        let updatedFirstLine = null;
+        if (providerNeedsUpdate) {
+          parsed.payload.model_provider = targetProvider;
+          updatedFirstLine = JSON.stringify(parsed);
+        }
         summaries.push({
           path: rolloutPath,
           threadId: parsed.payload.id ?? null,
@@ -695,7 +902,9 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
           originalSize: snapshot.size,
           originalMtimeMs: snapshot.mtimeMs,
           originalProvider: currentProvider,
-          updatedFirstLine: JSON.stringify(parsed)
+          originalModel,
+          providerNeedsUpdate,
+          updatedFirstLine
         });
       }
     }
@@ -704,29 +913,53 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
   return { changes: summaries, lockedPaths, providerCounts, encryptedContentCounts, userEventThreadIds, threadCwdById };
 }
 
-export async function applySessionChanges(changes) {
+export async function applySessionChanges(changes, options = {}) {
   const normalizedChanges = changes ?? [];
+  const { targetModel = null } = options ?? {};
   const skippedPaths = [];
   const appliedPaths = [];
   let appliedChanges = 0;
 
   if (process.platform === "win32") {
-    const results = await invokeWindowsExclusiveRewriteBatch(normalizedChanges, { requireOriginalMatch: true });
-    for (let index = 0; index < normalizedChanges.length; index += 1) {
+    // Split the batch into provider-rewrite work (which the
+    // PowerShell script can do efficiently, including the
+    // exclusive lock dance) and model-only work (which we run
+    // in pure Node because the PowerShell batch does not know how
+    // to skip the first-line rewrite while still walking the
+    // body for `turn_context.model` updates).
+    const providerChanges = normalizedChanges.filter((change) => change.providerNeedsUpdate !== false);
+    const modelOnlyChanges = normalizedChanges.filter((change) => change.providerNeedsUpdate === false);
+    const results = await invokeWindowsExclusiveRewriteBatch(providerChanges, { requireOriginalMatch: true });
+    for (let index = 0; index < providerChanges.length; index += 1) {
+      const change = providerChanges[index];
       if (results[index] === "APPLIED") {
-        appliedChanges += 1;
-        appliedPaths.push(normalizedChanges[index].path);
-        await restoreOriginalMtime(normalizedChanges[index].path, normalizedChanges[index].originalMtimeMs);
-      } else {
-        skippedPaths.push(normalizedChanges[index].path);
-      }
-    }
-  } else {
-    for (const change of normalizedChanges) {
-      if (await tryRewriteCollectedFirstLine(change)) {
         appliedChanges += 1;
         appliedPaths.push(change.path);
         await restoreOriginalMtime(change.path, change.originalMtimeMs);
+        await rewriteRolloutModelField(change, targetModel);
+      } else {
+        skippedPaths.push(change.path);
+      }
+    }
+
+    for (const change of modelOnlyChanges) {
+      appliedChanges += 1;
+      appliedPaths.push(change.path);
+      await rewriteRolloutModelField(change, targetModel);
+    }
+  } else {
+    for (const change of normalizedChanges) {
+      let providerRewritten = true;
+      if (change.providerNeedsUpdate !== false) {
+        providerRewritten = await tryRewriteCollectedFirstLine(change);
+      }
+      if (providerRewritten) {
+        if (change.providerNeedsUpdate !== false) {
+          await restoreOriginalMtime(change.path, change.originalMtimeMs);
+        }
+        appliedChanges += 1;
+        appliedPaths.push(change.path);
+        await rewriteRolloutModelField(change, targetModel);
       } else {
         skippedPaths.push(change.path);
       }

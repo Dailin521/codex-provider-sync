@@ -7,3 +7,5 @@ desktop/**/obj/
 *.csproj.user
 test/*.exe
 WORKLOG*.md
+
+.vscode/

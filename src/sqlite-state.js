@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { existsSync } from "node:fs";
 import path from "node:path";
 
 import { DB_FILE_BASENAME, SQLITE_DIR_BASENAME } from "./constants.js";
@@ -222,9 +223,24 @@ export async function updateSqliteProvider(codexHome, targetProvider, afterUpdat
   const options = typeof afterUpdateOrOptions === "function"
     ? (maybeOptions ?? {})
     : (afterUpdateOrOptions ?? {});
+  // When provided, the per-thread `model` column is rewritten alongside
+  // `model_provider` so old sessions pick up the new active model in
+  // the Codex UI's bottom-right label. Pass null to leave the column
+  // untouched (legacy behaviour for callers that do not track model).
+  const targetModel = options.targetModel ?? null;
 
-  const dbPath = await existingStateDbPath(codexHome);
-  if (!dbPath) {
+  // Walk every candidate database, not just the first one. Codex
+  // stores its state database in two locations (`<home>/sqlite/
+  // state_5.sqlite` for newer installs and `<home>/state_5.sqlite`
+  // for older installs), and the Codex App GUI keeps the legacy
+  // root database alive as long as it is on disk — including for
+  // the older project sessions it created before the new location
+  // was introduced. If we only update the first hit, the GUI keeps
+  // reading stale `model_provider` / `model` values for those older
+  // sessions and either shows the old provider label or sends
+  // requests with the wrong model name.
+  const candidates = stateDbCandidates(codexHome).filter((c) => existsSync(c.path));
+  if (candidates.length === 0) {
     if (afterUpdate) {
       await afterUpdate({
         updatedRows: 0,
@@ -243,6 +259,51 @@ export async function updateSqliteProvider(codexHome, targetProvider, afterUpdat
     };
   }
 
+  let totalUpdatedRows = 0;
+  let totalProviderRowsUpdated = 0;
+  let totalUserEventRowsUpdated = 0;
+  let totalCwdRowsUpdated = 0;
+  let totalDatabasePresent = false;
+
+  for (const candidate of candidates) {
+    const result = await updateSingleSqliteDatabase(
+      candidate.path,
+      targetProvider,
+      targetModel,
+      options);
+    totalUpdatedRows += result.updatedRows;
+    totalProviderRowsUpdated += result.providerRowsUpdated;
+    totalUserEventRowsUpdated += result.userEventRowsUpdated;
+    totalCwdRowsUpdated += result.cwdRowsUpdated;
+    totalDatabasePresent = totalDatabasePresent || result.databasePresent;
+  }
+
+  if (afterUpdate) {
+    // Run the rollout rewrite once, after both candidate databases
+    // have been updated. The rewrite is keyed off the session
+    // change collection, not the SQLite state, so it does not
+    // matter whether the data lives in the new or the legacy
+    // database — we only want to do it once, after the SQLite
+    // phase is fully done.
+    await afterUpdate({
+      updatedRows: totalUpdatedRows,
+      providerRowsUpdated: totalProviderRowsUpdated,
+      userEventRowsUpdated: totalUserEventRowsUpdated,
+      cwdRowsUpdated: totalCwdRowsUpdated,
+      databasePresent: totalDatabasePresent
+    });
+  }
+
+  return {
+    updatedRows: totalUpdatedRows,
+    providerRowsUpdated: totalProviderRowsUpdated,
+    userEventRowsUpdated: totalUserEventRowsUpdated,
+    cwdRowsUpdated: totalCwdRowsUpdated,
+    databasePresent: totalDatabasePresent
+  };
+}
+
+async function updateSingleSqliteDatabase(dbPath, targetProvider, targetModel, options) {
   let db;
   let transactionOpen = false;
   try {
@@ -250,12 +311,25 @@ export async function updateSqliteProvider(codexHome, targetProvider, afterUpdat
     setBusyTimeout(db, options.busyTimeoutMs);
     db.exec("BEGIN IMMEDIATE");
     transactionOpen = true;
-    const stmt = db.prepare(`
-      UPDATE threads
-      SET model_provider = ?
-      WHERE COALESCE(model_provider, '') <> ?
-    `);
-    const result = stmt.run(targetProvider, targetProvider);
+    // When a target model is provided, align every thread's `model` column
+    // with it alongside `model_provider`. This is what makes the bottom-right
+    // of the Codex UI show the active model for old sessions, instead of the
+    // name that was in effect when each thread was originally created.
+    // The `model` column is only present in newer Codex schemas, so guard
+    // with tableHasColumn to keep legacy layouts working.
+    const wantsModel = targetModel != null && targetModel.length > 0
+      && tableHasColumn(db, "threads", "model");
+    const stmt = db.prepare(wantsModel
+      ? `UPDATE threads
+         SET model_provider = ?, model = ?
+         WHERE COALESCE(model_provider, '') <> ? OR COALESCE(model, '') <> ?`
+      : `UPDATE threads
+         SET model_provider = ?
+         WHERE COALESCE(model_provider, '') <> ?`);
+    const result = wantsModel
+      ? stmt.run(targetProvider, targetModel, targetProvider, targetModel)
+      : stmt.run(targetProvider, targetProvider);
+    const providerRowsUpdated = result.changes ?? 0;
     let userEventUpdatedRows = 0;
     if (tableHasColumn(db, "threads", "has_user_event") && options.userEventThreadIds?.size) {
       const userEventStmt = db.prepare(`
@@ -281,21 +355,12 @@ export async function updateSqliteProvider(codexHome, targetProvider, afterUpdat
         cwdUpdatedRows += cwdStmt.run(cwd, threadId, cwd).changes ?? 0;
       }
     }
-    const updatedRows = (result.changes ?? 0) + userEventUpdatedRows + cwdUpdatedRows;
-    if (afterUpdate) {
-      await afterUpdate({
-        updatedRows,
-        providerRowsUpdated: result.changes ?? 0,
-        userEventRowsUpdated: userEventUpdatedRows,
-        cwdRowsUpdated: cwdUpdatedRows,
-        databasePresent: true
-      });
-    }
+    const updatedRows = providerRowsUpdated + userEventUpdatedRows + cwdUpdatedRows;
     db.exec("COMMIT");
     transactionOpen = false;
-    return {
+return {
       updatedRows,
-      providerRowsUpdated: result.changes ?? 0,
+      providerRowsUpdated,
       userEventRowsUpdated: userEventUpdatedRows,
       cwdRowsUpdated: cwdUpdatedRows,
       databasePresent: true
