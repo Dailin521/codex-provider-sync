@@ -102,8 +102,7 @@ function legacyStateDbPath(codexHome) {
   return path.join(codexHome, DB_FILE_BASENAME);
 }
 
-async function writeStateDb(codexHome, rows) {
-  const dbPath = stateDbPath(codexHome);
+async function writeStateDbAt(dbPath, rows) {
   await fs.mkdir(path.dirname(dbPath), { recursive: true });
   const db = await openDatabase(dbPath);
   try {
@@ -123,6 +122,14 @@ async function writeStateDb(codexHome, rows) {
   } finally {
     db.close();
   }
+}
+
+async function writeStateDb(codexHome, rows) {
+  await writeStateDbAt(stateDbPath(codexHome), rows);
+}
+
+async function writeLegacyStateDb(codexHome, rows) {
+  await writeStateDbAt(legacyStateDbPath(codexHome), rows);
 }
 
 async function writeStateDbWithUserEventColumn(codexHome, rows) {
@@ -583,6 +590,42 @@ test("status falls back to legacy root sqlite database", async () => {
   assert.equal(status.stateDbLocation.source, "legacy-root");
   assert.equal(status.stateDbLocation.path, legacyStateDbPath(codexHome));
   assert.deepEqual(status.sqliteCounts.sessions, { openai: 1 });
+  assert.match(renderStatus(status), /legacy root/);
+});
+
+test("status chooses legacy root sqlite database when sqlite-dir state is stale", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome);
+  await writeRollout(
+    path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl"),
+    "thread-a",
+    "openai"
+  );
+  await writeRollout(
+    path.join(codexHome, "sessions", "2026", "03", "19", "rollout-b.jsonl"),
+    "thread-b",
+    "openai"
+  );
+  await writeRollout(
+    path.join(codexHome, "archived_sessions", "2026", "03", "18", "rollout-c.jsonl"),
+    "thread-c",
+    "openai"
+  );
+  await writeStateDb(codexHome, [
+    { id: "thread-a", model_provider: "custom", archived: false }
+  ]);
+  await writeLegacyStateDb(codexHome, [
+    { id: "thread-a", model_provider: "openai", archived: false },
+    { id: "thread-b", model_provider: "openai", archived: false },
+    { id: "thread-c", model_provider: "openai", archived: true }
+  ]);
+
+  const status = await getStatus({ codexHome });
+
+  assert.equal(status.stateDbLocation.source, "legacy-root");
+  assert.equal(status.stateDbLocation.path, legacyStateDbPath(codexHome));
+  assert.deepEqual(status.sqliteCounts.sessions, { openai: 2 });
+  assert.deepEqual(status.sqliteCounts.archived_sessions, { openai: 1 });
   assert.match(renderStatus(status), /legacy root/);
 });
 
