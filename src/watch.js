@@ -216,36 +216,23 @@ export async function runWatch({
       // the watcher: the watcher only needs to notice when the DB
       // currently in use goes "I just got updated".
       const stateDir = path.dirname(stateDbInfo.path);
-      const stateBase = path.basename(stateDbInfo.path);
       const dirExists = await pathExists(stateDir);
       if (!dirExists) {
         log(`[${new Date().toISOString()}] State directory ${stateDir} does not exist yet; skipping watcher`);
       } else {
-        // Accept the SQLite file plus its WAL/SHM siblings so we
-        // react to writes that only land in the journal before the
-        // main file is touched.
-        const allowed = new Set([
-          stateBase,
-          `${stateBase}-wal`,
-          `${stateBase}-shm`,
-          `${stateBase}-journal`
-        ]);
-        const stateWatcher = fs.watch(stateDir, { persistent: true }, (eventType, filename) => {
-          if (stopped) {
-            return;
-          }
-          // fs.watch on Windows frequently reports filename === null.
-          // Treat null as "something in the dir changed" and fall back to
-          // comparing against the full path; the event is harmless to
-          // trigger a sync even if it was a neighbouring file.
-          const eventFile = filename ?? stateBase;
-          if (!allowed.has(eventFile)) {
-            return;
-          }
-          log(`[${new Date().toISOString()}] state_db ${describeEvent(eventType, filename ?? stateBase)}`);
-          debouncedSync("state_db");
-        });
-        watchers.push(stateWatcher);
+        // Watch the SQLite file directly instead of its parent
+        // directory. Watching a directory on Windows enters a
+        // libuv path that asserts in src/win/fs-event.c around
+        // line 72 when any sibling under the directory is renamed
+        // during startup (a race condition Node 22 and 24 started
+        // hitting reliably on Windows runners). Watching a single
+        // file bypasses that path entirely. The downside is that
+        // SQLite's atomic-rename of the database (or its WAL)
+        // can leave us listening on a stale handle; we re-attach
+        // the watcher on any `rename` event so the next write
+        // burst still reaches us.
+        const stateDbFile = stateDbInfo.path;
+        attachStateWatcher(stateDbFile);
       }
     } else {
       log(`[${new Date().toISOString()}] No state database found in ${codexHome}; skipping watcher`);
@@ -300,6 +287,62 @@ export async function runWatch({
       };
       signal.addEventListener("abort", abortHandler, { once: true });
     }
+  }
+
+  function attachStateWatcher(stateDbFile) {
+    // Attach (or re-attach after a rename) a single-file fs.watch
+    // for the active SQLite database. Returns when the watcher is
+    // attached so we can drive startup synchronously.
+    let current = null;
+    const tryAttach = () => {
+      if (stopped || current !== null) {
+        return;
+      }
+      let watcher;
+      try {
+        watcher = fs.watch(stateDbFile, { persistent: true }, (eventType, filename) => {
+          if (stopped) {
+            return;
+          }
+          if (eventType === "rename") {
+            // SQLite may have rotated the file (atomic-rename)
+            // or deleted it. Drop the stale handle and re-attach
+            // once the file is back so the next write fires again.
+            try {
+              watcher.close();
+            } catch {
+              // best-effort
+            }
+            current = null;
+            const idx = watchers.indexOf(watcher);
+            if (idx !== -1) {
+              watchers.splice(idx, 1);
+            }
+            setTimeout(tryAttach, 50);
+            return;
+          }
+          // Either "change" or null eventType is enough to fire
+          // a sync. We deliberately do NOT filter on filename: when
+          // watching a single file the only events we get are
+          // about that file, and Node sometimes reports null on
+          // Windows whenever the underlying FILE_OBJECT is
+          // re-opened. Either way a sync should run.
+          void filename;
+          log(`[${new Date().toISOString()}] state_db change${filename ? `:${filename}` : ""}`);
+          debouncedSync("state_db");
+        });
+      } catch (error) {
+        // Path may have gone away. Wait a moment and try again;
+        // the next config.toml change restarts the whole watcher
+        // so this is the only fallback we need.
+        log(`[${new Date().toISOString()}] Could not watch ${stateDbFile}: ${error instanceof Error ? error.message : String(error)}; will retry`);
+        setTimeout(tryAttach, 250);
+        return;
+      }
+      watchers.push(watcher);
+      current = watcher;
+    };
+    tryAttach();
   }
 
   return {
