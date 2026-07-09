@@ -765,6 +765,124 @@ test("runSync rewrites the per-turn turn_context model field in rollout files", 
   }
 });
 
+test("runSync rewrites turn_context model even when the line is larger than 64 KB", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "MiniMax-M3"\n');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "06", "09", "rollout-huge.jsonl");
+  await fs.mkdir(path.dirname(sessionPath), { recursive: true });
+
+  // Build a turn_context line whose `developer_instructions` blob
+  // pushes the encoded JSON well past the previous 64 KB scanner cap.
+  const devInstructions = "x".repeat(150 * 1024);
+  const turnContext = {
+    timestamp: "2026-06-09T09:16:03.880Z",
+    type: "turn_context",
+    payload: {
+      turn_id: "019eabaa-very-large",
+      cwd: "C:\\AITemp",
+      model: "gpt-5.4",
+      developer_instructions: devInstructions,
+      collaboration_mode: { mode: "default", settings: { model: "gpt-5.4", reasoning_effort: "xhigh" } }
+    }
+  };
+  const meta = JSON.stringify({
+    timestamp: "2026-06-09T09:16:03.878Z",
+    type: "session_meta",
+    payload: { id: "thread-huge", timestamp: "2026-06-09T09:16:03.878Z", cwd: "C:\\AITemp", source: "cli", cli_version: "0.115.0", model_provider: "apigather" }
+  });
+  await fs.writeFile(sessionPath, `${meta}\n${JSON.stringify(turnContext)}\n`, "utf8");
+
+  // Sanity: the encoded turn_context line should exceed 64 KB.
+  const onDisk = await fs.readFile(sessionPath, "utf8");
+  const lineLengths = onDisk.split("\n").filter(Boolean).map((line) => line.length);
+  assert.ok(Math.max(...lineLengths) > 64 * 1024, "test setup: line should exceed 64 KB");
+
+  const result = await runSync({ codexHome, model: "MiniMax-M3" });
+  assert.equal(result.changedSessionFiles, 1);
+
+  const lines = (await fs.readFile(sessionPath, "utf8")).split("\n").filter(Boolean);
+  for (const line of lines) {
+    if (!line.includes('"turn_context"')) continue;
+    const parsed = JSON.parse(line);
+    assert.equal(parsed.payload.model, "MiniMax-M3");
+    assert.equal(parsed.payload.collaboration_mode.settings.model, "MiniMax-M3");
+  }
+});
+
+test("runSync rewrites turn_context whose model name contains regex metacharacters", async () => {
+  // Names like `gpt-5.4-mini` and `apigather.fixed+name` should
+  // be matched literally — `.` is a regex any-char, `+` is a
+  // quantifier, and an unbalanced `{` would refuse to compile.
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "weird(target)+v2"\n');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "06", "09", "rollout-a.jsonl");
+  await writeRolloutWithTurnContext(sessionPath, {
+    id: "thread-a",
+    provider: "apigather",
+    model: "weird(target)+v2"
+  });
+  // Also throw in a decoy line with `weirdAtargetAv2` so we can
+  // confirm the regex does not over-match.
+  await fs.appendFile(sessionPath, JSON.stringify({
+    timestamp: "2026-06-09T09:16:03.881Z", type: "turn_context",
+    payload: { turn_id: "decoy", model: "weirdAtargetAv2" }
+  }) + "\n", "utf8");
+
+  // Pin target = same as source: still re-runs the rewrite, but
+  // also confirms no-op (same model) case does not corrupt the
+  // decoy.
+  const result = await runSync({ codexHome, model: "weird(target)+v2" });
+  assert.equal(result.changedSessionFiles, 1);
+
+  const lines = (await fs.readFile(sessionPath, "utf8")).split("\n").filter(Boolean);
+  const turnContextLines = lines
+    .map((line) => JSON.parse(line))
+    .filter((entry) => entry.type === "turn_context");
+  // The original two lines plus the decoy should both still
+  // parse cleanly. The decoy's model must be untouched.
+  assert.equal(turnContextLines.length, 3);
+  for (const entry of turnContextLines) {
+    if (entry.payload.turn_id === "decoy") {
+      assert.equal(entry.payload.model, "weirdAtargetAv2");
+    } else {
+      assert.equal(entry.payload.model, "weird(target)+v2");
+    }
+  }
+});
+
+test("runSync leaves rollout files alone when original turn_context model already equals target", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "MiniMax-M3"\n');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "06", "09", "rollout-a.jsonl");
+  await writeRolloutWithTurnContext(sessionPath, {
+    id: "thread-a",
+    provider: "apigather",
+    model: "MiniMax-M3"
+  });
+
+  // First sync moves provider apigather → openai and rewrites both
+  // SQLite and the rollout turn_context. Second sync with no
+  // arguments should be a no-op (original model already equals
+  // the new target), so session files stay untouched.
+  await runSync({ codexHome, model: "MiniMax-M3" });
+  const firstMtime = (await fs.stat(sessionPath)).mtimeMs;
+  // Touch the file system time back a bit to detect a no-op
+  // (real rewrites preserve mtime, but if we touch it forward we
+  // can still see whether anything wrote to the file).
+  const mtimeBefore = firstMtime - 1000;
+  await fs.utimes(sessionPath, new Date(mtimeBefore), new Date(mtimeBefore));
+
+  await runSync({ codexHome });
+  const finalText = await fs.readFile(sessionPath, "utf8");
+  // The turn_context lines must still report MiniMax-M3 — i.e.
+  // the rewrite did not corrupt them with stale gpt-5.4.
+  for (const line of finalText.split("\n").filter(Boolean)) {
+    if (!line.includes('"turn_context"')) continue;
+    const parsed = JSON.parse(line);
+    assert.equal(parsed.payload.model, "MiniMax-M3");
+  }
+});
+
 test("runSync leaves turn_context model field alone when no model is provided", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"\n');

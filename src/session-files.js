@@ -270,42 +270,54 @@ function parseSessionMetaRecord(firstLine) {
 // rewrite it (along with `payload.collaboration_mode.settings.model`) on
 // every sync in addition to the per-thread SQLite `model` column.
 //
-// We only need to peek at the first few KB of the file: the very first
-// `turn_context` event after the leading `session_meta` line is enough
-// to know what model the rest of the file uses. We deliberately stop as
-// soon as we find one, so the scan is O(1) for the common case and does
-// not load multi-MB rollouts into memory just to read a header.
-async function readFirstTurnContextModel(rolloutPath, { firstLineOffset, firstLineLength } = {}) {
-  let handle;
-  try {
-    handle = await fsp.open(rolloutPath, "r");
-    const headerSkip = firstLineOffset ?? 0;
-    const headerLength = firstLineLength ?? 0;
-    const scanLimit = 64 * 1024; // first 64 KB is plenty for one turn_context
-    const chunk = Buffer.alloc(scanLimit);
-    const start = headerSkip + headerLength;
-    const { bytesRead } = await handle.read(chunk, 0, chunk.length, start);
-    if (bytesRead === 0) {
-      return null;
-    }
+// We stream line-by-line because individual `turn_context` lines can
+// easily exceed 64 KB once Codex includes the `developer_instructions`
+// blob — the previous code that capped the read at 64 KB silently
+// missed those, which made the rollout model rewrite a no-op for
+// sessions whose first turn was a long planning step. We stop as
+// soon as we find a `turn_context` line, so the scan is O(1) for the
+// common case and we never load multi-MB rollouts into memory just
+// to read a header.
+//
+// For each line we find, we do a regex on the raw text instead of
+// `JSON.parse`-ing the entire payload: Codex writes opaque multi-KB
+// strings (`developer_instructions`, raw tool output, …) into the
+// payload, and round-tripping those through `JSON.parse` -> `JSON.stringify`
+// would silently mangle embedded escape sequences. Anchoring on
+// `"type":"turn_context"` and grabbing the first `"model":"<value>"`
+// that follows is enough for the first `turn_context` of the file,
+// because rollout lines are single JSON objects.
+const ROLLOUT_TURNCONTEXT_MODEL_RE = /"type"\s*:\s*"turn_context"[\s\S]*?"model"\s*:\s*"((?:[^"\\]|\\.)*)"/;
 
-    const text = chunk.subarray(0, bytesRead).toString("utf8");
-    // Each line in a rollout is a single JSON object. We split on
-    // newlines and look for the first line whose top-level `type`
-    // is `turn_context`, then parse it. A regex that tries to
-    // match the surrounding `{}` of a deeply nested payload will
-    // stop at the first inner `}` and miss the real outer one, so
-    // per-line scanning is much more robust here.
-    for (const line of text.split(/\r?\n/)) {
+async function readFirstTurnContextModel(rolloutPath, { firstLineOffset, firstLineLength } = {}) {
+  const headerSkip = Math.max(0, firstLineOffset ?? 0);
+  const headerLength = Math.max(0, firstLineLength ?? 0);
+
+  const stream = fs.createReadStream(rolloutPath, {
+    encoding: "utf8",
+    start: headerSkip + headerLength,
+    highWaterMark: ROLLOUT_SCAN_CHUNK_BYTES
+  });
+  const lines = readline.createInterface({
+    input: stream,
+    crlfDelay: Infinity
+  });
+
+  try {
+    for await (const line of lines) {
       if (!line.includes('"turn_context"')) {
         continue;
       }
+      const match = line.match(ROLLOUT_TURNCONTEXT_MODEL_RE);
+      if (!match) {
+        continue;
+      }
       try {
-        const parsed = JSON.parse(line);
-        if (parsed?.type === "turn_context"
-            && typeof parsed?.payload?.model === "string"
-            && parsed.payload.model.length > 0) {
-          return parsed.payload.model;
+        // The captured value is JSON-escaped (e.g. `\\`, `\"`). Decode
+        // it the same way `JSON.parse` would for a string literal.
+        const value = JSON.parse(`"${match[1]}"`);
+        if (typeof value === "string" && value.length > 0) {
+          return value;
         }
       } catch {
         // Skip lines that look like turn_context but fail to parse.
@@ -315,7 +327,8 @@ async function readFirstTurnContextModel(rolloutPath, { firstLineOffset, firstLi
   } catch (error) {
     throw wrapRolloutFileBusyError(error, rolloutPath, "read");
   } finally {
-    await handle?.close();
+    lines.close();
+    stream.destroy();
   }
 }
 
@@ -325,14 +338,30 @@ async function readFirstTurnContextModel(rolloutPath, { firstLineOffset, firstLi
 // rollout files can be tens of megabytes, and Codex writes a lot of
 // opaque payload (e.g. `developer_instructions`) that round-tripping
 // through `JSON.parse`+`JSON.stringify` would silently mangle.
+function jsonEscape(value) {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
+}
+
+function regexEscape(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function rewriteTurnContextModelInLine(line, oldModel, newModel) {
   if (!line || !line.includes('"turn_context"')) {
     return line;
   }
-  const escapedOld = oldModel.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
-  const escapedNew = newModel.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
-  const pattern = new RegExp(`"model"\\s*:\\s*"${escapedOld}"`, "g");
-  return line.replace(pattern, `"model":"${escapedNew}"`);
+  // The old model is embedded in two layers: regex syntax for the
+  // pattern, then JSON string syntax for the payload. We
+  // JSON-escape first (so a literal `\` in the model becomes `\\`
+  // and a `"` becomes `\"`), then regex-escape the resulting string
+  // so those new backslashes — and any other regex metacharacters
+  // in the original model name, like `.`, `+`, `*`, `?` — match
+  // literally instead of being treated as regex specials. Reversing
+  // the order would either fail to compile (an unescaped `{` in the
+  // original) or double-escape the regex metacharacters (the regex
+  // escape of a backslash we just inserted).
+  const pattern = new RegExp(`"model"\\s*:\\s*"${regexEscape(jsonEscape(oldModel))}"`, "g");
+  return line.replace(pattern, `"model":"${jsonEscape(newModel)}"`);
 }
 
 function isValidWindowsRewriteResult(result) {
