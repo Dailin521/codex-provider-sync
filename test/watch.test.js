@@ -142,3 +142,146 @@ test("runWatch swallows 'sqlite in use' errors and keeps watching", async () => 
   await handle.stop();
   await fs.rm(codexHome, { recursive: true, force: true });
 });
+
+test("runWatch stops itself after consecutive non-busy sync failures", async () => {
+  // Regression guard for B11: when the sync handler keeps
+  // throwing something other than `state_5.sqlite is currently
+  // in use` (e.g. config corruption, codex home moved,
+  // permission denied, ...), the watcher must not loop forever
+  // spamming logs. It should give up after a small threshold of
+  // consecutive failures so the user notices via the
+  // `codex-provider watch` exit instead.
+  const { codexHome } = await makeTempCodexHome();
+  const configPath = path.join(codexHome, "config.toml");
+  const shutdownReason = deferred();
+
+  const handle = await runWatch({
+    codexHome,
+    debounceMs: 30,
+    includeStateDb: false,
+    onSync: async () => {
+      // Throw something that is NOT a "busy" error so the watcher
+      // counts it toward the failure threshold.
+      throw new Error("config.toml is malformed (test fixture)");
+    },
+    onShutdown: async (reason) => {
+      shutdownReason.resolve(reason);
+    }
+  });
+
+  // Drive enough change events to exceed the threshold. The
+  // watcher should auto-shutdown after 5 consecutive failures.
+  for (let i = 0; i < 6; i += 1) {
+    await fs.writeFile(configPath, `model_provider = "apigather-${i}"\n`, "utf8");
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  }
+
+  const reason = await Promise.race([
+    shutdownReason.promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("watcher did not auto-shutdown within 3 seconds")), 3000))
+  ]);
+  assert.equal(reason, "consecutive-failures", "watcher must auto-shutdown with reason 'consecutive-failures'");
+
+  await handle.stop();
+  await fs.rm(codexHome, { recursive: true, force: true });
+});
+
+test("runWatch observes the active state database chosen by detectStateDb", async () => {
+  // Regression guard: the watcher must register exactly one
+  // filesystem watcher for the SQLite state database — the one
+  // `detectStateDb` identified as the live Codex layout. Walking
+  // every candidate and emitting a sync for any of them is the
+  // responsibility of the sync path (and is a single-active-DB
+  // semantic there now), not the watcher.
+  const { codexHome } = await makeTempCodexHome();
+  // Both layouts are present here so we exercise the
+  // "live in sqlite-dir" choice that detectStateDb makes.
+  const legacyDbPath = path.join(codexHome, "state_5.sqlite");
+  await fs.writeFile(legacyDbPath, "", "utf8");
+
+  const syncCalls = [];
+  const handle = await runWatch({
+    codexHome,
+    debounceMs: 30,
+    includeStateDb: true,
+    onSync: async () => {
+      syncCalls.push(Date.now());
+      return { targetProvider: "openai", changedSessionFiles: 0, sqliteRowsUpdated: 0 };
+    }
+  });
+
+  // Verify the watcher advertised only the new sqlite/state_5.sqlite
+  // path. The legacy root DB exists on disk but must not be
+  // reported as the watched file.
+  const newDbPath = path.join(codexHome, "sqlite", "state_5.sqlite");
+  assert.equal(
+    handle.watchedStateDbPath,
+    newDbPath,
+    "watcher must report the active DB path, not the legacy fallback"
+  );
+
+  // Touching the active DB triggers a sync; touching the legacy
+  // root DB does not (the watcher is not observing it).
+  const activeBefore = syncCalls.length;
+  await fs.writeFile(newDbPath, "x", "utf8");
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.ok(
+    syncCalls.length > activeBefore,
+    "watcher must react to writes in the active sqlite-dir state DB"
+  );
+
+  const legacyBefore = syncCalls.length;
+  await fs.writeFile(legacyDbPath, "y", "utf8");
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(
+    syncCalls.length,
+    legacyBefore,
+    "watcher must NOT react to writes in the legacy root DB anymore"
+  );
+
+  await handle.stop();
+  await fs.rm(codexHome, { recursive: true, force: true });
+});
+
+test("runWatch stops itself after consecutive non-busy sync failures", async () => {
+  // Regression guard for B11: when the sync handler keeps
+  // throwing something other than `state_5.sqlite is currently
+  // in use` (e.g. config corruption, codex home moved,
+  // permission denied, ...), the watcher must not loop forever
+  // spamming logs. It should give up after a small threshold of
+  // consecutive failures so the user notices via the
+  // `codex-provider watch` exit instead.
+  const { codexHome } = await makeTempCodexHome();
+  const configPath = path.join(codexHome, "config.toml");
+  const shutdownReason = deferred();
+
+  const handle = await runWatch({
+    codexHome,
+    debounceMs: 30,
+    includeStateDb: false,
+    onSync: async () => {
+      // Throw something that is NOT a "busy" error so the watcher
+      // counts it toward the failure threshold.
+      throw new Error("config.toml is malformed (test fixture)");
+    },
+    onShutdown: async (reason) => {
+      shutdownReason.resolve(reason);
+    }
+  });
+
+  // Drive enough change events to exceed the threshold. The
+  // watcher should auto-shutdown after 5 consecutive failures.
+  for (let i = 0; i < 6; i += 1) {
+    await fs.writeFile(configPath, `model_provider = "apigather-${i}"\n`, "utf8");
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  }
+
+  const reason = await Promise.race([
+    shutdownReason.promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("watcher did not auto-shutdown within 3 seconds")), 3000))
+  ]);
+  assert.equal(reason, "consecutive-failures", "watcher must auto-shutdown with reason 'consecutive-failures'");
+
+  await handle.stop();
+  await fs.rm(codexHome, { recursive: true, force: true });
+});

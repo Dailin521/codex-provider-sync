@@ -15,6 +15,7 @@ import path from "node:path";
 
 import { defaultCodexHome } from "./constants.js";
 import { detectStateDb } from "./sqlite-state.js";
+import { readConfigText, readRootModelFromConfigText } from "./config-file.js";
 
 function normalizeCodexHome(explicitCodexHome) {
   return path.resolve(explicitCodexHome ?? process.env.CODEX_HOME ?? defaultCodexHome());
@@ -170,45 +171,52 @@ export async function runWatch({
   });
   watchers.push(configWatcher);
 
-    if (includeStateDb) {
-      try {
-        stateDbInfo = await detectStateDb(codexHome);
-      } catch (error) {
-        log(`[${new Date().toISOString()}] Could not locate state database: ${error.message}`);
+  if (includeStateDb) {
+    try {
+      stateDbInfo = await detectStateDb(codexHome);
+    } catch (error) {
+      log(`[${new Date().toISOString()}] Could not locate state database: ${error.message}`);
+    }
+    if (stateDbInfo?.path) {
+      // Watch exactly one database — the one `detectStateDb` chose
+      // as active. Walking every candidate location and trying to
+      // keep them in lockstep is the sync-path responsibility, not
+      // the watcher: the watcher only needs to notice when the DB
+      // currently in use goes "I just got updated".
+      const stateDir = path.dirname(stateDbInfo.path);
+      const stateBase = path.basename(stateDbInfo.path);
+      const dirExists = await pathExists(stateDir);
+      if (!dirExists) {
+        log(`[${new Date().toISOString()}] State directory ${stateDir} does not exist yet; skipping watcher`);
+      } else {
+        // Accept the SQLite file plus its WAL/SHM siblings so we
+        // react to writes that only land in the journal before the
+        // main file is touched.
+        const allowed = new Set([
+          stateBase,
+          `${stateBase}-wal`,
+          `${stateBase}-shm`,
+          `${stateBase}-journal`
+        ]);
+        const stateWatcher = fs.watch(stateDir, { persistent: true }, (eventType, filename) => {
+          if (stopped) {
+            return;
+          }
+          // fs.watch on Windows frequently reports filename === null.
+          // Treat null as "something in the dir changed" and fall back to
+          // comparing against the full path; the event is harmless to
+          // trigger a sync even if it was a neighbouring file.
+          const eventFile = filename ?? stateBase;
+          if (!allowed.has(eventFile)) {
+            return;
+          }
+          log(`[${new Date().toISOString()}] state_db ${describeEvent(eventType, filename ?? stateBase)}`);
+          debouncedSync("state_db");
+        });
+        watchers.push(stateWatcher);
       }
-      if (stateDbInfo?.path) {
-        const stateDir = path.dirname(stateDbInfo.path);
-        const exists = await pathExists(stateDir);
-        if (exists) {
-          // Accept the SQLite file plus its WAL/SHM siblings. The basename
-          // is taken from the actual state db path so we never match
-          // unrelated "state*.sqlite" files that happen to share the dir.
-          const stateBase = path.basename(stateDbInfo.path);
-          const allowed = new Set([
-            stateBase,
-            `${stateBase}-wal`,
-            `${stateBase}-shm`,
-            `${stateBase}-journal`
-          ]);
-          const stateWatcher = fs.watch(stateDir, { persistent: true }, (eventType, filename) => {
-            if (stopped) {
-              return;
-            }
-            // fs.watch on Windows frequently reports filename === null.
-            // Treat null as "something in the dir changed" and fall back to
-            // comparing against the full path; the event is harmless to
-            // trigger a sync even if it was a neighbouring file.
-            const eventFile = filename ?? stateBase;
-            if (!allowed.has(eventFile)) {
-              return;
-            }
-            log(`[${new Date().toISOString()}] state_db ${describeEvent(eventType, filename ?? stateBase)}`);
-            debouncedSync("state_db");
-          });
-          watchers.push(stateWatcher);
-        } else {
-        log(`[${new Date().toISOString()}] State directory ${stateDir} not found yet; watching only config.toml`);
-      }
+    } else {
+      log(`[${new Date().toISOString()}] No state database found in ${codexHome}; skipping watcher`);
     }
   }
 
