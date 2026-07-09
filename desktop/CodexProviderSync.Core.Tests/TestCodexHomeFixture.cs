@@ -96,6 +96,16 @@ internal sealed class TestCodexHomeFixture
 
     public async Task WriteRolloutWithTurnContextAsync(string filePath, string id, string provider, string model)
     {
+        await WriteRolloutWithTurnContextPayloadAsync(filePath, id, provider, model, extraFields: null);
+    }
+
+    public async Task WriteRolloutWithTurnContextPayloadAsync(
+        string filePath,
+        string id,
+        string provider,
+        string model,
+        Dictionary<string, object>? extraFields)
+    {
         Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
         object payload = new
         {
@@ -112,26 +122,34 @@ internal sealed class TestCodexHomeFixture
             type = "session_meta",
             payload
         });
+        Dictionary<string, object> turnPayload = new()
+        {
+            ["turn_id"] = "019eabaa-e391-7e21-89cd-e761b5dee114",
+            ["cwd"] = "C:\\AITemp",
+            ["current_date"] = "2026-06-09",
+            ["model"] = model,
+            ["collaboration_mode"] = new
+            {
+                mode = "default",
+                settings = new
+                {
+                    model,
+                    reasoning_effort = "xhigh"
+                }
+            }
+        };
+        if (extraFields is not null)
+        {
+            foreach ((string key, object value) in extraFields)
+            {
+                turnPayload[key] = value;
+            }
+        }
         string turnContext = JsonSerializer.Serialize(new
         {
             timestamp = "2026-06-09T09:16:03.880Z",
             type = "turn_context",
-            payload = new
-            {
-                turn_id = "019eabaa-e391-7e21-89cd-e761b5dee114",
-                cwd = "C:\\AITemp",
-                current_date = "2026-06-09",
-                model,
-                collaboration_mode = new
-                {
-                    mode = "default",
-                    settings = new
-                    {
-                        model,
-                        reasoning_effort = "xhigh"
-                    }
-                }
-            }
+            payload = turnPayload
         });
         string heartbeat = JsonSerializer.Serialize(new
         {
