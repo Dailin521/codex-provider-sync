@@ -5,8 +5,13 @@ namespace CodexProviderSync.App;
 static class Program
 {
     [STAThread]
-    static void Main()
+    static void Main(string[] args)
     {
+        if (UpdateApplier.TryRun(args))
+        {
+            return;
+        }
+
         try
         {
             SingleInstanceGuard guard = new();
