@@ -13,14 +13,18 @@ internal static class UpdateApplier
             return false;
         }
 
+        UpdateArguments? update = null;
         try
         {
-            Apply(ParseArguments(args[1..]));
+            update = ParseArguments(args[1..]);
+            Apply(update);
         }
         catch (Exception error)
         {
+            TryRestartInstalledApplication(update?.Target);
+            string downloadedUpdatePath = update?.Source ?? "unavailable";
             MessageBox.Show(
-                $"Codex Provider Sync update failed.\n\n{error.Message}\n\nYour existing version was kept whenever possible.",
+                $"Codex Provider Sync update failed.\n\n{error.Message}\n\nDownloaded update:\n{downloadedUpdatePath}\n\nThe installed version was restarted when possible. You can manually replace the EXE with the downloaded update.",
                 "Codex Provider Sync",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
@@ -111,6 +115,27 @@ internal static class UpdateApplier
         catch (ArgumentException)
         {
             // The main application exited before the helper queried it.
+        }
+    }
+
+    private static void TryRestartInstalledApplication(string? targetExePath)
+    {
+        if (string.IsNullOrWhiteSpace(targetExePath) || !File.Exists(targetExePath))
+        {
+            return;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = targetExePath,
+                UseShellExecute = true
+            });
+        }
+        catch
+        {
+            // The update error dialog still gives the user the target and downloaded paths.
         }
     }
 
