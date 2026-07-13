@@ -30,6 +30,7 @@ Typical symptom:
 - the Codex state database, usually `~/.codex/sqlite/state_5.sqlite`
 
 Older Codex layouts may still use `~/.codex/state_5.sqlite`; the tool detects the active location and reports it in `codex-provider status`.
+If both database locations exist, sync and backup operations cover both so Codex Desktop cannot switch back to stale provider metadata.
 
 ## GUI For Windows
 

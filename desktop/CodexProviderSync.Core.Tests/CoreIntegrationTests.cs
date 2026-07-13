@@ -71,7 +71,7 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
-    public async Task RunSync_UpdatesLegacyRootSqliteDatabase_WhenSqliteDirStateIsStale()
+    public async Task RunSync_UpdatesAndBacksUpBothSqliteDatabases_WhenBothLocationsExist()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
         await fixture.WriteConfigAsync("model_provider = \"openai\"");
@@ -92,11 +92,16 @@ public sealed class CoreIntegrationTests
         CodexSyncService service = new();
         SyncResult syncResult = await service.RunSyncAsync(fixture.CodexHome);
 
-        Assert.Equal(2, syncResult.SqliteRowsUpdated);
+        Assert.Equal(3, syncResult.SqliteRowsUpdated);
         BackupMetadataFile backupMetadata = JsonSerializer.Deserialize<BackupMetadataFile>(
             await File.ReadAllTextAsync(Path.Combine(syncResult.BackupDir, "metadata.json")),
             new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase })!;
-        Assert.Equal([AppConstants.DbFileBasename], backupMetadata.DbFiles);
+        Assert.Equal(
+        [
+            Path.Combine(AppConstants.SqliteDirBasename, AppConstants.DbFileBasename),
+            AppConstants.DbFileBasename
+        ],
+            backupMetadata.DbFiles);
 
         await using (SqliteConnection connection = fixture.OpenLegacySqliteConnection())
         {
@@ -129,8 +134,21 @@ public sealed class CoreIntegrationTests
                 rows.Add((reader.GetString(0), reader.GetString(1)));
             }
 
-            Assert.Equal([("thread-active-a", "dal")], rows);
+            Assert.Equal([("thread-active-a", "openai")], rows);
         }
+
+        await service.RunRestoreAsync(fixture.CodexHome, syncResult.BackupDir);
+
+        await using SqliteConnection restoredSqliteDir = fixture.OpenSqliteConnection();
+        await using SqliteConnection restoredLegacy = fixture.OpenLegacySqliteConnection();
+        await restoredSqliteDir.OpenAsync();
+        await restoredLegacy.OpenAsync();
+        SqliteCommand sqliteDirProvider = restoredSqliteDir.CreateCommand();
+        sqliteDirProvider.CommandText = "SELECT model_provider FROM threads WHERE id = 'thread-active-a'";
+        Assert.Equal("dal", await sqliteDirProvider.ExecuteScalarAsync());
+        SqliteCommand legacyProviders = restoredLegacy.CreateCommand();
+        legacyProviders.CommandText = "SELECT COUNT(*) FROM threads WHERE model_provider = 'dal'";
+        Assert.Equal(2L, Convert.ToInt64(await legacyProviders.ExecuteScalarAsync()));
     }
 
     [Fact]

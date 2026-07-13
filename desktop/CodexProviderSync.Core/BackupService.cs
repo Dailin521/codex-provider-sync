@@ -26,8 +26,8 @@ public sealed class BackupService
         Directory.CreateDirectory(dbDir);
 
         List<string> copiedDbFiles = [];
-        StateDbLocation? stateDb = _sqliteStateService.DetectStateDb(codexHome);
-        if (stateDb is not null)
+        IReadOnlyList<StateDbLocation> stateDbs = _sqliteStateService.ExistingStateDbs(codexHome);
+        foreach (StateDbLocation stateDb in stateDbs)
         {
             foreach (string suffix in new[] { string.Empty, "-shm", "-wal" })
             {

@@ -44,6 +44,8 @@ codex-provider sync
 
 CLI 需要 Node.js `16+`。Node 24+ 会优先使用内置 `node:sqlite`；旧版 Node 会使用可选依赖 `better-sqlite3`。
 
+当 `~/.codex/sqlite/state_5.sqlite` 与旧路径 `~/.codex/state_5.sqlite` 同时存在时，同步和备份会同时处理两个数据库，避免 Codex Desktop 重新读到旧的 provider 元数据。
+
 更多 CLI 常用命令：
 
 ```bash

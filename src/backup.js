@@ -10,7 +10,7 @@ import {
   GLOBAL_STATE_FILE_BASENAME
 } from "./constants.js";
 import { assertSessionFilesWritable, restoreSessionChanges } from "./session-files.js";
-import { assertSqliteWritable, detectStateDb } from "./sqlite-state.js";
+import { assertSqliteWritable, existingStateDbs } from "./sqlite-state.js";
 
 function timestampSlug(date = new Date()) {
   return date.toISOString().replaceAll(":", "").replaceAll("-", "").replace(".", "");
@@ -70,8 +70,8 @@ export async function createBackup({
   await fs.mkdir(dbDir, { recursive: true });
 
   const copiedDbFiles = [];
-  const stateDb = await detectStateDb(codexHome);
-  if (stateDb) {
+  const stateDbs = await existingStateDbs(codexHome);
+  for (const stateDb of stateDbs) {
     for (const suffix of ["", "-shm", "-wal"]) {
       const relativePath = dbBackupRelativePath(codexHome, stateDb.path, suffix);
       const copied = await copyIfPresent(`${stateDb.path}${suffix}`, path.join(dbDir, relativePath));
