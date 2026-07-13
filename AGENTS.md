@@ -15,9 +15,10 @@ For normal Windows users, prefer the GUI app when it is available. Use the CLI w
 The tool works by updating both:
 
 - rollout metadata under `~/.codex/sessions` and `~/.codex/archived_sessions`
-- SQLite thread metadata in the detected Codex state database, normally
-  `~/.codex/sqlite/state_5.sqlite` with legacy fallback to
-  `~/.codex/state_5.sqlite`
+- SQLite thread metadata in every existing Codex state database. The current
+  location is normally `~/.codex/sqlite/state_5.sqlite`, while some Desktop
+  versions may also keep using the legacy `~/.codex/state_5.sqlite`; when both
+  exist, sync updates and backs up both.
 
 Do not solve this by manually editing rollout files only unless the user explicitly asks for manual intervention.
 

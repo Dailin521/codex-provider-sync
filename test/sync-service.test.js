@@ -322,7 +322,7 @@ test("runSync rewrites rollout files and sqlite, then restore reverts both", asy
   assert.match(restoredArchived, /"model_provider":"newapi"/);
 });
 
-test("runSync updates legacy root sqlite database when sqlite-dir state is stale", async () => {
+test("runSync updates and backs up both sqlite databases when both locations exist", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-active-a.jsonl");
@@ -339,9 +339,12 @@ test("runSync updates legacy root sqlite database when sqlite-dir state is stale
 
   const syncResult = await runSync({ codexHome });
 
-  assert.equal(syncResult.sqliteRowsUpdated, 2);
+  assert.equal(syncResult.sqliteRowsUpdated, 3);
   const backupMetadata = JSON.parse(await fs.readFile(path.join(syncResult.backupDir, "metadata.json"), "utf8"));
-  assert.deepEqual(backupMetadata.dbFiles, [DB_FILE_BASENAME]);
+  assert.deepEqual(
+    backupMetadata.dbFiles.map((fileName) => fileName.replaceAll("\\", "/")),
+    ["sqlite/state_5.sqlite", DB_FILE_BASENAME]
+  );
 
   const legacyDb = await openDatabase(legacyStateDbPath(codexHome));
   try {
@@ -361,11 +364,26 @@ test("runSync updates legacy root sqlite database when sqlite-dir state is stale
     assert.deepEqual(
       staleDb.prepare("SELECT id, model_provider FROM threads ORDER BY id").all().map((row) => ({ ...row })),
       [
-        { id: "thread-active-a", model_provider: "dal" }
+        { id: "thread-active-a", model_provider: "openai" }
       ]
     );
   } finally {
     staleDb.close();
+  }
+
+  await runRestore({ codexHome, backupDir: syncResult.backupDir });
+
+  const restoredSqliteDirDb = await openDatabase(stateDbPath(codexHome));
+  const restoredLegacyDb = await openDatabase(legacyStateDbPath(codexHome));
+  try {
+    assert.equal(restoredSqliteDirDb.prepare("SELECT model_provider FROM threads WHERE id = ?").get("thread-active-a").model_provider, "dal");
+    assert.deepEqual(
+      restoredLegacyDb.prepare("SELECT model_provider FROM threads ORDER BY id").all().map((row) => row.model_provider),
+      ["dal", "dal"]
+    );
+  } finally {
+    restoredSqliteDirDb.close();
+    restoredLegacyDb.close();
   }
 });
 
@@ -751,7 +769,7 @@ test("runSwitch rejects unknown custom providers", async () => {
   );
 });
 
-test("runSync leaves rollout files and sqlite untouched when sqlite is locked", async () => {
+test("runSync leaves rollout files and both sqlite databases untouched when either database is locked", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");
@@ -759,8 +777,11 @@ test("runSync leaves rollout files and sqlite untouched when sqlite is locked", 
   await writeStateDb(codexHome, [
     { id: "thread-a", model_provider: "apigather", archived: false }
   ]);
+  await writeLegacyStateDb(codexHome, [
+    { id: "thread-a", model_provider: "apigather", archived: false }
+  ]);
 
-  const lockDb = await openDatabase(stateDbPath(codexHome));
+  const lockDb = await openDatabase(legacyStateDbPath(codexHome));
   try {
     lockDb.exec("BEGIN IMMEDIATE");
     await assert.rejects(
@@ -780,13 +801,19 @@ test("runSync leaves rollout files and sqlite untouched when sqlite is locked", 
   assert.match(rollout, /"model_provider":"apigather"/);
 
   const db = await openDatabase(stateDbPath(codexHome));
+  const legacyDb = await openDatabase(legacyStateDbPath(codexHome));
   try {
     const row = db
       .prepare("SELECT model_provider FROM threads WHERE id = ?")
       .get("thread-a");
     assert.equal(row.model_provider, "apigather");
+    assert.equal(
+      legacyDb.prepare("SELECT model_provider FROM threads WHERE id = ?").get("thread-a").model_provider,
+      "apigather"
+    );
   } finally {
     db.close();
+    legacyDb.close();
   }
 });
 
