@@ -530,6 +530,62 @@ async function rewriteFirstLine(filePath, nextFirstLine, separator) {
   }
 }
 
+function getInPlaceProviderReplacement(change) {
+  if (typeof change.originalFirstLine !== "string"
+      || typeof change.originalProvider !== "string"
+      || typeof change.updatedProvider !== "string") {
+    return null;
+  }
+
+  const originalProvider = Buffer.from(change.originalProvider, "utf8");
+  const updatedProvider = Buffer.from(change.updatedProvider, "utf8");
+  if (originalProvider.length === 0 || originalProvider.length !== updatedProvider.length) {
+    return null;
+  }
+
+  const providerFieldPattern = /"model_provider"\s*:\s*"([^"\\]*)"/g;
+  let fieldMatch;
+  while ((fieldMatch = providerFieldPattern.exec(change.originalFirstLine)) !== null) {
+    if (fieldMatch[1] !== change.originalProvider) {
+      continue;
+    }
+
+    const valueOffset = fieldMatch.index + fieldMatch[0].lastIndexOf(change.originalProvider);
+    return {
+      byteOffset: Buffer.byteLength(change.originalFirstLine.slice(0, valueOffset), "utf8"),
+      replacement: updatedProvider
+    };
+  }
+
+  return null;
+}
+
+async function tryRewriteProviderInPlace(change, replacement) {
+  let handle;
+  try {
+    handle = await fsp.open(change.path, "r+");
+    const stat = await handle.stat();
+    if (!snapshotMatches(change, { size: stat.size, mtimeMs: stat.mtimeMs })) {
+      return false;
+    }
+
+    const { bytesWritten } = await handle.write(
+      replacement.replacement,
+      0,
+      replacement.replacement.length,
+      replacement.byteOffset
+    );
+    if (bytesWritten !== replacement.replacement.length) {
+      throw new Error(`Unable to rewrite provider bytes in rollout file: ${change.path}`);
+    }
+    return true;
+  } catch (error) {
+    throw wrapRolloutFileBusyError(error, change.path, "rewrite");
+  } finally {
+    await handle?.close();
+  }
+}
+
 async function tryRewriteCollectedFirstLine(change) {
   const beforeSnapshot = await getFileSnapshot(change.path);
   if (!snapshotMatches(change, beforeSnapshot)) {
@@ -539,6 +595,11 @@ async function tryRewriteCollectedFirstLine(change) {
   const current = await readFirstLineRecord(change.path);
   if (current.firstLine !== change.originalFirstLine || current.offset !== change.originalOffset) {
     return false;
+  }
+
+  const inPlaceReplacement = getInPlaceProviderReplacement(change);
+  if (inPlaceReplacement) {
+    return tryRewriteProviderInPlace(change, inPlaceReplacement);
   }
 
   const tmpPath = `${change.path}.provider-sync.${process.pid}.${Date.now()}.tmp`;
@@ -695,6 +756,7 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
           originalSize: snapshot.size,
           originalMtimeMs: snapshot.mtimeMs,
           originalProvider: currentProvider,
+          updatedProvider: targetProvider,
           updatedFirstLine: JSON.stringify(parsed)
         });
       }

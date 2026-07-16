@@ -63,6 +63,8 @@ codex-provider prune-backups --keep 5
 - `restore <backup-dir>`：从备份恢复，支持 `--no-config`、`--no-db`、`--no-sessions`。
 - `prune-backups --keep <n>`：只清理本工具创建的旧备份。
 
+备注：频繁切换时，建议使用统一的 6 字符 ASCII provider ID，例如将逻辑名称 `provider_a` 配置为 `prov_a`。内置的 `openai` ID 正好是 6 个字符，因此统一为 6 字符相对最通用。会话文件很多或体积很大时，不同长度的 ID 需要重写整个 rollout，可能产生巨量磁盘写入；相同长度则可原地替换，无法识别时仍自动回退到原有的完整重写。
+
 ## 能力边界
 
 本工具只修复“历史会话可见性”相关 metadata，不修改会话内容。

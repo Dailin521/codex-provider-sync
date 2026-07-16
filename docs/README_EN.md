@@ -115,6 +115,8 @@ Clean old managed backups manually:
 codex-provider prune-backups --keep 5
 ```
 
+Note: When switching frequently, we recommend consistent six-character ASCII provider IDs, for example configuring logical provider `provider_a` as `prov_a`. The built-in `openai` ID is six characters, making six-character IDs the most broadly compatible choice. With many or large session files, different-length IDs require rewriting entire rollouts and can cause massive disk writes; equal-length IDs can be replaced in place, while unrecognized cases still fall back to the existing full rewrite.
+
 ## AI Quick Run
 
 If you want an AI assistant to handle this in one shot, copy this prompt:
