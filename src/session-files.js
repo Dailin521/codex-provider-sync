@@ -358,7 +358,15 @@ async function readFirstTurnContextModel(rolloutPath, { firstLineOffset, firstLi
 // stay in sync. The `originalModel` we report back is the
 // top-level one — it is what the restore path uses to put the
 // line back to its original state on a failed rollback.
-const TURN_CONTEXT_MODEL_FIELD_RE = /"model"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+//
+// `g`-flagged RegExps are stateful: `String.prototype.match` and
+// `RegExp.prototype.test` both advance `lastIndex` between calls,
+// which is a footgun we explicitly do not want to inherit. We
+// rebuild the regex on every call site instead, which is cheap
+// (V8 caches the compiled pattern) and keeps each function pure.
+function buildTurnContextModelFieldRegex() {
+  return /"model"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+}
 
 function decodeJsonStringLiteral(literal) {
   // Treat the captured value as the inside of a JSON string literal
@@ -381,10 +389,10 @@ function rewriteTurnContextModelInLine(line, newModel) {
   if (!line || !line.includes('"turn_context"')) {
     return { line, replaced: false, originalModel: null };
   }
-  // Reset the regex's lastIndex because `g`-flag regexes are
-  // stateful when used with `match`/`exec`. We use `matchAll` to
-  // find every `model` field in the line in one pass.
-  const occurrences = [...line.matchAll(TURN_CONTEXT_MODEL_FIELD_RE)];
+  const regex = buildTurnContextModelFieldRegex();
+  // `matchAll` is non-mutating and returns a fresh iterator on
+  // every call, so we can safely use a stateful regex here.
+  const occurrences = [...line.matchAll(regex)];
   if (occurrences.length === 0) {
     return { line, replaced: false, originalModel: null };
   }
@@ -418,9 +426,8 @@ function rewriteTurnContextModelInLine(line, newModel) {
   if (alreadyMatches) {
     return { line, replaced: false, originalModel };
   }
-  // Reset the regex for the replacement pass.
-  TURN_CONTEXT_MODEL_FIELD_RE.lastIndex = 0;
-  const newLine = line.replace(TURN_CONTEXT_MODEL_FIELD_RE, `"model":${encodeJsonStringLiteral(newModel)}`);
+  const replacementRegex = buildTurnContextModelFieldRegex();
+  const newLine = line.replace(replacementRegex, `"model":${encodeJsonStringLiteral(newModel)}`);
   return { line: newLine, replaced: true, originalModel };
 }
 
@@ -1058,6 +1065,10 @@ export async function applySessionChanges(changes, options = {}) {
         const modelResult = await rewriteRolloutModelField(firstLineChanges[index], targetModel);
         firstLineChanges[index].originalTurnContextModels = modelResult.originalTurnContextModels;
         firstLineChanges[index].appliedTurnContextRewrites = modelResult.replacedLines;
+        // The per-turn rewrite is a tmp + rename that resets the
+        // mtime; pin it back to the original so the file's
+        // mtime is preserved end-to-end.
+        await restoreOriginalMtime(firstLineChanges[index].path, firstLineChanges[index].originalMtimeMs);
       } else {
         skippedPaths.push(firstLineChanges[index].path);
       }
@@ -1071,6 +1082,9 @@ export async function applySessionChanges(changes, options = {}) {
         const modelResult = await rewriteRolloutModelField(change, targetModel);
         change.originalTurnContextModels = modelResult.originalTurnContextModels;
         change.appliedTurnContextRewrites = modelResult.replacedLines;
+        // Pin the mtime back after the per-turn rewrite's
+        // tmp+rename, which would otherwise advance it to "now".
+        await restoreOriginalMtime(change.path, change.originalMtimeMs);
       } else {
         skippedPaths.push(change.path);
       }
@@ -1314,20 +1328,27 @@ function restoreTurnContextModelInLine(line, originalModel) {
   if (!line || !line.includes('"turn_context"')) {
     return line;
   }
-  const match = line.match(TURN_CONTEXT_MODEL_FIELD_RE);
-  if (!match) {
+  // `matchAll` is the only safe way to inspect a `g`-flagged
+  // regex's matches without poisoning `lastIndex` for the
+  // subsequent `replace` call.
+  const regex = buildTurnContextModelFieldRegex();
+  const occurrences = [...line.matchAll(regex)];
+  if (occurrences.length === 0) {
     return line;
   }
+  // Check the first occurrence's current value. If it already
+  // matches `originalModel` there is no work to do.
   let currentModel = null;
   try {
-    currentModel = decodeJsonStringLiteral(match[1]);
+    currentModel = decodeJsonStringLiteral(occurrences[0][1]);
   } catch {
     return line;
   }
   if (currentModel === originalModel) {
     return line;
   }
-  return line.replace(TURN_CONTEXT_MODEL_FIELD_RE, `"model":${encodeJsonStringLiteral(originalModel)}`);
+  const replacementRegex = buildTurnContextModelFieldRegex();
+  return line.replace(replacementRegex, `"model":${encodeJsonStringLiteral(originalModel)}`);
 }
 
 export function summarizeProviderCounts(providerCounts) {

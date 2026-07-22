@@ -6,6 +6,7 @@ import {
   listConfiguredProviderIds,
   readCurrentProviderFromConfigText,
   readProviderModel,
+  readRootModelFromConfigText,
   setRootModelInConfigText,
   setRootProviderInConfigText
 } from "../src/config-file.js";
@@ -129,4 +130,46 @@ test("setRootProviderInConfigText + setRootModelInConfigText produces a coherent
     next,
     `model_provider = "longcat"\nmodel = "LongCat-2.0-Preview"\n\n[model_providers.longcat]\nname = "longcat"\nmodel = "LongCat-2.0-Preview"\n`
   );
+});
+
+test("readRootModelFromConfigText returns the root-level model and ignores provider sections", () => {
+  // Owner review regression: the per-turn model rewrite must
+  // only see the root-level `model = "..."` line. A
+  // [model_providers.X] section also has a `model` field for
+  // its own purposes; without the section guard, a
+  // `readRootModelFromConfigText` call would happily return
+  // whatever the provider section has, and that value would be
+  // propagated to every rollout's turn_context.model.
+  const input = [
+    'model_provider = "foo"',
+    'model = "gpt-5"',
+    '',
+    '[model_providers.foo]',
+    'base_url = "https://example.com"',
+    'model = "gpt-4o-mini"',
+    ''
+  ].join("\n");
+  assert.equal(readRootModelFromConfigText(input), "gpt-5");
+});
+
+test("readRootModelFromConfigText returns null when no root-level model is set", () => {
+  const input = 'model_provider = "foo"\n\n[model_providers.foo]\nmodel = "gpt-4o-mini"\n';
+  assert.equal(readRootModelFromConfigText(input), null);
+});
+
+test("readRootModelFromConfigText ignores a provider section at the very top of the file", () => {
+  // When the file has no `model = "..."` line at all before the
+  // first [section], we return null — even if a provider section
+  // has its own model field. The sync path treats null as
+  // "don't touch the per-turn model field", which is the
+  // safe default.
+  const input = [
+    '[model_providers.foo]',
+    'model = "gpt-4o-mini"',
+    '',
+    '[model_providers.bar]',
+    'model = "gpt-5"',
+    ''
+  ].join("\n");
+  assert.equal(readRootModelFromConfigText(input), null);
 });

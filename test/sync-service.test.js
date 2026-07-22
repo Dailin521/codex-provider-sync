@@ -856,6 +856,238 @@ test("runSync rewrites turn_context whose model name contains regex metacharacte
   assert.equal(userMessage.payload.message, "echo weird(target)+v2 please");
 });
 
+test("runSync rewrites turn_context model when the provider is already correct (model-only change)", async () => {
+  // Owner review regression: when the root-level `model = "..."`
+  // in config.toml changes but `model_provider` is the same as
+  // what every rollout already has, the rollout's
+  // turn_context.model must still be updated. Otherwise the
+  // Codex GUI bottom-right of an old conversation would show the
+  // old model even though the user just switched the active
+  // model.
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "gpt-5.1"\n');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "06", "09", "rollout-a.jsonl");
+  await writeRolloutWithTurnContext(sessionPath, {
+    id: "thread-a",
+    provider: "openai",
+    model: "gpt-5"
+  });
+
+  // Run sync with no provider change (provider = openai is already
+  // the target), only the model changes. The rollout's
+  // turn_context.model must move from "gpt-5" to "gpt-5.1" and
+  // the first line (session_meta) must NOT be touched.
+  const originalFirstLine = (await fs.readFile(sessionPath, "utf8")).split("\n")[0];
+  const result = await runSync({ codexHome, provider: "openai", model: "gpt-5.1" });
+  assert.ok(
+    result.changedSessionFiles >= 1,
+    "rollout with a stale turn_context.model must be picked up as a model-only change"
+  );
+
+  const lines = (await fs.readFile(sessionPath, "utf8")).split("\n").filter(Boolean);
+  // First line (session_meta) must be untouched — the provider was
+  // already correct.
+  assert.equal(lines[0], originalFirstLine, "session_meta first line must not be touched on a model-only change");
+  for (const line of lines) {
+    if (!line.includes('"turn_context"')) continue;
+    const parsed = JSON.parse(line);
+    assert.equal(parsed.payload.model, "gpt-5.1");
+  }
+});
+
+test("runSync normalises multiple distinct models in the same session to the target model", async () => {
+  // Owner review regression: a single Codex session can use
+  // different models in different turn_context lines (the user
+  // switched models mid-conversation). The per-turn rewrite
+  // pass must normalise ALL of them to the new target, not just
+  // the ones whose value happens to match the first turn_context
+  // model.
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "gpt-5.1"\n');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "06", "09", "rollout-a.jsonl");
+  await writeRolloutWithTurnContext(sessionPath, {
+    id: "thread-a",
+    provider: "apigather",
+    model: "gpt-5"
+  });
+  // Three more turn_context lines with three different models.
+  for (const [turnId, model] of [
+    ["t2", "gpt-4o-mini"],
+    ["t3", "gpt-5"],
+    ["t4", "claude-3.5-sonnet"]
+  ]) {
+    await fs.appendFile(
+      sessionPath,
+      JSON.stringify({
+        timestamp: "2026-06-09T09:16:03.880Z",
+        type: "turn_context",
+        payload: { turn_id: turnId, model, collaboration_mode: { mode: "default", settings: { model } } }
+      }) + "\n",
+      "utf8"
+    );
+  }
+
+  const result = await runSync({ codexHome, model: "gpt-5.1" });
+  assert.equal(result.changedSessionFiles, 1);
+
+  const lines = (await fs.readFile(sessionPath, "utf8")).split("\n").filter(Boolean);
+  for (const line of lines) {
+    if (!line.includes('"turn_context"')) continue;
+    const parsed = JSON.parse(line);
+    assert.equal(parsed.payload.model, "gpt-5.1", `turn ${parsed.payload.turn_id} should be normalised`);
+    assert.equal(parsed.payload.collaboration_mode.settings.model, "gpt-5.1");
+  }
+});
+
+test("runSync preserves CRLF line separators and the original mtime when rewriting turn_context model", async () => {
+  // Owner review regression: rewriting the per-turn model field
+  // must preserve the original newline format (CRLF on Windows)
+  // and the original mtime. The previous code joined lines with
+  // "\n" unconditionally, which silently lost the 0x0d byte on
+  // CRLF rollouts.
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "gpt-5.1"\n');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "06", "09", "rollout-crlf.jsonl");
+  await fs.mkdir(path.dirname(sessionPath), { recursive: true });
+
+  // Build a CRLF-terminated rollout with a turn_context line.
+  const meta = JSON.stringify({
+    timestamp: "2026-06-09T09:16:03.878Z",
+    type: "session_meta",
+    payload: { id: "thread-crlf", timestamp: "2026-06-09T09:16:03.878Z", cwd: "C:\\AITemp", source: "cli", cli_version: "0.115.0", model_provider: "apigather" }
+  });
+  const turn = JSON.stringify({
+    timestamp: "2026-06-09T09:16:03.880Z",
+    type: "turn_context",
+    payload: { turn_id: "t1", cwd: "C:\\AITemp", model: "gpt-5", collaboration_mode: { mode: "default", settings: { model: "gpt-5" } } }
+  });
+  const originalBytes = Buffer.from(`${meta}\r\n${turn}\r\n`, "utf8");
+  await fs.writeFile(sessionPath, originalBytes);
+  // Pin the mtime to a recognisable value so we can confirm it
+  // is restored after the rewrite.
+  const pinnedMtime = new Date("2026-06-01T12:00:00.000Z");
+  await fs.utimes(sessionPath, pinnedMtime, pinnedMtime);
+
+  const result = await runSync({ codexHome, model: "gpt-5.1" });
+  assert.equal(result.changedSessionFiles, 1);
+
+  const afterBytes = await fs.readFile(sessionPath);
+  // The rewritten file must still contain 0x0d bytes (CRLF) —
+  // the rewrite pass would have lost them if it joined with
+  // plain "\n".
+  assert.ok(
+    afterBytes.includes(0x0d),
+    "rewritten rollout must preserve the original CRLF line separators"
+  );
+  // The mtime must match what we pinned above.
+  const afterStat = await fs.stat(sessionPath);
+  assert.equal(
+    afterStat.mtimeMs,
+    pinnedMtime.getTime(),
+    "rewritten rollout must preserve the original mtime"
+  );
+  // The new file should still end with a CRLF terminator (the
+  // source did, and the rewrite pass re-adds it).
+  assert.equal(afterBytes[afterBytes.length - 1], 0x0a);
+  assert.equal(afterBytes[afterBytes.length - 2], 0x0d);
+  // And the per-turn model must have moved.
+  const lines = afterBytes.toString("utf8").split("\r\n").filter(Boolean);
+  const turnContextLines = lines
+    .map((line) => JSON.parse(line))
+    .filter((entry) => entry.type === "turn_context");
+  for (const entry of turnContextLines) {
+    assert.equal(entry.payload.model, "gpt-5.1");
+  }
+});
+
+test("runSync restores turn_context model on failure rollback (no half-completed state)", async () => {
+  // Owner review regression: when the SQLite step fails after the
+  // rollout rewrite has already been applied, the rollback path
+  // must put the per-turn `model` field back to its original
+  // value, not just the first-line session_meta. Without the
+  // per-line backup in the manifest, the restore would leave
+  // the rollout in a half-completed state: session_meta pointing
+  // at the original provider, but per-turn model pointing at the
+  // new one.
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "gpt-5.1"\n');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "06", "09", "rollout-restore.jsonl");
+  await fs.mkdir(path.dirname(sessionPath), { recursive: true });
+  await writeRolloutWithTurnContext(sessionPath, {
+    id: "thread-restore",
+    provider: "apigather",
+    model: "gpt-5"
+  });
+
+  // Pre-flight: capture the original line + the original per-turn
+  // model.
+  const originalContent = await fs.readFile(sessionPath, "utf8");
+  const originalFirstLine = originalContent.split("\n")[0];
+  const originalTurnLine = originalContent
+    .split("\n")
+    .filter(Boolean)
+    .find((line) => line.includes('"turn_context"'));
+  assert.ok(originalTurnLine, "test setup: rollout should have a turn_context line");
+  const originalTurn = JSON.parse(originalTurnLine);
+  assert.equal(originalTurn.payload.model, "gpt-5");
+
+  // Stub a failing SQLite update so the runSync's try/catch
+  // triggers the restore path. We do this by passing a
+  // `sqliteBusyTimeoutMs` so small that the busy timeout fires
+  // and the underlying sqlite update throws.
+  // The simpler route: call collectSessionChanges + applySessionChanges
+  // by hand, then trigger restoreBackup explicitly. We want to
+  // exercise the restore path under realistic conditions.
+  const configPath = path.join(codexHome, "config.toml");
+  const { changes } = await collectSessionChanges(codexHome, "openai", { targetModel: "gpt-5.1" });
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: changes,
+    configPath
+  });
+
+  // Apply the rewrite so the rollout's per-turn model moves to
+  // "gpt-5.1" and the first line gets the new provider.
+  await applySessionChanges(changes, { targetModel: "gpt-5.1" });
+  await updateSessionBackupManifest(backupDir, changes);
+
+  // Debug: dump the manifest so we can see what updateSessionBackupManifest wrote.
+  const sessionManifest = JSON.parse(await fs.readFile(path.join(backupDir, "session-meta-backup.json"), "utf8"));
+  void sessionManifest; // suppress unused warning; the asserts below are the real check
+  // Simulate Codex appending a new event to the rollout between
+  // the rewrite and the rollback.
+  await fs.appendFile(
+    sessionPath,
+    JSON.stringify({
+      timestamp: "2026-06-09T09:16:03.881Z",
+      type: "user_message",
+      payload: { message: "after-rewrite" }
+    }) + "\n",
+    "utf8"
+  );
+
+  // Now roll back. The first line must return to its original
+  // session_meta, the per-turn model must return to "gpt-5",
+  // and the appended user_message must be left alone (the
+  // restore pass is append-tolerant).
+  await restoreBackup(backupDir, codexHome, { restoreSessions: true });
+
+  const restored = await fs.readFile(sessionPath, "utf8");
+  const restoredLines = restored.split("\n").filter(Boolean);
+  assert.equal(restoredLines[0], originalFirstLine, "first line must be restored to the original session_meta");
+  const restoredTurn = restoredLines
+    .map((line) => JSON.parse(line))
+    .find((entry) => entry.type === "turn_context");
+  assert.equal(restoredTurn.payload.model, "gpt-5", "per-turn model must be restored to its original value");
+  // Codex's append must be preserved.
+  const appended = restoredLines
+    .map((line) => JSON.parse(line))
+    .find((entry) => entry.type === "user_message");
+  assert.ok(appended, "appended user_message line must be preserved on rollback");
+  assert.equal(appended.payload.message, "after-rewrite");
+});
+
 test("runSync leaves rollout files alone when original turn_context model already equals target", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "MiniMax-M3"\n');
