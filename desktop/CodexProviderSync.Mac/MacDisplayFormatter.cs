@@ -110,6 +110,10 @@ internal static class MacDisplayFormatter
         {
             lines.Add($"已更新 SQLite user-event 标记: {result.SqliteUserEventRowsUpdated}");
         }
+        if (result.SqliteModelRowsUpdated > 0)
+        {
+            lines.Add($"已更新 SQLite 每线程 model: {result.SqliteModelRowsUpdated}");
+        }
         if (result.SqliteCwdRowsUpdated > 0)
         {
             lines.Add($"已更新 SQLite cwd 路径: {result.SqliteCwdRowsUpdated}");
