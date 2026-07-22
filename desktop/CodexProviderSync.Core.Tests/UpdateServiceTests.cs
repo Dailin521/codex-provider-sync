@@ -29,6 +29,34 @@ public sealed class UpdateServiceTests
     }
 
     [Fact]
+    public async Task CheckForUpdate_WhenApiIsRateLimited_FallsBackToLatestReleaseRedirect()
+    {
+        using HttpClient client = CreateClient(request =>
+        {
+            if (request.RequestUri!.Host == "api.github.com")
+            {
+                return new HttpResponseMessage(HttpStatusCode.Forbidden);
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                RequestMessage = new HttpRequestMessage(
+                    HttpMethod.Get,
+                    "https://github.com/Dailin521/codex-provider-sync/releases/tag/v0.2.10")
+            };
+        });
+        UpdateService service = new(client);
+
+        UpdateCheckResult result = await service.CheckForUpdateAsync(new Version(0, 2, 9, 0));
+
+        Assert.True(result.IsUpdateAvailable);
+        Assert.Equal("v0.2.10", result.LatestRelease.TagName);
+        Assert.Equal(
+            "https://github.com/Dailin521/codex-provider-sync/releases/download/v0.2.10/CodexProviderSync.exe",
+            result.LatestRelease.FindAsset("CodexProviderSync.exe").DownloadUrl.AbsoluteUri);
+    }
+
+    [Fact]
     public async Task DownloadWindowsExe_WritesOnlyVerifiedPayload()
     {
         byte[] executable = Encoding.UTF8.GetBytes("verified executable bytes");
@@ -49,9 +77,10 @@ public sealed class UpdateServiceTests
 
         try
         {
-            string path = await service.DownloadWindowsExeAsync(release, directory);
+            DownloadedUpdate update = await service.DownloadWindowsExeAsync(release, directory);
 
-            Assert.Equal(executable, await File.ReadAllBytesAsync(path));
+            Assert.Equal(executable, await File.ReadAllBytesAsync(update.Path));
+            Assert.Equal(hash, update.Sha256);
             Assert.DoesNotContain(Directory.EnumerateFiles(directory), path => path.EndsWith(".download", StringComparison.Ordinal));
         }
         finally

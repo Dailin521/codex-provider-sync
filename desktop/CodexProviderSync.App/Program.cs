@@ -12,6 +12,8 @@ static class Program
             return;
         }
 
+        UpdateApplier.CleanupStaleUpdaterDirectories();
+
         try
         {
             SingleInstanceGuard guard = new();

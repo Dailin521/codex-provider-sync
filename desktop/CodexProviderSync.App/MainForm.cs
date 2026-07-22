@@ -710,9 +710,9 @@ public sealed class MainForm : Form
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "codex-provider-sync",
                 "updates");
-            string downloadedExe = await _updateService.DownloadWindowsExeAsync(update.LatestRelease, updateDirectory);
+            DownloadedUpdate downloadedUpdate = await _updateService.DownloadWindowsExeAsync(update.LatestRelease, updateDirectory);
             string targetExe = Environment.ProcessPath ?? throw new InvalidOperationException("Unable to determine the current executable path.");
-            UpdateApplier.Start(downloadedExe, targetExe);
+            UpdateApplier.Start(downloadedUpdate.Path, targetExe, downloadedUpdate.Sha256);
             AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 已下载并校验 {update.LatestRelease.TagName}，正在重启完成更新。");
             BeginInvoke(Close);
         });

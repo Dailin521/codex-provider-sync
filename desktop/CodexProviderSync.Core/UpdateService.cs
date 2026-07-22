@@ -1,4 +1,5 @@
 using System.Net.Http.Headers;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text.Json;
 
@@ -11,6 +12,8 @@ namespace CodexProviderSync.Core;
 public sealed class UpdateService
 {
     private const string LatestReleaseUrl = "https://api.github.com/repos/Dailin521/codex-provider-sync/releases/latest";
+    private const string LatestReleasePageUrl = "https://github.com/Dailin521/codex-provider-sync/releases/latest";
+    private const string ReleaseTagPathPrefix = "/Dailin521/codex-provider-sync/releases/tag/";
     private readonly HttpClient _httpClient;
 
     public UpdateService(HttpClient? httpClient = null)
@@ -25,6 +28,11 @@ public sealed class UpdateService
     public async Task<UpdateCheckResult> CheckForUpdateAsync(Version currentVersion, CancellationToken cancellationToken = default)
     {
         using HttpResponseMessage response = await _httpClient.GetAsync(LatestReleaseUrl, cancellationToken);
+        if (response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests)
+        {
+            return await CheckForUpdateViaReleasePageAsync(currentVersion, cancellationToken);
+        }
+
         response.EnsureSuccessStatusCode();
 
         await using Stream stream = await response.Content.ReadAsStreamAsync(cancellationToken);
@@ -48,7 +56,35 @@ public sealed class UpdateService
         return new UpdateCheckResult(normalizedCurrentVersion, release, version > normalizedCurrentVersion);
     }
 
-    public async Task<string> DownloadWindowsExeAsync(ReleaseInfo release, string downloadDirectory, CancellationToken cancellationToken = default)
+    private async Task<UpdateCheckResult> CheckForUpdateViaReleasePageAsync(Version currentVersion, CancellationToken cancellationToken)
+    {
+        using HttpResponseMessage response = await _httpClient.GetAsync(
+            LatestReleasePageUrl,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        Uri finalUri = response.RequestMessage?.RequestUri
+            ?? throw new InvalidDataException("GitHub latest release redirect did not provide a destination URL.");
+        string path = finalUri.AbsolutePath;
+        if (!path.StartsWith(ReleaseTagPathPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException($"GitHub latest release redirect returned an unexpected URL: {finalUri}");
+        }
+
+        string tagName = Uri.UnescapeDataString(path[ReleaseTagPathPrefix.Length..]).Trim('/');
+        Version version = ParseReleaseVersion(tagName);
+        string assetRoot = $"https://github.com/Dailin521/codex-provider-sync/releases/download/{Uri.EscapeDataString(tagName)}";
+        ReleaseInfo release = new(tagName, version,
+        [
+            new ReleaseAsset("CodexProviderSync.exe", new Uri($"{assetRoot}/CodexProviderSync.exe")),
+            new ReleaseAsset("CodexProviderSync.exe.sha256", new Uri($"{assetRoot}/CodexProviderSync.exe.sha256"))
+        ]);
+        Version normalizedCurrentVersion = NormalizeVersion(currentVersion);
+        return new UpdateCheckResult(normalizedCurrentVersion, release, version > normalizedCurrentVersion);
+    }
+
+    public async Task<DownloadedUpdate> DownloadWindowsExeAsync(ReleaseInfo release, string downloadDirectory, CancellationToken cancellationToken = default)
     {
         ReleaseAsset exe = release.FindAsset("CodexProviderSync.exe");
         ReleaseAsset checksum = release.FindAsset("CodexProviderSync.exe.sha256");
@@ -77,7 +113,7 @@ public sealed class UpdateService
             }
 
             File.Move(temporaryPath, finalPath, overwrite: true);
-            return finalPath;
+            return new DownloadedUpdate(finalPath, expectedHash);
         }
         catch
         {
@@ -144,3 +180,5 @@ public sealed record ReleaseInfo(string TagName, Version Version, IReadOnlyList<
 }
 
 public sealed record UpdateCheckResult(Version CurrentVersion, ReleaseInfo LatestRelease, bool IsUpdateAvailable);
+
+public sealed record DownloadedUpdate(string Path, string Sha256);
