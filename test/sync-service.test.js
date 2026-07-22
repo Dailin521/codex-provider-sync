@@ -884,10 +884,6 @@ test("applySessionChanges preserves large UTF-8 session metadata", async () => {
 });
 
 test("applySessionChanges replaces equal-length provider IDs in place", async () => {
-  if (process.platform === "win32") {
-    return;
-  }
-
   const { codexHome } = await makeTempCodexHome();
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-in-place.jsonl");
   await writeRollout(sessionPath, "thread-in-place", "openai");
@@ -905,12 +901,29 @@ test("applySessionChanges replaces equal-length provider IDs in place", async ()
   const rollout = await fs.readFile(sessionPath, "utf8");
 
   assert.equal(result.appliedChanges, 1);
-  assert.equal(after.ino, before.ino);
+  assert.equal(result.inPlaceChanges, 1);
+  if (process.platform !== "win32") {
+    assert.equal(after.ino, before.ino);
+  }
   assert.equal(Math.round(after.mtimeMs), originalTime.getTime());
   assert.equal(
     rollout,
     original.replace('"model_provider" : "openai"', '"model_provider" : "prov_a"')
   );
+});
+
+test("applySessionChanges falls back when equal-length provider IDs have different JSON byte lengths", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-escaped-provider.jsonl");
+  await writeRollout(sessionPath, "thread-escaped-provider", "openai");
+
+  const { changes } = await collectSessionChanges(codexHome, 'bad"id');
+  const result = await applySessionChanges(changes);
+  const [firstLine] = (await fs.readFile(sessionPath, "utf8")).split(/\r?\n/);
+
+  assert.equal(result.appliedChanges, 1);
+  assert.equal(result.inPlaceChanges, 0);
+  assert.equal(JSON.parse(firstLine).payload.model_provider, 'bad"id');
 });
 
 test("applySessionChanges restores original rollout mtime", async () => {

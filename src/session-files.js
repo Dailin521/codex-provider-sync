@@ -265,7 +265,10 @@ function parseSessionMetaRecord(firstLine) {
 }
 
 function isValidWindowsRewriteResult(result) {
-  return result === "APPLIED" || result === "SKIP_BUSY" || result === "SKIP_CHANGED";
+  return result === "APPLIED"
+    || result === "APPLIED_IN_PLACE"
+    || result === "SKIP_BUSY"
+    || result === "SKIP_CHANGED";
 }
 
 function parseWindowsRewriteResults(stdout, changes) {
@@ -374,6 +377,14 @@ async function invokeWindowsExclusiveRewriteBatch(changes, { requireOriginalMatc
         $separator = [string]$change.originalSeparator
         $sourceOffset = [int64]$change.originalOffset
         $headerOnly = $sourceOffset -ge [int64]$change.originalSize
+
+        if ($null -ne $change.inPlaceByteOffset -and -not [string]::IsNullOrEmpty([string]$change.inPlaceReplacementBase64)) {
+          $replacementBytes = [Convert]::FromBase64String([string]$change.inPlaceReplacementBase64)
+          $source.Seek([int64]$change.inPlaceByteOffset, [System.IO.SeekOrigin]::Begin) | Out-Null
+          $source.Write($replacementBytes, 0, $replacementBytes.Length)
+          $source.Flush()
+          return "APPLIED_IN_PLACE"
+        }
       } else {
         $record = Read-FirstLineRecord $source
         $separator = [string]$change.separator
@@ -441,12 +452,18 @@ async function invokeWindowsExclusiveRewriteBatch(changes, { requireOriginalMatc
 `.trim();
 
   try {
+    const manifestChanges = changes.map((change) => {
+      const replacement = requireOriginalMatch ? getInPlaceProviderReplacement(change) : null;
+      return {
+        ...change,
+        requireOriginalMatch,
+        inPlaceByteOffset: replacement?.byteOffset ?? null,
+        inPlaceReplacementBase64: replacement?.replacement.toString("base64") ?? null
+      };
+    });
     await fsp.writeFile(
       manifestPath,
-      JSON.stringify(changes.map((change) => ({
-        ...change,
-        requireOriginalMatch
-      }))),
+      JSON.stringify(manifestChanges),
       "utf8"
     );
 
@@ -537,20 +554,22 @@ function getInPlaceProviderReplacement(change) {
     return null;
   }
 
-  const originalProvider = Buffer.from(change.originalProvider, "utf8");
-  const updatedProvider = Buffer.from(change.updatedProvider, "utf8");
+  const originalProviderJson = JSON.stringify(change.originalProvider);
+  const updatedProviderJson = JSON.stringify(change.updatedProvider);
+  const originalProvider = Buffer.from(originalProviderJson, "utf8");
+  const updatedProvider = Buffer.from(updatedProviderJson, "utf8");
   if (originalProvider.length === 0 || originalProvider.length !== updatedProvider.length) {
     return null;
   }
 
-  const providerFieldPattern = /"model_provider"\s*:\s*"([^"\\]*)"/g;
+  const providerFieldPattern = /"model_provider"\s*:\s*/g;
   let fieldMatch;
   while ((fieldMatch = providerFieldPattern.exec(change.originalFirstLine)) !== null) {
-    if (fieldMatch[1] !== change.originalProvider) {
+    const valueOffset = fieldMatch.index + fieldMatch[0].length;
+    if (!change.originalFirstLine.startsWith(originalProviderJson, valueOffset)) {
       continue;
     }
 
-    const valueOffset = fieldMatch.index + fieldMatch[0].lastIndexOf(change.originalProvider);
     return {
       byteOffset: Buffer.byteLength(change.originalFirstLine.slice(0, valueOffset), "utf8"),
       replacement: updatedProvider
@@ -589,17 +608,19 @@ async function tryRewriteProviderInPlace(change, replacement) {
 async function tryRewriteCollectedFirstLine(change) {
   const beforeSnapshot = await getFileSnapshot(change.path);
   if (!snapshotMatches(change, beforeSnapshot)) {
-    return false;
+    return "SKIP_CHANGED";
   }
 
   const current = await readFirstLineRecord(change.path);
   if (current.firstLine !== change.originalFirstLine || current.offset !== change.originalOffset) {
-    return false;
+    return "SKIP_CHANGED";
   }
 
   const inPlaceReplacement = getInPlaceProviderReplacement(change);
   if (inPlaceReplacement) {
-    return tryRewriteProviderInPlace(change, inPlaceReplacement);
+    return await tryRewriteProviderInPlace(change, inPlaceReplacement)
+      ? "APPLIED_IN_PLACE"
+      : "SKIP_CHANGED";
   }
 
   const tmpPath = `${change.path}.provider-sync.${process.pid}.${Date.now()}.tmp`;
@@ -630,11 +651,11 @@ async function tryRewriteCollectedFirstLine(change) {
     const afterSnapshot = await getFileSnapshot(change.path);
     if (!snapshotMatches(change, afterSnapshot)) {
       await fsp.rm(tmpPath, { force: true });
-      return false;
+      return "SKIP_CHANGED";
     }
 
     await fsp.rename(tmpPath, change.path);
-    return true;
+    return "APPLIED";
   } catch (error) {
     await fsp.rm(tmpPath, { force: true });
     throw wrapRolloutFileBusyError(error, change.path, "rewrite");
@@ -771,27 +792,26 @@ export async function applySessionChanges(changes) {
   const skippedPaths = [];
   const appliedPaths = [];
   let appliedChanges = 0;
+  let inPlaceChanges = 0;
+  let results;
 
   if (process.platform === "win32") {
-    const results = await invokeWindowsExclusiveRewriteBatch(normalizedChanges, { requireOriginalMatch: true });
-    for (let index = 0; index < normalizedChanges.length; index += 1) {
-      if (results[index] === "APPLIED") {
-        appliedChanges += 1;
-        appliedPaths.push(normalizedChanges[index].path);
-        await restoreOriginalMtime(normalizedChanges[index].path, normalizedChanges[index].originalMtimeMs);
-      } else {
-        skippedPaths.push(normalizedChanges[index].path);
-      }
-    }
+    results = await invokeWindowsExclusiveRewriteBatch(normalizedChanges, { requireOriginalMatch: true });
   } else {
+    results = [];
     for (const change of normalizedChanges) {
-      if (await tryRewriteCollectedFirstLine(change)) {
-        appliedChanges += 1;
-        appliedPaths.push(change.path);
-        await restoreOriginalMtime(change.path, change.originalMtimeMs);
-      } else {
-        skippedPaths.push(change.path);
-      }
+      results.push(await tryRewriteCollectedFirstLine(change));
+    }
+  }
+
+  for (let index = 0; index < normalizedChanges.length; index += 1) {
+    if (results[index] === "APPLIED" || results[index] === "APPLIED_IN_PLACE") {
+      appliedChanges += 1;
+      inPlaceChanges += results[index] === "APPLIED_IN_PLACE" ? 1 : 0;
+      appliedPaths.push(normalizedChanges[index].path);
+      await restoreOriginalMtime(normalizedChanges[index].path, normalizedChanges[index].originalMtimeMs);
+    } else {
+      skippedPaths.push(normalizedChanges[index].path);
     }
   }
 
@@ -799,6 +819,7 @@ export async function applySessionChanges(changes) {
   skippedPaths.sort((left, right) => left.localeCompare(right));
   return {
     appliedChanges,
+    inPlaceChanges,
     appliedPaths,
     skippedPaths
   };
