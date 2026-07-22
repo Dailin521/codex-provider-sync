@@ -32,6 +32,40 @@ export function readCurrentProviderFromConfigText(configText) {
   return { provider: DEFAULT_PROVIDER, implicit: true };
 }
 
+// Read the root-level `model = "..."` field from a Codex config.toml.
+// We deliberately only consider the first occurrence of `model = "..."`
+// before any `[section]` header. Without this guard, a config like
+//
+//   model_provider = "foo"
+//
+//   [model_providers.foo]
+//   model = "gpt-4o-mini"
+//
+// would return `"gpt-4o-mini"` here, and the per-rollout rewrite step
+// would propagate that provider-section model into every turn_context
+// line — which is wrong, because the user-set root model is the value
+// the Codex CLI/GUI actually use for the next turn.
+//
+// Returns `null` when no root-level `model` is set; callers should
+// treat that as "do not touch the per-turn model field".
+export function readRootModelFromConfigText(configText) {
+  const lines = splitLines(configText);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    if (trimmed.startsWith("[")) {
+      break;
+    }
+    const match = trimmed.match(/^model\s*=\s*"([^"]+)"\s*$/);
+    if (match) {
+      return match[1];
+    }
+  }
+  return null;
+}
+
 export function listConfiguredProviderIds(configText) {
   const providerIds = new Set([DEFAULT_PROVIDER]);
   const regex = /^\[model_providers\.([A-Za-z0-9_.-]+)]\s*$/gm;

@@ -18,6 +18,7 @@ Usage:
   codex-provider status [--codex-home PATH]
   codex-provider sync [--provider ID] [--keep N] [--codex-home PATH]
   codex-provider switch <provider-id> [--model NAME] [--keep-root-model] [--keep N] [--codex-home PATH]
+  codex-provider watch [--codex-home PATH] [--debounce-ms N] [--once] [--no-state-db]
   codex-provider prune-backups [--keep N] [--codex-home PATH]
   codex-provider restore <backup-dir> [--no-config] [--no-db] [--no-sessions] [--codex-home PATH]
   codex-provider install-windows-launcher [--dir PATH] [--codex-home PATH]
@@ -25,6 +26,12 @@ Usage:
 switch flags:
   --model NAME         override root-level model field with NAME (e.g. "MiniMax-M3")
   --keep-root-model    do not touch the root-level model field; only switch model_provider
+
+watch flags:
+  --codex-home PATH    override CODEX_HOME (default: ~/.codex or $CODEX_HOME)
+  --debounce-ms N      wait N milliseconds after a change before syncing (default 750)
+  --once               exit after the first successful sync
+  --no-state-db        only watch config.toml, ignore SQLite state events
 `);
 }
 
@@ -197,7 +204,7 @@ async function main() {
   if (command === "sync") {
     const { runSync } = await loadService();
     const { defaultCodexHome } = await import("./constants.js");
-    const { readConfigText } = await import("./config-file.js");
+    const { readConfigText, readRootModelFromConfigText } = await import("./config-file.js");
     const codexHome = path.resolve(
       flags["codex-home"] ?? process.env.CODEX_HOME ?? defaultCodexHome()
     );
@@ -205,10 +212,7 @@ async function main() {
     let rootModel = null;
     try {
       const cfg = await readConfigText(configPath);
-      const m = cfg.match(/^\s*model\s*=\s*"([^"]+)"\s*$/m);
-      if (m) {
-        rootModel = m[1];
-      }
+      rootModel = readRootModelFromConfigText(cfg);
     } catch {
       // config may be missing in degraded scenarios; carry on without a
       // model rewrite so the rest of the sync still runs.
@@ -256,6 +260,48 @@ async function main() {
       keepCount: parseKeepCount(flags.keep, { allowZero: true })
     });
     console.log(summarizePrune(result));
+    return;
+  }
+
+  if (command === "watch") {
+    const { runWatch } = await import("./watch.js");
+    const debounceMs = flags["debounce-ms"] !== undefined
+      ? parseKeepCount(flags["debounce-ms"], { allowZero: true })
+      : undefined;
+    const handle = await runWatch({
+      codexHome: flags["codex-home"],
+      debounceMs,
+      includeStateDb: !flags["no-state-db"],
+      once: Boolean(flags.once)
+    });
+    // Race the watcher's own `done` promise (which resolves when
+    // `--once` completes or the consecutive-failure auto-shutdown
+    // fires) against the external SIGINT/SIGTERM handler. Whichever
+    // wins, we stop the watcher cleanly and let the process exit.
+    // Without this race, the CLI sits in the event loop forever
+    // after a `--once` run, because Node only exits on its own
+    // when there are no more pending handles.
+    await new Promise((resolve) => {
+      let settled = false;
+      const finish = async (source) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        try {
+          await handle.stop();
+        } catch {
+          // best effort: stop() may already be in flight
+        }
+        resolve(source);
+      };
+      handle.done.then(() => finish("done"), () => finish("done-rejected"));
+      if (handle.signalPromise) {
+        handle.signalPromise.then(() => finish("signal"), () => finish("signal-rejected"));
+      }
+      process.once("SIGINT", () => finish("SIGINT"));
+      process.once("SIGTERM", () => finish("SIGTERM"));
+    });
     return;
   }
 
