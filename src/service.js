@@ -233,7 +233,7 @@ export async function runSync({
       encryptedContentCounts,
       userEventThreadIds,
       threadCwdById
-    } = await collectSessionChanges(codexHome, targetProvider, { skipLockedReads: true });
+    } = await collectSessionChanges(codexHome, targetProvider, { skipLockedReads: true, targetModel: model });
     const cwdStats = await readThreadCwdStats(codexHome);
     const encryptedContentWarning = buildEncryptedContentWarning(encryptedContentCounts, targetProvider);
     emitProgress(onProgress, {

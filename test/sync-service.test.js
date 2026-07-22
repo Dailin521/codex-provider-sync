@@ -812,7 +812,12 @@ test("runSync rewrites turn_context model even when the line is larger than 64 K
 test("runSync rewrites turn_context whose model name contains regex metacharacters", async () => {
   // Names like `gpt-5.4-mini` and `apigather.fixed+name` should
   // be matched literally — `.` is a regex any-char, `+` is a
-  // quantifier, and an unbalanced `{` would refuse to compile.
+  // quantifier, and an unbalanced `{` would refuse to compile. We
+  // rewrite every turn_context.model field to the new target so
+  // the per-turn model is normalised regardless of what was
+  // there before. The decoy line at the bottom (a non-turn_context
+  // event with the literal text in a field) confirms the rewrite
+  // does not over-match into unrelated events.
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "weird(target)+v2"\n');
   const sessionPath = path.join(codexHome, "sessions", "2026", "06", "09", "rollout-a.jsonl");
@@ -821,33 +826,34 @@ test("runSync rewrites turn_context whose model name contains regex metacharacte
     provider: "apigather",
     model: "weird(target)+v2"
   });
-  // Also throw in a decoy line with `weirdAtargetAv2` so we can
-  // confirm the regex does not over-match.
+  // A second turn_context with a different model that has the same
+  // metacharacter pattern; both must be normalised to the target.
   await fs.appendFile(sessionPath, JSON.stringify({
     timestamp: "2026-06-09T09:16:03.881Z", type: "turn_context",
     payload: { turn_id: "decoy", model: "weirdAtargetAv2" }
   }) + "\n", "utf8");
+  // A non-turn_context event whose text happens to include the
+  // literal model string. The rewrite must NOT touch this line.
+  await fs.appendFile(sessionPath, JSON.stringify({
+    timestamp: "2026-06-09T09:16:03.882Z", type: "user_message",
+    payload: { message: "echo weird(target)+v2 please" }
+  }) + "\n", "utf8");
 
-  // Pin target = same as source: still re-runs the rewrite, but
-  // also confirms no-op (same model) case does not corrupt the
-  // decoy.
   const result = await runSync({ codexHome, model: "weird(target)+v2" });
   assert.equal(result.changedSessionFiles, 1);
 
   const lines = (await fs.readFile(sessionPath, "utf8")).split("\n").filter(Boolean);
-  const turnContextLines = lines
-    .map((line) => JSON.parse(line))
-    .filter((entry) => entry.type === "turn_context");
-  // The original two lines plus the decoy should both still
-  // parse cleanly. The decoy's model must be untouched.
-  assert.equal(turnContextLines.length, 3);
-  for (const entry of turnContextLines) {
-    if (entry.payload.turn_id === "decoy") {
-      assert.equal(entry.payload.model, "weirdAtargetAv2");
-    } else {
+  const parsed = lines.map((line) => JSON.parse(line));
+  // Both turn_context lines should now have the target model.
+  for (const entry of parsed) {
+    if (entry.type === "turn_context") {
       assert.equal(entry.payload.model, "weird(target)+v2");
     }
   }
+  // The non-turn_context line must be left alone.
+  const userMessage = parsed.find((entry) => entry.type === "user_message");
+  assert.ok(userMessage, "user_message line should still be present");
+  assert.equal(userMessage.payload.message, "echo weird(target)+v2 please");
 });
 
 test("runSync leaves rollout files alone when original turn_context model already equals target", async () => {
