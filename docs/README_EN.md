@@ -2,236 +2,104 @@
 
 # codex-provider-sync
 
-### Keep Codex history visible after switching between providers
+### Keep Codex history visible after switching Providers
 
 [![CI](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml)
-[![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)](https://github.com/Dailin521/codex-provider-sync)
-[![Node](https://img.shields.io/badge/node-16%2B-brightgreen.svg)](https://nodejs.org/)
+[![Release](https://img.shields.io/github/v/release/Dailin521/codex-provider-sync)](https://github.com/Dailin521/codex-provider-sync/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
-[![Community](https://img.shields.io/badge/community-LINUX%20DO-2ea043.svg)](https://linux.do/)
 
-English | [中文](../README.md)
+[Download Windows GUI](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [中文](../README.md) · English
 
 </div>
 
-## What It Solves
+## When You Need It
 
-Codex session visibility can break after you switch `model_provider`.
+After switching `model_provider`, older Codex sessions may disappear from Desktop or `/resume`. The sessions are usually still present, but their rollout, SQLite, or project-visibility metadata still points to the previous Provider.
 
-Typical symptom:
+Use this tool when:
 
-- old sessions are visible under one provider
-- then disappear after switching to another provider
-- `codex resume` and Codex App may disagree because session metadata is stored in both rollout files and SQLite
+- switching between an official subscription (whose internal Provider is `openai`) and a custom relay;
+- switching configurations that must use different `model_provider` IDs;
+- rollout and SQLite Provider or model metadata has become inconsistent; or
+- you want changes to `config.toml`, SQLite, or its WAL to trigger synchronization automatically.
 
-`codex-provider-sync` fixes that by updating both:
+If all of your relays can reliably reuse one `model_provider` ID and history remains visible, using that shared ID is simpler and no synchronization is needed. This project is mainly useful when Provider IDs cannot be unified or when switching between official and custom Providers.
 
-- `~/.codex/sessions` and `~/.codex/archived_sessions`
-- the Codex state database, usually `~/.codex/sqlite/state_5.sqlite`
+The tool does not sign in, manage accounts, or switch authentication. Switch Provider using your normal workflow first, then synchronize history.
 
-Older Codex layouts may still use `~/.codex/state_5.sqlite`; the tool detects the active location and reports it in `codex-provider status`.
+## What It Updates
 
-## GUI For Windows
-
-If you want a normal Windows app instead of Node/npm, download `CodexProviderSync.exe` from Releases.
-
-The GUI app:
-
-- scans the current `.codex` home
-- shows provider distribution from rollout files and SQLite
-- lets you choose a target provider from detected and saved providers
-- can optionally update root `model_provider` in `config.toml`
-- keeps the latest 5 managed backups by default, with a configurable retention count
-- can manually clean old managed backups from the app
-- can restore from backup without using a terminal
-- writes UTF-8 daily execution logs under `%AppData%\codex-provider-sync\logs`
-- keeps the most recent 30 days of execution logs and can open the log folder from the app
-- checks for a stable GitHub Release once on the first launch of each local day, with a 10-second lookup deadline
-- keeps manual update checks available; automatic lookup failures are logged without blocking startup
-
-For GUI-specific usage notes, see [README_GUI_ZH.md](README_GUI_ZH.md).
-
-## Install
-
-```bash
-npm install -g git+https://github.com/Dailin521/codex-provider-sync.git
-```
-
-Requirements:
-
-- Node.js `16+`
-- Node.js 24+ uses the built-in `node:sqlite` module; older Node.js releases use the optional `better-sqlite3` dependency.
-- standard `~/.codex` layout
-- Windows is the primary tested target for now
-
-For end users, the GUI EXE is the recommended path. The npm CLI remains available for power users and automation.
+- Rollout metadata under `~/.codex/sessions` and `~/.codex/archived_sessions`.
+- Codex SQLite thread records. It prefers `~/.codex/sqlite/state_5.sqlite` and supports the legacy `~/.codex/state_5.sqlite` location.
+- Project-visibility path information and related model metadata when required.
+- Managed backups before each synchronization, with restore and pruning support.
+- Large rollout files in place when safe, with automatic fallback to a full safe rewrite.
+- Automatic CLI synchronization after `config.toml`, SQLite, or WAL changes.
 
 ## Quick Start
 
-GUI:
+### Windows GUI
 
-- download `CodexProviderSync.exe` from Releases
-- open it and click `Refresh`
-- choose the target provider
-- click `Execute`
+For normal Windows use, download and extract `CodexProviderSync.exe` from [Releases](https://github.com/Dailin521/codex-provider-sync/releases/latest):
 
-If you already switched auth/provider using your usual method:
+1. Open `CodexProviderSync.exe`.
+2. Click `刷新` (Refresh).
+3. Select the target Provider.
+4. Click `立即同步` (Sync Now).
 
-```bash
-codex-provider sync
-```
+The GUI keeps backups and displays the synchronization result. It checks for a stable release in the background on the first launch of each local day, with a 10-second lookup deadline. Manual update checks remain available. Execution logs are stored under `%AppData%\codex-provider-sync\logs`.
 
-If you want to change the root `model_provider` and sync history in one step:
+The Windows executable is currently unsigned, so browser downloads may trigger a SmartScreen warning. Download it only from this project's Releases and verify the matching SHA-256 when needed.
 
-```bash
-codex-provider switch openai
-codex-provider switch apigather
-```
+See [README_GUI_ZH.md](README_GUI_ZH.md) for the full Windows guide. A self-built Avalonia macOS app is also available; see [README_MAC_GUI_ZH.md](README_MAC_GUI_ZH.md).
 
-If you want a different automatic backup retention count for one run:
+### CLI
+
+The CLI requires Node.js `16+`:
 
 ```bash
-codex-provider sync --keep 5
-codex-provider switch apigather --keep 10
-```
-
-Check current state first:
-
-```bash
-codex-provider status
-```
-
-Install a Windows double-click launcher (placed on your Desktop by default):
-
-```bash
-codex-provider install-windows-launcher
-```
-
-Rollback from a backup:
-
-```bash
-codex-provider restore C:\Users\you\.codex\backups_state\provider-sync\<timestamp>
-```
-
-Clean old managed backups manually:
-
-```bash
-codex-provider prune-backups --keep 5
-```
-
-Note: When switching frequently, we recommend consistent six-character ASCII provider IDs, for example configuring logical provider `provider_a` as `prov_a`. The built-in `openai` ID is six characters, making six-character IDs the most broadly compatible choice. With many or large session files, different-length IDs require rewriting entire rollouts and can cause massive disk writes. In-place replacement is used only when the JSON-encoded byte lengths match and no model fields need rewriting; all other cases fall back to the full safe rewrite.
-
-## AI Quick Run
-
-If you want an AI assistant to handle this in one shot, copy this prompt:
-
-```text
-Help me fix Codex session visibility with codex-provider-sync.
-
-Steps:
-1. Run `codex-provider status`.
-2. If my current provider is already correct, run `codex-provider sync`.
-3. If I explicitly want to switch provider, run `codex-provider switch <provider-id>` instead.
-4. If `state_5.sqlite` is currently in use, tell me to close Codex / Codex App / app-server and retry.
-5. If sync skips locked rollout files, tell me which files were skipped and remind me to rerun `codex-provider sync` later.
-6. Summarize the final provider counts in rollout files and SQLite.
-```
-
-If the user prefers the GUI, the AI can instead guide these steps:
-
-1. Open `CodexProviderSync.exe`
-2. Confirm the `.codex` path
-3. Click `Refresh`
-4. Pick the target provider from the list
-5. Enable the config checkbox only if root `model_provider` should also change
-6. Click `Execute`
-7. Read the log panel for backup path, updated rollout files, SQLite rows, and skipped locked files
-
-Quick mapping:
-
-- inspect only: `codex-provider status`
-- fix visibility under current provider: `codex-provider sync`
-- switch provider and sync: `codex-provider switch openai`
-- install a desktop double-click launcher: `codex-provider install-windows-launcher`
-- roll back a mistake: `codex-provider restore <backup-dir>`
-
-## Commands
-
-- `codex-provider status`
-  - shows current provider, the detected SQLite database path, and provider distribution in rollout files and SQLite
-- `codex-provider sync`
-  - syncs history to the current provider
-  - `--provider <id>` overrides the target provider
-  - if root `model_provider` is missing, it falls back to `openai`
-- `codex-provider switch <provider-id>`
-  - updates root `model_provider` in `config.toml`
-  - immediately runs a sync
-  - `--keep <n>` overrides how many managed backups are retained after the run
-- `codex-provider prune-backups`
-  - manually removes older managed backups and keeps the newest `n`
-- `codex-provider restore <backup-dir>`
-  - restores a previous backup
-  - use `--no-config`, `--no-db`, or `--no-sessions` to skip a restore target
-- `codex-provider install-windows-launcher`
-  - creates two files on the Desktop by default
-  - `Codex Provider Sync.vbs`: hidden double-click launcher with a result popup
-  - `Codex Provider Sync.cmd`: visible console version for troubleshooting
-  - use `--dir <path>` to choose another install directory
-  - use `--codex-home <path>` to bake a fixed `CODEX_HOME` into the launcher
-
-```bash
+npm install -g git+https://github.com/Dailin521/codex-provider-sync.git
 codex-provider status
 codex-provider sync
-codex-provider sync --keep 5
-codex-provider sync --provider openai
-codex-provider switch openai
-codex-provider switch apigather
-codex-provider prune-backups --keep 5
-codex-provider install-windows-launcher
-codex-provider install-windows-launcher --dir D:\Tools
-codex-provider install-windows-launcher --codex-home C:\Users\you\.codex
-codex-provider restore C:\Users\you\.codex\backups_state\provider-sync\20260319T042708906Z
-codex-provider status --codex-home C:\Users\you\.codex
-codex-provider sync --codex-home C:\Users\you\.codex
-codex-provider switch apigather --codex-home C:\Users\you\.codex
-codex-provider restore C:\Users\you\.codex\backups_state\provider-sync\20260319T042708906Z
 ```
 
-## Safety
+Common commands:
 
-Before each sync, the tool creates a backup under:
+| Command | Purpose |
+| --- | --- |
+| `codex-provider status` | Inspect the current Provider, rollout files, SQLite, and project visibility |
+| `codex-provider sync` | Synchronize history to the current Provider without changing authentication |
+| `codex-provider switch <provider-id>` | Change the root `model_provider`, then synchronize |
+| `codex-provider restore <backup-dir>` | Restore a selected backup |
+| `codex-provider prune-backups --keep 5` | Keep only the five newest managed backups |
+| `codex-provider watch` | Watch config, SQLite, and WAL changes and synchronize automatically |
+| `codex-provider watch --once` | Exit after the first change is synchronized successfully |
+
+`switch` accepts `--model <NAME>` to set the root model explicitly, or `--keep-root-model` to change only the Provider. All main commands accept `--codex-home <PATH>`.
+
+Node.js 24+ uses the built-in `node:sqlite` module. Older supported Node.js releases use the optional `better-sqlite3` dependency.
+
+## Safety and Limitations
+
+Before each `sync` or `switch`, the tool creates a backup under:
 
 ```text
 ~/.codex/backups_state/provider-sync/<timestamp>
 ```
 
-It also uses:
+- It does not modify messages, session titles, authentication, `auth.json`, or `updated_at`.
+- It does not copy configuration or session files between devices; it only repairs metadata in the current Codex Home.
+- If SQLite is in use, close Codex, Codex App, and app-server before retrying.
+- If a live session locks a rollout file, the tool skips that file and continues. Run sync again after the session ends for a complete update.
+- Sessions containing `encrypted_content` may become visible across Providers/accounts but still fail to continue or compact with `invalid_encrypted_content`.
+- Codex Desktop currently shows only the latest 50 sessions on its first page. If `/resume` can see a session but the project view cannot, inspect the `first page` / `ranks` diagnostics. This tool does not alter timestamps to bypass that upstream limit.
 
-```text
-~/.codex/tmp/provider-sync.lock
-```
+## Documentation
 
-- It does not replace official `codex`.
-- It does not manage `auth.json` or third-party login tools.
-- It does not rewrite message history, titles, cwd, or timestamps.
-- It keeps the newest 5 managed backups by default; GUI retention settings or CLI `--keep <n>` can override that.
-- Manual cleanup and auto-prune only touch backups created by this tool inside `backups_state/provider-sync`.
-- `Codex Provider Sync.vbs` assumes the `codex-provider` command is already available.
-- If `state_5.sqlite` is in use, close Codex / Codex App / app-server and retry.
-- If `state_5.sqlite` is malformed, the tool reports it as malformed/unreadable and blocks sync; back up, repair, or remove the damaged database before retrying.
-- If a live session keeps one rollout file open, `sync` skips that file and reports it. Rerun later.
-- If history contains `encrypted_content`, switching across providers/accounts may restore visibility only; continuing or compacting those sessions can still fail with `invalid_encrypted_content` because this tool cannot re-encrypt Codex history.
-
-## EXE double-click troubleshooting
-
-1. Fully extract the release archive before running `CodexProviderSync.exe`.
-2. If no window appears, open PowerShell in the EXE directory and run `./CodexProviderSync.exe`.
-3. Check Windows SmartScreen, Defender, or third-party antivirus blocks.
-4. Check `%AppData%\codex-provider-sync\startup-error.log`; startup exceptions are written there.
-
-## For AI Agents
-
-For a fuller machine-oriented version, see [AGENTS.md](../AGENTS.md).
+- [Windows GUI guide](README_GUI_ZH.md)
+- [macOS GUI guide](README_MAC_GUI_ZH.md)
+- [中文说明](../README.md)
+- [AI / Agent guide](../AGENTS.md)
 
 ## Development
 
@@ -241,7 +109,7 @@ cd codex-provider-sync
 npm test
 dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj
 pwsh ./scripts/publish-gui.ps1
-node ./src/cli.js status --codex-home C:\path\to\.codex
+./scripts/publish-gui-macos.sh
 ```
 
 ## License

@@ -2,96 +2,82 @@
 
 # codex-provider-sync
 
-### 切换 provider 后，让 Codex 历史会话重新可见
+### 切换 Provider 后，让 Codex 历史会话重新可见
 
 [![CI](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml)
-[![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)](https://github.com/Dailin521/codex-provider-sync)
-[![Node](https://img.shields.io/badge/node-16%2B-brightgreen.svg)](https://nodejs.org/)
+[![Release](https://img.shields.io/github/v/release/Dailin521/codex-provider-sync)](https://github.com/Dailin521/codex-provider-sync/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-中文 | [English](docs/README_EN.md)
+[下载 Windows GUI](https://github.com/Dailin521/codex-provider-sync/releases/latest) · 中文 · [English](docs/README_EN.md)
 
 </div>
 
-## 解决什么问题
+## 什么时候需要它
 
-Codex 切换 `model_provider` 后，旧会话可能在 Desktop 或 `/resume` 里不可见。原因通常不是会话文件丢了，而是 rollout 文件、SQLite 线程表、项目路径缓存里的 provider / 可见性 metadata 不一致。
+Codex 切换 `model_provider` 后，旧会话可能从 Desktop 或 `/resume` 中消失。会话通常没有丢失，而是 rollout、SQLite 和项目可见性 metadata 仍指向原 Provider。
 
-本工具同步这些位置：
+适合使用本工具：
 
-- `~/.codex/sessions`
-- `~/.codex/archived_sessions`
-- `~/.codex/state_5.sqlite`
-- `.codex-global-state.json` 中的项目根路径缓存
+- 在官方订阅（内部 Provider 为 `openai`）和自定义中转之间切换。
+- 多个配置必须使用不同的 `model_provider`，切换后旧会话不可见。
+- rollout 与 SQLite 中的 Provider 或 model 信息不一致。
+- 希望在配置或 SQLite/WAL 变化后自动重新同步。
+
+如果所有中转都能稳定复用同一个 `model_provider`，并且历史会话始终可见，那么统一 Provider ID 是更简单的方案，不需要额外同步。本工具主要用于无法统一 Provider ID，或需要在官方订阅与自定义 Provider 之间切换的场景。
+
+本工具不负责登录、认证或切换账号；请先用原有方式完成 Provider 切换，再执行同步。
+
+## 它会处理什么
+
+- 同步 `~/.codex/sessions` 和 `~/.codex/archived_sessions` 中的 rollout metadata。
+- 同步 Codex SQLite 线程记录；优先检测 `~/.codex/sqlite/state_5.sqlite`，并兼容旧路径 `~/.codex/state_5.sqlite`。
+- 修复项目可见性相关路径信息，并在需要时同步相关 model metadata。
+- 每次同步前自动备份，支持恢复和清理旧备份。
+- 大型 rollout 文件在满足条件时原地更新，否则自动使用完整安全重写。
+- CLI `watch` 可监听 `config.toml`、SQLite 及 WAL 变化并自动同步。
 
 ## 快速使用
 
-Windows 用户优先下载 Release 里的 `CodexProviderSync.exe`：
+### Windows GUI
+
+普通 Windows 用户建议直接从 [Releases](https://github.com/Dailin521/codex-provider-sync/releases/latest) 下载并解压：
 
 1. 打开 `CodexProviderSync.exe`
 2. 点击“刷新”
 3. 选择目标 Provider
 4. 点击“立即同步”
 
-Windows GUI 每天首次启动会在后台检查一次本项目最新的稳定版 GitHub Release，也可以随时点击右侧的“检查更新”手动重试。自动和手动版本查询最多等待 10 秒；网络或代理异常不会阻止软件启动，自动检查失败也不会弹窗。确认更新后，程序会下载 `CodexProviderSync.exe`、校验同版本发布的 SHA-256 文件、退出并由临时更新器再次校验后原子替换原 EXE，再自动重启。更新器临时目录会在后续启动时自动清理。若 EXE 所在目录没有写入权限，更新不会覆盖旧版本，程序会尽力重启旧版，并在提示中保留下载路径供手动安装。
+GUI 会保留备份并显示同步结果。每天首次启动会在后台检查一次稳定版更新，网络查询最多等待 10 秒；也可以随时手动检查。执行日志保存在 `%AppData%\codex-provider-sync\logs`。
 
-macOS 用户可使用 Avalonia 桌面版，构建说明见 [README_MAC_GUI_ZH.md](docs/README_MAC_GUI_ZH.md)。
+项目目前未做 Windows 代码签名，从浏览器下载后可能出现 SmartScreen 提示。请从本项目 Release 下载，并按需核对同版本 SHA-256。
 
-其它环境使用 CLI：
+Windows 完整说明见 [README_GUI_ZH.md](docs/README_GUI_ZH.md)。macOS 用户可自行构建 Avalonia 桌面版，参见 [README_MAC_GUI_ZH.md](docs/README_MAC_GUI_ZH.md)。
+
+### CLI
+
+CLI 支持 Node.js `16+`：
 
 ```bash
 npm install -g git+https://github.com/Dailin521/codex-provider-sync.git
-codex-provider sync
-```
-
-CLI 需要 Node.js `16+`。Node 24+ 会优先使用内置 `node:sqlite`；旧版 Node 会使用可选依赖 `better-sqlite3`。
-
-更多 CLI 常用命令：
-
-```bash
 codex-provider status
 codex-provider sync
-codex-provider sync --provider openai
-codex-provider switch apigather
-codex-provider switch apigather --model "MiniMax-M3"     # 同时改顶层 model
-codex-provider switch apigather --keep-root-model        # 只改 model_provider，不动顶层 model
-codex-provider restore C:\Users\you\.codex\backups_state\provider-sync\<timestamp>
-codex-provider prune-backups --keep 5
 ```
 
-命令含义：
+常用命令：
 
-- `status`：只检查当前 provider、rollout、SQLite、项目可见性诊断。
-- `sync`：不切换登录状态，只把历史会话 metadata 同步到当前 provider。
-- `switch <provider-id>`：修改 `config.toml` 根级 `model_provider` 并默认把顶层 `model` 同步到新 provider section 里的 `model`（可用 `--keep-root-model` 关闭，或用 `--model <NAME>` 显式覆盖），然后执行同步。
-- `restore <backup-dir>`：从备份恢复，支持 `--no-config`、`--no-db`、`--no-sessions`。
-- `prune-backups --keep <n>`：只清理本工具创建的旧备份。
+| 命令 | 用途 |
+| --- | --- |
+| `codex-provider status` | 检查当前 Provider、rollout、SQLite 和项目可见性 |
+| `codex-provider sync` | 将历史会话同步到当前 Provider，不修改登录状态 |
+| `codex-provider switch <provider-id>` | 修改根级 `model_provider` 后执行同步 |
+| `codex-provider restore <backup-dir>` | 从指定备份恢复 |
+| `codex-provider prune-backups --keep 5` | 只保留最近 5 份托管备份 |
+| `codex-provider watch` | 监听配置、SQLite 和 WAL 变化并自动同步 |
+| `codex-provider watch --once` | 第一次变化并成功同步后退出 |
 
-备注：频繁切换时，建议使用统一的 6 字符 ASCII provider ID，例如将逻辑名称 `provider_a` 配置为 `prov_a`。内置的 `openai` ID 正好是 6 个字符，因此统一为 6 字符相对最通用。会话文件很多或体积很大时，不同长度的 ID 需要重写整个 rollout，可能产生巨量磁盘写入；JSON 编码后的字节长度相同且无需同步 model 字段时可原地替换，其他情况仍自动回退到完整安全重写。
+`switch` 支持 `--model <NAME>` 显式设置根级 model，或使用 `--keep-root-model` 只切换 Provider。所有主要命令都支持 `--codex-home <PATH>`。
 
-## 能力边界
-
-本工具只修复“历史会话可见性”相关 metadata，不修改会话内容。
-
-- 不处理登录、认证、`auth.json` 或第三方切号工具。
-- 不修改消息历史、会话标题、对话内容。
-- 不修改 `updated_at`，不通过改变历史排序来修复 Desktop 显示。
-- 不把旧会话里的 `encrypted_content` 重新加密到另一个 provider / account。
-- 含 `encrypted_content` 的旧会话跨 provider/account 后，通常只能恢复列表可见性，继续对话或 compact 仍可能报 `invalid_encrypted_content`。
-
-## Codex Desktop 最近 50 条限制
-
-目前 Codex Desktop 的 Recent/项目侧会话列表存在一个上游显示限制：前端首屏只拉取最近 `50` 条会话。
-
-影响：
-
-- CLI `/resume` 能看到的旧会话，Desktop 项目侧可能仍显示“暂无对话”。
-- 旧项目会话如果排在全局最近 50 条之后，Desktop 首屏可能不会展示。
-- `codex-provider-sync status` / GUI Refresh 会显示 `first page 0/50`、`ranks 64-77` 这类诊断，帮助判断是不是这个问题。
-
-本工具不会通过修改 `updated_at` 或文件时间把旧会话强行挤进前 50。这个问题应由 Codex Desktop 上游改成按项目分页加载，或提高/开放首屏加载数量。
-
-## 安全与排障
+## 安全与限制
 
 每次 `sync` / `switch` 前都会备份到：
 
@@ -99,16 +85,19 @@ codex-provider prune-backups --keep 5
 ~/.codex/backups_state/provider-sync/<timestamp>
 ```
 
-注意：
+- 不修改消息历史、会话标题、认证信息、`auth.json` 或 `updated_at`。
+- 不在多台设备之间复制配置或会话文件；它只修复当前 Codex Home 的 metadata。
+- SQLite 被占用时，需要先关闭 Codex、Codex App 和 app-server 后重试。
+- 活跃会话锁住 rollout 文件时，工具会跳过该文件并继续处理其它会话；结束活跃会话后可再次同步。
+- 含 `encrypted_content` 的会话跨 Provider/account 后，可能只能恢复列表可见性，继续对话或 compact 仍可能报 `invalid_encrypted_content`。
+- Codex Desktop 首屏目前只显示最近 50 条会话。若 `/resume` 可见但项目侧仍不显示，请查看状态中的 `first page` / `ranks` 诊断；本工具不会修改时间戳来绕过此限制。
 
-- 如果 `state_5.sqlite` 被占用，关闭 Codex / Codex App / app-server 后重试。
-- 如果 `state_5.sqlite` 损坏，工具会提示 malformed/unreadable 并停止同步。
-- 如果活跃会话锁住 rollout 文件，工具会跳过该文件并继续处理其它历史会话。
-- 常规执行日志按天写入 `%AppData%\codex-provider-sync\logs\execution-YYYY-MM-DD.log`，默认保留最近 30 天，也可在 GUI 中点击“打开日志目录”。
-- 如果 EXE 双击无反应，先确认已解压，再查看 `%AppData%\codex-provider-sync\startup-error.log` 和当天执行日志，或在 PowerShell 里运行 `./CodexProviderSync.exe`。
-- 内置更新只检查稳定版 GitHub Release，且需要用户在 GUI 中确认；项目目前未做 Windows 代码签名，SHA-256 校验可检测下载损坏，但不能替代代码签名。
+## 文档
 
-Windows GUI 说明见 [README_GUI_ZH.md](docs/README_GUI_ZH.md)，macOS GUI 说明见 [README_MAC_GUI_ZH.md](docs/README_MAC_GUI_ZH.md)。AI / Agent 说明见 [AGENTS.md](AGENTS.md)。
+- [Windows GUI 说明](docs/README_GUI_ZH.md)
+- [macOS GUI 说明](docs/README_MAC_GUI_ZH.md)
+- [English documentation](docs/README_EN.md)
+- [AI / Agent 操作指南](AGENTS.md)
 
 ## 开发
 
