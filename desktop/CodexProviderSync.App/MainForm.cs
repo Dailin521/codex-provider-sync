@@ -7,6 +7,7 @@ public sealed class MainForm : Form
 {
     private readonly CodexSyncService _syncService = new();
     private readonly SettingsService _settingsService = new();
+    private readonly UpdateService _updateService = new();
 
     private readonly ComboBox _codexHomeCombo = new() { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDown };
     private readonly Button _browseButton = new() { Text = "Browse...", AutoSize = true };
@@ -64,6 +65,7 @@ public sealed class MainForm : Form
     private readonly Button _restoreButton = new() { Text = "恢复备份", Dock = DockStyle.Fill, Height = 40 };
     private readonly Button _openBackupButton = new() { Text = "打开备份目录", Dock = DockStyle.Fill, Height = 40 };
     private readonly Button _pruneBackupsButton = new() { Text = "清理旧备份", Dock = DockStyle.Fill, Height = 40 };
+    private readonly Button _checkUpdateButton = new() { Text = "检查更新", Dock = DockStyle.Fill, Height = 40 };
     private readonly Label _busyLabel = new() { AutoSize = true, ForeColor = Color.DarkGreen, Text = "Ready" };
     private readonly Label _warningLine1 = new()
     {
@@ -288,9 +290,10 @@ public sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 11,
+            RowCount = 12,
             Padding = new Padding(12)
         };
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -313,7 +316,8 @@ public sealed class MainForm : Form
         panel.Controls.Add(_restoreButton, 0, 7);
         panel.Controls.Add(_openBackupButton, 0, 8);
         panel.Controls.Add(_pruneBackupsButton, 0, 9);
-        panel.Controls.Add(_busyLabel, 0, 10);
+        panel.Controls.Add(_checkUpdateButton, 0, 10);
+        panel.Controls.Add(_busyLabel, 0, 11);
 
         group.Controls.Add(panel);
         return group;
@@ -440,6 +444,7 @@ public sealed class MainForm : Form
         _restoreButton.Click += async (_, _) => await RestoreBackupAsync();
         _openBackupButton.Click += (_, _) => OpenBackupFolder();
         _pruneBackupsButton.Click += async (_, _) => await PruneBackupsAsync();
+        _checkUpdateButton.Click += async (_, _) => await CheckForUpdatesAsync();
         _providerList.SelectedIndexChanged += (_, _) => UpdateSelectionLabel();
         _codexHomeCombo.Leave += async (_, _) => await PersistHomeSelectionAsync();
     }
@@ -678,6 +683,41 @@ public sealed class MainForm : Form
         });
     }
 
+    private async Task CheckForUpdatesAsync()
+    {
+        await RunBusyAsync("正在检查更新...", async () =>
+        {
+            Version currentVersion = UpdateService.NormalizeVersion(GetType().Assembly.GetName().Version ?? new Version(0, 0, 0));
+            UpdateCheckResult update = await _updateService.CheckForUpdateAsync(currentVersion);
+            if (!update.IsUpdateAvailable)
+            {
+                MessageBox.Show(this, $"当前已是最新版本（v{currentVersion}）。", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            DialogResult choice = MessageBox.Show(
+                this,
+                $"发现新版本 {update.LatestRelease.TagName}（当前 v{currentVersion}）。\n\n是否下载、校验并重启完成更新？",
+                "发现更新",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Information);
+            if (choice != DialogResult.Yes)
+            {
+                return;
+            }
+
+            string updateDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "codex-provider-sync",
+                "updates");
+            DownloadedUpdate downloadedUpdate = await _updateService.DownloadWindowsExeAsync(update.LatestRelease, updateDirectory);
+            string targetExe = Environment.ProcessPath ?? throw new InvalidOperationException("Unable to determine the current executable path.");
+            UpdateApplier.Start(downloadedUpdate.Path, targetExe, downloadedUpdate.Sha256);
+            AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 已下载并校验 {update.LatestRelease.TagName}，正在重启完成更新。");
+            BeginInvoke(Close);
+        });
+    }
+
     private void ReloadRecentHomes()
     {
         string currentText = _codexHomeCombo.Text;
@@ -856,6 +896,7 @@ public sealed class MainForm : Form
         _restoreButton.Enabled = !busy;
         _openBackupButton.Enabled = !busy;
         _pruneBackupsButton.Enabled = !busy;
+        _checkUpdateButton.Enabled = !busy;
         _providerList.Enabled = !busy;
         _manualProviderText.Enabled = !busy;
         _codexHomeCombo.Enabled = !busy;
