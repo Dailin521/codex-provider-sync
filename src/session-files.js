@@ -547,11 +547,20 @@ async function invokeWindowsExclusiveRewriteBatch(changes, { requireOriginalMatc
         $headerOnly = $sourceOffset -ge [int64]$change.originalSize
 
         if ($null -ne $change.inPlaceByteOffset -and -not [string]::IsNullOrEmpty([string]$change.inPlaceReplacementBase64)) {
+          $originalBytes = [Convert]::FromBase64String([string]$change.inPlaceOriginalBase64)
           $replacementBytes = [Convert]::FromBase64String([string]$change.inPlaceReplacementBase64)
-          $source.Seek([int64]$change.inPlaceByteOffset, [System.IO.SeekOrigin]::Begin) | Out-Null
-          $source.Write($replacementBytes, 0, $replacementBytes.Length)
-          $source.Flush()
-          return "APPLIED_IN_PLACE"
+          try {
+            $source.Seek([int64]$change.inPlaceByteOffset, [System.IO.SeekOrigin]::Begin) | Out-Null
+            $source.Write($replacementBytes, 0, $replacementBytes.Length)
+            $source.Flush()
+            return "APPLIED_IN_PLACE"
+          } catch {
+            $source.Seek([int64]$change.inPlaceByteOffset, [System.IO.SeekOrigin]::Begin) | Out-Null
+            $source.Write($originalBytes, 0, $originalBytes.Length)
+            $source.Flush()
+            # The original bytes are restored; continue into the safe
+            # full-file rewrite below.
+          }
         }
       } else {
         $record = Read-FirstLineRecord $source
@@ -626,6 +635,7 @@ async function invokeWindowsExclusiveRewriteBatch(changes, { requireOriginalMatc
         ...change,
         requireOriginalMatch,
         inPlaceByteOffset: replacement?.byteOffset ?? null,
+        inPlaceOriginalBase64: replacement?.original.toString("base64") ?? null,
         inPlaceReplacementBase64: replacement?.replacement.toString("base64") ?? null
       };
     });
@@ -742,6 +752,7 @@ function getInPlaceProviderReplacement(change) {
 
     return {
       byteOffset: Buffer.byteLength(change.originalFirstLine.slice(0, valueOffset), "utf8"),
+      original: originalProvider,
       replacement: updatedProvider
     };
   }
@@ -751,24 +762,55 @@ function getInPlaceProviderReplacement(change) {
 
 async function tryRewriteProviderInPlace(change, replacement) {
   let handle;
+  let writeStarted = false;
   try {
     handle = await fsp.open(change.path, "r+");
     const stat = await handle.stat();
     if (!snapshotMatches(change, { size: stat.size, mtimeMs: stat.mtimeMs })) {
-      return false;
+      return "SKIP_CHANGED";
     }
 
-    const { bytesWritten } = await handle.write(
-      replacement.replacement,
-      0,
-      replacement.replacement.length,
-      replacement.byteOffset
-    );
-    if (bytesWritten !== replacement.replacement.length) {
-      throw new Error(`Unable to rewrite provider bytes in rollout file: ${change.path}`);
+    let totalWritten = 0;
+    writeStarted = true;
+    while (totalWritten < replacement.replacement.length) {
+      const { bytesWritten } = await handle.write(
+        replacement.replacement,
+        totalWritten,
+        replacement.replacement.length - totalWritten,
+        replacement.byteOffset + totalWritten
+      );
+      if (bytesWritten <= 0) {
+        throw new Error(`Unable to rewrite provider bytes in rollout file: ${change.path}`);
+      }
+      totalWritten += bytesWritten;
     }
-    return true;
+    await handle.sync();
+    return "APPLIED_IN_PLACE";
   } catch (error) {
+    if (handle && writeStarted) {
+      try {
+        let totalRestored = 0;
+        while (totalRestored < replacement.original.length) {
+          const { bytesWritten } = await handle.write(
+            replacement.original,
+            totalRestored,
+            replacement.original.length - totalRestored,
+            replacement.byteOffset + totalRestored
+          );
+          if (bytesWritten <= 0) {
+            throw new Error(`Unable to restore provider bytes in rollout file: ${change.path}`);
+          }
+          totalRestored += bytesWritten;
+        }
+        await handle.sync();
+        return "FALLBACK";
+      } catch (restoreError) {
+        throw new AggregateError(
+          [error, restoreError],
+          `Unable to restore provider bytes after an in-place rewrite failure: ${change.path}`
+        );
+      }
+    }
     throw wrapRolloutFileBusyError(error, change.path, "rewrite");
   } finally {
     await handle?.close();
@@ -788,9 +830,10 @@ async function tryRewriteCollectedFirstLine(change) {
 
   const inPlaceReplacement = getInPlaceProviderReplacement(change);
   if (inPlaceReplacement) {
-    return await tryRewriteProviderInPlace(change, inPlaceReplacement)
-      ? "APPLIED_IN_PLACE"
-      : "SKIP_CHANGED";
+    const inPlaceResult = await tryRewriteProviderInPlace(change, inPlaceReplacement);
+    if (inPlaceResult !== "FALLBACK") {
+      return inPlaceResult;
+    }
   }
 
   const tmpPath = `${change.path}.provider-sync.${process.pid}.${Date.now()}.tmp`;
