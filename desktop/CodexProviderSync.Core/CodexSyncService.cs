@@ -125,7 +125,11 @@ public sealed class CodexSyncService
 
         await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "sync");
 
-        SessionChangeCollection sessionInfo = await _sessionRolloutService.CollectSessionChangesAsync(codexHome, targetProvider, skipLockedReads: true);
+        SessionChangeCollection sessionInfo = await _sessionRolloutService.CollectSessionChangesAsync(
+            codexHome,
+            targetProvider,
+            skipLockedReads: true,
+            targetModel: targetModel);
         IReadOnlyList<ThreadCwdStat> workspaceCwdStats = await _globalStateService.ReadThreadCwdStatsAsync(codexHome);
         string? encryptedContentWarning = BuildEncryptedContentWarning(sessionInfo.EncryptedContentCounts, targetProvider);
         (IReadOnlyList<SessionChange> writableChanges, IReadOnlyList<SessionChange> lockedChanges) =
@@ -283,11 +287,11 @@ public sealed class CodexSyncService
 
         try
         {
-            // Forward the resolved model to RunSyncAsync so the per-thread
-            // SQLite `model` column also gets aligned with the new value. If
-            // the switch did not apply a model (keepRootModel, no model
-            // found, etc.), pass null so the legacy behaviour is preserved.
-            string? modelForThreads = modelSync.Applied ? modelSync.Model : null;
+            // Even when the switch keeps the existing root model, keep
+            // SQLite and rollout turn_context fields aligned with it.
+            string? modelForThreads = modelSync.Applied
+                ? modelSync.Model
+                : _configFileService.ReadRootModelFromConfigText(nextConfigText);
             SyncResult result = await RunSyncAsync(codexHome, provider, originalConfigText, keepCount, model: modelForThreads);
             return new SyncResult
             {

@@ -287,11 +287,12 @@ function parseSessionMetaRecord(firstLine) {
 // `"type":"turn_context"` and grabbing the first `"model":"<value>"`
 // that follows is enough for the first `turn_context` of the file,
 // because rollout lines are single JSON objects.
-const ROLLOUT_TURNCONTEXT_MODEL_RE = /"type"\s*:\s*"turn_context"[\s\S]*?"model"\s*:\s*"((?:[^"\\]|\\.)*)"/;
+const ROLLOUT_TURNCONTEXT_TYPE_RE = /"type"\s*:\s*"turn_context"/;
 
-async function readFirstTurnContextModel(rolloutPath, { firstLineOffset, firstLineLength } = {}) {
+async function readTurnContextModels(rolloutPath, { firstLineOffset, firstLineLength } = {}) {
   const headerSkip = Math.max(0, firstLineOffset ?? 0);
   const headerLength = Math.max(0, firstLineLength ?? 0);
+  const models = [];
 
   const stream = fs.createReadStream(rolloutPath, {
     encoding: "utf8",
@@ -308,22 +309,21 @@ async function readFirstTurnContextModel(rolloutPath, { firstLineOffset, firstLi
       if (!line.includes('"turn_context"')) {
         continue;
       }
-      const match = line.match(ROLLOUT_TURNCONTEXT_MODEL_RE);
-      if (!match) {
+      if (!ROLLOUT_TURNCONTEXT_TYPE_RE.test(line)) {
         continue;
       }
-      try {
-        // The captured value is JSON-escaped (e.g. `\\`, `\"`). Decode
-        // it the same way `JSON.parse` would for a string literal.
-        const value = JSON.parse(`"${match[1]}"`);
-        if (typeof value === "string" && value.length > 0) {
-          return value;
+      for (const match of line.matchAll(buildTurnContextModelFieldRegex())) {
+        try {
+          const value = decodeJsonStringLiteral(match[1]);
+          if (typeof value === "string" && value.length > 0) {
+            models.push(value);
+          }
+        } catch {
+          // Leave malformed model literals untouched.
         }
-      } catch {
-        // Skip lines that look like turn_context but fail to parse.
       }
     }
-    return null;
+    return models;
   } catch (error) {
     throw wrapRolloutFileBusyError(error, rolloutPath, "read");
   } finally {
@@ -396,39 +396,40 @@ function rewriteTurnContextModelInLine(line, newModel) {
   if (occurrences.length === 0) {
     return { line, replaced: false, originalModel: null };
   }
-  let originalModel = null;
+  const originalModels = [];
   try {
-    originalModel = decodeJsonStringLiteral(occurrences[0][1]);
+    for (const occurrence of occurrences) {
+      originalModels.push(decodeJsonStringLiteral(occurrence[1]));
+    }
   } catch {
     // The line looks like a turn_context but its `model` value is
     // not a clean JSON string literal. Refuse to touch it rather
     // than guess — the roll-out stays byte-identical.
     return { line, replaced: false, originalModel: null };
   }
-  if (typeof originalModel !== "string") {
+  if (originalModels.some((model) => typeof model !== "string")) {
     return { line, replaced: false, originalModel: null };
   }
   // If every `model` field in the line already equals newModel,
   // there is nothing to rewrite. The line stays byte-identical.
   let alreadyMatches = true;
-  for (const occurrence of occurrences) {
-    let current;
-    try {
-      current = decodeJsonStringLiteral(occurrence[1]);
-    } catch {
-      current = null;
-    }
+  for (const current of originalModels) {
     if (current !== newModel) {
       alreadyMatches = false;
       break;
     }
   }
   if (alreadyMatches) {
-    return { line, replaced: false, originalModel };
+    return { line, replaced: false, originalModel: originalModels[0], originalModels };
   }
   const replacementRegex = buildTurnContextModelFieldRegex();
   const newLine = line.replace(replacementRegex, `"model":${encodeJsonStringLiteral(newModel)}`);
-  return { line: newLine, replaced: true, originalModel };
+  return {
+    line: newLine,
+    replaced: true,
+    originalModel: originalModels[0],
+    originalModels
+  };
 }
 
 function isValidWindowsRewriteResult(result) {
@@ -789,21 +790,20 @@ async function rewriteRolloutModelField(change, targetModel) {
     mtimeMs: beforeStat.mtimeMs
   };
 
-  // Detect the original line separator and trailing-newline state
-  // by reading the file once. Any 0x0d immediately preceding a 0x0a
-  // means CRLF; if we never see 0x0d we treat the file as LF. The
-  // "trailing newline" check covers the three cases we care about:
-  // no terminator, single LF, or CRLF.
-  const rawBuffer = await fsp.readFile(filePath);
-  const lineSeparator = rawBuffer.includes(0x0d) ? "\r\n" : "\n";
-  const lastByte = rawBuffer.length > 0 ? rawBuffer[rawBuffer.length - 1] : null;
-  const secondLastByte = rawBuffer.length > 1 ? rawBuffer[rawBuffer.length - 2] : null;
-  const hasTrailingNewline = lastByte === 0x0a
-    || (lineSeparator === "\r\n" && lastByte === 0x0a && secondLastByte === 0x0d);
+  const lineSeparator = change.originalSeparator === "\r\n" ? "\r\n" : "\n";
 
   let handle;
   try {
     handle = await fsp.open(filePath, "r+");
+    const openedStat = await handle.stat();
+    if (openedStat.size !== beforeSnapshot.size || openedStat.mtimeMs !== beforeSnapshot.mtimeMs) {
+      return { replacedLines: 0, originalTurnContextModels: [] };
+    }
+    const tail = Buffer.alloc(Math.min(2, openedStat.size));
+    if (tail.length > 0) {
+      await handle.read(tail, 0, tail.length, openedStat.size - tail.length);
+    }
+    const hasTrailingNewline = tail.length > 0 && tail[tail.length - 1] === 0x0a;
     const stream = handle.createReadStream({ encoding: "utf8" });
     const reader = readline.createInterface({ input: stream, crlfDelay: Infinity });
     const tmpPath = `${filePath}.provider-sync-model.${process.pid}.${Date.now()}.tmp`;
@@ -831,7 +831,8 @@ async function rewriteRolloutModelField(change, targetModel) {
           replacements += 1;
           originalTurnContextModels.push({
             lineIndex,
-            originalModel: result.originalModel
+            originalModel: result.originalModel,
+            originalModels: result.originalModels
           });
         }
         writer.write(lineSeparator);
@@ -981,10 +982,11 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
       // keep this on the summary so the rewrite step knows what
       // value to swap out, without making collectSessionChanges
       // require a target model.
-      const originalModel = await readFirstTurnContextModel(rolloutPath, {
+      const currentModels = await readTurnContextModels(rolloutPath, {
         firstLineOffset: 0,
         firstLineLength: record.offset
       });
+      const originalModel = currentModels[0] ?? null;
 
       // A file is rewritten when EITHER the provider needs to
       // change OR the per-turn model needs to change. The
@@ -996,9 +998,7 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
       const providerChanged = targetProvider !== "__status_only__" && parsed.payload.model_provider !== targetProvider;
       const modelChanged = typeof targetModel === "string"
         && targetModel.length > 0
-        && typeof originalModel === "string"
-        && originalModel.length > 0
-        && originalModel !== targetModel;
+        && currentModels.some((currentModel) => currentModel !== targetModel);
 
       if (providerChanged || modelChanged) {
         const snapshot = await getFileSnapshot(rolloutPath);
@@ -1182,7 +1182,8 @@ export async function restoreSessionChanges(manifestEntries) {
   }
 
   if (process.platform === "win32") {
-    const changes = manifestEntries.map((entry) => ({
+    const firstLineEntries = manifestEntries.filter((entry) => !entry.modelOnlyChange);
+    const changes = firstLineEntries.map((entry) => ({
       path: entry.path,
       separator: entry.originalSeparator ?? "\n",
       updatedFirstLine: entry.originalFirstLine,
@@ -1196,23 +1197,23 @@ export async function restoreSessionChanges(manifestEntries) {
         `Unable to rewrite rollout file because it is currently in use. Close Codex and the Codex app, then retry. Locked file: ${filePath}`
       );
     }
-    for (const change of changes) {
-      await restoreOriginalMtime(change.path, change.originalMtimeMs);
-    }
     for (const entry of manifestEntries) {
       if (entry.originalTurnContextModels?.length) {
-        await restoreTurnContextModelsInFile(entry.path, entry.originalTurnContextModels);
+        await restoreTurnContextModelsInFile(entry.path, entry.originalTurnContextModels, entry.originalSeparator);
       }
+      await restoreOriginalMtime(entry.path, entry.originalMtimeMs);
     }
     return;
   }
 
   for (const entry of manifestEntries) {
-    await rewriteFirstLine(entry.path, entry.originalFirstLine, entry.originalSeparator ?? "\n");
-    await restoreOriginalMtime(entry.path, entry.originalMtimeMs);
-    if (entry.originalTurnContextModels?.length) {
-      await restoreTurnContextModelsInFile(entry.path, entry.originalTurnContextModels);
+    if (!entry.modelOnlyChange) {
+      await rewriteFirstLine(entry.path, entry.originalFirstLine, entry.originalSeparator ?? "\n");
     }
+    if (entry.originalTurnContextModels?.length) {
+      await restoreTurnContextModelsInFile(entry.path, entry.originalTurnContextModels, entry.originalSeparator);
+    }
+    await restoreOriginalMtime(entry.path, entry.originalMtimeMs);
   }
 }
 
@@ -1227,7 +1228,7 @@ export async function restoreSessionChanges(manifestEntries) {
 // The rewrite path is line-by-line, identical in shape to
 // `rewriteRolloutModelField`, and preserves the original line
 // separator + trailing-newline state of the file.
-async function restoreTurnContextModelsInFile(filePath, originalTurnContextModels) {
+async function restoreTurnContextModelsInFile(filePath, originalTurnContextModels, originalSeparator) {
   if (!filePath || !Array.isArray(originalTurnContextModels) || originalTurnContextModels.length === 0) {
     return;
   }
@@ -1235,7 +1236,7 @@ async function restoreTurnContextModelsInFile(filePath, originalTurnContextModel
   const byIndex = new Map();
   for (const entry of originalTurnContextModels) {
     if (entry && typeof entry.lineIndex === "number" && typeof entry.originalModel === "string") {
-      byIndex.set(entry.lineIndex, entry.originalModel);
+      byIndex.set(entry.lineIndex, entry);
     }
   }
   if (byIndex.size === 0) {
@@ -1245,16 +1246,20 @@ async function restoreTurnContextModelsInFile(filePath, originalTurnContextModel
   const beforeStat = await fsp.stat(filePath);
   const beforeSnapshot = { size: beforeStat.size, mtimeMs: beforeStat.mtimeMs };
 
-  const rawBuffer = await fsp.readFile(filePath);
-  const lineSeparator = rawBuffer.includes(0x0d) ? "\r\n" : "\n";
-  const lastByte = rawBuffer.length > 0 ? rawBuffer[rawBuffer.length - 1] : null;
-  const secondLastByte = rawBuffer.length > 1 ? rawBuffer[rawBuffer.length - 2] : null;
-  const hasTrailingNewline = lastByte === 0x0a
-    || (lineSeparator === "\r\n" && lastByte === 0x0a && secondLastByte === 0x0d);
+  const lineSeparator = originalSeparator === "\r\n" ? "\r\n" : "\n";
 
   let handle;
   try {
     handle = await fsp.open(filePath, "r+");
+    const openedStat = await handle.stat();
+    if (openedStat.size !== beforeSnapshot.size || openedStat.mtimeMs !== beforeSnapshot.mtimeMs) {
+      return;
+    }
+    const tail = Buffer.alloc(Math.min(2, openedStat.size));
+    if (tail.length > 0) {
+      await handle.read(tail, 0, tail.length, openedStat.size - tail.length);
+    }
+    const hasTrailingNewline = tail.length > 0 && tail[tail.length - 1] === 0x0a;
     const stream = handle.createReadStream({ encoding: "utf8" });
     const reader = readline.createInterface({ input: stream, crlfDelay: Infinity });
     const tmpPath = `${filePath}.provider-sync-restore.${process.pid}.${Date.now()}.tmp`;
@@ -1275,8 +1280,8 @@ async function restoreTurnContextModelsInFile(filePath, originalTurnContextModel
           return;
         }
         lineIndex += 1;
-        const restoreTo = byIndex.get(lineIndex);
-        if (restoreTo !== undefined && line.includes('"turn_context"')) {
+        const restoreEntry = byIndex.get(lineIndex);
+        if (restoreEntry !== undefined && line.includes('"turn_context"')) {
           // The current line is a turn_context line whose
           // per-turn `model` field we need to put back. We only
           // touch it if it currently holds some other value
@@ -1284,7 +1289,7 @@ async function restoreTurnContextModelsInFile(filePath, originalTurnContextModel
           // already correct, skip the rewrite so the file stays
           // byte-identical and we don't burn IOPS on no-op
           // edits).
-          const newLine = restoreTurnContextModelInLine(line, restoreTo);
+          const newLine = restoreTurnContextModelInLine(line, restoreEntry);
           if (newLine !== line) {
             replacements += 1;
             writer.write(lineSeparator);
@@ -1324,7 +1329,7 @@ async function restoreTurnContextModelsInFile(filePath, originalTurnContextModel
   }
 }
 
-function restoreTurnContextModelInLine(line, originalModel) {
+function restoreTurnContextModelInLine(line, backup) {
   if (!line || !line.includes('"turn_context"')) {
     return line;
   }
@@ -1336,19 +1341,27 @@ function restoreTurnContextModelInLine(line, originalModel) {
   if (occurrences.length === 0) {
     return line;
   }
-  // Check the first occurrence's current value. If it already
-  // matches `originalModel` there is no work to do.
-  let currentModel = null;
+  const originalModels = Array.isArray(backup.originalModels)
+    && backup.originalModels.length === occurrences.length
+    ? backup.originalModels
+    : Array.from({ length: occurrences.length }, () => backup.originalModel);
+  const currentModels = [];
   try {
-    currentModel = decodeJsonStringLiteral(occurrences[0][1]);
+    for (const occurrence of occurrences) {
+      currentModels.push(decodeJsonStringLiteral(occurrence[1]));
+    }
   } catch {
     return line;
   }
-  if (currentModel === originalModel) {
+  if (currentModels.every((model, index) => model === originalModels[index])) {
     return line;
   }
   const replacementRegex = buildTurnContextModelFieldRegex();
-  return line.replace(replacementRegex, `"model":${encodeJsonStringLiteral(originalModel)}`);
+  let index = 0;
+  return line.replace(
+    replacementRegex,
+    () => `"model":${encodeJsonStringLiteral(originalModels[index++])}`
+  );
 }
 
 export function summarizeProviderCounts(providerCounts) {

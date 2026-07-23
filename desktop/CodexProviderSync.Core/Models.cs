@@ -76,16 +76,16 @@ public sealed class SessionChange
     public required long OriginalFileLength { get; init; }
     public required long OriginalLastWriteTimeUtcTicks { get; init; }
     public required string OriginalProvider { get; init; }
-    // The model that the rollout's first `turn_context` event
-    // currently advertises. Used by the rewrite pass to know which
-    // value to swap out across every turn_context line in the file
-    // so that the Codex GUI bottom-right of an old conversation
-    // reflects the active provider's model. Null when the rollout
-    // does not expose a model field we recognise (e.g. legacy or
-    // unusually formatted files), in which case the model rewrite
-    // pass is a no-op.
-    public string? OriginalModel { get; init; }
     public required string UpdatedFirstLine { get; init; }
+    public bool ModelOnlyChange { get; init; }
+    public IReadOnlyList<TurnContextModelBackup> OriginalTurnContextModels { get; set; } = [];
+}
+
+public sealed class TurnContextModelBackup
+{
+    public required int LineIndex { get; init; }
+    public required string OriginalModel { get; init; }
+    public IReadOnlyList<string> OriginalModels { get; init; } = [];
 }
 
 public sealed class SessionChangeCollection
@@ -242,6 +242,8 @@ internal sealed class SessionBackupManifestEntry
     public required string OriginalFirstLine { get; init; }
     public required string OriginalSeparator { get; init; }
     public long? OriginalLastWriteTimeUtcTicks { get; init; }
+    public bool ModelOnlyChange { get; init; }
+    public List<TurnContextModelBackup> OriginalTurnContextModels { get; init; } = [];
 }
 
 public sealed class WorkspaceRootSyncResult

@@ -683,6 +683,34 @@ test("runSwitch emits a warning when the new provider has no model field", async
   assert.match(next, /^model = "gpt-5.4-mini"/m);
 });
 
+test("runSwitch does not treat a provider-section model as the root model", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  const config = `model_provider = "apigather"\n\n[model_providers.apigather]\nmodel = "provider-section-only"\nbase_url = "https://example.com"\n`;
+  await fs.writeFile(path.join(codexHome, "config.toml"), config, "utf8");
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-root-model.jsonl");
+  await writeRolloutWithTurnContext(sessionPath, {
+    id: "thread-root-model",
+    provider: "apigather",
+    model: "original-rollout-model"
+  });
+
+  const result = await runSwitch({ codexHome, provider: "openai" });
+
+  assert.equal(result.modelSync.applied, false);
+  const nextConfig = await fs.readFile(path.join(codexHome, "config.toml"), "utf8");
+  assert.doesNotMatch(nextConfig.split("[model_providers.", 1)[0], /^model\s*=/m);
+  const turnContexts = (await fs.readFile(sessionPath, "utf8"))
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => JSON.parse(line))
+    .filter((entry) => entry.type === "turn_context");
+  assert.ok(turnContexts.length > 0);
+  for (const entry of turnContexts) {
+    assert.equal(entry.payload.model, "original-rollout-model");
+    assert.equal(entry.payload.collaboration_mode.settings.model, "original-rollout-model");
+  }
+});
+
 test("runSwitch rejects --model and --keep-root-model together", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome);

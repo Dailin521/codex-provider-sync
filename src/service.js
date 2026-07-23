@@ -13,6 +13,7 @@ import {
   readConfigText,
   readCurrentProviderFromConfigText,
   readProviderModel,
+  readRootModelFromConfigText,
   setRootModelInConfigText,
   setRootProviderInConfigText,
   writeConfigText
@@ -468,8 +469,7 @@ export async function runSwitch({
     if (modelSync.applied && modelSync.model) {
       modelForThreads = modelSync.model;
     } else {
-      const rootModelMatch = nextConfigText.match(/^\s*model\s*=\s*"([^"]+)"\s*$/m);
-      modelForThreads = rootModelMatch ? rootModelMatch[1] : null;
+      modelForThreads = readRootModelFromConfigText(nextConfigText);
     }
     const syncResult = await runSync({
       codexHome,

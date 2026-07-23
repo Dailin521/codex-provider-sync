@@ -281,6 +281,34 @@ test("runWatch reacts to writes in the SQLite WAL sidecar", async () => {
   await fs.rm(codexHome, { recursive: true, force: true });
 });
 
+test("runWatch attaches when the SQLite WAL sidecar is created later", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  const walPath = path.join(codexHome, "sqlite", "state_5.sqlite-wal");
+  const syncCalls = [];
+  const handle = await runWatch({
+    codexHome,
+    debounceMs: 30,
+    includeStateDb: true,
+    onSync: async () => {
+      syncCalls.push(Date.now());
+      return { targetProvider: "openai", changedSessionFiles: 0, sqliteRowsUpdated: 0 };
+    }
+  });
+
+  await fs.writeFile(walPath, "", "utf8");
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  const before = syncCalls.length;
+  await fs.appendFile(walPath, "wal-created-after-start", "utf8");
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.ok(
+    syncCalls.length > before,
+    "watcher must attach to a WAL sidecar that did not exist at startup"
+  );
+
+  await handle.stop();
+  await fs.rm(codexHome, { recursive: true, force: true });
+});
+
 test("runWatch uses the top-level model field, ignoring provider sections", async () => {
   // Regression guard for owner review: the watcher must read the
   // root-level `model = "..."` line for the per-turn model sync

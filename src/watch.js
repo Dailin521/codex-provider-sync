@@ -50,15 +50,6 @@ function makeDebouncer(delayMs, run) {
   };
 }
 
-async function pathExists(target) {
-  try {
-    await fsp.access(target);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 export async function runWatch({
   codexHome: explicitCodexHome,
   debounceMs = defaultDebounceMs(),
@@ -235,9 +226,6 @@ export async function runWatch({
       const walFile = `${stateDbFile}-wal`;
       const shmFile = `${stateDbFile}-shm`;
       for (const target of [stateDbFile, walFile, shmFile]) {
-        if (!(await pathExists(target))) {
-          continue;
-        }
         // Watch each file directly instead of its parent
         // directory. Watching a directory on Windows enters a
         // libuv path that asserts in src/win/fs-event.c around
@@ -322,6 +310,12 @@ export async function runWatch({
     let current = null;
     const tryAttach = () => {
       if (stopped || current !== null) {
+        return;
+      }
+      // WAL and SHM sidecars may not exist when the watcher starts.
+      // Keep trying quietly so a later Codex launch is still observed.
+      if (!fs.existsSync(stateDbFile)) {
+        setTimeout(tryAttach, 250);
         return;
       }
       let watcher;

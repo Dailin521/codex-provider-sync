@@ -1007,6 +1007,41 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
+    public async Task RunSwitch_KeepRootModelStillAlignsRolloutAndSqlite()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\nmodel = \"kept-root-model\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-keep-root.jsonl");
+        await fixture.WriteRolloutWithTurnContextAsync(
+            sessionPath,
+            "thread-keep-root",
+            "openai",
+            "old-model");
+        await fixture.WriteStateDbAsync(
+        [
+            ("thread-keep-root", "openai", false)
+        ],
+            model: "old-model");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSwitchAsync(
+            fixture.CodexHome,
+            "apigather",
+            keepRootModel: true);
+
+        Assert.False(result.ModelSync.Applied);
+        Assert.Equal(1, result.SqliteModelRowsUpdated);
+        foreach (string line in (await File.ReadAllLinesAsync(sessionPath))
+            .Where(line => line.Contains("\"turn_context\"", StringComparison.Ordinal)))
+        {
+            using JsonDocument document = JsonDocument.Parse(line);
+            Assert.Equal(
+                "kept-root-model",
+                document.RootElement.GetProperty("payload").GetProperty("model").GetString());
+        }
+    }
+
+    [Fact]
     public async Task RunSync_RewritesTurnContextModelFieldInRolloutFiles()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
@@ -1224,7 +1259,7 @@ public sealed class CoreIntegrationTests
                 string model = doc.RootElement.GetProperty("payload").GetProperty("model").GetString()!;
                 if (turnId == "decoy")
                 {
-                    Assert.Equal("weirdAtargetAv2", model);
+                    Assert.Equal("weird(target)+v2", model);
                 }
                 else
                 {
@@ -1233,5 +1268,138 @@ public sealed class CoreIntegrationTests
             }
         }
         Assert.Equal(3, totalContext);
+    }
+
+    [Fact]
+    public async Task RunSync_RewritesModelOnlyChange_AndRestorePreservesOriginalFile()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\r\nmodel = \"MiniMax-M3\"\r\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-model-only.jsonl");
+        await fixture.WriteRolloutWithTurnContextAsync(
+            sessionPath,
+            "thread-model-only",
+            "openai",
+            "gpt-5.4");
+        string crlfContent = (await File.ReadAllTextAsync(sessionPath)).Replace("\n", "\r\n", StringComparison.Ordinal);
+        await File.WriteAllTextAsync(sessionPath, crlfContent);
+        DateTime originalTime = new(2026, 6, 9, 9, 0, 0, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(sessionPath, originalTime);
+        await fixture.WriteStateDbAsync(
+        [
+            ("thread-model-only", "openai", false)
+        ],
+            model: "gpt-5.4");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(1, result.ChangedSessionFiles);
+        Assert.Equal(1, result.SqliteModelRowsUpdated);
+        byte[] syncedBytes = await File.ReadAllBytesAsync(sessionPath);
+        Assert.Contains((byte)'\r', syncedBytes);
+        Assert.EndsWith("\r\n", await File.ReadAllTextAsync(sessionPath), StringComparison.Ordinal);
+        Assert.Equal(originalTime, File.GetLastWriteTimeUtc(sessionPath));
+
+        await service.RunRestoreAsync(fixture.CodexHome, result.BackupDir);
+
+        Assert.Equal(crlfContent, await File.ReadAllTextAsync(sessionPath));
+        Assert.Equal(originalTime, File.GetLastWriteTimeUtc(sessionPath));
+    }
+
+    [Fact]
+    public async Task RunSync_DetectsStaleModelsAfterAnAlreadyMatchingFirstTurn()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\nmodel = \"target-model\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-mixed-models.jsonl");
+        await fixture.WriteRolloutWithTurnContextAsync(
+            sessionPath,
+            "thread-mixed-models",
+            "openai",
+            "target-model");
+        await File.AppendAllTextAsync(sessionPath, JsonSerializer.Serialize(new
+        {
+            timestamp = "2026-06-09T11:16:03.880Z",
+            type = "turn_context",
+            payload = new
+            {
+                turn_id = "stale-turn",
+                model = "stale-top-level",
+                collaboration_mode = new
+                {
+                    mode = "default",
+                    settings = new
+                    {
+                        model = "stale-nested"
+                    }
+                }
+            }
+        }) + "\n");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(1, result.ChangedSessionFiles);
+        foreach (string line in (await File.ReadAllLinesAsync(sessionPath))
+            .Where(line => line.Contains("\"turn_context\"", StringComparison.Ordinal)))
+        {
+            using JsonDocument document = JsonDocument.Parse(line);
+            JsonElement payload = document.RootElement.GetProperty("payload");
+            Assert.Equal("target-model", payload.GetProperty("model").GetString());
+            Assert.Equal(
+                "target-model",
+                payload.GetProperty("collaboration_mode").GetProperty("settings").GetProperty("model").GetString());
+        }
+
+        await service.RunRestoreAsync(fixture.CodexHome, result.BackupDir);
+        string restoredStaleLine = (await File.ReadAllLinesAsync(sessionPath))
+            .Single(line => line.Contains("\"stale-turn\"", StringComparison.Ordinal));
+        using JsonDocument restoredDocument = JsonDocument.Parse(restoredStaleLine);
+        JsonElement restoredPayload = restoredDocument.RootElement.GetProperty("payload");
+        Assert.Equal("stale-top-level", restoredPayload.GetProperty("model").GetString());
+        Assert.Equal(
+            "stale-nested",
+            restoredPayload.GetProperty("collaboration_mode").GetProperty("settings").GetProperty("model").GetString());
+    }
+
+    [Fact]
+    public async Task RestoreBackup_AcceptsVersionOneSessionManifest()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-legacy-manifest.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-legacy-manifest", "apigather");
+        string originalFirstLine = (await File.ReadAllLinesAsync(sessionPath))[0];
+        await fixture.WriteRolloutAsync(sessionPath, "thread-legacy-manifest", "openai");
+
+        string sessionManifest = JsonSerializer.Serialize(new
+        {
+            version = 1,
+            @namespace = AppConstants.BackupNamespace,
+            codexHome = fixture.CodexHome,
+            targetProvider = "openai",
+            createdAt = DateTimeOffset.UtcNow,
+            files = new[]
+            {
+                new
+                {
+                    path = sessionPath,
+                    originalFirstLine,
+                    originalSeparator = "\n"
+                }
+            }
+        });
+        await fixture.WriteBackupAsync(
+            "20260723T000000000Z",
+            ("session-meta-backup.json", sessionManifest),
+            ("config.toml", await File.ReadAllTextAsync(Path.Combine(fixture.CodexHome, "config.toml"))));
+
+        CodexSyncService service = new();
+        await service.RunRestoreAsync(
+            fixture.CodexHome,
+            fixture.BackupPath("20260723T000000000Z"));
+
+        Assert.Equal(originalFirstLine, (await File.ReadAllLinesAsync(sessionPath))[0]);
     }
 }

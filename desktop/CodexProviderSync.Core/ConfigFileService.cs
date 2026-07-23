@@ -132,7 +132,7 @@ public sealed partial class ConfigFileService
                 break;
             }
 
-            if (trimmed.StartsWith("model_provider =", StringComparison.Ordinal))
+            if (Regex.IsMatch(trimmed, "^model_provider\\s*="))
             {
                 lines[index] = $"model_provider = \"{EscapeTomlString(provider)}\"";
                 return string.Join(newline, lines) + (configText.EndsWith(newline, StringComparison.Ordinal) ? newline : string.Empty);
@@ -172,7 +172,7 @@ public sealed partial class ConfigFileService
                 break;
             }
 
-            if (trimmed.StartsWith("model =", StringComparison.Ordinal))
+            if (Regex.IsMatch(trimmed, "^model\\s*="))
             {
                 lines[index] = $"model = \"{EscapeTomlString(model)}\"";
                 return string.Join(newline, lines) + (configText.EndsWith(newline, StringComparison.Ordinal) ? newline : string.Empty);
@@ -195,7 +195,7 @@ public sealed partial class ConfigFileService
         }
 
         List<string> lines = SplitLines(configText).ToList();
-        string sectionHeader = $"[model_providers.{Regex.Escape(provider)}]";
+        string sectionHeader = $"[model_providers.{provider}]";
         int sectionStartIndex = -1;
         for (int index = 0; index < lines.Count; index += 1)
         {
