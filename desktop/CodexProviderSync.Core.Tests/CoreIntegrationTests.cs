@@ -914,6 +914,201 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
+    public async Task RunSync_RewritesPerThreadModelColumnFromConfig()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\nmodel = \"MiniMax-M3\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-a", "openai");
+        await fixture.WriteStateDbAsync(
+        [
+            ("thread-a", "openai", false)
+        ],
+            model: "gpt-5.4-mini");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(1, result.SqliteModelRowsUpdated);
+        await using SqliteConnection connection = new($"Data Source={fixture.StateDbPath()};Mode=ReadOnly;Pooling=False");
+        await connection.OpenAsync();
+        await using SqliteCommand command = connection.CreateCommand();
+        command.CommandText = "SELECT model, model_provider FROM threads WHERE id = 'thread-a'";
+        await using SqliteDataReader reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal("MiniMax-M3", reader.GetString(0));
+        Assert.Equal("openai", reader.GetString(1));
+    }
+
+    [Fact]
+    public async Task RunSync_LeavesPerThreadModelAlone_WhenNoRootModelConfigured()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-a", "openai");
+        await fixture.WriteStateDbAsync(
+        [
+            ("thread-a", "openai", false)
+        ],
+            model: "gpt-5.4-mini");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(0, result.SqliteModelRowsUpdated);
+        await using SqliteConnection connection = new($"Data Source={fixture.StateDbPath()};Mode=ReadOnly;Pooling=False");
+        await connection.OpenAsync();
+        await using SqliteCommand command = connection.CreateCommand();
+        command.CommandText = "SELECT model FROM threads WHERE id = 'thread-a'";
+        Assert.Equal("gpt-5.4-mini", Convert.ToString(await command.ExecuteScalarAsync()));
+    }
+
+    [Fact]
+    public async Task RunSwitch_PropagatesNewModelToSqlitePerThreadColumn()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("""
+            model_provider = "openai"
+            model = "gpt-5.4"
+
+            [model_providers.apigather]
+            name = "apigather"
+            base_url = "https://example.com"
+            model = "MiniMax-M3"
+            """);
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-a", "openai");
+        await fixture.WriteStateDbAsync(
+        [
+            ("thread-a", "openai", false)
+        ],
+            model: "gpt-5.4");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSwitchAsync(
+            fixture.CodexHome,
+            "apigather",
+            keepRootModel: false,
+            model: null);
+
+        Assert.True(result.ModelSync.Applied);
+        Assert.Equal("MiniMax-M3", result.ModelSync.Model);
+        Assert.Equal(1, result.SqliteModelRowsUpdated);
+
+        await using SqliteConnection connection = new($"Data Source={fixture.StateDbPath()};Mode=ReadOnly;Pooling=False");
+        await connection.OpenAsync();
+        await using SqliteCommand command = connection.CreateCommand();
+        command.CommandText = "SELECT model, model_provider FROM threads WHERE id = 'thread-a'";
+        await using SqliteDataReader reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal("MiniMax-M3", reader.GetString(0));
+        Assert.Equal("apigather", reader.GetString(1));
+    }
+
+    [Fact]
+    public async Task RunSwitch_KeepRootModelStillAlignsRolloutAndSqlite()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\nmodel = \"kept-root-model\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-keep-root.jsonl");
+        await fixture.WriteRolloutWithTurnContextAsync(
+            sessionPath,
+            "thread-keep-root",
+            "openai",
+            "old-model");
+        await fixture.WriteStateDbAsync(
+        [
+            ("thread-keep-root", "openai", false)
+        ],
+            model: "old-model");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSwitchAsync(
+            fixture.CodexHome,
+            "apigather",
+            keepRootModel: true);
+
+        Assert.False(result.ModelSync.Applied);
+        Assert.Equal(1, result.SqliteModelRowsUpdated);
+        foreach (string line in (await File.ReadAllLinesAsync(sessionPath))
+            .Where(line => line.Contains("\"turn_context\"", StringComparison.Ordinal)))
+        {
+            using JsonDocument document = JsonDocument.Parse(line);
+            Assert.Equal(
+                "kept-root-model",
+                document.RootElement.GetProperty("payload").GetProperty("model").GetString());
+        }
+    }
+
+    [Fact]
+    public async Task RunSync_RewritesTurnContextModelFieldInRolloutFiles()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\nmodel = \"MiniMax-M3\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutWithTurnContextAsync(sessionPath, "thread-a", "apigather", "gpt-5.4");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(1, result.ChangedSessionFiles);
+        string rewritten = await File.ReadAllTextAsync(sessionPath);
+        using StringReader reader = new(rewritten);
+        string? line;
+        int turnContextCount = 0;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            if (!line.Contains("\"turn_context\"", StringComparison.Ordinal))
+            {
+                continue;
+            }
+            using JsonDocument doc = JsonDocument.Parse(line);
+            string model = doc.RootElement.GetProperty("payload").GetProperty("model").GetString()!;
+            string collabModel = doc.RootElement
+                .GetProperty("payload")
+                .GetProperty("collaboration_mode")
+                .GetProperty("settings")
+                .GetProperty("model")
+                .GetString()!;
+            Assert.Equal("MiniMax-M3", model);
+            Assert.Equal("MiniMax-M3", collabModel);
+            turnContextCount += 1;
+        }
+        Assert.Equal(2, turnContextCount);
+    }
+
+    [Fact]
+    public async Task RunSync_LeavesTurnContextModelFieldAlone_WhenNoRootModelConfigured()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutWithTurnContextAsync(sessionPath, "thread-a", "apigather", "gpt-5.4");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(1, result.ChangedSessionFiles);
+        string rewritten = await File.ReadAllTextAsync(sessionPath);
+        using StringReader reader = new(rewritten);
+        string? line;
+        int turnContextCount = 0;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            if (!line.Contains("\"turn_context\"", StringComparison.Ordinal))
+            {
+                continue;
+            }
+            using JsonDocument doc = JsonDocument.Parse(line);
+            string model = doc.RootElement.GetProperty("payload").GetProperty("model").GetString()!;
+            Assert.Equal("gpt-5.4", model);
+            turnContextCount += 1;
+        }
+        Assert.Equal(2, turnContextCount);
+    }
+
+    [Fact]
     public async Task Status_ReturnsMalformedSqliteAsUnreadable()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
@@ -959,5 +1154,252 @@ public sealed class CoreIntegrationTests
 
         Assert.Contains("model_provider = \"manual\"", await File.ReadAllTextAsync(Path.Combine(fixture.CodexHome, "config.toml")));
         Assert.Contains("\"model_provider\":\"manual\"", await File.ReadAllTextAsync(sessionPath));
+    }
+
+    [Fact]
+    public async Task RunSync_RewritesTurnContextModelField_LinesLargerThan64KB()
+    {
+        // Regression guard for the long-line reader. Codex can pack a
+        // `developer_instructions` blob into a single `turn_context`
+        // payload, easily pushing the encoded JSON past 64 KB. The
+        // previous 64 KB scanner silently returned null for those
+        // files, so the rollout model rewrite was a no-op for
+        // sessions whose first turn was a long planning step.
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\nmodel = \"MiniMax-M3\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-huge.jsonl");
+
+        await fixture.WriteRolloutWithTurnContextPayloadAsync(
+            sessionPath,
+            "thread-huge",
+            "apigather",
+            "gpt-5.4",
+            new Dictionary<string, object>
+            {
+                ["developer_instructions"] = new string('x', 150 * 1024)
+            });
+
+        string onDisk = await File.ReadAllTextAsync(sessionPath);
+        long longestLine = onDisk.Split('\n').Where(line => !string.IsNullOrEmpty(line)).Max(line => (long)line.Length);
+        Assert.True(longestLine > 64 * 1024, $"test setup: longest line should exceed 64 KB; got {longestLine}");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+        Assert.Equal(1, result.ChangedSessionFiles);
+
+        string rewritten = await File.ReadAllTextAsync(sessionPath);
+        int rewrittenCount = 0;
+        using (StringReader reader = new(rewritten))
+        {
+            string? line;
+            while ((line = reader.ReadLine()) is not null)
+            {
+                if (!line.Contains("\"turn_context\"", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                using JsonDocument doc = JsonDocument.Parse(line);
+                Assert.Equal("MiniMax-M3", doc.RootElement.GetProperty("payload").GetProperty("model").GetString());
+                Assert.Equal("MiniMax-M3", doc.RootElement
+                    .GetProperty("payload")
+                    .GetProperty("collaboration_mode")
+                    .GetProperty("settings")
+                    .GetProperty("model")
+                    .GetString());
+                rewrittenCount += 1;
+            }
+        }
+
+        Assert.Equal(2, rewrittenCount);
+    }
+
+    [Fact]
+    public async Task RunSync_RewritesTurnContextModelField_WithRegexMetacharactersInModelName()
+    {
+        // Regression guard for regex escaping in the per-turn
+        // rewrite. A model name containing '.', '+', '*', '?', or
+        // '(' is a regex hazard: '.' is a regex any-char, '+' is a
+        // quantifier, and an unbalanced '{' would refuse to compile.
+        // The rewrite must match literally and not poison a decoy
+        // sibling whose pattern over-matches.
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\nmodel = \"weird(target)+v2\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-rewrite.jsonl");
+        await fixture.WriteRolloutWithTurnContextAsync(sessionPath, "thread-rewrite", "apigather", "weird(target)+v2");
+        await File.AppendAllTextAsync(sessionPath, JsonSerializer.Serialize(new
+        {
+            timestamp = "2026-06-09T09:16:03.881Z",
+            type = "turn_context",
+            payload = new
+            {
+                turn_id = "decoy",
+                model = "weirdAtargetAv2"
+            }
+        }) + "\n");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+        Assert.Equal(1, result.ChangedSessionFiles);
+
+        string rewritten = await File.ReadAllTextAsync(sessionPath);
+        int totalContext = 0;
+        using (StringReader reader = new(rewritten))
+        {
+            string? line;
+            while ((line = reader.ReadLine()) is not null)
+            {
+                if (!line.Contains("\"turn_context\"", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                totalContext += 1;
+                using JsonDocument doc = JsonDocument.Parse(line);
+                string turnId = doc.RootElement.GetProperty("payload").GetProperty("turn_id").GetString()!;
+                string model = doc.RootElement.GetProperty("payload").GetProperty("model").GetString()!;
+                if (turnId == "decoy")
+                {
+                    Assert.Equal("weird(target)+v2", model);
+                }
+                else
+                {
+                    Assert.Equal("weird(target)+v2", model);
+                }
+            }
+        }
+        Assert.Equal(3, totalContext);
+    }
+
+    [Fact]
+    public async Task RunSync_RewritesModelOnlyChange_AndRestorePreservesOriginalFile()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\r\nmodel = \"MiniMax-M3\"\r\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-model-only.jsonl");
+        await fixture.WriteRolloutWithTurnContextAsync(
+            sessionPath,
+            "thread-model-only",
+            "openai",
+            "gpt-5.4");
+        string crlfContent = (await File.ReadAllTextAsync(sessionPath)).Replace("\n", "\r\n", StringComparison.Ordinal);
+        await File.WriteAllTextAsync(sessionPath, crlfContent);
+        DateTime originalTime = new(2026, 6, 9, 9, 0, 0, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(sessionPath, originalTime);
+        await fixture.WriteStateDbAsync(
+        [
+            ("thread-model-only", "openai", false)
+        ],
+            model: "gpt-5.4");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(1, result.ChangedSessionFiles);
+        Assert.Equal(1, result.SqliteModelRowsUpdated);
+        byte[] syncedBytes = await File.ReadAllBytesAsync(sessionPath);
+        Assert.Contains((byte)'\r', syncedBytes);
+        Assert.EndsWith("\r\n", await File.ReadAllTextAsync(sessionPath), StringComparison.Ordinal);
+        Assert.Equal(originalTime, File.GetLastWriteTimeUtc(sessionPath));
+
+        await service.RunRestoreAsync(fixture.CodexHome, result.BackupDir);
+
+        Assert.Equal(crlfContent, await File.ReadAllTextAsync(sessionPath));
+        Assert.Equal(originalTime, File.GetLastWriteTimeUtc(sessionPath));
+    }
+
+    [Fact]
+    public async Task RunSync_DetectsStaleModelsAfterAnAlreadyMatchingFirstTurn()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\nmodel = \"target-model\"\n");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-mixed-models.jsonl");
+        await fixture.WriteRolloutWithTurnContextAsync(
+            sessionPath,
+            "thread-mixed-models",
+            "openai",
+            "target-model");
+        await File.AppendAllTextAsync(sessionPath, JsonSerializer.Serialize(new
+        {
+            timestamp = "2026-06-09T11:16:03.880Z",
+            type = "turn_context",
+            payload = new
+            {
+                turn_id = "stale-turn",
+                model = "stale-top-level",
+                collaboration_mode = new
+                {
+                    mode = "default",
+                    settings = new
+                    {
+                        model = "stale-nested"
+                    }
+                }
+            }
+        }) + "\n");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.Equal(1, result.ChangedSessionFiles);
+        foreach (string line in (await File.ReadAllLinesAsync(sessionPath))
+            .Where(line => line.Contains("\"turn_context\"", StringComparison.Ordinal)))
+        {
+            using JsonDocument document = JsonDocument.Parse(line);
+            JsonElement payload = document.RootElement.GetProperty("payload");
+            Assert.Equal("target-model", payload.GetProperty("model").GetString());
+            Assert.Equal(
+                "target-model",
+                payload.GetProperty("collaboration_mode").GetProperty("settings").GetProperty("model").GetString());
+        }
+
+        await service.RunRestoreAsync(fixture.CodexHome, result.BackupDir);
+        string restoredStaleLine = (await File.ReadAllLinesAsync(sessionPath))
+            .Single(line => line.Contains("\"stale-turn\"", StringComparison.Ordinal));
+        using JsonDocument restoredDocument = JsonDocument.Parse(restoredStaleLine);
+        JsonElement restoredPayload = restoredDocument.RootElement.GetProperty("payload");
+        Assert.Equal("stale-top-level", restoredPayload.GetProperty("model").GetString());
+        Assert.Equal(
+            "stale-nested",
+            restoredPayload.GetProperty("collaboration_mode").GetProperty("settings").GetProperty("model").GetString());
+    }
+
+    [Fact]
+    public async Task RestoreBackup_AcceptsVersionOneSessionManifest()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-legacy-manifest.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-legacy-manifest", "apigather");
+        string originalFirstLine = (await File.ReadAllLinesAsync(sessionPath))[0];
+        await fixture.WriteRolloutAsync(sessionPath, "thread-legacy-manifest", "openai");
+
+        string sessionManifest = JsonSerializer.Serialize(new
+        {
+            version = 1,
+            @namespace = AppConstants.BackupNamespace,
+            codexHome = fixture.CodexHome,
+            targetProvider = "openai",
+            createdAt = DateTimeOffset.UtcNow,
+            files = new[]
+            {
+                new
+                {
+                    path = sessionPath,
+                    originalFirstLine,
+                    originalSeparator = "\n"
+                }
+            }
+        });
+        await fixture.WriteBackupAsync(
+            "20260723T000000000Z",
+            ("session-meta-backup.json", sessionManifest),
+            ("config.toml", await File.ReadAllTextAsync(Path.Combine(fixture.CodexHome, "config.toml"))));
+
+        CodexSyncService service = new();
+        await service.RunRestoreAsync(
+            fixture.CodexHome,
+            fixture.BackupPath("20260723T000000000Z"));
+
+        Assert.Equal(originalFirstLine, (await File.ReadAllLinesAsync(sessionPath))[0]);
     }
 }

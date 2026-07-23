@@ -94,6 +94,88 @@ internal sealed class TestCodexHomeFixture
         await File.WriteAllTextAsync(filePath, $"{first}\n{second}\n");
     }
 
+    public async Task WriteRolloutWithTurnContextAsync(string filePath, string id, string provider, string model)
+    {
+        await WriteRolloutWithTurnContextPayloadAsync(filePath, id, provider, model, extraFields: null);
+    }
+
+    public async Task WriteRolloutWithTurnContextPayloadAsync(
+        string filePath,
+        string id,
+        string provider,
+        string model,
+        Dictionary<string, object>? extraFields)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
+        object payload = new
+        {
+            id,
+            timestamp = "2026-06-09T09:16:03.878Z",
+            cwd = "C:\\AITemp",
+            source = "cli",
+            cli_version = "0.115.0",
+            model_provider = provider
+        };
+        string first = JsonSerializer.Serialize(new
+        {
+            timestamp = "2026-06-09T09:16:03.878Z",
+            type = "session_meta",
+            payload
+        });
+        Dictionary<string, object> turnPayload = new()
+        {
+            ["turn_id"] = "019eabaa-e391-7e21-89cd-e761b5dee114",
+            ["cwd"] = "C:\\AITemp",
+            ["current_date"] = "2026-06-09",
+            ["model"] = model,
+            ["collaboration_mode"] = new
+            {
+                mode = "default",
+                settings = new
+                {
+                    model,
+                    reasoning_effort = "xhigh"
+                }
+            }
+        };
+        if (extraFields is not null)
+        {
+            foreach ((string key, object value) in extraFields)
+            {
+                turnPayload[key] = value;
+            }
+        }
+        string turnContext = JsonSerializer.Serialize(new
+        {
+            timestamp = "2026-06-09T09:16:03.880Z",
+            type = "turn_context",
+            payload = turnPayload
+        });
+        string heartbeat = JsonSerializer.Serialize(new
+        {
+            timestamp = "2026-06-09T10:16:03.880Z",
+            type = "turn_context",
+            payload = new
+            {
+                turn_id = "019eabaa-e391-7e21-89cd-e761b5dee115",
+                cwd = "C:\\AITemp",
+                current_date = "2026-06-09",
+                model,
+                collaboration_mode = new
+                {
+                    mode = "default",
+                    settings = new
+                    {
+                        model,
+                        reasoning_effort = "xhigh"
+                    }
+                }
+            }
+        });
+
+        await File.WriteAllTextAsync(filePath, $"{first}\n{turnContext}\n{heartbeat}\n");
+    }
+
     public async Task AppendEncryptedContentAsync(string filePath)
     {
         await File.AppendAllTextAsync(filePath, "{\"type\":\"event_msg\",\"payload\":{\"encrypted_content\":\"gAAA\"}}\n");
@@ -136,15 +218,20 @@ internal sealed class TestCodexHomeFixture
 
     public async Task WriteStateDbAsync(IEnumerable<(string Id, string ModelProvider, bool Archived)> rows)
     {
-        await WriteStateDbAtAsync(StateDbPath(), rows);
+        await WriteStateDbAtAsync(StateDbPath(), rows, model: null);
+    }
+
+    public async Task WriteStateDbAsync(IEnumerable<(string Id, string ModelProvider, bool Archived)> rows, string? model)
+    {
+        await WriteStateDbAtAsync(StateDbPath(), rows, model: model);
     }
 
     public async Task WriteLegacyStateDbAsync(IEnumerable<(string Id, string ModelProvider, bool Archived)> rows)
     {
-        await WriteStateDbAtAsync(LegacyStateDbPath(), rows);
+        await WriteStateDbAtAsync(LegacyStateDbPath(), rows, model: null);
     }
 
-    private static async Task WriteStateDbAtAsync(string dbPath, IEnumerable<(string Id, string ModelProvider, bool Archived)> rows)
+    public async Task WriteStateDbAtAsync(string dbPath, IEnumerable<(string Id, string ModelProvider, bool Archived)> rows, string? model)
     {
         await using SqliteConnection connection = OpenSqliteConnection(dbPath);
         await connection.OpenAsync();
@@ -155,7 +242,8 @@ internal sealed class TestCodexHomeFixture
               model_provider TEXT,
               cwd TEXT NOT NULL DEFAULT '',
               archived INTEGER NOT NULL DEFAULT 0,
-              first_user_message TEXT NOT NULL DEFAULT ''
+              first_user_message TEXT NOT NULL DEFAULT '',
+              model TEXT
             )
             """;
         await create.ExecuteNonQueryAsync();
@@ -164,12 +252,13 @@ internal sealed class TestCodexHomeFixture
         {
             SqliteCommand insert = connection.CreateCommand();
             insert.CommandText = """
-                INSERT INTO threads (id, model_provider, cwd, archived, first_user_message)
-                VALUES ($id, $provider, 'C:\AITemp', $archived, 'hello')
+                INSERT INTO threads (id, model_provider, cwd, archived, first_user_message, model)
+                VALUES ($id, $provider, 'C:\AITemp', $archived, 'hello', $model)
                 """;
             insert.Parameters.AddWithValue("$id", id);
             insert.Parameters.AddWithValue("$provider", modelProvider);
             insert.Parameters.AddWithValue("$archived", archived ? 1 : 0);
+            insert.Parameters.AddWithValue("$model", (object?)model ?? DBNull.Value);
             await insert.ExecuteNonQueryAsync();
         }
     }

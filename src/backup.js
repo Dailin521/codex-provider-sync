@@ -89,7 +89,7 @@ export async function createBackup({
   await backupGlobalStateFiles(codexHome, backupDir);
 
   const sessionManifest = {
-    version: 1,
+    version: 2,
     namespace: BACKUP_NAMESPACE,
     codexHome,
     targetProvider,
@@ -98,7 +98,16 @@ export async function createBackup({
       path: change.path,
       originalFirstLine: change.originalFirstLine,
       originalSeparator: change.originalSeparator,
-      originalMtimeMs: change.originalMtimeMs
+      originalMtimeMs: change.originalMtimeMs,
+      // Per-line record of the original turn_context.model values
+      // so a failed rollback can put the per-turn model back to
+      // what it was before the sync. Without this, a restore
+      // would only rewind the session_meta line and leave the
+      // per-turn `model` field pointing at the new value, which
+      // is exactly the "half-completed state" the owner review
+      // called out.
+      originalTurnContextModels: change.originalTurnContextModels ?? [],
+      modelOnlyChange: Boolean(change.modelOnlyChange)
     }))
   };
   await fs.writeFile(
@@ -134,11 +143,19 @@ export async function updateSessionBackupManifest(backupDir, sessionChanges) {
   const sessionManifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
   const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
 
+  // Promote older manifests to the v2 schema so restoreSessionChanges
+  // can rely on the per-line `originalTurnContextModels` field.
+  if (sessionManifest.version !== 2) {
+    sessionManifest.version = 2;
+  }
+
   sessionManifest.files = sessionChanges.map((change) => ({
     path: change.path,
     originalFirstLine: change.originalFirstLine,
     originalSeparator: change.originalSeparator,
-    originalMtimeMs: change.originalMtimeMs
+    originalMtimeMs: change.originalMtimeMs,
+    originalTurnContextModels: change.originalTurnContextModels ?? [],
+    modelOnlyChange: Boolean(change.modelOnlyChange)
   }));
   metadata.changedSessionFiles = sessionChanges.length;
 

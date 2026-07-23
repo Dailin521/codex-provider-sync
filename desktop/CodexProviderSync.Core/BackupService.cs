@@ -60,7 +60,7 @@ public sealed class BackupService
         DateTimeOffset createdAt = DateTimeOffset.UtcNow;
         SessionBackupManifest sessionManifest = new()
         {
-            Version = 1,
+            Version = 2,
             Namespace = AppConstants.BackupNamespace,
             CodexHome = codexHome,
             TargetProvider = targetProvider,
@@ -70,7 +70,9 @@ public sealed class BackupService
                 Path = change.Path,
                 OriginalFirstLine = change.OriginalFirstLine,
                 OriginalSeparator = change.OriginalSeparator,
-                OriginalLastWriteTimeUtcTicks = change.OriginalLastWriteTimeUtcTicks
+                OriginalLastWriteTimeUtcTicks = change.OriginalLastWriteTimeUtcTicks,
+                ModelOnlyChange = change.ModelOnlyChange,
+                OriginalTurnContextModels = [.. change.OriginalTurnContextModels]
             }).ToList()
         };
         await File.WriteAllTextAsync(
@@ -193,7 +195,7 @@ public sealed class BackupService
 
         sessionManifest = new SessionBackupManifest
         {
-            Version = sessionManifest.Version,
+            Version = 2,
             Namespace = sessionManifest.Namespace,
             CodexHome = sessionManifest.CodexHome,
             TargetProvider = sessionManifest.TargetProvider,
@@ -203,7 +205,9 @@ public sealed class BackupService
                 Path = change.Path,
                 OriginalFirstLine = change.OriginalFirstLine,
                 OriginalSeparator = change.OriginalSeparator,
-                OriginalLastWriteTimeUtcTicks = change.OriginalLastWriteTimeUtcTicks
+                OriginalLastWriteTimeUtcTicks = change.OriginalLastWriteTimeUtcTicks,
+                ModelOnlyChange = change.ModelOnlyChange,
+                OriginalTurnContextModels = [.. change.OriginalTurnContextModels]
             }).ToList()
         };
         metadata = new BackupMetadataFile
