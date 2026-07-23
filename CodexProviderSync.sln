@@ -11,6 +11,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CodexProviderSync.Mac", "de
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CodexProviderSync.Core", "desktop\CodexProviderSync.Core\CodexProviderSync.Core.csproj", "{0BAD4EAB-F18E-405C-AA1F-0D08B03B599B}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CodexProviderSync.App.Tests", "desktop\CodexProviderSync.App.Tests\CodexProviderSync.App.Tests.csproj", "{C2B35A41-4A58-49EC-A8D1-65F8AA6D9914}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -57,6 +59,18 @@ Global
 		{0BAD4EAB-F18E-405C-AA1F-0D08B03B599B}.Release|x64.Build.0 = Release|Any CPU
 		{0BAD4EAB-F18E-405C-AA1F-0D08B03B599B}.Release|x86.ActiveCfg = Release|Any CPU
 		{0BAD4EAB-F18E-405C-AA1F-0D08B03B599B}.Release|x86.Build.0 = Release|Any CPU
+		{C2B35A41-4A58-49EC-A8D1-65F8AA6D9914}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C2B35A41-4A58-49EC-A8D1-65F8AA6D9914}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C2B35A41-4A58-49EC-A8D1-65F8AA6D9914}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{C2B35A41-4A58-49EC-A8D1-65F8AA6D9914}.Debug|x64.Build.0 = Debug|Any CPU
+		{C2B35A41-4A58-49EC-A8D1-65F8AA6D9914}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{C2B35A41-4A58-49EC-A8D1-65F8AA6D9914}.Debug|x86.Build.0 = Debug|Any CPU
+		{C2B35A41-4A58-49EC-A8D1-65F8AA6D9914}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C2B35A41-4A58-49EC-A8D1-65F8AA6D9914}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C2B35A41-4A58-49EC-A8D1-65F8AA6D9914}.Release|x64.ActiveCfg = Release|Any CPU
+		{C2B35A41-4A58-49EC-A8D1-65F8AA6D9914}.Release|x64.Build.0 = Release|Any CPU
+		{C2B35A41-4A58-49EC-A8D1-65F8AA6D9914}.Release|x86.ActiveCfg = Release|Any CPU
+		{C2B35A41-4A58-49EC-A8D1-65F8AA6D9914}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -65,5 +79,6 @@ Global
 		{046C07E6-8117-4F19-B2CF-683D62D944C9} = {7A1224A0-F22D-34FF-DE0A-A058FAFFD90C}
 		{2F00CBA5-C5E9-42BC-9F25-01641E0B8901} = {7A1224A0-F22D-34FF-DE0A-A058FAFFD90C}
 		{0BAD4EAB-F18E-405C-AA1F-0D08B03B599B} = {7A1224A0-F22D-34FF-DE0A-A058FAFFD90C}
+		{C2B35A41-4A58-49EC-A8D1-65F8AA6D9914} = {7A1224A0-F22D-34FF-DE0A-A058FAFFD90C}
 	EndGlobalSection
 EndGlobal
