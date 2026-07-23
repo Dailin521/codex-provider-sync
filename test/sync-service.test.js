@@ -1420,9 +1420,9 @@ test("applySessionChanges skips rollout files that changed after collection", as
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");
-  await writeRollout(sessionPath, "thread-a", "apigather");
+  await writeRollout(sessionPath, "thread-a", "openai");
 
-  const { changes } = await collectSessionChanges(codexHome, "openai");
+  const { changes } = await collectSessionChanges(codexHome, "prov_a");
   await fs.appendFile(
     sessionPath,
     '{"timestamp":"2026-03-19T00:00:01.000Z","type":"event_msg","payload":{"type":"assistant_message","message":"later"}}\n',
@@ -1434,7 +1434,7 @@ test("applySessionChanges skips rollout files that changed after collection", as
   assert.deepEqual(result.skippedPaths, [sessionPath]);
 
   const rollout = await fs.readFile(sessionPath, "utf8");
-  assert.match(rollout, /"model_provider":"apigather"/);
+  assert.match(rollout, /"model_provider":"openai"/);
   assert.match(rollout, /"message":"later"/);
 });
 
@@ -1467,6 +1467,83 @@ test("applySessionChanges preserves large UTF-8 session metadata", async () => {
   assert.match(rollout, /"note":"保留 UTF-8 内容"/);
   assert.match(rollout, /"message":"你好"/);
   assert.match(rollout, /"large_blob":"数据块数据块/);
+});
+
+test("applySessionChanges replaces equal-length provider IDs in place", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-in-place.jsonl");
+  await writeRollout(sessionPath, "thread-in-place", "openai");
+  await fs.appendFile(
+    sessionPath,
+    `${JSON.stringify({ type: "event_msg", payload: { message: "x".repeat(4 * 1024 * 1024) } })}\n`,
+    "utf8"
+  );
+  const original = (await fs.readFile(sessionPath, "utf8"))
+    .replace('"cwd":"C:\\\\AITemp"', '"cwd":"中文路径"')
+    .replace('"model_provider":"openai"', '"model_provider" : "openai"');
+  await fs.writeFile(sessionPath, original, "utf8");
+  const originalTime = new Date("2026-01-02T03:04:05.000Z");
+  await fs.utimes(sessionPath, originalTime, originalTime);
+
+  const before = await fs.stat(sessionPath);
+  const { changes } = await collectSessionChanges(codexHome, "prov_a");
+  const result = await applySessionChanges(changes);
+  const after = await fs.stat(sessionPath);
+  const rollout = await fs.readFile(sessionPath, "utf8");
+
+  assert.equal(result.appliedChanges, 1);
+  assert.equal(result.inPlaceChanges, 1);
+  if (process.platform !== "win32") {
+    assert.equal(after.ino, before.ino);
+  }
+  assert.equal(Math.round(after.mtimeMs), originalTime.getTime());
+  assert.equal(
+    rollout,
+    original.replace('"model_provider" : "openai"', '"model_provider" : "prov_a"')
+  );
+});
+
+test("applySessionChanges falls back when equal-length provider IDs have different JSON byte lengths", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-escaped-provider.jsonl");
+  await writeRollout(sessionPath, "thread-escaped-provider", "openai");
+
+  const { changes } = await collectSessionChanges(codexHome, 'bad"id');
+  const result = await applySessionChanges(changes);
+  const [firstLine] = (await fs.readFile(sessionPath, "utf8")).split(/\r?\n/);
+
+  assert.equal(result.appliedChanges, 1);
+  assert.equal(result.inPlaceChanges, 0);
+  assert.equal(JSON.parse(firstLine).payload.model_provider, 'bad"id');
+});
+
+test("applySessionChanges falls back when rollout model fields also need rewriting", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-provider-and-model.jsonl");
+  await writeRolloutWithTurnContext(sessionPath, {
+    id: "thread-provider-and-model",
+    provider: "openai",
+    model: "old-model"
+  });
+
+  const { changes } = await collectSessionChanges(
+    codexHome,
+    "prov_a",
+    { targetModel: "target-model" }
+  );
+  const result = await applySessionChanges(changes, { targetModel: "target-model" });
+  const entries = (await fs.readFile(sessionPath, "utf8"))
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => JSON.parse(line));
+
+  assert.equal(result.appliedChanges, 1);
+  assert.equal(result.inPlaceChanges, 0);
+  assert.equal(entries[0].payload.model_provider, "prov_a");
+  for (const entry of entries.filter((item) => item.type === "turn_context")) {
+    assert.equal(entry.payload.model, "target-model");
+    assert.equal(entry.payload.collaboration_mode.settings.model, "target-model");
+  }
 });
 
 test("applySessionChanges restores original rollout mtime", async () => {

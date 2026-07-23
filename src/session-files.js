@@ -433,7 +433,10 @@ function rewriteTurnContextModelInLine(line, newModel) {
 }
 
 function isValidWindowsRewriteResult(result) {
-  return result === "APPLIED" || result === "SKIP_BUSY" || result === "SKIP_CHANGED";
+  return result === "APPLIED"
+    || result === "APPLIED_IN_PLACE"
+    || result === "SKIP_BUSY"
+    || result === "SKIP_CHANGED";
 }
 
 function parseWindowsRewriteResults(stdout, changes) {
@@ -542,6 +545,23 @@ async function invokeWindowsExclusiveRewriteBatch(changes, { requireOriginalMatc
         $separator = [string]$change.originalSeparator
         $sourceOffset = [int64]$change.originalOffset
         $headerOnly = $sourceOffset -ge [int64]$change.originalSize
+
+        if ($null -ne $change.inPlaceByteOffset -and -not [string]::IsNullOrEmpty([string]$change.inPlaceReplacementBase64)) {
+          $originalBytes = [Convert]::FromBase64String([string]$change.inPlaceOriginalBase64)
+          $replacementBytes = [Convert]::FromBase64String([string]$change.inPlaceReplacementBase64)
+          try {
+            $source.Seek([int64]$change.inPlaceByteOffset, [System.IO.SeekOrigin]::Begin) | Out-Null
+            $source.Write($replacementBytes, 0, $replacementBytes.Length)
+            $source.Flush()
+            return "APPLIED_IN_PLACE"
+          } catch {
+            $source.Seek([int64]$change.inPlaceByteOffset, [System.IO.SeekOrigin]::Begin) | Out-Null
+            $source.Write($originalBytes, 0, $originalBytes.Length)
+            $source.Flush()
+            # The original bytes are restored; continue into the safe
+            # full-file rewrite below.
+          }
+        }
       } else {
         $record = Read-FirstLineRecord $source
         $separator = [string]$change.separator
@@ -609,12 +629,19 @@ async function invokeWindowsExclusiveRewriteBatch(changes, { requireOriginalMatc
 `.trim();
 
   try {
+    const manifestChanges = changes.map((change) => {
+      const replacement = requireOriginalMatch ? getInPlaceProviderReplacement(change) : null;
+      return {
+        ...change,
+        requireOriginalMatch,
+        inPlaceByteOffset: replacement?.byteOffset ?? null,
+        inPlaceOriginalBase64: replacement?.original.toString("base64") ?? null,
+        inPlaceReplacementBase64: replacement?.replacement.toString("base64") ?? null
+      };
+    });
     await fsp.writeFile(
       manifestPath,
-      JSON.stringify(changes.map((change) => ({
-        ...change,
-        requireOriginalMatch
-      }))),
+      JSON.stringify(manifestChanges),
       "utf8"
     );
 
@@ -698,15 +725,115 @@ async function rewriteFirstLine(filePath, nextFirstLine, separator) {
   }
 }
 
+function getInPlaceProviderReplacement(change) {
+  if (change.modelRewriteRequired
+      || change.modelOnlyChange
+      || typeof change.originalFirstLine !== "string"
+      || typeof change.originalProvider !== "string"
+      || typeof change.updatedProvider !== "string") {
+    return null;
+  }
+
+  const originalProviderJson = JSON.stringify(change.originalProvider);
+  const updatedProviderJson = JSON.stringify(change.updatedProvider);
+  const originalProvider = Buffer.from(originalProviderJson, "utf8");
+  const updatedProvider = Buffer.from(updatedProviderJson, "utf8");
+  if (originalProvider.length === 0 || originalProvider.length !== updatedProvider.length) {
+    return null;
+  }
+
+  const providerFieldPattern = /"model_provider"\s*:\s*/g;
+  let fieldMatch;
+  while ((fieldMatch = providerFieldPattern.exec(change.originalFirstLine)) !== null) {
+    const valueOffset = fieldMatch.index + fieldMatch[0].length;
+    if (!change.originalFirstLine.startsWith(originalProviderJson, valueOffset)) {
+      continue;
+    }
+
+    return {
+      byteOffset: Buffer.byteLength(change.originalFirstLine.slice(0, valueOffset), "utf8"),
+      original: originalProvider,
+      replacement: updatedProvider
+    };
+  }
+
+  return null;
+}
+
+async function tryRewriteProviderInPlace(change, replacement) {
+  let handle;
+  let writeStarted = false;
+  try {
+    handle = await fsp.open(change.path, "r+");
+    const stat = await handle.stat();
+    if (!snapshotMatches(change, { size: stat.size, mtimeMs: stat.mtimeMs })) {
+      return "SKIP_CHANGED";
+    }
+
+    let totalWritten = 0;
+    writeStarted = true;
+    while (totalWritten < replacement.replacement.length) {
+      const { bytesWritten } = await handle.write(
+        replacement.replacement,
+        totalWritten,
+        replacement.replacement.length - totalWritten,
+        replacement.byteOffset + totalWritten
+      );
+      if (bytesWritten <= 0) {
+        throw new Error(`Unable to rewrite provider bytes in rollout file: ${change.path}`);
+      }
+      totalWritten += bytesWritten;
+    }
+    await handle.sync();
+    return "APPLIED_IN_PLACE";
+  } catch (error) {
+    if (handle && writeStarted) {
+      try {
+        let totalRestored = 0;
+        while (totalRestored < replacement.original.length) {
+          const { bytesWritten } = await handle.write(
+            replacement.original,
+            totalRestored,
+            replacement.original.length - totalRestored,
+            replacement.byteOffset + totalRestored
+          );
+          if (bytesWritten <= 0) {
+            throw new Error(`Unable to restore provider bytes in rollout file: ${change.path}`);
+          }
+          totalRestored += bytesWritten;
+        }
+        await handle.sync();
+        return "FALLBACK";
+      } catch (restoreError) {
+        throw new AggregateError(
+          [error, restoreError],
+          `Unable to restore provider bytes after an in-place rewrite failure: ${change.path}`
+        );
+      }
+    }
+    throw wrapRolloutFileBusyError(error, change.path, "rewrite");
+  } finally {
+    await handle?.close();
+  }
+}
+
 async function tryRewriteCollectedFirstLine(change) {
   const beforeSnapshot = await getFileSnapshot(change.path);
   if (!snapshotMatches(change, beforeSnapshot)) {
-    return false;
+    return "SKIP_CHANGED";
   }
 
   const current = await readFirstLineRecord(change.path);
   if (current.firstLine !== change.originalFirstLine || current.offset !== change.originalOffset) {
-    return false;
+    return "SKIP_CHANGED";
+  }
+
+  const inPlaceReplacement = getInPlaceProviderReplacement(change);
+  if (inPlaceReplacement) {
+    const inPlaceResult = await tryRewriteProviderInPlace(change, inPlaceReplacement);
+    if (inPlaceResult !== "FALLBACK") {
+      return inPlaceResult;
+    }
   }
 
   const tmpPath = `${change.path}.provider-sync.${process.pid}.${Date.now()}.tmp`;
@@ -737,11 +864,11 @@ async function tryRewriteCollectedFirstLine(change) {
     const afterSnapshot = await getFileSnapshot(change.path);
     if (!snapshotMatches(change, afterSnapshot)) {
       await fsp.rm(tmpPath, { force: true });
-      return false;
+      return "SKIP_CHANGED";
     }
 
     await fsp.rename(tmpPath, change.path);
-    return true;
+    return "APPLIED";
   } catch (error) {
     await fsp.rm(tmpPath, { force: true });
     throw wrapRolloutFileBusyError(error, change.path, "rewrite");
@@ -1015,11 +1142,9 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
           originalSize: snapshot.size,
           originalMtimeMs: snapshot.mtimeMs,
           originalProvider: currentProvider,
+          updatedProvider: targetProvider,
           originalModel,
-          // Mark this change as a "model-only" change when the
-          // provider is already correct. The first-line rewrite
-        // path uses this to skip touching the first line at
-        // all — only the per-turn `model` field needs to move.
+          modelRewriteRequired: modelChanged,
           modelOnlyChange: !providerChanged && modelChanged,
           updatedFirstLine: providerChanged ? JSON.stringify(parsed) : record.firstLine
         });
@@ -1036,6 +1161,7 @@ export async function applySessionChanges(changes, options = {}) {
   const skippedPaths = [];
   const appliedPaths = [];
   let appliedChanges = 0;
+  let inPlaceChanges = 0;
 
   // A "model-only" change carries no first-line rewrite. The
   // provider is already correct on disk, so the only thing to
@@ -1052,38 +1178,33 @@ export async function applySessionChanges(changes, options = {}) {
       ? await invokeWindowsExclusiveRewriteBatch(firstLineChanges, { requireOriginalMatch: true })
       : [];
     for (let index = 0; index < firstLineChanges.length; index += 1) {
-      if (results[index] === "APPLIED") {
+      const change = firstLineChanges[index];
+      if (results[index] === "APPLIED" || results[index] === "APPLIED_IN_PLACE") {
         appliedChanges += 1;
-        appliedPaths.push(firstLineChanges[index].path);
-        await restoreOriginalMtime(firstLineChanges[index].path, firstLineChanges[index].originalMtimeMs);
-        // After the first-line rewrite, do a second pass that
-        // updates the per-turn `model` field. This is what the
-        // Codex GUI bottom-right of an old conversation reads.
-        // We also attach the per-line original model list to the
-        // change so the backup manifest can record it for the
-        // restore path.
-        const modelResult = await rewriteRolloutModelField(firstLineChanges[index], targetModel);
-        firstLineChanges[index].originalTurnContextModels = modelResult.originalTurnContextModels;
-        firstLineChanges[index].appliedTurnContextRewrites = modelResult.replacedLines;
-        // The per-turn rewrite is a tmp + rename that resets the
-        // mtime; pin it back to the original so the file's
-        // mtime is preserved end-to-end.
-        await restoreOriginalMtime(firstLineChanges[index].path, firstLineChanges[index].originalMtimeMs);
+        inPlaceChanges += results[index] === "APPLIED_IN_PLACE" ? 1 : 0;
+        appliedPaths.push(change.path);
+        if (change.modelRewriteRequired) {
+          const modelResult = await rewriteRolloutModelField(change, targetModel);
+          change.originalTurnContextModels = modelResult.originalTurnContextModels;
+          change.appliedTurnContextRewrites = modelResult.replacedLines;
+        }
+        await restoreOriginalMtime(change.path, change.originalMtimeMs);
       } else {
-        skippedPaths.push(firstLineChanges[index].path);
+        skippedPaths.push(change.path);
       }
     }
   } else {
     for (const change of firstLineChanges) {
-      if (await tryRewriteCollectedFirstLine(change)) {
+      const result = await tryRewriteCollectedFirstLine(change);
+      if (result === "APPLIED" || result === "APPLIED_IN_PLACE") {
         appliedChanges += 1;
+        inPlaceChanges += result === "APPLIED_IN_PLACE" ? 1 : 0;
         appliedPaths.push(change.path);
-        await restoreOriginalMtime(change.path, change.originalMtimeMs);
-        const modelResult = await rewriteRolloutModelField(change, targetModel);
-        change.originalTurnContextModels = modelResult.originalTurnContextModels;
-        change.appliedTurnContextRewrites = modelResult.replacedLines;
-        // Pin the mtime back after the per-turn rewrite's
-        // tmp+rename, which would otherwise advance it to "now".
+        if (change.modelRewriteRequired) {
+          const modelResult = await rewriteRolloutModelField(change, targetModel);
+          change.originalTurnContextModels = modelResult.originalTurnContextModels;
+          change.appliedTurnContextRewrites = modelResult.replacedLines;
+        }
         await restoreOriginalMtime(change.path, change.originalMtimeMs);
       } else {
         skippedPaths.push(change.path);
@@ -1121,6 +1242,7 @@ export async function applySessionChanges(changes, options = {}) {
   skippedPaths.sort((left, right) => left.localeCompare(right));
   return {
     appliedChanges,
+    inPlaceChanges,
     appliedPaths,
     skippedPaths
   };
