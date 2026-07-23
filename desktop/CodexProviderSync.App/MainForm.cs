@@ -7,6 +7,7 @@ public sealed class MainForm : Form
 {
     private readonly CodexSyncService _syncService = new();
     private readonly SettingsService _settingsService = new();
+    private readonly UpdateService _updateService = new();
 
     private readonly ComboBox _codexHomeCombo = new() { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDown };
     private readonly Button _browseButton = new() { Text = "Browse...", AutoSize = true };
@@ -43,6 +44,30 @@ public sealed class MainForm : Form
         AutoSize = true,
         Margin = new Padding(0, 4, 8, 0)
     };
+    private readonly RadioButton _modelAutoRadio = new()
+    {
+        Text = "跟随 provider 里的 model (默认)",
+        AutoSize = true,
+        Checked = true,
+        Margin = new Padding(0, 2, 12, 2)
+    };
+    private readonly RadioButton _modelKeepRadio = new()
+    {
+        Text = "保留当前顶层 model",
+        AutoSize = true,
+        Margin = new Padding(0, 2, 12, 2)
+    };
+    private readonly RadioButton _modelCustomRadio = new()
+    {
+        Text = "自定义:",
+        AutoSize = true,
+        Margin = new Padding(0, 2, 6, 2)
+    };
+    private readonly TextBox _modelCustomText = new()
+    {
+        Width = 240,
+        Margin = new Padding(0, 0, 0, 2)
+    };
     private readonly CheckBox _restoreConfigCheck = new() { Text = "恢复配置文件（config.toml）", Checked = false, AutoSize = true };
     private readonly CheckBox _restoreDatabaseCheck = new() { Text = "恢复线程数据库（SQLite）", Checked = true, AutoSize = true };
     private readonly CheckBox _restoreSessionsCheck = new() { Text = "恢复会话文件元数据（rollout）", Checked = true, AutoSize = true };
@@ -64,6 +89,7 @@ public sealed class MainForm : Form
     private readonly Button _restoreButton = new() { Text = "恢复备份", Dock = DockStyle.Fill, Height = 40 };
     private readonly Button _openBackupButton = new() { Text = "打开备份目录", Dock = DockStyle.Fill, Height = 40 };
     private readonly Button _pruneBackupsButton = new() { Text = "清理旧备份", Dock = DockStyle.Fill, Height = 40 };
+    private readonly Button _checkUpdateButton = new() { Text = "检查更新", Dock = DockStyle.Fill, Height = 40 };
     private readonly Label _busyLabel = new() { AutoSize = true, ForeColor = Color.DarkGreen, Text = "Ready" };
     private readonly Label _warningLine1 = new()
     {
@@ -122,13 +148,16 @@ public sealed class MainForm : Form
     /// <summary>
     /// Brings the running form back to the foreground. Invoked by the
     /// single-instance focus broker when a second copy of CodexProviderSync
-    /// is launched and asks the first copy to take focus.
+    /// is launched and asks the first copy to take focus. We name it
+    /// `RequestBringToFront` rather than overriding `Form.BringToFront`
+    /// with the `new` keyword so we do not silently break if a future
+    /// .NET version changes the base signature or marks it virtual.
     /// </summary>
-    public new void BringToFront()
+    public void RequestBringToFront()
     {
         if (InvokeRequired)
         {
-            BeginInvoke(new Action(BringToFront));
+            BeginInvoke(new Action(RequestBringToFront));
             return;
         }
         if (WindowState == FormWindowState.Minimized)
@@ -288,9 +317,10 @@ public sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 11,
+            RowCount = 12,
             Padding = new Padding(12)
         };
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -313,7 +343,8 @@ public sealed class MainForm : Form
         panel.Controls.Add(_restoreButton, 0, 7);
         panel.Controls.Add(_openBackupButton, 0, 8);
         panel.Controls.Add(_pruneBackupsButton, 0, 9);
-        panel.Controls.Add(_busyLabel, 0, 10);
+        panel.Controls.Add(_checkUpdateButton, 0, 10);
+        panel.Controls.Add(_busyLabel, 0, 11);
 
         group.Controls.Add(panel);
         return group;
@@ -331,7 +362,44 @@ public sealed class MainForm : Form
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         panel.Controls.Add(_updateConfigCheck, 0, 0);
         panel.Controls.Add(_updateConfigLabel, 1, 0);
+
+        FlowLayoutPanel modelOptions = new()
+        {
+            FlowDirection = FlowDirection.LeftToRight,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Margin = new Padding(24, 0, 0, 0),
+            Dock = DockStyle.Fill
+        };
+        Label modelHeader = new()
+        {
+            Text = "顶层 model:",
+            AutoSize = true,
+            Margin = new Padding(0, 4, 8, 0)
+        };
+        modelOptions.Controls.Add(modelHeader);
+        modelOptions.Controls.Add(_modelAutoRadio);
+        modelOptions.Controls.Add(_modelKeepRadio);
+        modelOptions.Controls.Add(_modelCustomRadio);
+        modelOptions.Controls.Add(_modelCustomText);
+        panel.Controls.Add(modelOptions, 0, 1);
+        panel.SetColumnSpan(modelOptions, 2);
+
+        _modelAutoRadio.CheckedChanged += (_, _) => UpdateModelOptionsEnabled();
+        _modelKeepRadio.CheckedChanged += (_, _) => UpdateModelOptionsEnabled();
+        _modelCustomRadio.CheckedChanged += (_, _) => UpdateModelOptionsEnabled();
+        _updateConfigCheck.CheckedChanged += (_, _) => UpdateModelOptionsEnabled();
+        UpdateModelOptionsEnabled();
         return panel;
+    }
+
+    private void UpdateModelOptionsEnabled()
+    {
+        bool enabled = _updateConfigCheck.Checked;
+        _modelAutoRadio.Enabled = enabled;
+        _modelKeepRadio.Enabled = enabled;
+        _modelCustomRadio.Enabled = enabled;
+        _modelCustomText.Enabled = enabled && _modelCustomRadio.Checked;
     }
 
     private Control BuildWarningPanel()
@@ -440,6 +508,7 @@ public sealed class MainForm : Form
         _restoreButton.Click += async (_, _) => await RestoreBackupAsync();
         _openBackupButton.Click += (_, _) => OpenBackupFolder();
         _pruneBackupsButton.Click += async (_, _) => await PruneBackupsAsync();
+        _checkUpdateButton.Click += async (_, _) => await CheckForUpdatesAsync();
         _providerList.SelectedIndexChanged += (_, _) => UpdateSelectionLabel();
         _codexHomeCombo.Leave += async (_, _) => await PersistHomeSelectionAsync();
     }
@@ -565,14 +634,33 @@ public sealed class MainForm : Form
         {
             string codexHome = CurrentCodexHome();
             int backupRetentionCount = CurrentBackupRetentionCount();
-            SyncResult result = _updateConfigCheck.Checked
-                ? await Task.Run(async () => await _syncService.RunSwitchAsync(codexHome, provider, backupRetentionCount))
-                : await Task.Run(async () => await _syncService.RunSyncAsync(codexHome, provider: provider, keepCount: backupRetentionCount));
+            SyncResult result;
+            if (_updateConfigCheck.Checked)
+            {
+                bool keepRootModel = _modelKeepRadio.Checked;
+                string? explicitModel = _modelCustomRadio.Checked ? _modelCustomText.Text.Trim() : null;
+                if (_modelCustomRadio.Checked && string.IsNullOrEmpty(explicitModel))
+                {
+                    MessageBox.Show(this, "请填写自定义 model 名称,或改成 \"跟随 provider\"。", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                result = await Task.Run(async () => await _syncService.RunSwitchAsync(
+                    codexHome,
+                    provider,
+                    backupRetentionCount,
+                    model: explicitModel,
+                    keepRootModel: keepRootModel));
+            }
+            else
+            {
+                result = await Task.Run(async () => await _syncService.RunSyncAsync(codexHome, provider: provider, keepCount: backupRetentionCount));
+            }
 
             _settings = _settingsService.UpdateState(_settings, provider, result.BackupDir, CaptureWindowBounds(), backupRetentionCount);
             await _settingsService.SaveAsync(_settings);
             AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 执行完成");
             AppendLog(TextFormatter.FormatSyncResult(result, _updateConfigCheck.Checked ? "已切换并同步" : "已同步"));
+            AppendLog(FormatModelSyncOutcome(result.ModelSync));
             AppendLog(string.Empty);
             await RefreshStatusCoreAsync(codexHome);
             SelectProvider(provider);
@@ -675,6 +763,41 @@ public sealed class MainForm : Form
             AppendLog(TextFormatter.FormatBackupPruneResult(result));
             AppendLog(string.Empty);
             await RefreshStatusCoreAsync(codexHome);
+        });
+    }
+
+    private async Task CheckForUpdatesAsync()
+    {
+        await RunBusyAsync("正在检查更新...", async () =>
+        {
+            Version currentVersion = UpdateService.NormalizeVersion(GetType().Assembly.GetName().Version ?? new Version(0, 0, 0));
+            UpdateCheckResult update = await _updateService.CheckForUpdateAsync(currentVersion);
+            if (!update.IsUpdateAvailable)
+            {
+                MessageBox.Show(this, $"当前已是最新版本（v{currentVersion}）。", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            DialogResult choice = MessageBox.Show(
+                this,
+                $"发现新版本 {update.LatestRelease.TagName}（当前 v{currentVersion}）。\n\n是否下载、校验并重启完成更新？",
+                "发现更新",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Information);
+            if (choice != DialogResult.Yes)
+            {
+                return;
+            }
+
+            string updateDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "codex-provider-sync",
+                "updates");
+            DownloadedUpdate downloadedUpdate = await _updateService.DownloadWindowsExeAsync(update.LatestRelease, updateDirectory);
+            string targetExe = Environment.ProcessPath ?? throw new InvalidOperationException("Unable to determine the current executable path.");
+            UpdateApplier.Start(downloadedUpdate.Path, targetExe, downloadedUpdate.Sha256);
+            AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 已下载并校验 {update.LatestRelease.TagName}，正在重启完成更新。");
+            BeginInvoke(Close);
         });
     }
 
@@ -856,6 +979,7 @@ public sealed class MainForm : Form
         _restoreButton.Enabled = !busy;
         _openBackupButton.Enabled = !busy;
         _pruneBackupsButton.Enabled = !busy;
+        _checkUpdateButton.Enabled = !busy;
         _providerList.Enabled = !busy;
         _manualProviderText.Enabled = !busy;
         _codexHomeCombo.Enabled = !busy;
@@ -871,6 +995,23 @@ public sealed class MainForm : Form
         _logBox.AppendText(message);
         _logBox.SelectionStart = _logBox.TextLength;
         _logBox.ScrollToCaret();
+    }
+
+    private static string FormatModelSyncOutcome(ModelSyncOutcome outcome)
+    {
+        if (outcome.Source == "not-applicable")
+        {
+            return string.Empty;
+        }
+        if (outcome.Applied)
+        {
+            return $"顶层 model: {outcome.Model} (来源: {outcome.Source})";
+        }
+        if (!string.IsNullOrEmpty(outcome.Warning))
+        {
+            return $"顶层 model: 未改写 ({outcome.Warning})";
+        }
+        return "顶层 model: 未改写 (已请求保留)";
     }
 
     private bool ConfirmCodexClosed(string message)

@@ -55,6 +55,13 @@ Use `codex-provider switch <provider-id>` when:
 - the user wants to change the root `model_provider`
 - the user wants one command to both switch provider and resync history
 
+By default `switch` also aligns the root-level `model` with the new
+provider section's `model`. Use `switch <provider-id> --keep-root-model`
+to leave the root-level `model` untouched, or
+`switch <provider-id> --model <name>` to set it explicitly (e.g. when
+the new provider section has no `model` field of its own, or when the
+user wants to call a non-default model through a relay provider).
+
 Use `codex-provider restore <backup-dir>` when:
 
 - the user wants to roll back a previous sync
@@ -131,6 +138,8 @@ codex-provider sync
 codex-provider sync --keep 5
 codex-provider sync --provider openai
 codex-provider switch apigather
+codex-provider switch apigather --model "MiniMax-M3"
+codex-provider switch apigather --keep-root-model
 codex-provider prune-backups --keep 5
 codex-provider restore C:\Users\you\.codex\backups_state\provider-sync\20260319T042708906Z
 ```

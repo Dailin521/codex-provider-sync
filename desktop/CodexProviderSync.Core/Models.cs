@@ -77,6 +77,15 @@ public sealed class SessionChange
     public required long OriginalLastWriteTimeUtcTicks { get; init; }
     public required string OriginalProvider { get; init; }
     public required string UpdatedFirstLine { get; init; }
+    public bool ModelOnlyChange { get; init; }
+    public IReadOnlyList<TurnContextModelBackup> OriginalTurnContextModels { get; set; } = [];
+}
+
+public sealed class TurnContextModelBackup
+{
+    public required int LineIndex { get; init; }
+    public required string OriginalModel { get; init; }
+    public IReadOnlyList<string> OriginalModels { get; init; } = [];
 }
 
 public sealed class SessionChangeCollection
@@ -101,6 +110,7 @@ public sealed class SyncResult
     public required IReadOnlyList<string> SkippedUnreadableRolloutFiles { get; init; }
     public required int SqliteRowsUpdated { get; init; }
     public int SqliteProviderRowsUpdated { get; init; }
+    public int SqliteModelRowsUpdated { get; init; }
     public int SqliteUserEventRowsUpdated { get; init; }
     public int SqliteCwdRowsUpdated { get; init; }
     public int UpdatedWorkspaceRoots { get; init; }
@@ -110,8 +120,37 @@ public sealed class SyncResult
     public required ProviderCounts EncryptedContentCounts { get; init; }
     public string? EncryptedContentWarning { get; init; }
     public bool ConfigUpdated { get; init; }
+    public ModelSyncOutcome ModelSync { get; init; } = ModelSyncOutcome.NotApplicable();
     public BackupPruneResult? AutoPruneResult { get; init; }
     public string? AutoPruneWarning { get; init; }
+}
+
+public sealed class ModelSyncOutcome
+{
+    public required bool Applied { get; init; }
+    public string Source { get; init; } = "none";
+    public string? Model { get; init; }
+    public string? Warning { get; init; }
+
+    public static ModelSyncOutcome CreateApplied(string source, string model) => new()
+    {
+        Applied = true,
+        Source = source,
+        Model = model
+    };
+
+    public static ModelSyncOutcome CreateSkipped(string source, string? warning) => new()
+    {
+        Applied = false,
+        Source = source,
+        Warning = warning
+    };
+
+    public static ModelSyncOutcome NotApplicable() => new()
+    {
+        Applied = false,
+        Source = "not-applicable"
+    };
 }
 
 public sealed class SessionApplyResult
@@ -203,6 +242,8 @@ internal sealed class SessionBackupManifestEntry
     public required string OriginalFirstLine { get; init; }
     public required string OriginalSeparator { get; init; }
     public long? OriginalLastWriteTimeUtcTicks { get; init; }
+    public bool ModelOnlyChange { get; init; }
+    public List<TurnContextModelBackup> OriginalTurnContextModels { get; init; } = [];
 }
 
 public sealed class WorkspaceRootSyncResult

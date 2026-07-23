@@ -3,6 +3,29 @@ namespace CodexProviderSync.Core.Tests;
 public sealed class SettingsAndDiscoveryTests
 {
     [Fact]
+    public void ConfigFileService_UpdatesCompactRootModelAssignment()
+    {
+        ConfigFileService service = new();
+
+        string updated = service.SetRootModelInConfigText(
+            "model_provider=\"openai\"\nmodel=\"old\"\n\n[model_providers.apigather]\nmodel=\"section\"\n",
+            "new");
+
+        Assert.Contains("model = \"new\"", updated);
+        Assert.Contains("model=\"section\"", updated);
+        Assert.Equal(1, updated.Split("model = \"new\"", StringSplitOptions.None).Length - 1);
+    }
+
+    [Fact]
+    public void ConfigFileService_ReadsProviderModel_WhenProviderIdContainsRegexCharacters()
+    {
+        ConfigFileService service = new();
+        string config = "[model_providers.foo.bar+v2]\nmodel = \"special\"\n";
+
+        Assert.Equal("special", service.ReadProviderModel(config, "foo.bar+v2"));
+    }
+
+    [Fact]
     public async Task SettingsService_PersistsRecentPathsAndProviders()
     {
         string uniqueSettingsRoot = Path.Combine(Path.GetTempPath(), $"codex-provider-settings-{Guid.NewGuid():N}");

@@ -33,6 +33,8 @@ Windows 用户优先下载 Release 里的 `CodexProviderSync.exe`：
 3. 选择目标 Provider
 4. 点击 `Execute`
 
+GUI 右侧的“检查更新”会读取本项目最新的稳定版 GitHub Release。确认更新后，程序会下载 `CodexProviderSync.exe`、校验同版本发布的 SHA-256 文件、退出并由临时更新器再次校验后原子替换原 EXE，再自动重启。更新器临时目录会在后续启动时自动清理。若 EXE 所在目录没有写入权限，更新不会覆盖旧版本，程序会尽力重启旧版，并在提示中保留下载路径供手动安装。
+
 macOS 用户可使用 Avalonia 桌面版，构建说明见 [README_MAC_GUI_ZH.md](docs/README_MAC_GUI_ZH.md)。
 
 其它环境使用 CLI：
@@ -51,6 +53,8 @@ codex-provider status
 codex-provider sync
 codex-provider sync --provider openai
 codex-provider switch apigather
+codex-provider switch apigather --model "MiniMax-M3"     # 同时改顶层 model
+codex-provider switch apigather --keep-root-model        # 只改 model_provider，不动顶层 model
 codex-provider restore C:\Users\you\.codex\backups_state\provider-sync\<timestamp>
 codex-provider prune-backups --keep 5
 ```
@@ -59,11 +63,11 @@ codex-provider prune-backups --keep 5
 
 - `status`：只检查当前 provider、rollout、SQLite、项目可见性诊断。
 - `sync`：不切换登录状态，只把历史会话 metadata 同步到当前 provider。
-- `switch <provider-id>`：修改 `config.toml` 根级 `model_provider`，然后执行同步。
+- `switch <provider-id>`：修改 `config.toml` 根级 `model_provider` 并默认把顶层 `model` 同步到新 provider section 里的 `model`（可用 `--keep-root-model` 关闭，或用 `--model <NAME>` 显式覆盖），然后执行同步。
 - `restore <backup-dir>`：从备份恢复，支持 `--no-config`、`--no-db`、`--no-sessions`。
 - `prune-backups --keep <n>`：只清理本工具创建的旧备份。
 
-备注：频繁切换时，建议使用统一的 6 字符 ASCII provider ID，例如将逻辑名称 `provider_a` 配置为 `prov_a`。内置的 `openai` ID 正好是 6 个字符，因此统一为 6 字符相对最通用。会话文件很多或体积很大时，不同长度的 ID 需要重写整个 rollout，可能产生巨量磁盘写入；相同长度则可原地替换，无法识别时仍自动回退到原有的完整重写。
+备注：频繁切换时，建议使用统一的 6 字符 ASCII provider ID，例如将逻辑名称 `provider_a` 配置为 `prov_a`。内置的 `openai` ID 正好是 6 个字符，因此统一为 6 字符相对最通用。会话文件很多或体积很大时，不同长度的 ID 需要重写整个 rollout，可能产生巨量磁盘写入；JSON 编码后的字节长度相同且无需同步 model 字段时可原地替换，其他情况仍自动回退到完整安全重写。
 
 ## 能力边界
 
@@ -101,6 +105,7 @@ codex-provider prune-backups --keep 5
 - 如果 `state_5.sqlite` 损坏，工具会提示 malformed/unreadable 并停止同步。
 - 如果活跃会话锁住 rollout 文件，工具会跳过该文件并继续处理其它历史会话。
 - 如果 EXE 双击无反应，先确认已解压，再查看 `%AppData%\codex-provider-sync\startup-error.log`，或在 PowerShell 里运行 `./CodexProviderSync.exe`。
+- 内置更新只检查稳定版 GitHub Release，且需要用户在 GUI 中确认；项目目前未做 Windows 代码签名，SHA-256 校验可检测下载损坏，但不能替代代码签名。
 
 Windows GUI 说明见 [README_GUI_ZH.md](docs/README_GUI_ZH.md)，macOS GUI 说明见 [README_MAC_GUI_ZH.md](docs/README_MAC_GUI_ZH.md)。AI / Agent 说明见 [AGENTS.md](AGENTS.md)。
 
