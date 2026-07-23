@@ -23,6 +23,8 @@ macOS 桌面版说明见 [README_MAC_GUI_ZH.md](README_MAC_GUI_ZH.md)。
 - 当前状态、执行结果和常用提示使用中文显示
 - 常规执行日志按天写入本地并自动保留最近 30 天
 - 支持直接打开日志目录
+- 每天首次启动会后台检查更新，版本查询最多等待 10 秒；失败不弹窗且不影响使用
+- “检查更新”按钮不受每日限制，可随时手动重试
 - 如果 EXE 双击无反应，查看 `%AppData%\codex-provider-sync\startup-error.log`，或在 PowerShell 中运行 `./CodexProviderSync.exe` 获取错误
 - 含 `encrypted_content` 的历史会话跨 provider/account 后可能只能恢复可见性，继续对话或 compact 仍可能报 `invalid_encrypted_content`
 
@@ -52,6 +54,7 @@ GUI Refresh 会显示项目可见性诊断，例如 `first page 0/50`、`ranks 6
 8. 如需回滚，点击“恢复备份”
 9. 如需立刻清理旧备份，点击 `清理旧备份`
 10. 如需复制或查看历史执行信息，点击“打开日志目录”
+11. 软件每天首次启动会自动检查一次更新，也可以点击“检查更新”立即重试
 
 ## 持久化位置
 

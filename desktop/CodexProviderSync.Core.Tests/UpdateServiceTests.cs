@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
+using System.Diagnostics;
 
 namespace CodexProviderSync.Core.Tests;
 
@@ -57,6 +58,68 @@ public sealed class UpdateServiceTests
     }
 
     [Fact]
+    public async Task CheckForUpdate_TimesOutUsingConfiguredDeadline()
+    {
+        using HttpClient client = CreateClient(async (_, cancellationToken) =>
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("The cancellation token should stop the request.");
+        });
+        UpdateService service = new(client, TimeSpan.FromMilliseconds(40));
+
+        TimeoutException error = await Assert.ThrowsAsync<TimeoutException>(
+            () => service.CheckForUpdateAsync(new Version(0, 3, 1)));
+
+        Assert.Contains("已取消", error.Message);
+        Assert.IsAssignableFrom<OperationCanceledException>(error.InnerException);
+    }
+
+    [Fact]
+    public async Task CheckForUpdate_ApiFallbackSharesOneTotalDeadline()
+    {
+        CancellationToken firstToken = default;
+        CancellationToken fallbackToken = default;
+        using HttpClient client = CreateClient(async (request, cancellationToken) =>
+        {
+            if (request.RequestUri!.Host == "api.github.com")
+            {
+                firstToken = cancellationToken;
+                await Task.Delay(300, cancellationToken);
+                return new HttpResponseMessage(HttpStatusCode.Forbidden);
+            }
+
+            fallbackToken = cancellationToken;
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("The shared deadline should stop the fallback request.");
+        });
+        UpdateService service = new(client, TimeSpan.FromMilliseconds(400));
+        Stopwatch timer = Stopwatch.StartNew();
+
+        await Assert.ThrowsAsync<TimeoutException>(
+            () => service.CheckForUpdateAsync(new Version(0, 3, 1)));
+
+        timer.Stop();
+        Assert.True(firstToken.CanBeCanceled);
+        Assert.True(fallbackToken.CanBeCanceled);
+        Assert.InRange(timer.ElapsedMilliseconds, 350, 550);
+    }
+
+    [Fact]
+    public async Task CheckForUpdate_ExternalCancellationRemainsCancellation()
+    {
+        using HttpClient client = CreateClient(async (_, cancellationToken) =>
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("The cancellation token should stop the request.");
+        });
+        UpdateService service = new(client, TimeSpan.FromSeconds(10));
+        using CancellationTokenSource cancellation = new(TimeSpan.FromMilliseconds(40));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => service.CheckForUpdateAsync(new Version(0, 3, 1), cancellation.Token));
+    }
+
+    [Fact]
     public async Task DownloadWindowsExe_WritesOnlyVerifiedPayload()
     {
         byte[] executable = Encoding.UTF8.GetBytes("verified executable bytes");
@@ -89,6 +152,44 @@ public sealed class UpdateServiceTests
         }
     }
 
+    [Fact]
+    public async Task DownloadWindowsExe_DoesNotUseVersionLookupDeadline()
+    {
+        byte[] executable = Encoding.UTF8.GetBytes("slow but verified executable");
+        string hash = Convert.ToHexString(SHA256.HashData(executable)).ToLowerInvariant();
+        using HttpClient client = CreateClient(async (request, cancellationToken) =>
+        {
+            await Task.Delay(50, cancellationToken);
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/CodexProviderSync.exe.sha256" => TextResponse($"{hash}  CodexProviderSync.exe\n"),
+                "/CodexProviderSync.exe" => new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new ByteArrayContent(executable)
+                },
+                _ => new HttpResponseMessage(HttpStatusCode.NotFound)
+            };
+        });
+        UpdateService service = new(client, TimeSpan.FromMilliseconds(20));
+        string directory = Path.Combine(Path.GetTempPath(), $"codex-provider-update-test-{Guid.NewGuid():N}");
+        ReleaseInfo release = new("v0.3.1", new Version(0, 3, 1),
+        [
+            new ReleaseAsset("CodexProviderSync.exe", new Uri("https://example.test/CodexProviderSync.exe")),
+            new ReleaseAsset("CodexProviderSync.exe.sha256", new Uri("https://example.test/CodexProviderSync.exe.sha256"))
+        ]);
+
+        try
+        {
+            DownloadedUpdate update = await service.DownloadWindowsExeAsync(release, directory);
+
+            Assert.Equal(executable, await File.ReadAllBytesAsync(update.Path));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData("v0.2.9", 0, 2, 9)]
     [InlineData("v0.3.1", 0, 3, 1)]
@@ -99,6 +200,9 @@ public sealed class UpdateServiceTests
     }
 
     private static HttpClient CreateClient(Func<HttpRequestMessage, HttpResponseMessage> responder) => new(new DelegateHandler(responder));
+
+    private static HttpClient CreateClient(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> responder) =>
+        new(new AsyncDelegateHandler(responder));
 
     private static HttpResponseMessage JsonResponse(string content) => new(HttpStatusCode.OK)
     {
@@ -114,5 +218,14 @@ public sealed class UpdateServiceTests
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
             Task.FromResult(responder(request));
+    }
+
+    private sealed class AsyncDelegateHandler(
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> responder) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken) =>
+            responder(request, cancellationToken);
     }
 }

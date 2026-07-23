@@ -37,7 +37,8 @@ public sealed class SettingsAndDiscoveryTests
             ManualProviders = ["custom-a"],
             LastSelectedProvider = "apigather",
             BackupRetentionCount = 7,
-            UiLanguage = "zh-Hans"
+            UiLanguage = "zh-Hans",
+            LastAutomaticUpdateCheckDate = new DateOnly(2026, 7, 23)
         };
 
         await service.SaveAsync(settings);
@@ -48,6 +49,50 @@ public sealed class SettingsAndDiscoveryTests
         Assert.Equal("apigather", loaded.LastSelectedProvider);
         Assert.Equal(7, loaded.BackupRetentionCount);
         Assert.Equal("zh-Hans", loaded.UiLanguage);
+        Assert.Equal(new DateOnly(2026, 7, 23), loaded.LastAutomaticUpdateCheckDate);
+    }
+
+    [Fact]
+    public async Task SettingsService_OldSettingsDefaultToNoAutomaticUpdateCheck()
+    {
+        string uniqueSettingsRoot = Path.Combine(Path.GetTempPath(), $"codex-provider-settings-{Guid.NewGuid():N}");
+        string settingsPath = Path.Combine(uniqueSettingsRoot, "settings.json");
+        Directory.CreateDirectory(uniqueSettingsRoot);
+        await File.WriteAllTextAsync(settingsPath, """{"backupRetentionCount":5,"uiLanguage":"zh-Hans"}""");
+
+        try
+        {
+            SettingsService service = new(settingsPath);
+
+            AppSettings loaded = await service.LoadAsync();
+
+            Assert.Null(loaded.LastAutomaticUpdateCheckDate);
+        }
+        finally
+        {
+            Directory.Delete(uniqueSettingsRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void SettingsService_RecordAutomaticUpdateCheckPreservesOtherState()
+    {
+        SettingsService service = new(Path.Combine(Path.GetTempPath(), $"unused-{Guid.NewGuid():N}.json"));
+        AppSettings settings = new()
+        {
+            LastCodexHome = @"C:\Users\Administrator\.codex",
+            SavedProviders = ["openai"],
+            LastSelectedProvider = "openai",
+            BackupRetentionCount = 7
+        };
+
+        AppSettings updated = service.RecordAutomaticUpdateCheck(settings, new DateOnly(2026, 7, 23));
+
+        Assert.Equal(new DateOnly(2026, 7, 23), updated.LastAutomaticUpdateCheckDate);
+        Assert.Equal(settings.LastCodexHome, updated.LastCodexHome);
+        Assert.Equal(settings.LastSelectedProvider, updated.LastSelectedProvider);
+        Assert.Equal(settings.BackupRetentionCount, updated.BackupRetentionCount);
+        Assert.Contains("openai", updated.SavedProviders);
     }
 
     [Fact]

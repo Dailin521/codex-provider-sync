@@ -11,14 +11,27 @@ namespace CodexProviderSync.Core;
 /// </summary>
 public sealed class UpdateService
 {
+    internal static readonly TimeSpan DefaultCheckTimeout = TimeSpan.FromSeconds(10);
     private const string LatestReleaseUrl = "https://api.github.com/repos/Dailin521/codex-provider-sync/releases/latest";
     private const string LatestReleasePageUrl = "https://github.com/Dailin521/codex-provider-sync/releases/latest";
     private const string ReleaseTagPathPrefix = "/Dailin521/codex-provider-sync/releases/tag/";
     private readonly HttpClient _httpClient;
+    private readonly TimeSpan _checkTimeout;
 
     public UpdateService(HttpClient? httpClient = null)
+        : this(httpClient ?? new HttpClient(), DefaultCheckTimeout)
     {
-        _httpClient = httpClient ?? new HttpClient();
+    }
+
+    internal UpdateService(HttpClient httpClient, TimeSpan checkTimeout)
+    {
+        if (checkTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(checkTimeout), checkTimeout, "检查更新超时必须大于 0。");
+        }
+
+        _httpClient = httpClient;
+        _checkTimeout = checkTimeout;
         if (!_httpClient.DefaultRequestHeaders.UserAgent.Any())
         {
             _httpClient.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("CodexProviderSync", "1.0"));
@@ -26,6 +39,20 @@ public sealed class UpdateService
     }
 
     public async Task<UpdateCheckResult> CheckForUpdateAsync(Version currentVersion, CancellationToken cancellationToken = default)
+    {
+        using CancellationTokenSource timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutSource.CancelAfter(_checkTimeout);
+        try
+        {
+            return await CheckForUpdateCoreAsync(currentVersion, timeoutSource.Token);
+        }
+        catch (OperationCanceledException error) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException($"检查更新超过 {_checkTimeout.TotalSeconds:0.##} 秒，已取消。", error);
+        }
+    }
+
+    private async Task<UpdateCheckResult> CheckForUpdateCoreAsync(Version currentVersion, CancellationToken cancellationToken)
     {
         using HttpResponseMessage response = await _httpClient.GetAsync(LatestReleaseUrl, cancellationToken);
         if (response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests)

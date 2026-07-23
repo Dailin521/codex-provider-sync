@@ -67,6 +67,7 @@ public sealed class SettingsService
             LastBackupDirectory = settings.LastBackupDirectory,
             BackupRetentionCount = NormalizeBackupRetentionCount(settings.BackupRetentionCount),
             UiLanguage = NormalizeUiLanguage(settings.UiLanguage),
+            LastAutomaticUpdateCheckDate = settings.LastAutomaticUpdateCheckDate,
             WindowBounds = settings.WindowBounds
         };
     }
@@ -83,6 +84,7 @@ public sealed class SettingsService
             LastBackupDirectory = settings.LastBackupDirectory,
             BackupRetentionCount = NormalizeBackupRetentionCount(settings.BackupRetentionCount),
             UiLanguage = NormalizeUiLanguage(settings.UiLanguage),
+            LastAutomaticUpdateCheckDate = settings.LastAutomaticUpdateCheckDate,
             WindowBounds = settings.WindowBounds
         };
     }
@@ -99,6 +101,7 @@ public sealed class SettingsService
             LastBackupDirectory = settings.LastBackupDirectory,
             BackupRetentionCount = NormalizeBackupRetentionCount(settings.BackupRetentionCount),
             UiLanguage = NormalizeUiLanguage(settings.UiLanguage),
+            LastAutomaticUpdateCheckDate = settings.LastAutomaticUpdateCheckDate,
             WindowBounds = settings.WindowBounds
         };
     }
@@ -115,6 +118,7 @@ public sealed class SettingsService
             LastBackupDirectory = settings.LastBackupDirectory,
             BackupRetentionCount = NormalizeBackupRetentionCount(settings.BackupRetentionCount),
             UiLanguage = NormalizeUiLanguage(settings.UiLanguage),
+            LastAutomaticUpdateCheckDate = settings.LastAutomaticUpdateCheckDate,
             WindowBounds = settings.WindowBounds
         };
     }
@@ -131,6 +135,24 @@ public sealed class SettingsService
             LastBackupDirectory = settings.LastBackupDirectory,
             BackupRetentionCount = NormalizeBackupRetentionCount(settings.BackupRetentionCount),
             UiLanguage = NormalizeUiLanguage(uiLanguage),
+            LastAutomaticUpdateCheckDate = settings.LastAutomaticUpdateCheckDate,
+            WindowBounds = settings.WindowBounds
+        };
+    }
+
+    public AppSettings RecordAutomaticUpdateCheck(AppSettings settings, DateOnly date)
+    {
+        return new AppSettings
+        {
+            RecentCodexHomes = Deduplicate(settings.RecentCodexHomes).ToList(),
+            LastCodexHome = settings.LastCodexHome,
+            SavedProviders = Deduplicate(settings.SavedProviders).ToList(),
+            ManualProviders = Deduplicate(settings.ManualProviders).ToList(),
+            LastSelectedProvider = settings.LastSelectedProvider,
+            LastBackupDirectory = settings.LastBackupDirectory,
+            BackupRetentionCount = NormalizeBackupRetentionCount(settings.BackupRetentionCount),
+            UiLanguage = NormalizeUiLanguage(settings.UiLanguage),
+            LastAutomaticUpdateCheckDate = date,
             WindowBounds = settings.WindowBounds
         };
     }
@@ -152,6 +174,7 @@ public sealed class SettingsService
             LastBackupDirectory = string.IsNullOrWhiteSpace(backupDirectory) ? settings.LastBackupDirectory : Path.GetFullPath(backupDirectory),
             BackupRetentionCount = NormalizeBackupRetentionCount(backupRetentionCount ?? settings.BackupRetentionCount),
             UiLanguage = NormalizeUiLanguage(settings.UiLanguage),
+            LastAutomaticUpdateCheckDate = settings.LastAutomaticUpdateCheckDate,
             WindowBounds = bounds ?? settings.WindowBounds
         };
     }
@@ -168,6 +191,7 @@ public sealed class SettingsService
             LastBackupDirectory = string.IsNullOrWhiteSpace(settings.LastBackupDirectory) ? null : Path.GetFullPath(settings.LastBackupDirectory),
             BackupRetentionCount = NormalizeBackupRetentionCount(settings.BackupRetentionCount),
             UiLanguage = NormalizeUiLanguage(settings.UiLanguage),
+            LastAutomaticUpdateCheckDate = settings.LastAutomaticUpdateCheckDate,
             WindowBounds = settings.WindowBounds
         };
     }

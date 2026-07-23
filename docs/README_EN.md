@@ -46,6 +46,8 @@ The GUI app:
 - can restore from backup without using a terminal
 - writes UTF-8 daily execution logs under `%AppData%\codex-provider-sync\logs`
 - keeps the most recent 30 days of execution logs and can open the log folder from the app
+- checks for a stable GitHub Release once on the first launch of each local day, with a 10-second lookup deadline
+- keeps manual update checks available; automatic lookup failures are logged without blocking startup
 
 For GUI-specific usage notes, see [README_GUI_ZH.md](README_GUI_ZH.md).
 

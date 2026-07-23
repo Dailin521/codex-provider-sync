@@ -205,6 +205,7 @@ public sealed class AppSettings
     public string? LastBackupDirectory { get; init; }
     public int BackupRetentionCount { get; init; } = AppConstants.DefaultBackupRetentionCount;
     public string UiLanguage { get; init; } = "en";
+    public DateOnly? LastAutomaticUpdateCheckDate { get; init; }
     public WindowBoundsState? WindowBounds { get; init; }
 }
 

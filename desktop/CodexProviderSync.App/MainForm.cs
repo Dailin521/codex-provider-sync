@@ -6,9 +6,10 @@ namespace CodexProviderSync.App;
 public sealed class MainForm : Form
 {
     private readonly CodexSyncService _syncService = new();
-    private readonly SettingsService _settingsService = new();
-    private readonly UpdateService _updateService = new();
+    private readonly SettingsService _settingsService;
+    private readonly UpdateService _updateService;
     private readonly ExecutionLogService _executionLogService;
+    private readonly Func<DateOnly> _localDate;
 
     private readonly ComboBox _codexHomeCombo = new() { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDown };
     private readonly Button _browseButton = new() { Text = "浏览...", AutoSize = true };
@@ -125,14 +126,23 @@ public sealed class MainForm : Form
     private StatusSnapshot? _currentStatus;
     private bool _loadingSettings;
     private bool _logFailureReported;
+    private bool _busy;
+    private bool _updateCheckInProgress;
 
     public MainForm() : this(new ExecutionLogService())
     {
     }
 
-    internal MainForm(ExecutionLogService executionLogService)
+    internal MainForm(
+        ExecutionLogService executionLogService,
+        SettingsService? settingsService = null,
+        UpdateService? updateService = null,
+        Func<DateOnly>? localDate = null)
     {
         _executionLogService = executionLogService;
+        _settingsService = settingsService ?? new SettingsService();
+        _updateService = updateService ?? new UpdateService();
+        _localDate = localDate ?? (() => DateOnly.FromDateTime(DateTime.Now));
         Text = "Codex Provider Sync";
         MinimumSize = new Size(1180, 760);
         StartPosition = FormStartPosition.CenterScreen;
@@ -159,6 +169,7 @@ public sealed class MainForm : Form
     {
         base.OnLoad(e);
         await LoadStateAsync();
+        _ = CheckForUpdatesAsync(UpdateCheckTrigger.Automatic);
     }
 
     /// <summary>
@@ -544,7 +555,7 @@ public sealed class MainForm : Form
         _restoreButton.Click += async (_, _) => await RestoreBackupAsync();
         _openBackupButton.Click += (_, _) => OpenBackupFolder();
         _pruneBackupsButton.Click += async (_, _) => await PruneBackupsAsync();
-        _checkUpdateButton.Click += async (_, _) => await CheckForUpdatesAsync();
+        _checkUpdateButton.Click += async (_, _) => await CheckForUpdatesAsync(UpdateCheckTrigger.Manual);
         _openLogButton.Click += (_, _) => OpenLogFolder();
         _providerList.SelectedIndexChanged += (_, _) => UpdateSelectionLabel();
         _codexHomeCombo.Leave += async (_, _) => await PersistHomeSelectionAsync();
@@ -826,33 +837,153 @@ public sealed class MainForm : Form
         });
     }
 
-    private async Task CheckForUpdatesAsync()
+    private async Task CheckForUpdatesAsync(UpdateCheckTrigger trigger)
     {
-        await RunBusyAsync("正在检查更新...", async () =>
+        bool automatic = trigger == UpdateCheckTrigger.Automatic;
+        DateOnly today = _localDate();
+        if (automatic && !UpdateCheckPolicy.ShouldRunAutomaticCheck(_settings, today))
         {
-            Version currentVersion = UpdateService.NormalizeVersion(GetType().Assembly.GetName().Version ?? new Version(0, 0, 0));
-            AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 正在检查更新，当前版本: v{currentVersion}");
-            UpdateCheckResult update = await _updateService.CheckForUpdateAsync(currentVersion);
-            if (!update.IsUpdateAvailable)
+            AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 今日已尝试自动检查更新，已跳过");
+            return;
+        }
+
+        if (_updateCheckInProgress)
+        {
+            if (!automatic)
             {
-                AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 未发现更高版本，GitHub 最新 Release: {update.LatestRelease.TagName}");
+                AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 更新检查已在进行中");
+            }
+            return;
+        }
+
+        _updateCheckInProgress = true;
+        UpdateCheckButtonState();
+        try
+        {
+            if (automatic)
+            {
+                _settings = _settingsService.RecordAutomaticUpdateCheck(_settings, today);
+                try
+                {
+                    await _settingsService.SaveAsync(_settings);
+                }
+                catch (Exception error)
+                {
+                    AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 保存自动更新检查日期失败:{Environment.NewLine}{error}");
+                }
+
+                await CheckForUpdatesCoreAsync(trigger);
+            }
+            else
+            {
+                await RunBusyAsync("正在检查更新...", () => CheckForUpdatesCoreAsync(trigger));
+            }
+        }
+        catch (Exception error)
+        {
+            AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 更新检查出现未处理错误:{Environment.NewLine}{error}");
+            if (UpdateCheckPolicy.ShouldShowFailureDialog(trigger))
+            {
+                MessageBox.Show(
+                    this,
+                    $"检查更新失败。{Environment.NewLine}{Environment.NewLine}{error.Message}",
+                    Text,
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+        finally
+        {
+            _updateCheckInProgress = false;
+            UpdateCheckButtonState();
+        }
+    }
+
+    private async Task CheckForUpdatesCoreAsync(UpdateCheckTrigger trigger)
+    {
+        bool automatic = trigger == UpdateCheckTrigger.Automatic;
+        string checkKind = automatic ? "自动" : "手动";
+        Version currentVersion = UpdateService.NormalizeVersion(GetType().Assembly.GetName().Version ?? new Version(0, 0, 0));
+        AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 正在{checkKind}检查更新（最长 10 秒），当前版本: v{currentVersion}");
+
+        UpdateCheckResult update;
+        try
+        {
+            update = await _updateService.CheckForUpdateAsync(currentVersion);
+        }
+        catch (TimeoutException error)
+        {
+            AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {checkKind}检查更新超时（10 秒），已跳过，不影响正常使用{Environment.NewLine}{error}");
+            if (UpdateCheckPolicy.ShouldShowFailureDialog(trigger))
+            {
+                MessageBox.Show(
+                    this,
+                    "检查更新超过 10 秒，已取消。请检查网络或代理设置后重试。",
+                    Text,
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
+            return;
+        }
+        catch (Exception error)
+        {
+            AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {checkKind}检查更新失败，不影响正常使用{Environment.NewLine}{error}");
+            if (UpdateCheckPolicy.ShouldShowFailureDialog(trigger))
+            {
+                MessageBox.Show(
+                    this,
+                    $"检查更新失败。{Environment.NewLine}{Environment.NewLine}{error.Message}",
+                    Text,
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+            return;
+        }
+
+        if (!update.IsUpdateAvailable)
+        {
+            AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 未发现更高版本，GitHub 最新 Release: {update.LatestRelease.TagName}");
+            if (UpdateCheckPolicy.ShouldShowNoUpdateDialog(trigger))
+            {
                 MessageBox.Show(this, $"当前已是最新版本（v{currentVersion}）。", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
             }
+            return;
+        }
 
-            AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 发现新版本: {update.LatestRelease.TagName}");
-            DialogResult choice = MessageBox.Show(
-                this,
-                $"发现新版本 {update.LatestRelease.TagName}（当前 v{currentVersion}）。\n\n是否下载、校验并重启完成更新？",
-                "发现更新",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Information);
-            if (choice != DialogResult.Yes)
+        AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 发现新版本: {update.LatestRelease.TagName}");
+        if (automatic)
+        {
+            await WaitForIdleAsync();
+            if (IsDisposed || Disposing)
             {
-                AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 已取消更新: {update.LatestRelease.TagName}");
                 return;
             }
+        }
 
+        DialogResult choice = MessageBox.Show(
+            this,
+            $"发现新版本 {update.LatestRelease.TagName}（当前 v{currentVersion}）。\n\n是否下载、校验并重启完成更新？",
+            "发现更新",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Information);
+        if (choice != DialogResult.Yes)
+        {
+            AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 已取消更新: {update.LatestRelease.TagName}");
+            return;
+        }
+
+        bool ownsBusyState = automatic;
+        if (ownsBusyState)
+        {
+            SetBusy(true, "正在下载更新...");
+        }
+        else
+        {
+            _busyLabel.Text = "正在下载更新...";
+        }
+
+        try
+        {
             string updateDirectory = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "codex-provider-sync",
@@ -862,7 +993,32 @@ public sealed class MainForm : Form
             UpdateApplier.Start(downloadedUpdate.Path, targetExe, downloadedUpdate.Sha256);
             AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 已下载并校验 {update.LatestRelease.TagName}，正在重启完成更新。");
             BeginInvoke(Close);
-        });
+        }
+        catch (Exception error)
+        {
+            AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 下载或应用更新失败:{Environment.NewLine}{error}");
+            MessageBox.Show(
+                this,
+                $"下载或应用更新失败。{Environment.NewLine}{Environment.NewLine}{error.Message}",
+                Text,
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+        finally
+        {
+            if (ownsBusyState && !IsDisposed)
+            {
+                SetBusy(false, "就绪");
+            }
+        }
+    }
+
+    private async Task WaitForIdleAsync()
+    {
+        while (_busy && !IsDisposed && !Disposing)
+        {
+            await Task.Delay(100);
+        }
     }
 
     private void ReloadRecentHomes()
@@ -1027,6 +1183,7 @@ public sealed class MainForm : Form
 
     private void SetBusy(bool busy, string stateText)
     {
+        _busy = busy;
         UseWaitCursor = busy;
         _busyLabel.Text = stateText;
         _busyLabel.ForeColor = busy ? Color.DarkOrange : Color.DarkGreen;
@@ -1043,11 +1200,16 @@ public sealed class MainForm : Form
         _restoreButton.Enabled = !busy;
         _openBackupButton.Enabled = !busy;
         _pruneBackupsButton.Enabled = !busy;
-        _checkUpdateButton.Enabled = !busy;
+        UpdateCheckButtonState();
         _openLogButton.Enabled = !busy;
         _providerList.Enabled = !busy;
         _manualProviderText.Enabled = !busy;
         _codexHomeCombo.Enabled = !busy;
+    }
+
+    private void UpdateCheckButtonState()
+    {
+        _checkUpdateButton.Enabled = !_busy && !_updateCheckInProgress;
     }
 
     private void AppendLog(string message)
