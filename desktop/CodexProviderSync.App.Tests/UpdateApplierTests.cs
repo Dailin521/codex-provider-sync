@@ -64,6 +64,29 @@ public sealed class UpdateApplierTests
     }
 
     [Fact]
+    public void Apply_WhenUpdatedApplicationCannotStart_RestoresPreviousVersion()
+    {
+        FakeUpdateRuntime runtime = new() { StartException = new IOException("start failed") };
+        byte[] original = Encoding.UTF8.GetBytes("old executable");
+        byte[] update = Encoding.UTF8.GetBytes("new executable");
+        runtime.AddFile("download.exe", update);
+        runtime.AddFile("installed.exe", original);
+        UpdateApplyEngine engine = new(runtime);
+        UpdateArguments arguments = new(42, "download.exe", "installed.exe", Sha256(update));
+
+        InvalidOperationException error = Assert.Throws<InvalidOperationException>(() => engine.Apply(arguments));
+        engine.TryRestartInstalledApplication(arguments.Target);
+
+        Assert.Contains("previous version was restored", error.Message, StringComparison.Ordinal);
+        Assert.Equal(original, runtime.ReadFile("installed.exe"));
+        Assert.True(runtime.FileExists("download.exe"));
+        Assert.False(runtime.FileExists("installed.exe.previous"));
+        Assert.False(runtime.FileExists("installed.exe.update"));
+        Assert.Equal(["installed.exe"], runtime.StartedProcesses);
+        Assert.Equal(2, runtime.ReplaceCalls);
+    }
+
+    [Fact]
     public void CleanupStaleUpdaterDirectories_RemovesOldHelpersAndKeepsCurrentOne()
     {
         string root = Path.Combine(Path.GetTempPath(), $"codex-provider-updater-cleanup-{Guid.NewGuid():N}");
@@ -119,6 +142,7 @@ public sealed class UpdateApplierTests
         private readonly Dictionary<string, byte[]> _files = new(StringComparer.OrdinalIgnoreCase);
 
         public Exception? ReplaceException { get; init; }
+        public Exception? StartException { get; set; }
         public int ReplaceCalls { get; private set; }
         public List<string> StartedProcesses { get; } = [];
         public List<(int ProcessId, TimeSpan Timeout)> ProcessWaits { get; } = [];
@@ -158,6 +182,15 @@ public sealed class UpdateApplierTests
 
         public void WaitForProcessExit(int processId, TimeSpan timeout) => ProcessWaits.Add((processId, timeout));
 
-        public void StartProcess(string path) => StartedProcesses.Add(path);
+        public void StartProcess(string path)
+        {
+            if (StartException is { } error)
+            {
+                StartException = null;
+                throw error;
+            }
+
+            StartedProcesses.Add(path);
+        }
     }
 }

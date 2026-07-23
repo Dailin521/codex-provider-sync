@@ -172,9 +172,31 @@ internal sealed class UpdateApplyEngine(IUpdateRuntime runtime)
             runtime.CopyFile(arguments.Source, replacementPath, overwrite: true);
             VerifySha256(replacementPath, arguments.ExpectedSha256);
             runtime.ReplaceFile(replacementPath, arguments.Target, backupPath);
+            try
+            {
+                runtime.StartProcess(arguments.Target);
+            }
+            catch (Exception startError)
+            {
+                try
+                {
+                    runtime.ReplaceFile(backupPath, arguments.Target, replacementPath);
+                }
+                catch (Exception rollbackError)
+                {
+                    throw new AggregateException(
+                        "The updated application could not be started and the previous version could not be restored.",
+                        startError,
+                        rollbackError);
+                }
+
+                throw new InvalidOperationException(
+                    "The updated application could not be started. The previous version was restored.",
+                    startError);
+            }
+
             TryDelete(backupPath);
             TryDelete(arguments.Source);
-            runtime.StartProcess(arguments.Target);
         }
         finally
         {
