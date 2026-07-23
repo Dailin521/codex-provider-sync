@@ -7,7 +7,8 @@ static class Program
     [STAThread]
     static void Main(string[] args)
     {
-        if (UpdateApplier.TryRun(args))
+        ExecutionLogService executionLogService = new();
+        if (UpdateApplier.TryRun(args, executionLogService))
         {
             return;
         }
@@ -25,7 +26,7 @@ static class Program
             }
 
             ApplicationConfiguration.Initialize();
-            MainForm mainForm = new();
+            MainForm mainForm = new(executionLogService);
             using FocusRequestServer focusServer = new(mainForm.BringToFront);
             focusServer.Start();
             Application.Run(mainForm);
@@ -38,8 +39,11 @@ static class Program
             Directory.CreateDirectory(logDir);
             string logPath = Path.Combine(logDir, "startup-error.log");
             File.WriteAllText(logPath, error.ToString());
+            executionLogService.TryAppend(
+                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 启动失败{Environment.NewLine}{error}",
+                out _);
             MessageBox.Show(
-                $"Codex Provider Sync failed to start.\n\n{error.Message}\n\nDetails were written to:\n{logPath}",
+                $"Codex Provider Sync 启动失败。{Environment.NewLine}{Environment.NewLine}{error.Message}{Environment.NewLine}{Environment.NewLine}详细信息已写入:{Environment.NewLine}{logPath}",
                 "Codex Provider Sync",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);

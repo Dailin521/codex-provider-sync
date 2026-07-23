@@ -44,6 +44,8 @@ The GUI app:
 - keeps the latest 5 managed backups by default, with a configurable retention count
 - can manually clean old managed backups from the app
 - can restore from backup without using a terminal
+- writes UTF-8 daily execution logs under `%AppData%\codex-provider-sync\logs`
+- keeps the most recent 30 days of execution logs and can open the log folder from the app
 
 For GUI-specific usage notes, see [README_GUI_ZH.md](README_GUI_ZH.md).
 

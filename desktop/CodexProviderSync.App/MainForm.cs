@@ -8,10 +8,11 @@ public sealed class MainForm : Form
     private readonly CodexSyncService _syncService = new();
     private readonly SettingsService _settingsService = new();
     private readonly UpdateService _updateService = new();
+    private readonly ExecutionLogService _executionLogService;
 
     private readonly ComboBox _codexHomeCombo = new() { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDown };
-    private readonly Button _browseButton = new() { Text = "Browse...", AutoSize = true };
-    private readonly Button _refreshButton = new() { Text = "Refresh", AutoSize = true };
+    private readonly Button _browseButton = new() { Text = "浏览...", AutoSize = true };
+    private readonly Button _refreshButton = new() { Text = "刷新", AutoSize = true };
     private readonly RichTextBox _statusBox = new()
     {
         Dock = DockStyle.Fill,
@@ -90,7 +91,8 @@ public sealed class MainForm : Form
     private readonly Button _openBackupButton = new() { Text = "打开备份目录", Dock = DockStyle.Fill, Height = 40 };
     private readonly Button _pruneBackupsButton = new() { Text = "清理旧备份", Dock = DockStyle.Fill, Height = 40 };
     private readonly Button _checkUpdateButton = new() { Text = "检查更新", Dock = DockStyle.Fill, Height = 40 };
-    private readonly Label _busyLabel = new() { AutoSize = true, ForeColor = Color.DarkGreen, Text = "Ready" };
+    private readonly Button _openLogButton = new() { Text = "打开日志目录", AutoSize = true, Height = 32 };
+    private readonly Label _busyLabel = new() { AutoSize = true, ForeColor = Color.DarkGreen, Text = "就绪" };
     private readonly Label _warningLine1 = new()
     {
         AutoSize = false,
@@ -122,12 +124,26 @@ public sealed class MainForm : Form
     private AppSettings _settings = new();
     private StatusSnapshot? _currentStatus;
     private bool _loadingSettings;
+    private bool _logFailureReported;
 
-    public MainForm()
+    public MainForm() : this(new ExecutionLogService())
     {
+    }
+
+    internal MainForm(ExecutionLogService executionLogService)
+    {
+        _executionLogService = executionLogService;
         Text = "Codex Provider Sync";
         MinimumSize = new Size(1180, 760);
         StartPosition = FormStartPosition.CenterScreen;
+
+        _executeButton.BackColor = Color.FromArgb(220, 252, 231);
+        _executeButton.ForeColor = Color.FromArgb(22, 101, 52);
+        _executeButton.FlatStyle = FlatStyle.Flat;
+        _executeButton.FlatAppearance.BorderColor = Color.FromArgb(134, 239, 172);
+        _executeButton.FlatAppearance.BorderSize = 1;
+        _executeButton.FlatAppearance.MouseOverBackColor = Color.FromArgb(187, 247, 208);
+        _executeButton.UseVisualStyleBackColor = false;
 
         _providerList.Columns.Add("Provider", 180);
         _providerList.Columns.Add("来源", 180);
@@ -297,7 +313,7 @@ public sealed class MainForm : Form
         hintPanel.Controls.Add(_removeProviderButton);
         hintPanel.Controls.Add(new Label
         {
-            Text = "Refresh 时会把扫描到的新 Provider 自动并入持久化列表",
+            Text = "刷新时会把扫描到的新 Provider 自动并入持久化列表",
             AutoSize = true,
             Margin = new Padding(12, 8, 0, 0),
             ForeColor = SystemColors.GrayText
@@ -493,7 +509,27 @@ public sealed class MainForm : Form
     private Control BuildLogPanel()
     {
         GroupBox group = new() { Text = "执行日志", Dock = DockStyle.Fill };
-        group.Controls.Add(_logBox);
+        TableLayoutPanel panel = new()
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            Padding = new Padding(4)
+        };
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+        FlowLayoutPanel toolbar = new()
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false
+        };
+        toolbar.Controls.Add(_openLogButton);
+        panel.Controls.Add(toolbar, 0, 0);
+        panel.Controls.Add(_logBox, 0, 1);
+        group.Controls.Add(panel);
         return group;
     }
 
@@ -509,6 +545,7 @@ public sealed class MainForm : Form
         _openBackupButton.Click += (_, _) => OpenBackupFolder();
         _pruneBackupsButton.Click += async (_, _) => await PruneBackupsAsync();
         _checkUpdateButton.Click += async (_, _) => await CheckForUpdatesAsync();
+        _openLogButton.Click += (_, _) => OpenLogFolder();
         _providerList.SelectedIndexChanged += (_, _) => UpdateSelectionLabel();
         _codexHomeCombo.Leave += async (_, _) => await PersistHomeSelectionAsync();
     }
@@ -522,6 +559,7 @@ public sealed class MainForm : Form
         _codexHomeCombo.Text = _settings.LastCodexHome ?? AppConstants.DefaultCodexHome();
         _backupRetentionInput.Value = Math.Max(_backupRetentionInput.Minimum, Math.Min(_backupRetentionInput.Maximum, _settings.BackupRetentionCount));
         AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 已加载设置: {_settingsService.SettingsPath}");
+        AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 执行日志文件: {_executionLogService.CurrentLogPath}");
         _loadingSettings = false;
         await RefreshStatusAsync();
     }
@@ -529,7 +567,7 @@ public sealed class MainForm : Form
     private async Task RefreshStatusAsync()
     {
         string codexHome = CurrentCodexHome();
-        await RunBusyAsync("Refreshing...", () => RefreshStatusCoreAsync(codexHome));
+        await RunBusyAsync("刷新中...", () => RefreshStatusCoreAsync(codexHome));
     }
 
     private async Task BrowseCodexHomeAsync()
@@ -630,7 +668,7 @@ public sealed class MainForm : Form
             return;
         }
 
-        await RunBusyAsync("Executing...", async () =>
+        await RunBusyAsync("执行中...", async () =>
         {
             string codexHome = CurrentCodexHome();
             int backupRetentionCount = CurrentBackupRetentionCount();
@@ -659,7 +697,10 @@ public sealed class MainForm : Form
             _settings = _settingsService.UpdateState(_settings, provider, result.BackupDir, CaptureWindowBounds(), backupRetentionCount);
             await _settingsService.SaveAsync(_settings);
             AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 执行完成");
-            AppendLog(TextFormatter.FormatSyncResult(result, _updateConfigCheck.Checked ? "已切换并同步" : "已同步"));
+            AppendLog(TextFormatter.FormatSyncResult(
+                result,
+                _updateConfigCheck.Checked ? "已切换并同步" : "已同步",
+                TextFormatter.ChineseSimplified));
             AppendLog(FormatModelSyncOutcome(result.ModelSync));
             AppendLog(string.Empty);
             await RefreshStatusCoreAsync(codexHome);
@@ -676,7 +717,7 @@ public sealed class MainForm : Form
 
         using FolderBrowserDialog dialog = new()
         {
-            Description = "选择要恢复的 backup 目录",
+            Description = "选择要恢复的备份目录",
             UseDescriptionForTitle = true,
             InitialDirectory = initialBackupDir,
             ShowNewFolderButton = false
@@ -711,12 +752,12 @@ public sealed class MainForm : Form
             return;
         }
 
-        if (!ConfirmCodexClosed("恢复 backup 前，请先关闭已打开的 Codex CLI、Codex App、app-server 和相关终端。是否继续？"))
+        if (!ConfirmCodexClosed("恢复备份前，请先关闭已打开的 Codex CLI、Codex App、app-server 和相关终端。是否继续？"))
         {
             return;
         }
 
-        await RunBusyAsync("Restoring...", async () =>
+        await RunBusyAsync("恢复中...", async () =>
         {
             string codexHome = CurrentCodexHome();
             RestoreResult result = await Task.Run(async () => await _syncService.RunRestoreAsync(
@@ -731,7 +772,7 @@ public sealed class MainForm : Form
             _settings = _settingsService.UpdateState(_settings, SelectedProvider(), dialog.SelectedPath, CaptureWindowBounds(), CurrentBackupRetentionCount());
             await _settingsService.SaveAsync(_settings);
             AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 恢复完成");
-            AppendLog(TextFormatter.FormatRestoreResult(result));
+            AppendLog(TextFormatter.FormatRestoreResult(result, TextFormatter.ChineseSimplified));
             AppendLog(string.Empty);
             await RefreshStatusCoreAsync(codexHome);
         });
@@ -748,6 +789,25 @@ public sealed class MainForm : Form
         });
     }
 
+    private void OpenLogFolder()
+    {
+        try
+        {
+            Directory.CreateDirectory(_executionLogService.LogDirectory);
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = _executionLogService.LogDirectory,
+                UseShellExecute = true
+            });
+            AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 已打开日志目录: {_executionLogService.LogDirectory}");
+        }
+        catch (Exception error)
+        {
+            AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 打开日志目录失败: {error}");
+            MessageBox.Show(this, $"无法打开日志目录。{Environment.NewLine}{Environment.NewLine}{error.Message}", Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
     private async Task PruneBackupsAsync()
     {
         if (!ConfirmBackupPrune())
@@ -755,12 +815,12 @@ public sealed class MainForm : Form
             return;
         }
 
-        await RunBusyAsync("Cleaning backups...", async () =>
+        await RunBusyAsync("正在清理备份...", async () =>
         {
             string codexHome = CurrentCodexHome();
             BackupPruneResult result = await Task.Run(async () => await _syncService.RunPruneBackupsAsync(codexHome, CurrentBackupRetentionCount()));
             AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 旧备份清理完成");
-            AppendLog(TextFormatter.FormatBackupPruneResult(result));
+            AppendLog(TextFormatter.FormatBackupPruneResult(result, TextFormatter.ChineseSimplified));
             AppendLog(string.Empty);
             await RefreshStatusCoreAsync(codexHome);
         });
@@ -771,13 +831,16 @@ public sealed class MainForm : Form
         await RunBusyAsync("正在检查更新...", async () =>
         {
             Version currentVersion = UpdateService.NormalizeVersion(GetType().Assembly.GetName().Version ?? new Version(0, 0, 0));
+            AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 正在检查更新，当前版本: v{currentVersion}");
             UpdateCheckResult update = await _updateService.CheckForUpdateAsync(currentVersion);
             if (!update.IsUpdateAvailable)
             {
+                AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 未发现更高版本，GitHub 最新 Release: {update.LatestRelease.TagName}");
                 MessageBox.Show(this, $"当前已是最新版本（v{currentVersion}）。", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
+            AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 发现新版本: {update.LatestRelease.TagName}");
             DialogResult choice = MessageBox.Show(
                 this,
                 $"发现新版本 {update.LatestRelease.TagName}（当前 v{currentVersion}）。\n\n是否下载、校验并重启完成更新？",
@@ -786,6 +849,7 @@ public sealed class MainForm : Form
                 MessageBoxIcon.Information);
             if (choice != DialogResult.Yes)
             {
+                AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 已取消更新: {update.LatestRelease.TagName}");
                 return;
             }
 
@@ -794,7 +858,7 @@ public sealed class MainForm : Form
                 "codex-provider-sync",
                 "updates");
             DownloadedUpdate downloadedUpdate = await _updateService.DownloadWindowsExeAsync(update.LatestRelease, updateDirectory);
-            string targetExe = Environment.ProcessPath ?? throw new InvalidOperationException("Unable to determine the current executable path.");
+            string targetExe = Environment.ProcessPath ?? throw new InvalidOperationException("无法确定当前程序文件路径。");
             UpdateApplier.Start(downloadedUpdate.Path, targetExe, downloadedUpdate.Sha256);
             AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 已下载并校验 {update.LatestRelease.TagName}，正在重启完成更新。");
             BeginInvoke(Close);
@@ -830,10 +894,10 @@ public sealed class MainForm : Form
                 {
                     Tag = option.Id
                 };
-                item.SubItems.Add(TextFormatter.FormatProviderSources(option));
-                item.SubItems.Add(option.IsCurrentProvider ? "Yes" : string.Empty);
-                item.SubItems.Add(option.IsManual ? "Yes" : string.Empty);
-                item.SubItems.Add(option.IsSaved ? "Yes" : string.Empty);
+                item.SubItems.Add(TextFormatter.FormatProviderSources(option, TextFormatter.ChineseSimplified));
+                item.SubItems.Add(option.IsCurrentProvider ? "是" : string.Empty);
+                item.SubItems.Add(option.IsManual ? "是" : string.Empty);
+                item.SubItems.Add(option.IsSaved ? "是" : string.Empty);
                 _providerList.Items.Add(item);
             }
         }
@@ -907,7 +971,7 @@ public sealed class MainForm : Form
         _settings = _settingsService.UpdateState(_settings, SelectedProvider(), _settings.LastBackupDirectory, CaptureWindowBounds(), CurrentBackupRetentionCount());
         await _settingsService.SaveAsync(_settings);
 
-        _statusBox.Text = TextFormatter.FormatStatus(_currentStatus);
+        _statusBox.Text = TextFormatter.FormatStatus(_currentStatus, TextFormatter.ChineseSimplified);
         ReloadRecentHomes();
         ReloadProviderList();
         _codexHomeCombo.Text = _currentStatus.CodexHome;
@@ -953,11 +1017,11 @@ public sealed class MainForm : Form
         catch (Exception error)
         {
             AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 错误: {error}");
-            MessageBox.Show(this, error.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(this, $"操作失败。{Environment.NewLine}{Environment.NewLine}{error.Message}", Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
         {
-            SetBusy(false, "Ready");
+            SetBusy(false, "就绪");
         }
     }
 
@@ -980,6 +1044,7 @@ public sealed class MainForm : Form
         _openBackupButton.Enabled = !busy;
         _pruneBackupsButton.Enabled = !busy;
         _checkUpdateButton.Enabled = !busy;
+        _openLogButton.Enabled = !busy;
         _providerList.Enabled = !busy;
         _manualProviderText.Enabled = !busy;
         _codexHomeCombo.Enabled = !busy;
@@ -995,6 +1060,16 @@ public sealed class MainForm : Form
         _logBox.AppendText(message);
         _logBox.SelectionStart = _logBox.TextLength;
         _logBox.ScrollToCaret();
+
+        if (!_executionLogService.TryAppend(message, out Exception? error) && !_logFailureReported)
+        {
+            _logFailureReported = true;
+            string warning = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 警告: 无法写入本地执行日志: {error?.Message}";
+            _logBox.AppendText(Environment.NewLine);
+            _logBox.AppendText(warning);
+            _logBox.SelectionStart = _logBox.TextLength;
+            _logBox.ScrollToCaret();
+        }
     }
 
     private static string FormatModelSyncOutcome(ModelSyncOutcome outcome)
@@ -1005,13 +1080,23 @@ public sealed class MainForm : Form
         }
         if (outcome.Applied)
         {
-            return $"顶层 model: {outcome.Model} (来源: {outcome.Source})";
+            string source = outcome.Source switch
+            {
+                "explicit" => "手动指定",
+                "provider-section" => "Provider 配置",
+                _ => outcome.Source
+            };
+            return $"顶层 model: {outcome.Model}（来源: {source}）";
         }
         if (!string.IsNullOrEmpty(outcome.Warning))
         {
-            return $"顶层 model: 未改写 ({outcome.Warning})";
+            return outcome.Source == "none"
+                ? "顶层 model: 未改写（目标 Provider 配置中没有 model，已保留当前值；也可以选择自定义 model 后重试）"
+                : $"顶层 model: 未改写（{outcome.Warning}）";
         }
-        return "顶层 model: 未改写 (已请求保留)";
+        return outcome.Source == "keep-root-model"
+            ? "顶层 model: 未改写（已请求保留）"
+            : "顶层 model: 未改写";
     }
 
     private bool ConfirmCodexClosed(string message)

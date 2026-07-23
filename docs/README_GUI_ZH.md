@@ -20,6 +20,9 @@ macOS 桌面版说明见 [README_MAC_GUI_ZH.md](README_MAC_GUI_ZH.md)。
 - 支持手动清理旧备份
 - 支持从 backup 目录恢复
 - 恢复时可分别选择 config、SQLite、rollout metadata
+- 当前状态、执行结果和常用提示使用中文显示
+- 常规执行日志按天写入本地并自动保留最近 30 天
+- 支持直接打开日志目录
 - 如果 EXE 双击无反应，查看 `%AppData%\codex-provider-sync\startup-error.log`，或在 PowerShell 中运行 `./CodexProviderSync.exe` 获取错误
 - 含 `encrypted_content` 的历史会话跨 provider/account 后可能只能恢复可见性，继续对话或 compact 仍可能报 `invalid_encrypted_content`
 
@@ -41,23 +44,27 @@ GUI Refresh 会显示项目可见性诊断，例如 `first page 0/50`、`ranks 6
 
 1. 打开 `CodexProviderSync.exe`
 2. 确认顶部 `Codex Home` 路径
-3. 点击 `Refresh`
+3. 点击“刷新”
 4. 在中间列表里选择目标 Provider
 5. 如果你希望同时改写 `config.toml` 根级 provider，勾选右侧复选框
 6. 根据需要调整“自动保留最近 N 份备份”
-7. 点击 `Execute`
-8. 如需回滚，点击 `Restore Backup`
+7. 点击“立即同步”
+8. 如需回滚，点击“恢复备份”
 9. 如需立刻清理旧备份，点击 `清理旧备份`
+10. 如需复制或查看历史执行信息，点击“打开日志目录”
 
 ## 持久化位置
 
 - GUI 设置：`%AppData%\codex-provider-sync\settings.json`
+- 每日执行日志：`%AppData%\codex-provider-sync\logs\execution-YYYY-MM-DD.log`
+- 启动失败日志：`%AppData%\codex-provider-sync\startup-error.log`
 - 备份目录：`%USERPROFILE%\.codex\backups_state\provider-sync\`
 
 ## 注意事项
 
 - 如果 `state_5.sqlite` 被占用，请先关闭 Codex / Codex App / app-server 再重试
 - 如果某个 rollout 文件仍被活跃会话占用，程序会跳过它并在日志区列出来
+- 每日执行日志使用 UTF-8，可在程序运行期间读取；超过 30 天的同类日志会自动清理
 - 自动清理和手动清理都只会处理由本工具创建的备份目录
 - 手动清理旧备份前会弹确认框
 - GUI 不会处理登录、认证或第三方 provider 切换，只负责同步可见性相关元数据

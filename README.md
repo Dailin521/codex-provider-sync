@@ -29,9 +29,9 @@ Codex 切换 `model_provider` 后，旧会话可能在 Desktop 或 `/resume` 里
 Windows 用户优先下载 Release 里的 `CodexProviderSync.exe`：
 
 1. 打开 `CodexProviderSync.exe`
-2. 点击 `Refresh`
+2. 点击“刷新”
 3. 选择目标 Provider
-4. 点击 `Execute`
+4. 点击“立即同步”
 
 GUI 右侧的“检查更新”会读取本项目最新的稳定版 GitHub Release。确认更新后，程序会下载 `CodexProviderSync.exe`、校验同版本发布的 SHA-256 文件、退出并由临时更新器再次校验后原子替换原 EXE，再自动重启。更新器临时目录会在后续启动时自动清理。若 EXE 所在目录没有写入权限，更新不会覆盖旧版本，程序会尽力重启旧版，并在提示中保留下载路径供手动安装。
 
@@ -104,7 +104,8 @@ codex-provider prune-backups --keep 5
 - 如果 `state_5.sqlite` 被占用，关闭 Codex / Codex App / app-server 后重试。
 - 如果 `state_5.sqlite` 损坏，工具会提示 malformed/unreadable 并停止同步。
 - 如果活跃会话锁住 rollout 文件，工具会跳过该文件并继续处理其它历史会话。
-- 如果 EXE 双击无反应，先确认已解压，再查看 `%AppData%\codex-provider-sync\startup-error.log`，或在 PowerShell 里运行 `./CodexProviderSync.exe`。
+- 常规执行日志按天写入 `%AppData%\codex-provider-sync\logs\execution-YYYY-MM-DD.log`，默认保留最近 30 天，也可在 GUI 中点击“打开日志目录”。
+- 如果 EXE 双击无反应，先确认已解压，再查看 `%AppData%\codex-provider-sync\startup-error.log` 和当天执行日志，或在 PowerShell 里运行 `./CodexProviderSync.exe`。
 - 内置更新只检查稳定版 GitHub Release，且需要用户在 GUI 中确认；项目目前未做 Windows 代码签名，SHA-256 校验可检测下载损坏，但不能替代代码签名。
 
 Windows GUI 说明见 [README_GUI_ZH.md](docs/README_GUI_ZH.md)，macOS GUI 说明见 [README_MAC_GUI_ZH.md](docs/README_MAC_GUI_ZH.md)。AI / Agent 说明见 [AGENTS.md](AGENTS.md)。

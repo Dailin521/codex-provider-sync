@@ -12,7 +12,7 @@ public sealed class UpdateServiceTests
     {
         using HttpClient client = CreateClient(_ => JsonResponse("""
             {
-              "tag_name": "v0.2.10",
+              "tag_name": "v0.3.1",
               "assets": [
                 { "name": "CodexProviderSync.exe", "browser_download_url": "https://example.test/CodexProviderSync.exe" },
                 { "name": "CodexProviderSync.exe.sha256", "browser_download_url": "https://example.test/CodexProviderSync.exe.sha256" }
@@ -21,11 +21,11 @@ public sealed class UpdateServiceTests
             """));
         UpdateService service = new(client);
 
-        UpdateCheckResult result = await service.CheckForUpdateAsync(new Version(0, 2, 9, 0));
+        UpdateCheckResult result = await service.CheckForUpdateAsync(new Version(0, 3, 0, 0));
 
         Assert.True(result.IsUpdateAvailable);
-        Assert.Equal(new Version(0, 2, 9), result.CurrentVersion);
-        Assert.Equal(new Version(0, 2, 10), result.LatestRelease.Version);
+        Assert.Equal(new Version(0, 3, 0), result.CurrentVersion);
+        Assert.Equal(new Version(0, 3, 1), result.LatestRelease.Version);
     }
 
     [Fact]
@@ -42,17 +42,17 @@ public sealed class UpdateServiceTests
             {
                 RequestMessage = new HttpRequestMessage(
                     HttpMethod.Get,
-                    "https://github.com/Dailin521/codex-provider-sync/releases/tag/v0.2.10")
+                    "https://github.com/Dailin521/codex-provider-sync/releases/tag/v0.3.1")
             };
         });
         UpdateService service = new(client);
 
-        UpdateCheckResult result = await service.CheckForUpdateAsync(new Version(0, 2, 9, 0));
+        UpdateCheckResult result = await service.CheckForUpdateAsync(new Version(0, 3, 0, 0));
 
         Assert.True(result.IsUpdateAvailable);
-        Assert.Equal("v0.2.10", result.LatestRelease.TagName);
+        Assert.Equal("v0.3.1", result.LatestRelease.TagName);
         Assert.Equal(
-            "https://github.com/Dailin521/codex-provider-sync/releases/download/v0.2.10/CodexProviderSync.exe",
+            "https://github.com/Dailin521/codex-provider-sync/releases/download/v0.3.1/CodexProviderSync.exe",
             result.LatestRelease.FindAsset("CodexProviderSync.exe").DownloadUrl.AbsoluteUri);
     }
 
@@ -69,7 +69,7 @@ public sealed class UpdateServiceTests
         });
         UpdateService service = new(client);
         string directory = Path.Combine(Path.GetTempPath(), $"codex-provider-update-test-{Guid.NewGuid():N}");
-        ReleaseInfo release = new("v0.2.10", new Version(0, 2, 10),
+        ReleaseInfo release = new("v0.3.1", new Version(0, 3, 1),
         [
             new ReleaseAsset("CodexProviderSync.exe", new Uri("https://example.test/CodexProviderSync.exe")),
             new ReleaseAsset("CodexProviderSync.exe.sha256", new Uri("https://example.test/CodexProviderSync.exe.sha256"))
@@ -91,6 +91,7 @@ public sealed class UpdateServiceTests
 
     [Theory]
     [InlineData("v0.2.9", 0, 2, 9)]
+    [InlineData("v0.3.1", 0, 3, 1)]
     [InlineData(" 1.4.0 ", 1, 4, 0)]
     public void ParseReleaseVersion_AcceptsStableVersionTags(string tag, int major, int minor, int build)
     {

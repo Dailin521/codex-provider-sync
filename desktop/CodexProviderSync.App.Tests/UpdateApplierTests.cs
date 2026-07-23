@@ -77,7 +77,7 @@ public sealed class UpdateApplierTests
         InvalidOperationException error = Assert.Throws<InvalidOperationException>(() => engine.Apply(arguments));
         engine.TryRestartInstalledApplication(arguments.Target);
 
-        Assert.Contains("previous version was restored", error.Message, StringComparison.Ordinal);
+        Assert.Contains("已恢复旧版本", error.Message, StringComparison.Ordinal);
         Assert.Equal(original, runtime.ReadFile("installed.exe"));
         Assert.True(runtime.FileExists("download.exe"));
         Assert.False(runtime.FileExists("installed.exe.previous"));

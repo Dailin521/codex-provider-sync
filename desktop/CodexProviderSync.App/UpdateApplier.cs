@@ -8,7 +8,9 @@ internal static class UpdateApplier
     private const string ApplyArgument = "--apply-update";
     private const string UpdaterDirectoryName = "codex-provider-sync-updater";
 
-    public static bool TryRun(string[] args)
+    public static bool TryRun(string[] args) => TryRun(args, new ExecutionLogService());
+
+    internal static bool TryRun(string[] args, ExecutionLogService executionLogService)
     {
         if (args.Length == 0 || !string.Equals(args[0], ApplyArgument, StringComparison.Ordinal))
         {
@@ -20,14 +22,23 @@ internal static class UpdateApplier
         try
         {
             update = ParseArguments(args[1..]);
+            executionLogService.TryAppend(
+                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 开始应用更新: {update.Source} -> {update.Target}",
+                out _);
             engine.Apply(update);
+            executionLogService.TryAppend(
+                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 更新文件已校验并替换，正在启动: {update.Target}",
+                out _);
         }
         catch (Exception error)
         {
+            executionLogService.TryAppend(
+                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 应用更新失败{Environment.NewLine}{error}",
+                out _);
             engine.TryRestartInstalledApplication(update?.Target);
-            string downloadedUpdatePath = update?.Source ?? "unavailable";
+            string downloadedUpdatePath = update?.Source ?? "不可用";
             MessageBox.Show(
-                $"Codex Provider Sync update failed.\n\n{error.Message}\n\nDownloaded update:\n{downloadedUpdatePath}\n\nThe installed version was restarted when possible. You can manually replace the EXE with the downloaded update.",
+                $"Codex Provider Sync 更新失败。{Environment.NewLine}{Environment.NewLine}{error.Message}{Environment.NewLine}{Environment.NewLine}已下载的更新文件:{Environment.NewLine}{downloadedUpdatePath}{Environment.NewLine}{Environment.NewLine}已尽可能重新启动原版本。你也可以手动使用下载文件替换 EXE。",
                 "Codex Provider Sync",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
@@ -43,7 +54,7 @@ internal static class UpdateApplier
         string updaterDirectory = Path.Combine(updaterRoot, Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(updaterDirectory);
         string updaterPath = Path.Combine(updaterDirectory, "CodexProviderSync.Updater.exe");
-        File.Copy(Environment.ProcessPath ?? throw new InvalidOperationException("Unable to determine the current executable path."), updaterPath);
+        File.Copy(Environment.ProcessPath ?? throw new InvalidOperationException("无法确定当前程序文件路径。"), updaterPath);
 
         ProcessStartInfo startInfo = new()
         {
@@ -60,7 +71,7 @@ internal static class UpdateApplier
         startInfo.ArgumentList.Add("--target");
         startInfo.ArgumentList.Add(Path.GetFullPath(targetExePath));
 
-        _ = Process.Start(startInfo) ?? throw new InvalidOperationException("Unable to start the update helper.");
+        _ = Process.Start(startInfo) ?? throw new InvalidOperationException("无法启动更新辅助程序。");
     }
 
     public static void CleanupStaleUpdaterDirectories()
@@ -121,7 +132,7 @@ internal static class UpdateApplier
         if (args.Length != 8 || args[0] != "--pid" || args[2] != "--source" || args[4] != "--sha256" || args[6] != "--target" ||
             !int.TryParse(args[1], out int parentProcessId) || parentProcessId <= 0)
         {
-            throw new ArgumentException("Update helper arguments are invalid.");
+            throw new ArgumentException("更新辅助程序参数无效。");
         }
 
         return new UpdateArguments(
@@ -138,7 +149,7 @@ internal static class UpdateApplier
         string hash = value.Trim();
         if (hash.Length != 64 || !hash.All(Uri.IsHexDigit))
         {
-            throw new ArgumentException("Expected update SHA-256 is invalid.", nameof(value));
+            throw new ArgumentException("更新文件的 SHA-256 校验值无效。", nameof(value));
         }
 
         return hash.ToLowerInvariant();
@@ -153,12 +164,12 @@ internal sealed class UpdateApplyEngine(IUpdateRuntime runtime)
     {
         if (!runtime.FileExists(arguments.Source))
         {
-            throw new FileNotFoundException("Downloaded update file was not found.", arguments.Source);
+            throw new FileNotFoundException("未找到已下载的更新文件。", arguments.Source);
         }
 
         if (!runtime.FileExists(arguments.Target))
         {
-            throw new FileNotFoundException("Installed application file was not found.", arguments.Target);
+            throw new FileNotFoundException("未找到当前安装的程序文件。", arguments.Target);
         }
 
         runtime.WaitForProcessExit(arguments.ParentProcessId, TimeSpan.FromSeconds(30));
@@ -185,13 +196,13 @@ internal sealed class UpdateApplyEngine(IUpdateRuntime runtime)
                 catch (Exception rollbackError)
                 {
                     throw new AggregateException(
-                        "The updated application could not be started and the previous version could not be restored.",
+                        "更新后的程序无法启动，并且旧版本恢复失败。",
                         startError,
                         rollbackError);
                 }
 
                 throw new InvalidOperationException(
-                    "The updated application could not be started. The previous version was restored.",
+                    "更新后的程序无法启动，已恢复旧版本。",
                     startError);
             }
 
@@ -227,7 +238,7 @@ internal sealed class UpdateApplyEngine(IUpdateRuntime runtime)
         byte[] actualHash = runtime.CalculateSha256(path);
         if (!CryptographicOperations.FixedTimeEquals(expectedHash, actualHash))
         {
-            throw new InvalidDataException("The update file no longer matches the published SHA-256 checksum.");
+            throw new InvalidDataException("更新文件与发布的 SHA-256 校验值不一致。");
         }
     }
 
@@ -282,7 +293,7 @@ internal sealed class SystemUpdateRuntime : IUpdateRuntime
             using Process parent = Process.GetProcessById(processId);
             if (!parent.WaitForExit((int)timeout.TotalMilliseconds))
             {
-                throw new TimeoutException("The existing application did not exit before the update timed out.");
+                throw new TimeoutException("等待当前程序退出超时。");
             }
         }
         catch (ArgumentException)
@@ -297,6 +308,6 @@ internal sealed class SystemUpdateRuntime : IUpdateRuntime
         {
             FileName = path,
             UseShellExecute = true
-        }) ?? throw new InvalidOperationException($"Unable to start {path}.");
+        }) ?? throw new InvalidOperationException($"无法启动 {path}。");
     }
 }

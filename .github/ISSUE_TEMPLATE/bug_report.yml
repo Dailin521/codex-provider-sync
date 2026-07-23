@@ -80,7 +80,7 @@ body:
     id: logs
     attributes:
       label: 日志或错误堆栈
-      description: EXE 启动问题请贴 `%AppData%\codex-provider-sync\startup-error.log`，CLI 问题请贴终端完整输出。
+      description: Windows GUI 常规问题请贴 `%AppData%\codex-provider-sync\logs\execution-YYYY-MM-DD.log`；EXE 启动问题另请贴 `%AppData%\codex-provider-sync\startup-error.log`；CLI 问题请贴终端完整输出。
       render: text
     validations:
       required: false
