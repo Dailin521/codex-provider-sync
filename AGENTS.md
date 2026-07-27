@@ -15,9 +15,9 @@ For normal Windows users, prefer the GUI app when it is available. Use the CLI w
 The tool works by updating both:
 
 - rollout metadata under `~/.codex/sessions` and `~/.codex/archived_sessions`
-- SQLite thread metadata in the detected Codex state database, normally
-  `~/.codex/sqlite/state_5.sqlite` with legacy fallback to
-  `~/.codex/state_5.sqlite`
+- SQLite thread metadata in the resolved Codex state database
+
+Resolve SQLite Home in this order: explicit CLI override, root `sqlite_home` in `config.toml`, `CODEX_SQLITE_HOME`, then `<codex-home>/sqlite`. Only the default layout may fall back to `<codex-home>/state_5.sqlite`. Never fall back when an explicit/config/environment SQLite Home is missing.
 
 Do not solve this by manually editing rollout files only unless the user explicitly asks for manual intervention.
 
@@ -128,6 +128,7 @@ If `switch <provider-id>` fails because the provider is missing:
 - by default the tool keeps the most recent 5 managed backups
 - use GUI retention settings or CLI `--keep <n>` when the user wants a different retention count
 - do not edit `state_5.sqlite` or rollout files manually if the tool can do it
+- metadata v2 backups record `sqliteHome` and `sqliteDbFiles`; CLI restore to a different SQLite Home requires explicit relocation flags
 - GUI settings live in `%AppData%\codex-provider-sync\settings.json`
 
 ## Recommended Commands
@@ -148,6 +149,7 @@ With an explicit Codex home:
 
 ```bash
 codex-provider status --codex-home C:\Users\you\.codex
+codex-provider status --codex-home C:\Users\you\.codex --sqlite-home \\wsl.localhost\Ubuntu\home\you\.codex\sqlite
 codex-provider sync --codex-home C:\Users\you\.codex
 codex-provider switch openai --codex-home C:\Users\you\.codex
 ```

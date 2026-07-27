@@ -30,7 +30,7 @@ The tool does not sign in, manage accounts, or switch authentication. Switch Pro
 ## What It Updates
 
 - Rollout metadata under `~/.codex/sessions` and `~/.codex/archived_sessions`.
-- Codex SQLite thread records. It prefers `~/.codex/sqlite/state_5.sqlite` and supports the legacy `~/.codex/state_5.sqlite` location.
+- Codex SQLite thread records, including layouts where SQLite is stored outside Codex Home.
 - Project-visibility path information and related model metadata when required.
 - Managed backups before each synchronization, with restore and pruning support.
 - Large rollout files in place when safe, with automatic fallback to a full safe rewrite.
@@ -75,7 +75,11 @@ Common commands:
 | `codex-provider watch` | Watch config, SQLite, and WAL changes and synchronize automatically |
 | `codex-provider watch --once` | Exit after the first change is synchronized successfully |
 
-`switch` accepts `--model <NAME>` to set the root model explicitly, or `--keep-root-model` to change only the Provider. All main commands accept `--codex-home <PATH>`.
+`switch` accepts `--model <NAME>` to set the root model explicitly, or `--keep-root-model` to change only the Provider. All main commands accept `--codex-home <PATH>` and `--sqlite-home <PATH>`.
+
+SQLite Home precedence is: CLI override, root-level `sqlite_home` in `config.toml`, `CODEX_SQLITE_HOME`, then `<Codex Home>/sqlite`. The legacy `<Codex Home>/state_5.sqlite` fallback is enabled only for the default layout. An explicit SQLite Home never falls back to a stale database under Codex Home.
+
+`status` reports the effective SQLite Home and its source. If an explicit location has no `state_5.sqlite`, read-only status reports the diagnostic while write operations fail. New metadata v2 backups record the separate SQLite Home. Restoring a v2 backup to a different SQLite Home is rejected unless relocation is explicitly confirmed; the CLI requires both `--sqlite-home` and `--allow-sqlite-home-relocation`.
 
 Node.js 24+ uses the built-in `node:sqlite` module. Older supported Node.js releases use the optional `better-sqlite3` dependency.
 
