@@ -11,6 +11,7 @@ import {
 } from "./constants.js";
 import { assertSessionFilesWritable, restoreSessionChanges } from "./session-files.js";
 import { assertSqliteWritable, detectStateDb } from "./sqlite-state.js";
+import { resolveStorageLayout, withStateDbLocation } from "./storage-layout.js";
 
 function timestampSlug(date = new Date()) {
   return date.toISOString().replaceAll(":", "").replaceAll("-", "").replace(".", "");
@@ -27,18 +28,33 @@ async function copyIfPresent(sourcePath, destinationPath) {
   return true;
 }
 
-function dbBackupRelativePath(codexHome, dbPath, suffix) {
-  const relativePath = path.relative(codexHome, `${dbPath}${suffix}`);
-  return relativePath && !relativePath.startsWith("..") && !path.isAbsolute(relativePath)
-    ? relativePath
-    : `${DB_FILE_BASENAME}${suffix}`;
-}
-
 function restoreDbTargetPath(codexHome, relativePath) {
   if (path.isAbsolute(relativePath) || relativePath.split(/[\\/]/).includes("..")) {
     throw new Error(`Invalid database backup path: ${relativePath}`);
   }
   return path.join(codexHome, relativePath);
+}
+
+function safeRelativePath(root, target) {
+  const relativePath = path.relative(root, target);
+  return relativePath && !relativePath.startsWith("..") && !path.isAbsolute(relativePath)
+    ? relativePath
+    : null;
+}
+
+function restoreSqliteTargetPath(sqliteHome, relativePath) {
+  if (path.isAbsolute(relativePath) || relativePath.split(/[\\/]/).includes("..")) {
+    throw new Error(`Invalid SQLite backup path: ${relativePath}`);
+  }
+  return path.join(sqliteHome, relativePath);
+}
+
+function storagePathsEqual(left, right) {
+  const normalizedLeft = path.resolve(left);
+  const normalizedRight = path.resolve(right);
+  return process.platform === "win32"
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
 }
 
 async function removeIfPresent(targetPath) {
@@ -58,25 +74,40 @@ export async function restoreGlobalStateFilesFromBackup(backupDir, codexHome) {
 }
 
 export async function createBackup({
+  storage,
   codexHome,
   targetProvider,
   sessionChanges,
   configPath,
   configBackupText
 }) {
+  const effectiveStorage = storage ?? resolveStorageLayout({ codexHome, env: {} });
+  codexHome = effectiveStorage.codexHome;
   const backupRoot = defaultBackupRoot(codexHome);
   const backupDir = path.join(backupRoot, timestampSlug());
   const dbDir = path.join(backupDir, "db");
   await fs.mkdir(dbDir, { recursive: true });
 
   const copiedDbFiles = [];
-  const stateDb = await detectStateDb(codexHome);
+  const copiedSqliteDbFiles = [];
+  const stateDb = Object.hasOwn(effectiveStorage, "stateDbLocation")
+    ? effectiveStorage.stateDbLocation
+    : await detectStateDb(effectiveStorage);
+  const actualSqliteHome = stateDb ? path.dirname(stateDb.path) : effectiveStorage.sqliteHome;
   if (stateDb) {
     for (const suffix of ["", "-shm", "-wal"]) {
-      const relativePath = dbBackupRelativePath(codexHome, stateDb.path, suffix);
-      const copied = await copyIfPresent(`${stateDb.path}${suffix}`, path.join(dbDir, relativePath));
-      if (copied) {
-        copiedDbFiles.push(relativePath);
+      const sourcePath = `${stateDb.path}${suffix}`;
+      const sqliteRelativePath = `${DB_FILE_BASENAME}${suffix}`;
+      const copied = await copyIfPresent(sourcePath, path.join(dbDir, "sqlite-home", sqliteRelativePath));
+      if (!copied) {
+        continue;
+      }
+      copiedSqliteDbFiles.push(sqliteRelativePath);
+
+      const legacyRelativePath = safeRelativePath(codexHome, sourcePath);
+      if (legacyRelativePath) {
+        await copyIfPresent(sourcePath, path.join(dbDir, legacyRelativePath));
+        copiedDbFiles.push(legacyRelativePath);
       }
     }
   }
@@ -120,12 +151,14 @@ export async function createBackup({
     path.join(backupDir, "metadata.json"),
     JSON.stringify(
       {
-        version: 1,
+        version: 2,
         namespace: BACKUP_NAMESPACE,
         codexHome,
+        sqliteHome: actualSqliteHome,
         targetProvider,
         createdAt: sessionManifest.createdAt,
         dbFiles: copiedDbFiles,
+        sqliteDbFiles: copiedSqliteDbFiles,
         changedSessionFiles: sessionChanges.length
       },
       null,
@@ -199,14 +232,22 @@ export async function pruneBackups(codexHome, keepCount = DEFAULT_BACKUP_RETENTI
   };
 }
 
-export async function restoreBackup(backupDir, codexHome, options = {}) {
+export async function restoreBackup(backupDir, storageOrCodexHome, options = {}) {
   const {
     restoreConfig = true,
     restoreDatabase = true,
-    restoreSessions = true
+    restoreSessions = true,
+    allowSqliteHomeRelocation = false
   } = options;
+  const storage = typeof storageOrCodexHome === "string"
+    ? resolveStorageLayout({ codexHome: storageOrCodexHome, env: {} })
+    : storageOrCodexHome;
+  const codexHome = storage.codexHome;
   const metadataPath = path.join(backupDir, "metadata.json");
   const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
+  if (metadata.namespace !== BACKUP_NAMESPACE || ![1, 2].includes(metadata.version)) {
+    throw new Error(`Unsupported backup metadata in ${metadataPath}.`);
+  }
   if (metadata.codexHome !== codexHome) {
     throw new Error(`Backup was created for ${metadata.codexHome}, not ${codexHome}.`);
   }
@@ -218,30 +259,79 @@ export async function restoreBackup(backupDir, codexHome, options = {}) {
     await assertSessionFilesWritable(sessionManifest.files ?? []);
   }
 
+  let stateDb = null;
+  let targetSqliteHome = null;
+  let databaseRestorePlan = null;
+  if (restoreDatabase) {
+    stateDb = Object.hasOwn(storage, "stateDbLocation")
+      ? storage.stateDbLocation
+      : await detectStateDb(storage);
+    if (!stateDb && storage.sqliteHomeSource !== "default") {
+      throw new Error(`state_5.sqlite not found in SQLite home ${storage.sqliteHome}.`);
+    }
+    targetSqliteHome = stateDb ? path.dirname(stateDb.path) : storage.sqliteHome;
+    if (stateDb
+      && metadata.version >= 2
+      && metadata.sqliteHome
+      && !storagePathsEqual(metadata.sqliteHome, targetSqliteHome)
+      && !allowSqliteHomeRelocation) {
+      throw new Error(
+        `Backup SQLite home is ${metadata.sqliteHome}, but the current target is ${targetSqliteHome}. `
+        + "Use --allow-sqlite-home-relocation with an explicit --sqlite-home to restore to a different location."
+      );
+    }
+    if (stateDb) {
+      await assertSqliteWritable(withStateDbLocation(storage, stateDb));
+
+      const dbDir = path.join(backupDir, "db");
+      const databaseFiles = metadata.version >= 2
+        ? (metadata.sqliteDbFiles ?? [])
+        : (metadata.dbFiles ?? []);
+      const databaseBackupRoot = metadata.version >= 2
+        ? path.join(dbDir, "sqlite-home")
+        : dbDir;
+      const restoreRoot = metadata.version >= 2 ? targetSqliteHome : codexHome;
+      const entries = [];
+      for (const fileName of databaseFiles) {
+        const targetPath = metadata.version >= 2
+          ? restoreSqliteTargetPath(restoreRoot, fileName)
+          : restoreDbTargetPath(restoreRoot, fileName);
+        const sourcePath = path.join(databaseBackupRoot, fileName);
+        await fs.access(sourcePath).catch(() => {
+          throw new Error(`Backup declares a missing SQLite file: ${sourcePath}`);
+        });
+        entries.push({ fileName, sourcePath, targetPath });
+      }
+
+      const backedUpFiles = new Set(databaseFiles);
+      const sidecarsToRemove = [];
+      for (const baseFile of databaseFiles.filter((fileName) => path.basename(fileName) === DB_FILE_BASENAME)) {
+        const basePath = metadata.version >= 2
+          ? restoreSqliteTargetPath(restoreRoot, baseFile)
+          : restoreDbTargetPath(restoreRoot, baseFile);
+        for (const suffix of ["-shm", "-wal"]) {
+          if (!backedUpFiles.has(`${baseFile}${suffix}`)) {
+            sidecarsToRemove.push(`${basePath}${suffix}`);
+          }
+        }
+      }
+      databaseRestorePlan = { entries, sidecarsToRemove };
+    }
+  }
+
   const configBackupPath = path.join(backupDir, "config.toml");
   if (restoreConfig) {
     await copyIfPresent(configBackupPath, path.join(codexHome, "config.toml"));
     await restoreGlobalStateFilesFromBackup(backupDir, codexHome);
   }
 
-  if (restoreDatabase) {
-    await assertSqliteWritable(codexHome);
-
-    const dbDir = path.join(backupDir, "db");
-    const backedUpFiles = new Set(metadata.dbFiles ?? []);
-    const backedUpBaseFiles = (metadata.dbFiles ?? [])
-      .filter((fileName) => path.basename(fileName) === DB_FILE_BASENAME);
-    for (const baseFile of backedUpBaseFiles) {
-      const basePath = restoreDbTargetPath(codexHome, baseFile);
-      for (const suffix of ["-shm", "-wal"]) {
-        const sidecarFile = `${baseFile}${suffix}`;
-        if (!backedUpFiles.has(sidecarFile)) {
-          await removeIfPresent(`${basePath}${suffix}`);
-        }
-      }
+  if (databaseRestorePlan) {
+    for (const sidecarPath of databaseRestorePlan.sidecarsToRemove) {
+      await removeIfPresent(sidecarPath);
     }
-    for (const fileName of metadata.dbFiles ?? []) {
-      await copyIfPresent(path.join(dbDir, fileName), restoreDbTargetPath(codexHome, fileName));
+    for (const { sourcePath, targetPath } of databaseRestorePlan.entries) {
+      await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      await fs.copyFile(sourcePath, targetPath);
     }
   }
 

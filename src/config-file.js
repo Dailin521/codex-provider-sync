@@ -10,6 +10,48 @@ function escapeTomlString(value) {
   return value.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"");
 }
 
+function decodeTomlBasicString(value) {
+  return value.replace(/\\(?:[btnfr"\\]|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})/g, (escape) => {
+    const simple = {
+      "\\b": "\b",
+      "\\t": "\t",
+      "\\n": "\n",
+      "\\f": "\f",
+      "\\r": "\r",
+      '\\"': '"',
+      "\\\\": "\\"
+    };
+    if (simple[escape] !== undefined) {
+      return simple[escape];
+    }
+    const codePoint = Number.parseInt(escape.slice(2), 16);
+    return String.fromCodePoint(codePoint);
+  });
+}
+
+export function readRootStringFromConfigText(configText, key) {
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const assignment = new RegExp(`^${escapedKey}\\s*=\\s*(?:\"((?:\\\\.|[^\"\\\\])*)\"|'([^']*)')\\s*(?:#.*)?$`);
+  for (const line of splitLines(configText)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    if (trimmed.startsWith("[")) {
+      break;
+    }
+    const match = trimmed.match(assignment);
+    if (match) {
+      return match[1] !== undefined ? decodeTomlBasicString(match[1]) : match[2];
+    }
+  }
+  return null;
+}
+
+export function readSqliteHomeFromConfigText(configText) {
+  return readRootStringFromConfigText(configText, "sqlite_home");
+}
+
 export async function readConfigText(configPath) {
   return fs.readFile(configPath, "utf8");
 }

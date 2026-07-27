@@ -18,6 +18,8 @@ import { getUnsupportedNodeVersionMessage } from "../src/node-version.js";
 import { applySessionChanges, collectSessionChanges } from "../src/session-files.js";
 import { openDatabase } from "../src/sqlite.js";
 
+delete process.env.CODEX_SQLITE_HOME;
+
 async function makeTempCodexHome() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-provider-sync-"));
   const codexHome = path.join(root, ".codex");
@@ -331,6 +333,9 @@ test("runSync rewrites rollout files and sqlite, then restore reverts both", asy
   assert.deepEqual(syncResult.skippedLockedRolloutFiles, []);
   assert.equal(syncResult.sqliteRowsUpdated, 2);
   const backupMetadata = JSON.parse(await fs.readFile(path.join(syncResult.backupDir, "metadata.json"), "utf8"));
+  assert.equal(backupMetadata.version, 2);
+  assert.equal(backupMetadata.sqliteHome, path.join(codexHome, SQLITE_DIR_BASENAME));
+  assert.deepEqual(backupMetadata.sqliteDbFiles, [DB_FILE_BASENAME]);
   assert.deepEqual(
     backupMetadata.dbFiles.map((fileName) => fileName.replaceAll("\\", "/")),
     ["sqlite/state_5.sqlite"]
@@ -382,6 +387,9 @@ test("runSync updates legacy root sqlite database when sqlite-dir state is stale
 
   assert.equal(syncResult.sqliteRowsUpdated, 2);
   const backupMetadata = JSON.parse(await fs.readFile(path.join(syncResult.backupDir, "metadata.json"), "utf8"));
+  assert.equal(backupMetadata.version, 2);
+  assert.equal(backupMetadata.sqliteHome, codexHome);
+  assert.deepEqual(backupMetadata.sqliteDbFiles, [DB_FILE_BASENAME]);
   assert.deepEqual(backupMetadata.dbFiles, [DB_FILE_BASENAME]);
 
   const legacyDb = await openDatabase(legacyStateDbPath(codexHome));
@@ -408,6 +416,191 @@ test("runSync updates legacy root sqlite database when sqlite-dir state is stale
   } finally {
     staleDb.close();
   }
+});
+
+test("runSync uses an explicit SQLite home and never touches a stale Codex Home database", async () => {
+  const { root, codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-external.jsonl");
+  await writeRollout(sessionPath, "thread-external", "custom");
+
+  const sqliteHome = path.join(root, "external-sqlite");
+  const externalDbPath = path.join(sqliteHome, DB_FILE_BASENAME);
+  await writeStateDbAt(externalDbPath, [
+    { id: "thread-external", model_provider: "custom", archived: false }
+  ]);
+  await writeStateDb(codexHome, [
+    { id: "thread-stale", model_provider: "stale", archived: false }
+  ]);
+
+  const result = await runSync({ codexHome, sqliteHome });
+  assert.equal(result.sqliteHome, sqliteHome);
+  assert.equal(result.sqliteHomeSource, "cli");
+
+  const externalDb = await openDatabase(externalDbPath);
+  try {
+    assert.equal(
+      externalDb.prepare("SELECT model_provider FROM threads WHERE id = ?").get("thread-external").model_provider,
+      "openai"
+    );
+  } finally {
+    externalDb.close();
+  }
+
+  const staleDb = await openDatabase(stateDbPath(codexHome));
+  try {
+    assert.equal(
+      staleDb.prepare("SELECT model_provider FROM threads WHERE id = ?").get("thread-stale").model_provider,
+      "stale"
+    );
+  } finally {
+    staleDb.close();
+  }
+
+  const metadata = JSON.parse(await fs.readFile(path.join(result.backupDir, "metadata.json"), "utf8"));
+  assert.equal(metadata.version, 2);
+  assert.equal(metadata.sqliteHome, sqliteHome);
+  assert.deepEqual(metadata.dbFiles, []);
+  assert.deepEqual(metadata.sqliteDbFiles, [DB_FILE_BASENAME]);
+  await fs.access(path.join(result.backupDir, "db", "sqlite-home", DB_FILE_BASENAME));
+
+  await runRestore({ codexHome, sqliteHome, backupDir: result.backupDir });
+  const restoredDb = await openDatabase(externalDbPath);
+  try {
+    assert.equal(
+      restoredDb.prepare("SELECT model_provider FROM threads WHERE id = ?").get("thread-external").model_provider,
+      "custom"
+    );
+  } finally {
+    restoredDb.close();
+  }
+});
+
+test("configured SQLite home reports a missing database and blocks writes without fallback", async () => {
+  const { root, codexHome } = await makeTempCodexHome();
+  const sqliteHome = path.join(root, "missing-sqlite");
+  await fs.writeFile(
+    path.join(codexHome, "config.toml"),
+    `model_provider = "openai"\nsqlite_home = '${sqliteHome}'\n`,
+    "utf8"
+  );
+  await writeStateDb(codexHome, [
+    { id: "thread-stale", model_provider: "custom", archived: false }
+  ]);
+
+  const status = await getStatus({ codexHome });
+  assert.equal(status.sqliteHome, sqliteHome);
+  assert.equal(status.sqliteHomeSource, "config");
+  assert.equal(status.stateDbLocation, null);
+  assert.match(renderStatus(status), /database: not found/);
+  assert.match(renderStatus(status), new RegExp(sqliteHome.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")));
+
+  await assert.rejects(
+    () => runSync({ codexHome }),
+    /not found in configured SQLite home/
+  );
+});
+
+test("v2 restore rejects SQLite home relocation unless explicitly allowed", async () => {
+  const { root, codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-relocation.jsonl");
+  await writeRollout(sessionPath, "thread-relocation", "custom");
+
+  const sourceSqliteHome = path.join(root, "source-sqlite");
+  const targetSqliteHome = path.join(root, "target-sqlite");
+  await writeStateDbAt(path.join(sourceSqliteHome, DB_FILE_BASENAME), [
+    { id: "thread-relocation", model_provider: "custom", archived: false }
+  ]);
+  await writeStateDbAt(path.join(targetSqliteHome, DB_FILE_BASENAME), [
+    { id: "thread-relocation", model_provider: "openai", archived: false }
+  ]);
+
+  const syncResult = await runSync({ codexHome, sqliteHome: sourceSqliteHome });
+  await assert.rejects(
+    () => runRestore({ codexHome, sqliteHome: targetSqliteHome, backupDir: syncResult.backupDir }),
+    /Use --allow-sqlite-home-relocation/
+  );
+  await assert.rejects(
+    () => runRestore({ codexHome, backupDir: syncResult.backupDir, allowSqliteHomeRelocation: true }),
+    /requires an explicit --sqlite-home/
+  );
+
+  await runRestore({
+    codexHome,
+    sqliteHome: targetSqliteHome,
+    backupDir: syncResult.backupDir,
+    allowSqliteHomeRelocation: true
+  });
+  const targetDb = await openDatabase(path.join(targetSqliteHome, DB_FILE_BASENAME));
+  try {
+    assert.equal(
+      targetDb.prepare("SELECT model_provider FROM threads WHERE id = ?").get("thread-relocation").model_provider,
+      "custom"
+    );
+  } finally {
+    targetDb.close();
+  }
+});
+
+test("restoreBackup keeps metadata v1 database paths compatible", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  await writeStateDb(codexHome, [
+    { id: "thread-v1", model_provider: "openai", archived: false }
+  ]);
+
+  const backupDir = path.join(backupRoot(codexHome), "v1-restore");
+  const backupDbPath = path.join(backupDir, "db", SQLITE_DIR_BASENAME, DB_FILE_BASENAME);
+  await writeStateDbAt(backupDbPath, [
+    { id: "thread-v1", model_provider: "custom", archived: false }
+  ]);
+  await fs.writeFile(
+    path.join(backupDir, "metadata.json"),
+    JSON.stringify({
+      version: 1,
+      namespace: "provider-sync",
+      codexHome,
+      targetProvider: "custom",
+      createdAt: "2026-03-24T00:00:00.000Z",
+      dbFiles: [path.join(SQLITE_DIR_BASENAME, DB_FILE_BASENAME)],
+      changedSessionFiles: 0
+    }),
+    "utf8"
+  );
+
+  await restoreBackup(backupDir, codexHome, {
+    restoreConfig: false,
+    restoreSessions: false
+  });
+
+  const restoredDb = await openDatabase(stateDbPath(codexHome));
+  try {
+    assert.equal(
+      restoredDb.prepare("SELECT model_provider FROM threads WHERE id = ?").get("thread-v1").model_provider,
+      "custom"
+    );
+  } finally {
+    restoredDb.close();
+  }
+});
+
+test("restore validates v2 SQLite files before restoring config", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  await writeStateDb(codexHome, [
+    { id: "thread-restore-validation", model_provider: "custom", archived: false }
+  ]);
+  const syncResult = await runSync({ codexHome });
+  await fs.rm(path.join(syncResult.backupDir, "db", "sqlite-home", DB_FILE_BASENAME));
+
+  const currentConfig = 'model_provider = "sentinel"\n';
+  await fs.writeFile(path.join(codexHome, "config.toml"), currentConfig, "utf8");
+  await assert.rejects(
+    () => runRestore({ codexHome, backupDir: syncResult.backupDir }),
+    /declares a missing SQLite file/
+  );
+  assert.equal(await fs.readFile(path.join(codexHome, "config.toml"), "utf8"), currentConfig);
 });
 
 test("runSync reports stage progress and backup duration", async () => {

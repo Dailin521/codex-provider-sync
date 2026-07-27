@@ -7,9 +7,28 @@ import {
   readCurrentProviderFromConfigText,
   readProviderModel,
   readRootModelFromConfigText,
+  readSqliteHomeFromConfigText,
   setRootModelInConfigText,
   setRootProviderInConfigText
 } from "../src/config-file.js";
+
+test("readSqliteHomeFromConfigText reads root basic and literal strings", () => {
+  assert.equal(
+    readSqliteHomeFromConfigText('sqlite_home = "C:\\\\Users\\\\Example\\\\.codex\\\\sqlite"\n'),
+    "C:\\Users\\Example\\.codex\\sqlite"
+  );
+  assert.equal(
+    readSqliteHomeFromConfigText("sqlite_home = '\\\\wsl.localhost\\Ubuntu\\home\\user\\.codex\\sqlite'\n"),
+    "\\\\wsl.localhost\\Ubuntu\\home\\user\\.codex\\sqlite"
+  );
+});
+
+test("readSqliteHomeFromConfigText ignores provider-section values", () => {
+  assert.equal(
+    readSqliteHomeFromConfigText('[model_providers.custom]\nsqlite_home = "/wrong"\n'),
+    null
+  );
+});
 
 test("readCurrentProviderFromConfigText falls back to implicit openai", () => {
   const input = `
