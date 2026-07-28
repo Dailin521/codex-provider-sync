@@ -20,21 +20,51 @@ public sealed class BackupService
         string configPath,
         string? configBackupText = null)
     {
+        return await CreateBackupAsync(
+            new CodexStorageLayoutService().CreateDefault(codexHome),
+            targetProvider,
+            sessionChanges,
+            configPath,
+            configBackupText);
+    }
+
+    public async Task<string> CreateBackupAsync(
+        CodexStorageLayout storage,
+        string targetProvider,
+        IReadOnlyList<SessionChange> sessionChanges,
+        string configPath,
+        string? configBackupText = null)
+    {
+        string codexHome = storage.CodexHome;
         string backupRoot = AppConstants.DefaultBackupRoot(codexHome);
         string backupDir = Path.Combine(backupRoot, DateTimeOffset.UtcNow.ToString("yyyyMMdd'T'HHmmssfff'Z'"));
         string dbDir = Path.Combine(backupDir, "db");
         Directory.CreateDirectory(dbDir);
 
         List<string> copiedDbFiles = [];
-        StateDbLocation? stateDb = _sqliteStateService.DetectStateDb(codexHome);
+        List<string> copiedSqliteDbFiles = [];
+        StateDbLocation? stateDb = storage.StateDbLocation ?? _sqliteStateService.DetectStateDb(storage);
+        string actualSqliteHome = stateDb is null ? storage.SqliteHome : Path.GetDirectoryName(stateDb.Path)!;
         if (stateDb is not null)
         {
             foreach (string suffix in new[] { string.Empty, "-shm", "-wal" })
             {
-                string relativePath = DbBackupRelativePath(codexHome, stateDb.Path, suffix);
-                if (await CopyIfPresentAsync(stateDb.Path + suffix, Path.Combine(dbDir, relativePath), overwrite: false))
+                string sourcePath = stateDb.Path + suffix;
+                string sqliteRelativePath = AppConstants.DbFileBasename + suffix;
+                if (!await CopyIfPresentAsync(
+                    sourcePath,
+                    Path.Combine(dbDir, "sqlite-home", sqliteRelativePath),
+                    overwrite: false))
                 {
-                    copiedDbFiles.Add(relativePath);
+                    continue;
+                }
+
+                copiedSqliteDbFiles.Add(sqliteRelativePath);
+                string? legacyRelativePath = SafeRelativePath(codexHome, sourcePath);
+                if (legacyRelativePath is not null)
+                {
+                    await CopyIfPresentAsync(sourcePath, Path.Combine(dbDir, legacyRelativePath), overwrite: false);
+                    copiedDbFiles.Add(legacyRelativePath);
                 }
             }
         }
@@ -81,12 +111,14 @@ public sealed class BackupService
 
         BackupMetadataFile metadata = new()
         {
-            Version = 1,
+            Version = 2,
             Namespace = AppConstants.BackupNamespace,
             CodexHome = codexHome,
+            SqliteHome = actualSqliteHome,
             TargetProvider = targetProvider,
             CreatedAt = createdAt,
             DbFiles = copiedDbFiles,
+            SqliteDbFiles = copiedSqliteDbFiles,
             ChangedSessionFiles = sessionChanges.Count
         };
         await File.WriteAllTextAsync(
@@ -101,13 +133,32 @@ public sealed class BackupService
         string codexHome,
         RestoreBackupOptions? options = null)
     {
+        return await RestoreBackupAsync(
+            backupDir,
+            new CodexStorageLayoutService().CreateDefault(codexHome),
+            options);
+    }
+
+    public async Task<RestoreResult> RestoreBackupAsync(
+        string backupDir,
+        CodexStorageLayout storage,
+        RestoreBackupOptions? options = null)
+    {
         options ??= new RestoreBackupOptions();
+        string codexHome = storage.CodexHome;
         string normalizedBackupDir = Path.GetFullPath(backupDir);
+        string metadataPath = Path.Combine(normalizedBackupDir, "metadata.json");
         BackupMetadataFile metadata = JsonSerializer.Deserialize<BackupMetadataFile>(
-            await File.ReadAllTextAsync(Path.Combine(normalizedBackupDir, "metadata.json")),
+            await File.ReadAllTextAsync(metadataPath),
             JsonOptions()) ?? throw new InvalidOperationException($"Backup metadata is invalid: {backupDir}");
 
-        if (!string.Equals(metadata.CodexHome, codexHome, StringComparison.Ordinal))
+        if (!string.Equals(metadata.Namespace, AppConstants.BackupNamespace, StringComparison.Ordinal)
+            || metadata.Version is not (1 or 2))
+        {
+            throw new InvalidOperationException($"Unsupported backup metadata in {metadataPath}.");
+        }
+
+        if (!PathsEqual(metadata.CodexHome, codexHome))
         {
             throw new InvalidOperationException($"Backup was created for {metadata.CodexHome}, not {codexHome}.");
         }
@@ -123,45 +174,95 @@ public sealed class BackupService
                 sessionManifest.Files.Select(static entry => entry.Path));
         }
 
+        List<(string SourcePath, string TargetPath)> databaseEntries = [];
+        List<string> sidecarsToRemove = [];
+        if (options.RestoreDatabase)
+        {
+            StateDbLocation? stateDb = storage.StateDbLocation ?? _sqliteStateService.DetectStateDb(storage);
+            if (stateDb is null && storage.HasConfiguredSqliteHome)
+            {
+                throw new InvalidOperationException(
+                    $"state_5.sqlite not found in SQLite home {storage.SqliteHome}.");
+            }
+
+            string targetSqliteHome = stateDb is null ? storage.SqliteHome : Path.GetDirectoryName(stateDb.Path)!;
+            if (stateDb is not null
+                && metadata.Version >= 2
+                && !string.IsNullOrWhiteSpace(metadata.SqliteHome)
+                && !PathsEqual(metadata.SqliteHome, targetSqliteHome)
+                && !options.AllowSqliteHomeRelocation)
+            {
+                throw new InvalidOperationException(
+                    $"Backup SQLite home is {metadata.SqliteHome}, but the current target is {targetSqliteHome}. "
+                    + "Confirm SQLite Home relocation before restoring to a different location.");
+            }
+
+            if (stateDb is not null)
+            {
+                CodexStorageLayout detectedStorage = storage with { StateDbLocation = stateDb };
+                await _sqliteStateService.AssertSqliteWritableAsync(detectedStorage);
+
+                IReadOnlyList<string> databaseFiles = metadata.Version >= 2
+                    ? metadata.SqliteDbFiles ?? []
+                    : metadata.DbFiles ?? [];
+                string databaseBackupRoot = metadata.Version >= 2
+                    ? Path.Combine(normalizedBackupDir, "db", "sqlite-home")
+                    : Path.Combine(normalizedBackupDir, "db");
+                string restoreRoot = metadata.Version >= 2 ? targetSqliteHome : codexHome;
+                foreach (string fileName in databaseFiles)
+                {
+                    string targetPath = metadata.Version >= 2
+                        ? RestoreSqliteTargetPath(restoreRoot, fileName)
+                        : RestoreDbTargetPath(restoreRoot, fileName);
+                    string sourcePath = Path.Combine(databaseBackupRoot, fileName);
+                    if (!File.Exists(sourcePath))
+                    {
+                        throw new InvalidOperationException($"Backup declares a missing SQLite file: {sourcePath}");
+                    }
+                    databaseEntries.Add((sourcePath, targetPath));
+                }
+
+                HashSet<string> backedUpFiles = new(databaseFiles, StringComparer.Ordinal);
+                foreach (string baseFile in databaseFiles.Where(
+                    static fileName => Path.GetFileName(fileName) == AppConstants.DbFileBasename))
+                {
+                    string basePath = metadata.Version >= 2
+                        ? RestoreSqliteTargetPath(restoreRoot, baseFile)
+                        : RestoreDbTargetPath(restoreRoot, baseFile);
+                    foreach (string suffix in new[] { "-shm", "-wal" })
+                    {
+                        if (!backedUpFiles.Contains(baseFile + suffix))
+                        {
+                            sidecarsToRemove.Add(basePath + suffix);
+                        }
+                    }
+                }
+            }
+        }
+
         if (options.RestoreConfig)
         {
             await CopyIfPresentAsync(
                 Path.Combine(normalizedBackupDir, "config.toml"),
                 Path.Combine(codexHome, "config.toml"),
                 overwrite: true);
-            await CopyIfPresentAsync(
-                Path.Combine(normalizedBackupDir, AppConstants.GlobalStateFileBasename),
-                Path.Combine(codexHome, AppConstants.GlobalStateFileBasename),
-                overwrite: true);
-            await CopyIfPresentAsync(
-                Path.Combine(normalizedBackupDir, AppConstants.GlobalStateBackupFileBasename),
-                Path.Combine(codexHome, AppConstants.GlobalStateBackupFileBasename),
-                overwrite: true);
+            await RestoreGlobalStateFilesAsync(normalizedBackupDir, codexHome);
         }
 
         if (options.RestoreDatabase)
         {
-            await _sqliteStateService.AssertSqliteWritableAsync(codexHome);
-            string dbDir = Path.Combine(normalizedBackupDir, "db");
-            HashSet<string> backedUpFiles = new(metadata.DbFiles, StringComparer.Ordinal);
-
-            foreach (string baseFile in metadata.DbFiles.Where(static fileName => Path.GetFileName(fileName) == AppConstants.DbFileBasename))
+            foreach (string sidecarPath in sidecarsToRemove)
             {
-                string basePath = RestoreDbTargetPath(codexHome, baseFile);
-                foreach (string suffix in new[] { "-shm", "-wal" })
+                if (File.Exists(sidecarPath))
                 {
-                    string sidecarFile = baseFile + suffix;
-                    string sidecarPath = basePath + suffix;
-                    if (!backedUpFiles.Contains(sidecarFile) && File.Exists(sidecarPath))
-                    {
-                        File.Delete(sidecarPath);
-                    }
+                    File.Delete(sidecarPath);
                 }
             }
 
-            foreach (string fileName in metadata.DbFiles)
+            foreach ((string sourcePath, string targetPath) in databaseEntries)
             {
-                await CopyIfPresentAsync(Path.Combine(dbDir, fileName), RestoreDbTargetPath(codexHome, fileName), overwrite: true);
+                Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+                File.Copy(sourcePath, targetPath, overwrite: true);
             }
         }
 
@@ -215,9 +316,11 @@ public sealed class BackupService
             Version = metadata.Version,
             Namespace = metadata.Namespace,
             CodexHome = metadata.CodexHome,
+            SqliteHome = metadata.SqliteHome,
             TargetProvider = metadata.TargetProvider,
             CreatedAt = metadata.CreatedAt,
             DbFiles = metadata.DbFiles,
+            SqliteDbFiles = metadata.SqliteDbFiles,
             ChangedSessionFiles = sessionChanges.Count
         };
 
@@ -236,6 +339,24 @@ public sealed class BackupService
             Path.Combine(normalizedBackupDir, AppConstants.GlobalStateBackupFileBasename),
             Path.Combine(codexHome, AppConstants.GlobalStateBackupFileBasename),
             overwrite: true);
+    }
+
+    public async Task<BackupStorageInfo> GetBackupStorageInfoAsync(string backupDir)
+    {
+        string metadataPath = Path.Combine(Path.GetFullPath(backupDir), "metadata.json");
+        BackupMetadataFile metadata = JsonSerializer.Deserialize<BackupMetadataFile>(
+            await File.ReadAllTextAsync(metadataPath),
+            JsonOptions()) ?? throw new InvalidOperationException($"Backup metadata is invalid: {backupDir}");
+        if (!string.Equals(metadata.Namespace, AppConstants.BackupNamespace, StringComparison.Ordinal)
+            || metadata.Version is not (1 or 2))
+        {
+            throw new InvalidOperationException($"Unsupported backup metadata in {metadataPath}.");
+        }
+        return new BackupStorageInfo
+        {
+            Version = metadata.Version,
+            SqliteHome = metadata.SqliteHome
+        };
     }
 
     public Task<BackupSummary> GetBackupSummaryAsync(string codexHome)
@@ -317,13 +438,14 @@ public sealed class BackupService
         return true;
     }
 
-    private static string DbBackupRelativePath(string codexHome, string dbPath, string suffix)
+    private static string? SafeRelativePath(string root, string target)
     {
-        string relativePath = Path.GetRelativePath(codexHome, dbPath + suffix);
-        return !relativePath.StartsWith("..", StringComparison.Ordinal)
+        string relativePath = Path.GetRelativePath(root, target);
+        return !string.IsNullOrEmpty(relativePath)
+            && !relativePath.StartsWith("..", StringComparison.Ordinal)
             && !Path.IsPathRooted(relativePath)
             ? relativePath
-            : AppConstants.DbFileBasename + suffix;
+            : null;
     }
 
     private static string RestoreDbTargetPath(string codexHome, string relativePath)
@@ -335,6 +457,25 @@ public sealed class BackupService
         }
 
         return Path.Combine(codexHome, relativePath);
+    }
+
+    private static string RestoreSqliteTargetPath(string sqliteHome, string relativePath)
+    {
+        if (Path.IsPathRooted(relativePath)
+            || relativePath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Contains("..", StringComparer.Ordinal))
+        {
+            throw new InvalidOperationException($"Invalid SQLite backup path: {relativePath}");
+        }
+
+        return Path.Combine(sqliteHome, relativePath);
+    }
+
+    private static bool PathsEqual(string left, string right)
+    {
+        StringComparison comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        return string.Equals(Path.GetFullPath(left), Path.GetFullPath(right), comparison);
     }
 
     private static JsonSerializerOptions JsonOptions()

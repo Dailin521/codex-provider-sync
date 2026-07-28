@@ -10,6 +10,7 @@ public sealed class CodexSyncService
     private readonly BackupService _backupService;
     private readonly LockService _lockService;
     private readonly ProviderDiscoveryService _providerDiscoveryService;
+    private readonly CodexStorageLayoutService _storageLayoutService;
 
     public CodexSyncService()
         : this(
@@ -39,33 +40,40 @@ public sealed class CodexSyncService
         _globalStateService = globalStateService;
         _lockService = lockService;
         _providerDiscoveryService = providerDiscoveryService;
+        _storageLayoutService = new CodexStorageLayoutService(codexHomeService, configFileService);
         _backupService = new BackupService(sessionRolloutService, sqliteStateService);
     }
 
-    public async Task<StatusSnapshot> GetStatusAsync(string? explicitCodexHome = null)
+    public async Task<StatusSnapshot> GetStatusAsync(
+        string? explicitCodexHome = null,
+        string? explicitSqliteHome = null)
     {
         string codexHome = _codexHomeService.NormalizeCodexHome(explicitCodexHome);
         await _codexHomeService.EnsureCodexHomeAsync(codexHome);
         string configText = await _configFileService.ReadConfigTextAsync(_codexHomeService.ConfigPath(codexHome));
+        CodexStorageLayout storage = await PrepareStorageAsync(codexHome, explicitSqliteHome, configText);
         CurrentProviderInfo currentProvider = _configFileService.ReadCurrentProviderFromConfigText(configText);
         IReadOnlyList<string> configuredProviders = _configFileService.ListConfiguredProviderIds(configText);
         SessionChangeCollection rolloutInfo = await _sessionRolloutService.CollectSessionChangesAsync(codexHome, "__status_only__", skipLockedReads: true);
-        StateDbLocation? stateDbLocation = _sqliteStateService.DetectStateDb(codexHome);
-        ProviderCounts? sqliteCounts = await _sqliteStateService.ReadSqliteProviderCountsAsync(codexHome);
+        StateDbLocation? stateDbLocation = storage.StateDbLocation;
+        ProviderCounts? sqliteCounts = await _sqliteStateService.ReadSqliteProviderCountsAsync(storage);
         SqliteRepairStats? sqliteRepairStats = sqliteCounts is not null && !sqliteCounts.Unreadable
             ? await _sqliteStateService.ReadSqliteRepairStatsAsync(
-                codexHome,
+                storage,
                 rolloutInfo.UserEventThreadIds,
                 rolloutInfo.ThreadCwdsById)
             : null;
         IReadOnlyList<ProjectThreadVisibility> projectThreadVisibility = sqliteCounts?.Unreadable == true
             ? []
-            : await _globalStateService.ReadProjectThreadVisibilityAsync(codexHome);
+            : await _globalStateService.ReadProjectThreadVisibilityAsync(storage);
         BackupSummary backupSummary = await _backupService.GetBackupSummaryAsync(codexHome);
 
         return new StatusSnapshot
         {
             CodexHome = codexHome,
+            SqliteHome = storage.SqliteHome,
+            SqliteHomeSource = storage.SqliteHomeSource,
+            CheckedStateDbPaths = storage.StateDbCandidates.Select(static candidate => candidate.Path).ToList(),
             CurrentProvider = currentProvider,
             ConfiguredProviders = configuredProviders,
             RolloutCounts = rolloutInfo.ProviderCounts,
@@ -98,7 +106,8 @@ public sealed class CodexSyncService
         string? configBackupText = null,
         int keepCount = AppConstants.DefaultBackupRetentionCount,
         int? sqliteBusyTimeoutMs = null,
-        string? model = null)
+        string? model = null,
+        string? explicitSqliteHome = null)
     {
         if (keepCount < 1)
         {
@@ -109,6 +118,8 @@ public sealed class CodexSyncService
         await _codexHomeService.EnsureCodexHomeAsync(codexHome);
         string configPath = _codexHomeService.ConfigPath(codexHome);
         string configText = await _configFileService.ReadConfigTextAsync(configPath);
+        CodexStorageLayout storage = await PrepareStorageAsync(codexHome, explicitSqliteHome, configText);
+        EnsureWritableStorage(storage);
         CurrentProviderInfo current = _configFileService.ReadCurrentProviderFromConfigText(configText);
         string targetProvider = provider ?? current.Provider ?? AppConstants.DefaultProvider;
 
@@ -130,7 +141,7 @@ public sealed class CodexSyncService
             targetProvider,
             skipLockedReads: true,
             targetModel: targetModel);
-        IReadOnlyList<ThreadCwdStat> workspaceCwdStats = await _globalStateService.ReadThreadCwdStatsAsync(codexHome);
+        IReadOnlyList<ThreadCwdStat> workspaceCwdStats = await _globalStateService.ReadThreadCwdStatsAsync(storage);
         string? encryptedContentWarning = BuildEncryptedContentWarning(sessionInfo.EncryptedContentCounts, targetProvider);
         (IReadOnlyList<SessionChange> writableChanges, IReadOnlyList<SessionChange> lockedChanges) =
             await _sessionRolloutService.SplitLockedSessionChangesAsync(sessionInfo.Changes);
@@ -141,8 +152,8 @@ public sealed class CodexSyncService
             .Order(StringComparer.Ordinal)
             .ToList();
 
-        await _sqliteStateService.AssertSqliteWritableAsync(codexHome, sqliteBusyTimeoutMs);
-        string backupDir = await _backupService.CreateBackupAsync(codexHome, targetProvider, writableChanges, configPath, configBackupText);
+        await _sqliteStateService.AssertSqliteWritableAsync(storage, sqliteBusyTimeoutMs);
+        string backupDir = await _backupService.CreateBackupAsync(storage, targetProvider, writableChanges, configPath, configBackupText);
 
         bool sessionRestoreNeeded = false;
         List<SessionChange> appliedSessionChanges = [];
@@ -158,7 +169,7 @@ public sealed class CodexSyncService
         {
             SessionApplyResult? applyResult = null;
             (int updatedRows, int providerRowsUpdated, int modelRowsUpdated, int userEventRowsUpdated, int cwdRowsUpdated, bool databasePresent) = await _sqliteStateService.UpdateSqliteProviderAsync(
-                codexHome,
+                storage,
                 targetProvider,
                 targetModel,
                 async _ =>
@@ -171,7 +182,7 @@ public sealed class CodexSyncService
                         sessionRestoreNeeded = appliedSessionChanges.Count > 0;
                         await _backupService.UpdateSessionBackupManifestAsync(backupDir, appliedSessionChanges);
                     }
-                    workspaceRootResult = await _globalStateService.SyncWorkspaceRootsAsync(codexHome, workspaceCwdStats);
+                    workspaceRootResult = await _globalStateService.SyncWorkspaceRootsAsync(storage, workspaceCwdStats);
                     globalStateRestoreNeeded = workspaceRootResult.Updated;
                 },
                 sqliteBusyTimeoutMs,
@@ -195,6 +206,8 @@ public sealed class CodexSyncService
             return new SyncResult
             {
                 CodexHome = codexHome,
+                SqliteHome = storage.SqliteHome,
+                SqliteHomeSource = storage.SqliteHomeSource,
                 TargetProvider = targetProvider,
                 PreviousProvider = current.Provider ?? AppConstants.DefaultProvider,
                 BackupDir = backupDir,
@@ -258,7 +271,8 @@ public sealed class CodexSyncService
         string provider,
         int keepCount = AppConstants.DefaultBackupRetentionCount,
         string? model = null,
-        bool keepRootModel = false)
+        bool keepRootModel = false,
+        string? explicitSqliteHome = null)
     {
         if (string.IsNullOrWhiteSpace(provider))
         {
@@ -269,6 +283,8 @@ public sealed class CodexSyncService
         await _codexHomeService.EnsureCodexHomeAsync(codexHome);
         string configPath = _codexHomeService.ConfigPath(codexHome);
         string originalConfigText = await _configFileService.ReadConfigTextAsync(configPath);
+        CodexStorageLayout storage = await PrepareStorageAsync(codexHome, explicitSqliteHome, originalConfigText);
+        EnsureWritableStorage(storage);
         if (!_configFileService.ConfigDeclaresProvider(originalConfigText, provider))
         {
             string configuredProviders = string.Join(", ", _configFileService.ListConfiguredProviderIds(originalConfigText));
@@ -292,10 +308,18 @@ public sealed class CodexSyncService
             string? modelForThreads = modelSync.Applied
                 ? modelSync.Model
                 : _configFileService.ReadRootModelFromConfigText(nextConfigText);
-            SyncResult result = await RunSyncAsync(codexHome, provider, originalConfigText, keepCount, model: modelForThreads);
+            SyncResult result = await RunSyncAsync(
+                codexHome,
+                provider,
+                originalConfigText,
+                keepCount,
+                model: modelForThreads,
+                explicitSqliteHome: explicitSqliteHome);
             return new SyncResult
             {
                 CodexHome = result.CodexHome,
+                SqliteHome = result.SqliteHome,
+                SqliteHomeSource = result.SqliteHomeSource,
                 TargetProvider = result.TargetProvider,
                 PreviousProvider = result.PreviousProvider,
                 BackupDir = result.BackupDir,
@@ -364,12 +388,19 @@ public sealed class CodexSyncService
         return ModelSyncOutcome.CreateSkipped("none", warning: null);
     }
 
-    public async Task<RestoreResult> RunRestoreAsync(string? explicitCodexHome, string backupDir)
+    public async Task<RestoreResult> RunRestoreAsync(
+        string? explicitCodexHome,
+        string backupDir,
+        string? explicitSqliteHome = null)
     {
-        return await RunRestoreAsync(explicitCodexHome, backupDir, new RestoreBackupOptions());
+        return await RunRestoreAsync(explicitCodexHome, backupDir, new RestoreBackupOptions(), explicitSqliteHome);
     }
 
-    public async Task<RestoreResult> RunRestoreAsync(string? explicitCodexHome, string backupDir, RestoreBackupOptions options)
+    public async Task<RestoreResult> RunRestoreAsync(
+        string? explicitCodexHome,
+        string backupDir,
+        RestoreBackupOptions options,
+        string? explicitSqliteHome = null)
     {
         if (string.IsNullOrWhiteSpace(backupDir))
         {
@@ -378,9 +409,11 @@ public sealed class CodexSyncService
 
         string codexHome = _codexHomeService.NormalizeCodexHome(explicitCodexHome);
         await _codexHomeService.EnsureCodexHomeAsync(codexHome);
+        string configText = await _configFileService.ReadConfigTextAsync(_codexHomeService.ConfigPath(codexHome));
+        CodexStorageLayout storage = await PrepareStorageAsync(codexHome, explicitSqliteHome, configText);
 
         await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "restore");
-        return await _backupService.RestoreBackupAsync(Path.GetFullPath(backupDir), codexHome, options);
+        return await _backupService.RestoreBackupAsync(Path.GetFullPath(backupDir), storage, options);
     }
 
     public async Task<BackupPruneResult> RunPruneBackupsAsync(
@@ -392,6 +425,11 @@ public sealed class CodexSyncService
 
         await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "prune-backups");
         return await _backupService.PruneBackupsAsync(codexHome, keepCount);
+    }
+
+    public Task<BackupStorageInfo> GetBackupStorageInfoAsync(string backupDir)
+    {
+        return _backupService.GetBackupStorageInfoAsync(backupDir);
     }
 
     private static string? BuildEncryptedContentWarning(ProviderCounts encryptedContentCounts, string targetProvider)
@@ -411,5 +449,29 @@ public sealed class CodexSyncService
         }
 
         return $"Encrypted content warning: {total} rollout file(s) contain encrypted_content from provider(s) {string.Join(", ", riskyProviders)}. Visibility metadata can be synchronized to {targetProvider}, but continuing or compacting those histories may fail with invalid_encrypted_content. Return to the original provider/account or start a new session if you need reliable continuation.";
+    }
+
+    private async Task<CodexStorageLayout> PrepareStorageAsync(
+        string codexHome,
+        string? explicitSqliteHome,
+        string configText)
+    {
+        CodexStorageLayout storage = _storageLayoutService.Resolve(
+            codexHome,
+            explicitSqliteHome,
+            configText,
+            explicitSource: "gui");
+        StateDbLocation? stateDb = _sqliteStateService.DetectStateDb(storage);
+        return storage with { StateDbLocation = stateDb };
+    }
+
+    private static void EnsureWritableStorage(CodexStorageLayout storage)
+    {
+        if (storage.StateDbLocation is null && storage.HasConfiguredSqliteHome)
+        {
+            throw new InvalidOperationException(
+                $"state_5.sqlite not found in configured SQLite home {storage.SqliteHome} "
+                + $"(source: {storage.SqliteHomeSource}).");
+        }
     }
 }

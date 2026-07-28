@@ -19,6 +19,45 @@ public sealed partial class ConfigFileService
         return File.ReadAllTextAsync(configPath);
     }
 
+    public string? ReadSqliteHomeFromConfigText(string configText)
+    {
+        return ReadRootStringFromConfigText(configText, "sqlite_home");
+    }
+
+    public string? ReadRootStringFromConfigText(string configText, string key)
+    {
+        string escapedKey = Regex.Escape(key);
+        Regex assignment = new(
+            $"^{escapedKey}\\s*=\\s*(?:\"((?:\\\\.|[^\"\\\\])*)\"|'([^']*)')\\s*(?:#.*)?$",
+            RegexOptions.CultureInvariant);
+
+        foreach (string rawLine in SplitLines(configText))
+        {
+            string trimmed = rawLine.Trim();
+            if (string.IsNullOrWhiteSpace(trimmed) || trimmed.StartsWith('#'))
+            {
+                continue;
+            }
+            if (trimmed.StartsWith('['))
+            {
+                break;
+            }
+
+            Match match = assignment.Match(trimmed);
+            if (!match.Success)
+            {
+                continue;
+            }
+            if (match.Groups[1].Success)
+            {
+                return DecodeTomlBasicString(match.Groups[1].Value);
+            }
+            return match.Groups[2].Value;
+        }
+
+        return null;
+    }
+
     public async Task WriteConfigTextAsync(string configPath, string configText)
     {
         await File.WriteAllTextAsync(configPath, configText);
@@ -242,5 +281,23 @@ public sealed partial class ConfigFileService
     {
         return value.Replace("\\", "\\\\", StringComparison.Ordinal)
             .Replace("\"", "\\\"", StringComparison.Ordinal);
+    }
+
+    private static string DecodeTomlBasicString(string value)
+    {
+        return Regex.Replace(
+            value,
+            "\\\\(?:[btnfr\"\\\\]|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})",
+            static match => match.Value switch
+            {
+                @"\b" => "\b",
+                @"\t" => "\t",
+                @"\n" => "\n",
+                @"\f" => "\f",
+                @"\r" => "\r",
+                "\\\"" => "\"",
+                @"\\" => "\\",
+                _ => char.ConvertFromUtf32(Convert.ToInt32(match.Value[2..], 16))
+            });
     }
 }

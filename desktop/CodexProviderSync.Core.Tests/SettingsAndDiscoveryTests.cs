@@ -3,6 +3,55 @@ namespace CodexProviderSync.Core.Tests;
 public sealed class SettingsAndDiscoveryTests
 {
     [Fact]
+    public void ConfigFileService_ReadsBasicAndLiteralSqliteHome()
+    {
+        ConfigFileService service = new();
+
+        Assert.Equal(
+            @"C:\Users\cheng\.codex\sqlite",
+            service.ReadSqliteHomeFromConfigText("sqlite_home = 'C:\\Users\\cheng\\.codex\\sqlite'\n[model_providers.custom]\n"));
+        Assert.Equal(
+            "C:\\Users\\cheng\\.codex\\sqlite",
+            service.ReadSqliteHomeFromConfigText("sqlite_home = \"C:\\\\Users\\\\cheng\\\\.codex\\\\sqlite\" # comment\n"));
+    }
+
+    [Fact]
+    public void StorageLayout_UsesExplicitConfigEnvironmentAndDefaultPrecedence()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"storage-layout-{Guid.NewGuid():N}");
+        string codexHome = Path.Combine(root, ".codex");
+        CodexStorageLayoutService service = new();
+        Dictionary<string, string?> environment = new()
+        {
+            ["CODEX_SQLITE_HOME"] = Path.Combine(root, "env")
+        };
+
+        CodexStorageLayout explicitLayout = service.Resolve(
+            codexHome,
+            Path.Combine(root, "explicit"),
+            $"sqlite_home = '{Path.Combine(root, "config")}'\n",
+            environment);
+        CodexStorageLayout configLayout = service.Resolve(
+            codexHome,
+            null,
+            $"sqlite_home = '{Path.Combine(root, "config")}'\n",
+            environment);
+        CodexStorageLayout environmentLayout = service.Resolve(codexHome, null, string.Empty, environment);
+        CodexStorageLayout defaultLayout = service.Resolve(
+            codexHome,
+            null,
+            string.Empty,
+            new Dictionary<string, string?>());
+
+        Assert.Equal("gui", explicitLayout.SqliteHomeSource);
+        Assert.Equal("config", configLayout.SqliteHomeSource);
+        Assert.Equal("env", environmentLayout.SqliteHomeSource);
+        Assert.Equal("default", defaultLayout.SqliteHomeSource);
+        Assert.Single(explicitLayout.StateDbCandidates);
+        Assert.Equal(2, defaultLayout.StateDbCandidates.Count);
+    }
+
+    [Fact]
     public void ConfigFileService_UpdatesCompactRootModelAssignment()
     {
         ConfigFileService service = new();
@@ -50,6 +99,24 @@ public sealed class SettingsAndDiscoveryTests
         Assert.Equal(7, loaded.BackupRetentionCount);
         Assert.Equal("zh-Hans", loaded.UiLanguage);
         Assert.Equal(new DateOnly(2026, 7, 23), loaded.LastAutomaticUpdateCheckDate);
+    }
+
+    [Fact]
+    public async Task SettingsService_PersistsSqliteHomeOverridePerCodexHome()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"codex-provider-settings-{Guid.NewGuid():N}");
+        SettingsService service = new(Path.Combine(root, "settings.json"));
+        string codexHomeA = Path.Combine(root, "codex-a");
+        string codexHomeB = Path.Combine(root, "codex-b");
+        string sqliteHomeA = Path.Combine(root, "sqlite-a");
+
+        AppSettings settings = service.RecordSqliteHomeOverride(new AppSettings(), codexHomeA, sqliteHomeA);
+        settings = service.RecordCodexHome(settings, codexHomeB);
+        await service.SaveAsync(settings);
+        AppSettings loaded = await service.LoadAsync();
+
+        Assert.Equal(Path.GetFullPath(sqliteHomeA), service.GetSqliteHomeOverride(loaded, codexHomeA));
+        Assert.Null(service.GetSqliteHomeOverride(loaded, codexHomeB));
     }
 
     [Fact]

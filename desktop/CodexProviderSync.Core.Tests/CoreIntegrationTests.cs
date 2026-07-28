@@ -1402,4 +1402,152 @@ public sealed class CoreIntegrationTests
 
         Assert.Equal(originalFirstLine, (await File.ReadAllLinesAsync(sessionPath))[0]);
     }
+
+    [Fact]
+    public async Task RunSync_UsesExplicitSqliteHomeWithoutTouchingDefaultDatabase()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        await fixture.WriteStateDbAsync([("default-thread", "default-provider", false)]);
+        string sqliteHome = Path.Combine(fixture.Root, "external-sqlite");
+        string externalDbPath = Path.Combine(sqliteHome, AppConstants.DbFileBasename);
+        await fixture.WriteStateDbAtAsync(
+            externalDbPath,
+            [("external-thread", "custom", false)],
+            model: "old-model");
+
+        CodexSyncService service = new();
+        SyncResult result = await service.RunSyncAsync(
+            fixture.CodexHome,
+            model: "new-model",
+            explicitSqliteHome: sqliteHome);
+
+        Assert.Equal(Path.GetFullPath(sqliteHome), result.SqliteHome);
+        Assert.Equal("gui", result.SqliteHomeSource);
+        Assert.Equal("openai", await ReadProviderAsync(externalDbPath, "external-thread"));
+        Assert.Equal("default-provider", await ReadProviderAsync(fixture.StateDbPath(), "default-thread"));
+
+        BackupMetadataFile metadata = JsonSerializer.Deserialize<BackupMetadataFile>(
+            await File.ReadAllTextAsync(Path.Combine(result.BackupDir, "metadata.json")),
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase })!;
+        Assert.Equal(2, metadata.Version);
+        Assert.Equal(Path.GetFullPath(sqliteHome), metadata.SqliteHome);
+        Assert.Empty(metadata.DbFiles);
+        Assert.Equal([AppConstants.DbFileBasename], metadata.SqliteDbFiles);
+    }
+
+    [Fact]
+    public async Task ConfiguredSqliteHomeWithoutDatabase_IsDiagnosticForStatusButBlocksSync()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        string sqliteHome = Path.Combine(fixture.Root, "missing-sqlite");
+        await fixture.WriteConfigAsync($"model_provider = \"openai\"\nsqlite_home = '{sqliteHome}'");
+        await fixture.WriteStateDbAsync([("stale-thread", "custom", false)]);
+
+        CodexSyncService service = new();
+        StatusSnapshot status = await service.GetStatusAsync(fixture.CodexHome);
+
+        Assert.Equal(Path.GetFullPath(sqliteHome), status.SqliteHome);
+        Assert.Equal("config", status.SqliteHomeSource);
+        Assert.Null(status.StateDbLocation);
+        Assert.Single(status.CheckedStateDbPaths);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.RunSyncAsync(fixture.CodexHome));
+        Assert.Equal("custom", await ReadProviderAsync(fixture.StateDbPath(), "stale-thread"));
+    }
+
+    [Fact]
+    public async Task RestoreVersionTwo_RequiresExplicitRelocationConfirmation()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string sourceSqliteHome = Path.Combine(fixture.Root, "source-sqlite");
+        string sourceDbPath = Path.Combine(sourceSqliteHome, AppConstants.DbFileBasename);
+        await fixture.WriteStateDbAtAsync(sourceDbPath, [("thread-a", "custom", false)], model: null);
+
+        CodexSyncService service = new();
+        SyncResult syncResult = await service.RunSyncAsync(
+            fixture.CodexHome,
+            explicitSqliteHome: sourceSqliteHome);
+
+        string targetSqliteHome = Path.Combine(fixture.Root, "target-sqlite");
+        string targetDbPath = Path.Combine(targetSqliteHome, AppConstants.DbFileBasename);
+        await fixture.WriteStateDbAtAsync(targetDbPath, [("thread-a", "target", false)], model: null);
+        RestoreBackupOptions deniedOptions = new()
+        {
+            RestoreConfig = false,
+            RestoreDatabase = true,
+            RestoreSessions = false
+        };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.RunRestoreAsync(
+            fixture.CodexHome,
+            syncResult.BackupDir,
+            deniedOptions,
+            targetSqliteHome));
+        Assert.Equal("target", await ReadProviderAsync(targetDbPath, "thread-a"));
+
+        await service.RunRestoreAsync(
+            fixture.CodexHome,
+            syncResult.BackupDir,
+            new RestoreBackupOptions
+            {
+                RestoreConfig = false,
+                RestoreDatabase = true,
+                RestoreSessions = false,
+                AllowSqliteHomeRelocation = true
+            },
+            targetSqliteHome);
+        Assert.Equal("custom", await ReadProviderAsync(targetDbPath, "thread-a"));
+    }
+
+    [Fact]
+    public async Task RestoreVersionTwo_ValidatesDatabaseFilesBeforeRestoringConfig()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"current\"");
+        await fixture.WriteStateDbAsync([("thread-a", "current", false)]);
+        string backupDir = fixture.BackupPath("20260728T000000000Z");
+        string metadata = JsonSerializer.Serialize(new
+        {
+            version = 2,
+            @namespace = AppConstants.BackupNamespace,
+            codexHome = fixture.CodexHome,
+            sqliteHome = Path.GetDirectoryName(fixture.StateDbPath()),
+            targetProvider = "backup",
+            createdAt = DateTimeOffset.UtcNow,
+            dbFiles = Array.Empty<string>(),
+            sqliteDbFiles = new[] { AppConstants.DbFileBasename },
+            changedSessionFiles = 0
+        });
+        await fixture.WriteBackupAsync(
+            "20260728T000000000Z",
+            ("metadata.json", metadata),
+            ("config.toml", "model_provider = \"backup\"\n"));
+
+        CodexSyncService service = new();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.RunRestoreAsync(
+            fixture.CodexHome,
+            backupDir,
+            new RestoreBackupOptions { RestoreSessions = false }));
+
+        Assert.Contains(
+            "model_provider = \"current\"",
+            await File.ReadAllTextAsync(Path.Combine(fixture.CodexHome, "config.toml")));
+    }
+
+    private static async Task<string> ReadProviderAsync(string dbPath, string threadId)
+    {
+        SqliteConnectionStringBuilder builder = new()
+        {
+            DataSource = dbPath,
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false
+        };
+        await using SqliteConnection connection = new(builder.ConnectionString);
+        await connection.OpenAsync();
+        SqliteCommand command = connection.CreateCommand();
+        command.CommandText = "SELECT model_provider FROM threads WHERE id = $id";
+        command.Parameters.AddWithValue("$id", threadId);
+        return Convert.ToString(await command.ExecuteScalarAsync())!;
+    }
 }

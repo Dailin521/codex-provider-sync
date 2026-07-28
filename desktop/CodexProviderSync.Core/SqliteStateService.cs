@@ -31,23 +31,18 @@ public sealed class SqliteStateService
 
     public IReadOnlyList<StateDbLocation> StateDbCandidates(string codexHome)
     {
-        return
-        [
-            new StateDbLocation(
-                StateDbPath(codexHome),
-                Path.Combine(AppConstants.SqliteDirBasename, AppConstants.DbFileBasename),
-                "sqlite-dir"),
-            new StateDbLocation(
-                LegacyStateDbPath(codexHome),
-                AppConstants.DbFileBasename,
-                "legacy-root")
-        ];
+        return new CodexStorageLayoutService().CreateDefault(codexHome).StateDbCandidates;
     }
 
     public StateDbLocation? DetectStateDb(string codexHome)
     {
+        return DetectStateDb(new CodexStorageLayoutService().CreateDefault(codexHome));
+    }
+
+    public StateDbLocation? DetectStateDb(CodexStorageLayout storage)
+    {
         List<(StateDbLocation Location, int Priority)> existingCandidates = [];
-        IReadOnlyList<StateDbLocation> candidates = StateDbCandidates(codexHome);
+        IReadOnlyList<StateDbLocation> candidates = storage.StateDbCandidates;
         for (int index = 0; index < candidates.Count; index += 1)
         {
             StateDbLocation candidate = candidates[index];
@@ -62,7 +57,7 @@ public sealed class SqliteStateService
             return null;
         }
 
-        long rolloutCount = CountRolloutFiles(codexHome);
+        long rolloutCount = CountRolloutFiles(storage.CodexHome);
         List<StateDbCandidateStats> readableCandidates = [];
         foreach ((StateDbLocation candidate, int priority) in existingCandidates)
         {
@@ -98,9 +93,19 @@ public sealed class SqliteStateService
         return DetectStateDb(codexHome)?.Path;
     }
 
+    public string? ExistingStateDbPath(CodexStorageLayout storage)
+    {
+        return storage.StateDbLocation?.Path ?? DetectStateDb(storage)?.Path;
+    }
+
     public async Task<ProviderCounts?> ReadSqliteProviderCountsAsync(string codexHome)
     {
-        string? dbPath = ExistingStateDbPath(codexHome);
+        return await ReadSqliteProviderCountsAsync(new CodexStorageLayoutService().CreateDefault(codexHome));
+    }
+
+    public async Task<ProviderCounts?> ReadSqliteProviderCountsAsync(CodexStorageLayout storage)
+    {
+        string? dbPath = ExistingStateDbPath(storage);
         if (dbPath is null)
         {
             return null;
@@ -165,7 +170,18 @@ public sealed class SqliteStateService
         IReadOnlyCollection<string>? userEventThreadIds = null,
         IReadOnlyDictionary<string, string>? threadCwdsById = null)
     {
-        string? dbPath = ExistingStateDbPath(codexHome);
+        return await ReadSqliteRepairStatsAsync(
+            new CodexStorageLayoutService().CreateDefault(codexHome),
+            userEventThreadIds,
+            threadCwdsById);
+    }
+
+    public async Task<SqliteRepairStats?> ReadSqliteRepairStatsAsync(
+        CodexStorageLayout storage,
+        IReadOnlyCollection<string>? userEventThreadIds = null,
+        IReadOnlyDictionary<string, string>? threadCwdsById = null)
+    {
+        string? dbPath = ExistingStateDbPath(storage);
         if (dbPath is null)
         {
             return null;
@@ -233,7 +249,14 @@ public sealed class SqliteStateService
 
     public async Task<bool> AssertSqliteWritableAsync(string codexHome, int? busyTimeoutMs = null)
     {
-        string? dbPath = ExistingStateDbPath(codexHome);
+        return await AssertSqliteWritableAsync(
+            new CodexStorageLayoutService().CreateDefault(codexHome),
+            busyTimeoutMs);
+    }
+
+    public async Task<bool> AssertSqliteWritableAsync(CodexStorageLayout storage, int? busyTimeoutMs = null)
+    {
+        string? dbPath = ExistingStateDbPath(storage);
         if (dbPath is null)
         {
             return false;
@@ -265,7 +288,26 @@ public sealed class SqliteStateService
         IReadOnlyCollection<string>? userEventThreadIds = null,
         IReadOnlyDictionary<string, string>? threadCwdsById = null)
     {
-        string? dbPath = ExistingStateDbPath(codexHome);
+        return await UpdateSqliteProviderAsync(
+            new CodexStorageLayoutService().CreateDefault(codexHome),
+            targetProvider,
+            targetModel,
+            afterUpdate,
+            busyTimeoutMs,
+            userEventThreadIds,
+            threadCwdsById);
+    }
+
+    public async Task<(int UpdatedRows, int ProviderRowsUpdated, int ModelRowsUpdated, int UserEventRowsUpdated, int CwdRowsUpdated, bool DatabasePresent)> UpdateSqliteProviderAsync(
+        CodexStorageLayout storage,
+        string targetProvider,
+        string? targetModel = null,
+        Func<(int UpdatedRows, int ProviderRowsUpdated, int ModelRowsUpdated, int UserEventRowsUpdated, int CwdRowsUpdated, bool DatabasePresent), Task>? afterUpdate = null,
+        int? busyTimeoutMs = null,
+        IReadOnlyCollection<string>? userEventThreadIds = null,
+        IReadOnlyDictionary<string, string>? threadCwdsById = null)
+    {
+        string? dbPath = ExistingStateDbPath(storage);
         if (dbPath is null)
         {
             if (afterUpdate is not null)
