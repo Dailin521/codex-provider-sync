@@ -333,7 +333,7 @@ public sealed class MainWindow : Window
         _openBackupButton.Click += async (_, _) => await OpenBackupFolderAsync();
         _pruneBackupsButton.Click += async (_, _) => await PruneBackupsAsync();
         _codexHomeText.LostFocus += async (_, _) => await PersistHomeSelectionAsync();
-        _sqliteHomeText.LostFocus += async (_, _) => await PersistSqliteHomeOverrideAsync();
+        _sqliteHomeText.LostFocus += async (_, _) => await PersistSqliteHomeOverrideAsync(CaptureStorageSelection());
         _manualProviderText.KeyDown += async (_, args) =>
         {
             if (args.Key == Key.Enter)
@@ -363,9 +363,9 @@ public sealed class MainWindow : Window
 
     private async Task RefreshStatusAsync()
     {
-        string codexHome = CurrentCodexHome();
-        await PersistSqliteHomeOverrideAsync();
-        await RunBusyAsync(T("refreshing"), () => RefreshStatusCoreAsync(codexHome));
+        (string codexHome, string? sqliteHome) = CaptureStorageSelection();
+        await PersistSqliteHomeOverrideAsync((codexHome, sqliteHome));
+        await RunBusyAsync(T("refreshing"), () => RefreshStatusCoreAsync(codexHome, sqliteHome));
     }
 
     private async Task ChangeLanguageAsync()
@@ -415,7 +415,7 @@ public sealed class MainWindow : Window
 
     private async Task PersistHomeSelectionAsync()
     {
-        string codexHome = CurrentCodexHome();
+        (string codexHome, _) = CaptureStorageSelection();
         if (string.IsNullOrWhiteSpace(codexHome))
         {
             return;
@@ -425,15 +425,12 @@ public sealed class MainWindow : Window
         _settings = _settingsService.UpdateState(_settings, SelectedProvider(), _settings.LastBackupDirectory, CaptureWindowBounds(), CurrentBackupRetentionCount());
         await _settingsService.SaveAsync(_settings);
         ReloadRecentHomes();
-        if (_sqliteOverrideCodexHome is null || !PathsEqual(_sqliteOverrideCodexHome, codexHome))
-        {
-            LoadSqliteHomeOverride(codexHome);
-        }
     }
 
     private async Task BrowseSqliteHomeAsync()
     {
-        string startPath = CurrentSqliteHomeOverride() ?? CurrentCodexHome();
+        (string codexHome, string? sqliteHome) = CaptureStorageSelection();
+        string startPath = sqliteHome ?? codexHome;
         IStorageFolder? start = Directory.Exists(startPath)
             ? await StorageProvider.TryGetFolderFromPathAsync(startPath)
             : null;
@@ -449,12 +446,13 @@ public sealed class MainWindow : Window
             return;
         }
 
+        (codexHome, _) = CaptureStorageSelection();
         _sqliteHomeText.Text = selected;
-        await PersistSqliteHomeOverrideAsync();
+        await PersistSqliteHomeOverrideAsync((codexHome, selected));
         await RefreshStatusAsync();
     }
 
-    private async Task PersistSqliteHomeOverrideAsync()
+    private async Task PersistSqliteHomeOverrideAsync((string CodexHome, string? SqliteHome) selection)
     {
         if (_loadingSettings)
         {
@@ -462,8 +460,8 @@ public sealed class MainWindow : Window
         }
         _settings = _settingsService.RecordSqliteHomeOverride(
             _settings,
-            CurrentCodexHome(),
-            CurrentSqliteHomeOverride());
+            selection.CodexHome,
+            selection.SqliteHome);
         await _settingsService.SaveAsync(_settings);
     }
 
@@ -525,6 +523,7 @@ public sealed class MainWindow : Window
 
     private async Task ExecuteSyncOrSwitchAsync()
     {
+        (string codexHome, string? sqliteHome) = CaptureStorageSelection();
         string? provider = SelectedProvider();
         if (string.IsNullOrWhiteSpace(provider))
         {
@@ -545,9 +544,7 @@ public sealed class MainWindow : Window
 
         await RunBusyAsync(T("executing"), async () =>
         {
-            string codexHome = CurrentCodexHome();
-            string? sqliteHome = CurrentSqliteHomeOverride();
-            await PersistSqliteHomeOverrideAsync();
+            await PersistSqliteHomeOverrideAsync((codexHome, sqliteHome));
             int backupRetentionCount = CurrentBackupRetentionCount();
             SyncResult result = IsSwitchMode()
                 ? await Task.Run(async () => await _syncService.RunSwitchAsync(
@@ -566,14 +563,15 @@ public sealed class MainWindow : Window
             AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {T("executionFinished")}");
             AppendLog(MacDisplayFormatter.FormatSyncResult(result, IsSwitchMode() ? T("switchedAndSynced") : T("synced"), _language));
             AppendLog(string.Empty);
-            await RefreshStatusCoreAsync(codexHome);
+            await RefreshStatusCoreAsync(codexHome, sqliteHome);
             SelectProvider(provider);
         });
     }
 
     private async Task RestoreBackupAsync()
     {
-        string backupRoot = _currentStatus?.BackupRoot ?? AppConstants.DefaultBackupRoot(CurrentCodexHome());
+        (string codexHome, string? sqliteHome) = CaptureStorageSelection();
+        string backupRoot = _currentStatus?.BackupRoot ?? AppConstants.DefaultBackupRoot(codexHome);
         string initialBackupDir = Directory.Exists(_settings.LastBackupDirectory)
             ? _settings.LastBackupDirectory!
             : backupRoot;
@@ -618,13 +616,12 @@ public sealed class MainWindow : Window
         }
 
         bool allowSqliteHomeRelocation = false;
-        string? sqliteHome = CurrentSqliteHomeOverride();
         try
         {
             if (restoreDatabase)
             {
                 BackupStorageInfo backupStorage = await _syncService.GetBackupStorageInfoAsync(backupDir);
-                StatusSnapshot targetStatus = await _syncService.GetStatusAsync(CurrentCodexHome(), sqliteHome);
+                StatusSnapshot targetStatus = await _syncService.GetStatusAsync(codexHome, sqliteHome);
                 string targetSqliteHome = targetStatus.StateDbLocation is null
                     ? targetStatus.SqliteHome
                     : Path.GetDirectoryName(targetStatus.StateDbLocation.Path)!;
@@ -656,7 +653,6 @@ public sealed class MainWindow : Window
 
         await RunBusyAsync(T("restoring"), async () =>
         {
-            string codexHome = CurrentCodexHome();
             RestoreResult result = await Task.Run(async () => await _syncService.RunRestoreAsync(
                 codexHome,
                 backupDir,
@@ -673,7 +669,7 @@ public sealed class MainWindow : Window
             AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {T("restoreFinished")}");
             AppendLog(MacDisplayFormatter.FormatRestoreResult(result, _language));
             AppendLog(string.Empty);
-            await RefreshStatusCoreAsync(codexHome);
+            await RefreshStatusCoreAsync(codexHome, sqliteHome);
         });
     }
 
@@ -698,6 +694,7 @@ public sealed class MainWindow : Window
 
     private async Task PruneBackupsAsync()
     {
+        (string codexHome, string? sqliteHome) = CaptureStorageSelection();
         if (!await ConfirmAsync(
             T("cleanTitle"),
             string.Format(T("cleanMessage"), CurrentBackupRetentionCount())))
@@ -707,20 +704,19 @@ public sealed class MainWindow : Window
 
         await RunBusyAsync(T("cleaning"), async () =>
         {
-            string codexHome = CurrentCodexHome();
             BackupPruneResult result = await Task.Run(async () => await _syncService.RunPruneBackupsAsync(codexHome, CurrentBackupRetentionCount()));
             AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {T("backupCleanupFinished")}");
             AppendLog(MacDisplayFormatter.FormatBackupPruneResult(result, _language));
             AppendLog(string.Empty);
-            await RefreshStatusCoreAsync(codexHome);
+            await RefreshStatusCoreAsync(codexHome, sqliteHome);
         });
     }
 
-    private async Task RefreshStatusCoreAsync(string codexHome)
+    private async Task RefreshStatusCoreAsync(string codexHome, string? sqliteHome)
     {
         _currentStatus = await Task.Run(async () => await _syncService.GetStatusAsync(
             codexHome,
-            CurrentSqliteHomeOverride()));
+            sqliteHome));
         _settings = _settingsService.RecordCodexHome(_settings, _currentStatus.CodexHome);
         _settings = _settingsService.MergeDetectedProviders(_settings, _syncService.ExtractDetectedProviderIds(_currentStatus));
         _settings = _settingsService.UpdateState(_settings, SelectedProvider(), _settings.LastBackupDirectory, CaptureWindowBounds(), CurrentBackupRetentionCount());
@@ -875,6 +871,16 @@ public sealed class MainWindow : Window
         return string.IsNullOrWhiteSpace(text) ? null : text;
     }
 
+    private (string CodexHome, string? SqliteHome) CaptureStorageSelection()
+    {
+        string codexHome = CurrentCodexHome();
+        if (_sqliteOverrideCodexHome is null || !PathsEqual(_sqliteOverrideCodexHome, codexHome))
+        {
+            LoadSqliteHomeOverride(codexHome);
+        }
+        return (codexHome, CurrentSqliteHomeOverride());
+    }
+
     private int CurrentBackupRetentionCount()
     {
         decimal value = _backupRetentionInput.Value ?? AppConstants.DefaultBackupRetentionCount;
@@ -890,11 +896,12 @@ public sealed class MainWindow : Window
     {
         try
         {
-            _settings = _settingsService.RecordCodexHome(_settings, CurrentCodexHome());
+            (string codexHome, string? sqliteHome) = CaptureStorageSelection();
+            _settings = _settingsService.RecordCodexHome(_settings, codexHome);
             _settings = _settingsService.RecordSqliteHomeOverride(
                 _settings,
-                CurrentCodexHome(),
-                CurrentSqliteHomeOverride());
+                codexHome,
+                sqliteHome);
             _settings = _settingsService.UpdateUiLanguage(_settings, _language);
             _settings = _settingsService.UpdateState(_settings, SelectedProvider(), _settings.LastBackupDirectory, CaptureWindowBounds(), CurrentBackupRetentionCount());
             _settingsService.Save(_settings);

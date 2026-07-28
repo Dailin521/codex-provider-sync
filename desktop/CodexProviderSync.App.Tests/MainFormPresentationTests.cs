@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.Reflection;
 using System.Windows.Forms;
+using CodexProviderSync.Core;
 
 namespace CodexProviderSync.App.Tests;
 
@@ -37,11 +38,53 @@ public sealed class MainFormPresentationTests
         }
     }
 
+    [Fact]
+    public void CaptureStorageSelection_RebindsSqliteOverrideBeforeReturningNewCodexHome()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"codex-provider-ui-test-{Guid.NewGuid():N}");
+        string codexHomeA = Path.Combine(root, "home-a");
+        string codexHomeB = Path.Combine(root, "home-b");
+        string sqliteHomeA = Path.Combine(root, "sqlite-a");
+        string sqliteHomeB = Path.Combine(root, "sqlite-b");
+        Directory.CreateDirectory(root);
+        try
+        {
+            SettingsService settingsService = new(Path.Combine(root, "settings.json"));
+            AppSettings settings = settingsService.RecordSqliteHomeOverride(
+                settingsService.RecordSqliteHomeOverride(new AppSettings(), codexHomeA, sqliteHomeA),
+                codexHomeB,
+                sqliteHomeB);
+            using MainForm form = new(new ExecutionLogService(root), settingsService);
+            SetField(form, "_settings", settings);
+
+            ComboBox codexHome = Field<ComboBox>(form, "_codexHomeCombo");
+            TextBox sqliteHome = Field<TextBox>(form, "_sqliteHomeText");
+            codexHome.Text = codexHomeA;
+            Assert.Equal((codexHomeA, sqliteHomeA), form.CaptureStorageSelection());
+            Assert.Equal(sqliteHomeA, sqliteHome.Text);
+
+            codexHome.Text = codexHomeB;
+            Assert.Equal((codexHomeB, sqliteHomeB), form.CaptureStorageSelection());
+            Assert.Equal(sqliteHomeB, sqliteHome.Text);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static T Field<T>(MainForm form, string name) where T : class
     {
         return typeof(MainForm)
             .GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)?
             .GetValue(form) as T
             ?? throw new InvalidOperationException($"Unable to read {name}.");
+    }
+
+    private static void SetField<T>(MainForm form, string name, T value)
+    {
+        FieldInfo field = typeof(MainForm).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException($"Unable to find {name}.");
+        field.SetValue(form, value);
     }
 }

@@ -568,7 +568,7 @@ public sealed class MainForm : Form
         _openLogButton.Click += (_, _) => OpenLogFolder();
         _providerList.SelectedIndexChanged += (_, _) => UpdateSelectionLabel();
         _codexHomeCombo.Leave += async (_, _) => await PersistHomeSelectionAsync();
-        _sqliteHomeText.Leave += async (_, _) => await PersistSqliteHomeOverrideAsync();
+        _sqliteHomeText.Leave += async (_, _) => await PersistSqliteHomeOverrideAsync(CaptureStorageSelection());
     }
 
     private async Task LoadStateAsync()
@@ -588,9 +588,9 @@ public sealed class MainForm : Form
 
     private async Task RefreshStatusAsync()
     {
-        string codexHome = CurrentCodexHome();
-        await PersistSqliteHomeOverrideAsync();
-        await RunBusyAsync("刷新中...", () => RefreshStatusCoreAsync(codexHome));
+        (string codexHome, string? sqliteHome) = CaptureStorageSelection();
+        await PersistSqliteHomeOverrideAsync((codexHome, sqliteHome));
+        await RunBusyAsync("刷新中...", () => RefreshStatusCoreAsync(codexHome, sqliteHome));
     }
 
     private async Task BrowseCodexHomeAsync()
@@ -615,7 +615,7 @@ public sealed class MainForm : Form
 
     private async Task PersistHomeSelectionAsync()
     {
-        string codexHome = CurrentCodexHome();
+        (string codexHome, _) = CaptureStorageSelection();
         if (string.IsNullOrWhiteSpace(codexHome))
         {
             return;
@@ -625,20 +625,17 @@ public sealed class MainForm : Form
         _settings = _settingsService.UpdateState(_settings, SelectedProvider(), _settings.LastBackupDirectory, CaptureWindowBounds(), CurrentBackupRetentionCount());
         await _settingsService.SaveAsync(_settings);
         ReloadRecentHomes();
-        if (_sqliteOverrideCodexHome is null || !PathsEqual(_sqliteOverrideCodexHome, codexHome))
-        {
-            LoadSqliteHomeOverride(codexHome);
-        }
     }
 
     private async Task BrowseSqliteHomeAsync()
     {
+        (_, string? sqliteHome) = CaptureStorageSelection();
         using FolderBrowserDialog dialog = new()
         {
             Description = "选择包含 state_5.sqlite 的目录",
             UseDescriptionForTitle = true,
-            InitialDirectory = Directory.Exists(CurrentSqliteHomeOverride())
-                ? CurrentSqliteHomeOverride()!
+            InitialDirectory = Directory.Exists(sqliteHome)
+                ? sqliteHome!
                 : CurrentCodexHome(),
             ShowNewFolderButton = false
         };
@@ -647,12 +644,13 @@ public sealed class MainForm : Form
             return;
         }
 
+        (string codexHome, _) = CaptureStorageSelection();
         _sqliteHomeText.Text = dialog.SelectedPath;
-        await PersistSqliteHomeOverrideAsync();
+        await PersistSqliteHomeOverrideAsync((codexHome, dialog.SelectedPath));
         await RefreshStatusAsync();
     }
 
-    private async Task PersistSqliteHomeOverrideAsync()
+    private async Task PersistSqliteHomeOverrideAsync((string CodexHome, string? SqliteHome) selection)
     {
         if (_loadingSettings)
         {
@@ -660,8 +658,8 @@ public sealed class MainForm : Form
         }
         _settings = _settingsService.RecordSqliteHomeOverride(
             _settings,
-            CurrentCodexHome(),
-            CurrentSqliteHomeOverride());
+            selection.CodexHome,
+            selection.SqliteHome);
         await _settingsService.SaveAsync(_settings);
     }
 
@@ -723,6 +721,7 @@ public sealed class MainForm : Form
 
     private async Task ExecuteSyncOrSwitchAsync()
     {
+        (string codexHome, string? sqliteHome) = CaptureStorageSelection();
         string? provider = SelectedProvider();
         if (string.IsNullOrWhiteSpace(provider))
         {
@@ -737,9 +736,7 @@ public sealed class MainForm : Form
 
         await RunBusyAsync("执行中...", async () =>
         {
-            string codexHome = CurrentCodexHome();
-            string? sqliteHome = CurrentSqliteHomeOverride();
-            await PersistSqliteHomeOverrideAsync();
+            await PersistSqliteHomeOverrideAsync((codexHome, sqliteHome));
             int backupRetentionCount = CurrentBackupRetentionCount();
             SyncResult result;
             if (_updateConfigCheck.Checked)
@@ -777,14 +774,15 @@ public sealed class MainForm : Form
                 TextFormatter.ChineseSimplified));
             AppendLog(FormatModelSyncOutcome(result.ModelSync));
             AppendLog(string.Empty);
-            await RefreshStatusCoreAsync(codexHome);
+            await RefreshStatusCoreAsync(codexHome, sqliteHome);
             SelectProvider(provider);
         });
     }
 
     private async Task RestoreBackupAsync()
     {
-        string backupRoot = _currentStatus?.BackupRoot ?? AppConstants.DefaultBackupRoot(CurrentCodexHome());
+        (string codexHome, string? sqliteHome) = CaptureStorageSelection();
+        string backupRoot = _currentStatus?.BackupRoot ?? AppConstants.DefaultBackupRoot(codexHome);
         string initialBackupDir = Directory.Exists(_settings.LastBackupDirectory)
             ? _settings.LastBackupDirectory!
             : backupRoot;
@@ -832,13 +830,12 @@ public sealed class MainForm : Form
         }
 
         bool allowSqliteHomeRelocation = false;
-        string? sqliteHome = CurrentSqliteHomeOverride();
         try
         {
             if (_restoreDatabaseCheck.Checked)
             {
                 BackupStorageInfo backupStorage = await _syncService.GetBackupStorageInfoAsync(dialog.SelectedPath);
-                StatusSnapshot targetStatus = await _syncService.GetStatusAsync(CurrentCodexHome(), sqliteHome);
+                StatusSnapshot targetStatus = await _syncService.GetStatusAsync(codexHome, sqliteHome);
                 if (backupStorage.Version >= 2
                     && !string.IsNullOrWhiteSpace(backupStorage.SqliteHome)
                     && !PathsEqual(backupStorage.SqliteHome, targetStatus.StateDbLocation is null
@@ -884,7 +881,6 @@ public sealed class MainForm : Form
 
         await RunBusyAsync("恢复中...", async () =>
         {
-            string codexHome = CurrentCodexHome();
             RestoreResult result = await Task.Run(async () => await _syncService.RunRestoreAsync(
                 codexHome,
                 dialog.SelectedPath,
@@ -901,7 +897,7 @@ public sealed class MainForm : Form
             AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 恢复完成");
             AppendLog(TextFormatter.FormatRestoreResult(result, TextFormatter.ChineseSimplified));
             AppendLog(string.Empty);
-            await RefreshStatusCoreAsync(codexHome);
+            await RefreshStatusCoreAsync(codexHome, sqliteHome);
         });
     }
 
@@ -937,6 +933,7 @@ public sealed class MainForm : Form
 
     private async Task PruneBackupsAsync()
     {
+        (string codexHome, string? sqliteHome) = CaptureStorageSelection();
         if (!ConfirmBackupPrune())
         {
             return;
@@ -944,12 +941,11 @@ public sealed class MainForm : Form
 
         await RunBusyAsync("正在清理备份...", async () =>
         {
-            string codexHome = CurrentCodexHome();
             BackupPruneResult result = await Task.Run(async () => await _syncService.RunPruneBackupsAsync(codexHome, CurrentBackupRetentionCount()));
             AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 旧备份清理完成");
             AppendLog(TextFormatter.FormatBackupPruneResult(result, TextFormatter.ChineseSimplified));
             AppendLog(string.Empty);
-            await RefreshStatusCoreAsync(codexHome);
+            await RefreshStatusCoreAsync(codexHome, sqliteHome);
         });
     }
 
@@ -1222,6 +1218,16 @@ public sealed class MainForm : Form
         return string.IsNullOrWhiteSpace(text) ? null : text;
     }
 
+    internal (string CodexHome, string? SqliteHome) CaptureStorageSelection()
+    {
+        string codexHome = CurrentCodexHome();
+        if (_sqliteOverrideCodexHome is null || !PathsEqual(_sqliteOverrideCodexHome, codexHome))
+        {
+            LoadSqliteHomeOverride(codexHome);
+        }
+        return (codexHome, CurrentSqliteHomeOverride());
+    }
+
     private int CurrentBackupRetentionCount()
     {
         return Decimal.ToInt32(_backupRetentionInput.Value);
@@ -1231,11 +1237,12 @@ public sealed class MainForm : Form
     {
         try
         {
-            _settings = _settingsService.RecordCodexHome(_settings, CurrentCodexHome());
+            (string codexHome, string? sqliteHome) = CaptureStorageSelection();
+            _settings = _settingsService.RecordCodexHome(_settings, codexHome);
             _settings = _settingsService.RecordSqliteHomeOverride(
                 _settings,
-                CurrentCodexHome(),
-                CurrentSqliteHomeOverride());
+                codexHome,
+                sqliteHome);
             _settings = _settingsService.UpdateState(_settings, SelectedProvider(), _settings.LastBackupDirectory, CaptureWindowBounds(), CurrentBackupRetentionCount());
             _settingsService.Save(_settings);
         }
@@ -1245,11 +1252,11 @@ public sealed class MainForm : Form
         }
     }
 
-    private async Task RefreshStatusCoreAsync(string codexHome)
+    private async Task RefreshStatusCoreAsync(string codexHome, string? sqliteHome)
     {
         _currentStatus = await Task.Run(async () => await _syncService.GetStatusAsync(
             codexHome,
-            CurrentSqliteHomeOverride()));
+            sqliteHome));
         _settings = _settingsService.RecordCodexHome(_settings, _currentStatus.CodexHome);
         _settings = _settingsService.MergeDetectedProviders(_settings, _syncService.ExtractDetectedProviderIds(_currentStatus));
         _settings = _settingsService.UpdateState(_settings, SelectedProvider(), _settings.LastBackupDirectory, CaptureWindowBounds(), CurrentBackupRetentionCount());
