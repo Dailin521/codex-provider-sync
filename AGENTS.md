@@ -17,7 +17,7 @@ The tool works by updating both:
 - rollout metadata under `~/.codex/sessions` and `~/.codex/archived_sessions`
 - SQLite thread metadata in the resolved Codex state database
 
-Resolve SQLite Home in this order: explicit CLI override, root `sqlite_home` in `config.toml`, `CODEX_SQLITE_HOME`, then `<codex-home>/sqlite`. Only the default layout may fall back to `<codex-home>/state_5.sqlite`. Never fall back when an explicit/config/environment SQLite Home is missing.
+Resolve SQLite Home in this order: explicit CLI/GUI override, root `sqlite_home` in `config.toml`, `CODEX_SQLITE_HOME`, then `<codex-home>/sqlite`. Only the default layout may fall back to `<codex-home>/state_5.sqlite`. Never fall back when an explicit/config/environment SQLite Home is missing.
 
 Do not solve this by manually editing rollout files only unless the user explicitly asks for manual intervention.
 
@@ -87,6 +87,8 @@ GUI mapping:
 - `Execute` with config checkbox = switch-like behavior
 - `Restore Backup` = restore a previous backup
 - backup retention defaults to 5 and can be customized in the GUI
+- SQLite Home overrides are stored per Codex Home in app settings and are passed to refresh, sync, switch, and restore
+- restoring a metadata v2 backup to a different SQLite Home requires a second confirmation showing source and target
 - `Clean Old Backups` = prune managed backups down to the selected retention count
 
 ## Important Behavior

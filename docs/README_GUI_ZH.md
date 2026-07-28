@@ -20,6 +20,7 @@ macOS 桌面版说明见 [README_MAC_GUI_ZH.md](README_MAC_GUI_ZH.md)。
 - 支持手动清理旧备份
 - 支持从 backup 目录恢复
 - 恢复时可分别选择 config、SQLite、rollout metadata
+- 支持为每个 Codex Home 单独指定 SQLite Home，适配 Windows Codex App + WSL app-server 等分离布局
 - 当前状态、执行结果和常用提示使用中文显示
 - 常规执行日志按天写入本地并自动保留最近 30 天
 - 支持直接打开日志目录
@@ -47,15 +48,20 @@ GUI“刷新”会显示项目可见性诊断，例如 `first page 0/50`、`rank
 
 1. 打开 `CodexProviderSync.exe`
 2. 确认顶部 `Codex Home` 路径
-3. 点击“刷新”
-4. 在中间列表里选择目标 Provider
-5. 如果你希望同时改写 `config.toml` 根级 provider，勾选右侧复选框
-6. 根据需要调整“自动保留最近 N 份备份”
-7. 点击“立即同步”
-8. 如需回滚，点击“恢复备份”
-9. 如需立刻清理旧备份，点击“清理旧备份”
-10. 如需复制或查看历史执行信息，点击“打开日志目录”
-11. 软件每天首次启动会自动检查一次更新，也可以点击“检查更新”立即重试
+3. 如果 SQLite 不在 Codex Home 中，在 `SQLite Home` 填写或选择包含 `state_5.sqlite` 的目录；留空时按配置自动解析
+4. 点击“刷新”，核对状态中的有效 SQLite Home、来源和数据库路径
+5. 在中间列表里选择目标 Provider
+6. 如果你希望同时改写 `config.toml` 根级 provider，勾选右侧复选框
+7. 根据需要调整“自动保留最近 N 份备份”
+8. 点击“立即同步”
+9. 如需回滚，点击“恢复备份”
+10. 如需立刻清理旧备份，点击“清理旧备份”
+11. 如需复制或查看历史执行信息，点击“打开日志目录”
+12. 软件每天首次启动会自动检查一次更新，也可以点击“检查更新”立即重试
+
+GUI 中的 SQLite Home override 按 Codex Home 保存在 GUI settings 中，不会写入 `config.toml`。解析优先级为：GUI override → `config.toml` 根级 `sqlite_home` → `CODEX_SQLITE_HOME` → `<Codex Home>\sqlite`。只有最后一种默认布局会检查旧路径 `<Codex Home>\state_5.sqlite`。
+
+Windows GUI 可直接选择 `\\wsl.localhost\Ubuntu\home\you\.codex\sqlite` 一类 UNC 路径。显式位置缺少 `state_5.sqlite` 时，“刷新”只显示诊断，写操作会停止，不会回退到 Codex Home 中可能过期的数据库。从 metadata v2 备份恢复到不同 SQLite Home 时，GUI 会显示来源与目标并要求二次确认。
 
 ## 更新与日志
 

@@ -49,6 +49,8 @@ Codex 切换 `model_provider` 后，旧会话可能从 Desktop 或 `/resume` 中
 
 GUI 会保留备份并显示同步结果。每天首次启动会在后台检查一次稳定版更新，网络查询最多等待 10 秒；也可以随时手动检查。执行日志保存在 `%AppData%\codex-provider-sync\logs`。
 
+如果 Codex Home 与 SQLite 分处 Windows/WSL，可在 GUI 顶部单独选择 SQLite Home。该 override 按 Codex Home 保存，不写入 `config.toml`；状态区会显示最终生效路径及来源。
+
 项目目前未做 Windows 代码签名，从浏览器下载后可能出现 SmartScreen 提示。请从本项目 Release 下载，并按需核对同版本 SHA-256。
 
 Windows 完整说明见 [README_GUI_ZH.md](docs/README_GUI_ZH.md)。macOS 用户可自行构建 Avalonia 桌面版，参见 [README_MAC_GUI_ZH.md](docs/README_MAC_GUI_ZH.md)。

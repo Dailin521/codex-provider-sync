@@ -49,6 +49,8 @@ For normal Windows use, download and extract `CodexProviderSync.exe` from [Relea
 
 The GUI keeps backups and displays the synchronization result. It checks for a stable release in the background on the first launch of each local day, with a 10-second lookup deadline. Manual update checks remain available. Execution logs are stored under `%AppData%\codex-provider-sync\logs`.
 
+When Codex Home and SQLite are split across Windows/WSL, select SQLite Home separately at the top of the GUI. This per-CodexHome override is stored in app settings, not `config.toml`; status shows the effective path and source. Restoring a metadata v2 backup to a different SQLite Home requires a second confirmation showing both paths.
+
 The Windows executable is currently unsigned, so browser downloads may trigger a SmartScreen warning. Download it only from this project's Releases and verify the matching SHA-256 when needed.
 
 See [README_GUI_ZH.md](README_GUI_ZH.md) for the full Windows guide. A self-built Avalonia macOS app is also available; see [README_MAC_GUI_ZH.md](README_MAC_GUI_ZH.md).
