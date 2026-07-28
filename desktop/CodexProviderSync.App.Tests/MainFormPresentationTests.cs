@@ -25,6 +25,8 @@ public sealed class MainFormPresentationTests
             Assert.Equal(FlatStyle.Flat, execute.FlatStyle);
 
             Assert.Equal("浏览...", Field<Button>(form, "_browseButton").Text);
+            Assert.Equal("浏览...", Field<Button>(form, "_browseSqliteHomeButton").Text);
+            Assert.True(string.IsNullOrEmpty(Field<TextBox>(form, "_sqliteHomeText").Text));
             Assert.Equal("刷新", Field<Button>(form, "_refreshButton").Text);
             Assert.Equal("打开日志目录", Field<Button>(form, "_openLogButton").Text);
             Assert.Equal("就绪", Field<Label>(form, "_busyLabel").Text);
