@@ -525,11 +525,21 @@ test("v2 restore rejects SQLite home relocation unless explicitly allowed", asyn
     () => runRestore({ codexHome, backupDir: syncResult.backupDir, allowSqliteHomeRelocation: true }),
     /requires an explicit --sqlite-home/
   );
+  await assert.rejects(
+    () => runRestore({
+      codexHome,
+      sqliteHome: targetSqliteHome,
+      backupDir: syncResult.backupDir,
+      allowSqliteHomeRelocation: true
+    }),
+    /Cannot restore config\.toml while relocating SQLite home/
+  );
 
   await runRestore({
     codexHome,
     sqliteHome: targetSqliteHome,
     backupDir: syncResult.backupDir,
+    restoreConfig: false,
     allowSqliteHomeRelocation: true
   });
   const targetDb = await openDatabase(path.join(targetSqliteHome, DB_FILE_BASENAME));
@@ -540,6 +550,63 @@ test("v2 restore rejects SQLite home relocation unless explicitly allowed", asyn
     );
   } finally {
     targetDb.close();
+  }
+});
+
+test("v2 restore rebuilds a missing default SQLite database", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  await writeStateDb(codexHome, [
+    { id: "thread-missing-default", model_provider: "custom", archived: false }
+  ]);
+
+  const syncResult = await runSync({ codexHome });
+  await fs.rm(stateDbPath(codexHome));
+
+  await runRestore({
+    codexHome,
+    backupDir: syncResult.backupDir,
+    restoreConfig: false,
+    restoreSessions: false
+  });
+
+  const restoredDb = await openDatabase(stateDbPath(codexHome));
+  try {
+    assert.equal(
+      restoredDb.prepare("SELECT model_provider FROM threads WHERE id = ?").get("thread-missing-default").model_provider,
+      "custom"
+    );
+  } finally {
+    restoredDb.close();
+  }
+});
+
+test("v2 restore rebuilds a missing legacy root SQLite database in place", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  await writeLegacyStateDb(codexHome, [
+    { id: "thread-missing-legacy", model_provider: "custom", archived: false }
+  ]);
+
+  const syncResult = await runSync({ codexHome });
+  await fs.rm(legacyStateDbPath(codexHome));
+
+  await runRestore({
+    codexHome,
+    backupDir: syncResult.backupDir,
+    restoreConfig: false,
+    restoreSessions: false
+  });
+
+  await assert.rejects(() => fs.access(stateDbPath(codexHome)));
+  const restoredDb = await openDatabase(legacyStateDbPath(codexHome));
+  try {
+    assert.equal(
+      restoredDb.prepare("SELECT model_provider FROM threads WHERE id = ?").get("thread-missing-legacy").model_provider,
+      "custom"
+    );
+  } finally {
+    restoredDb.close();
   }
 });
 
@@ -568,6 +635,7 @@ test("restoreBackup keeps metadata v1 database paths compatible", async () => {
     }),
     "utf8"
   );
+  await fs.rm(stateDbPath(codexHome));
 
   await restoreBackup(backupDir, codexHome, {
     restoreConfig: false,
@@ -1292,7 +1360,7 @@ test("runSync restores turn_context model on failure rollback (no half-completed
   // session_meta, the per-turn model must return to "gpt-5",
   // and the appended user_message must be left alone (the
   // restore pass is append-tolerant).
-  await restoreBackup(backupDir, codexHome, { restoreSessions: true });
+  await restoreBackup(backupDir, codexHome, { restoreDatabase: false, restoreSessions: true });
 
   const restored = await fs.readFile(sessionPath, "utf8");
   const restoredLines = restored.split("\n").filter(Boolean);

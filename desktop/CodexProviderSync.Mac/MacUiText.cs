@@ -81,6 +81,9 @@ internal static class MacUiText
             "confirmWriteTitle" => zh ? "确认写操作" : "Confirm Write Action",
             "restoreTitle" => zh ? "恢复备份" : "Restore Backup",
             "relocationTitle" => zh ? "确认 SQLite Home 迁移" : "Confirm SQLite Home Relocation",
+            "relocationConfigConflict" => zh
+                ? "恢复到不同 SQLite Home 时不能同时恢复 config.toml。请取消勾选恢复配置后重试，以保留当前目标配置。"
+                : "Restoring to a different SQLite Home cannot also restore config.toml. Disable config restore and try again to preserve the current target configuration.",
             "relocationMessage" => zh
                 ? "备份中的 SQLite Home 与当前目标不同。\n\n备份来源: {0}\n恢复目标: {1}\n\n确认将数据库恢复到当前目标吗？"
                 : "The backup SQLite Home differs from the current target.\n\nBackup source: {0}\nRestore target: {1}\n\nRestore the database to the current target?",

@@ -61,7 +61,7 @@ GUI“刷新”会显示项目可见性诊断，例如 `first page 0/50`、`rank
 
 GUI 中的 SQLite Home override 按 Codex Home 保存在 GUI settings 中，不会写入 `config.toml`。解析优先级为：GUI override → `config.toml` 根级 `sqlite_home` → `CODEX_SQLITE_HOME` → `<Codex Home>\sqlite`。只有最后一种默认布局会检查旧路径 `<Codex Home>\state_5.sqlite`。
 
-Windows GUI 可直接选择 `\\wsl.localhost\Ubuntu\home\you\.codex\sqlite` 一类 UNC 路径。显式位置缺少 `state_5.sqlite` 时，“刷新”只显示诊断，写操作会停止，不会回退到 Codex Home 中可能过期的数据库。从 metadata v2 备份恢复到不同 SQLite Home 时，GUI 会显示来源与目标并要求二次确认。
+Windows GUI 可直接选择 `\\wsl.localhost\Ubuntu\home\you\.codex\sqlite` 一类 UNC 路径。显式位置缺少 `state_5.sqlite` 时，“刷新”只显示诊断，写操作会停止，不会回退到 Codex Home 中可能过期的数据库。默认布局中的数据库被删除时，可以从有效备份恢复到原默认位置。从 metadata v2 备份恢复到不同 SQLite Home 时，必须取消勾选“恢复配置文件”；GUI 随后会显示来源与目标并要求二次确认。
 
 ## 更新与日志
 

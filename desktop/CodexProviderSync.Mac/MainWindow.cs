@@ -632,6 +632,11 @@ public sealed class MainWindow : Window
                     && !string.IsNullOrWhiteSpace(backupStorage.SqliteHome)
                     && !PathsEqual(backupStorage.SqliteHome, targetSqliteHome))
                 {
+                    if (restoreConfig)
+                    {
+                        await ShowInfoAsync(T("relocationConfigConflict"));
+                        return;
+                    }
                     if (!await ConfirmAsync(
                         T("relocationTitle"),
                         string.Format(T("relocationMessage"), backupStorage.SqliteHome, targetSqliteHome)))

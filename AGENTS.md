@@ -130,7 +130,8 @@ If `switch <provider-id>` fails because the provider is missing:
 - by default the tool keeps the most recent 5 managed backups
 - use GUI retention settings or CLI `--keep <n>` when the user wants a different retention count
 - do not edit `state_5.sqlite` or rollout files manually if the tool can do it
-- metadata v2 backups record `sqliteHome` and `sqliteDbFiles`; CLI restore to a different SQLite Home requires explicit relocation flags
+- metadata v2 backups record `sqliteHome` and `sqliteDbFiles`; a missing default-layout database may be rebuilt from a valid backup, but a missing explicit/config/environment database remains an error
+- CLI restore to a different SQLite Home requires `--sqlite-home`, `--allow-sqlite-home-relocation`, and `--no-config`; desktop apps must reject relocation while config restore is selected
 - GUI settings live in `%AppData%\codex-provider-sync\settings.json`
 
 ## Recommended Commands

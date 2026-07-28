@@ -1352,7 +1352,10 @@ public sealed class CoreIntegrationTests
                 payload.GetProperty("collaboration_mode").GetProperty("settings").GetProperty("model").GetString());
         }
 
-        await service.RunRestoreAsync(fixture.CodexHome, result.BackupDir);
+        await service.RunRestoreAsync(
+            fixture.CodexHome,
+            result.BackupDir,
+            new RestoreBackupOptions { RestoreDatabase = false });
         string restoredStaleLine = (await File.ReadAllLinesAsync(sessionPath))
             .Single(line => line.Contains("\"stale-turn\"", StringComparison.Ordinal));
         using JsonDocument restoredDocument = JsonDocument.Parse(restoredStaleLine);
@@ -1398,7 +1401,8 @@ public sealed class CoreIntegrationTests
         CodexSyncService service = new();
         await service.RunRestoreAsync(
             fixture.CodexHome,
-            fixture.BackupPath("20260723T000000000Z"));
+            fixture.BackupPath("20260723T000000000Z"),
+            new RestoreBackupOptions { RestoreDatabase = false });
 
         Assert.Equal(originalFirstLine, (await File.ReadAllLinesAsync(sessionPath))[0]);
     }
@@ -1456,6 +1460,93 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
+    public async Task RestoreVersionTwo_RebuildsMissingDefaultSqliteDatabase()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        await fixture.WriteStateDbAsync([("thread-missing-default", "custom", false)]);
+
+        CodexSyncService service = new();
+        SyncResult syncResult = await service.RunSyncAsync(fixture.CodexHome);
+        File.Delete(fixture.StateDbPath());
+
+        await service.RunRestoreAsync(
+            fixture.CodexHome,
+            syncResult.BackupDir,
+            new RestoreBackupOptions
+            {
+                RestoreConfig = false,
+                RestoreDatabase = true,
+                RestoreSessions = false
+            });
+
+        Assert.Equal("custom", await ReadProviderAsync(fixture.StateDbPath(), "thread-missing-default"));
+    }
+
+    [Fact]
+    public async Task RestoreVersionTwo_RebuildsMissingLegacyRootSqliteDatabaseInPlace()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        await fixture.WriteLegacyStateDbAsync([("thread-missing-legacy", "custom", false)]);
+
+        CodexSyncService service = new();
+        SyncResult syncResult = await service.RunSyncAsync(fixture.CodexHome);
+        File.Delete(fixture.LegacyStateDbPath());
+
+        await service.RunRestoreAsync(
+            fixture.CodexHome,
+            syncResult.BackupDir,
+            new RestoreBackupOptions
+            {
+                RestoreConfig = false,
+                RestoreDatabase = true,
+                RestoreSessions = false
+            });
+
+        Assert.False(File.Exists(fixture.StateDbPath()));
+        Assert.Equal("custom", await ReadProviderAsync(fixture.LegacyStateDbPath(), "thread-missing-legacy"));
+    }
+
+    [Fact]
+    public async Task RestoreVersionOne_RebuildsMissingDefaultSqliteDatabase()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string backupDir = fixture.BackupPath("20260728T010000000Z");
+        string relativeDbPath = Path.Combine(AppConstants.SqliteDirBasename, AppConstants.DbFileBasename);
+        string backupDbPath = Path.Combine(backupDir, "db", relativeDbPath);
+        await fixture.WriteStateDbAtAsync(
+            backupDbPath,
+            [("thread-v1-missing", "custom", false)],
+            model: null);
+        string metadata = JsonSerializer.Serialize(new
+        {
+            version = 1,
+            @namespace = AppConstants.BackupNamespace,
+            codexHome = fixture.CodexHome,
+            targetProvider = "custom",
+            createdAt = DateTimeOffset.UtcNow,
+            dbFiles = new[] { relativeDbPath },
+            changedSessionFiles = 0
+        });
+        await File.WriteAllTextAsync(Path.Combine(backupDir, "metadata.json"), metadata);
+
+        CodexSyncService service = new();
+        await service.RunRestoreAsync(
+            fixture.CodexHome,
+            backupDir,
+            new RestoreBackupOptions
+            {
+                RestoreConfig = false,
+                RestoreDatabase = true,
+                RestoreSessions = false
+            });
+
+        Assert.Equal("custom", await ReadProviderAsync(fixture.StateDbPath(), "thread-v1-missing"));
+    }
+
+    [Fact]
     public async Task RestoreVersionTwo_RequiresExplicitRelocationConfirmation()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
@@ -1484,6 +1575,21 @@ public sealed class CoreIntegrationTests
             syncResult.BackupDir,
             deniedOptions,
             targetSqliteHome));
+        Assert.Equal("target", await ReadProviderAsync(targetDbPath, "thread-a"));
+
+        InvalidOperationException configError = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => service.RunRestoreAsync(
+                fixture.CodexHome,
+                syncResult.BackupDir,
+                new RestoreBackupOptions
+                {
+                    RestoreConfig = true,
+                    RestoreDatabase = true,
+                    RestoreSessions = false,
+                    AllowSqliteHomeRelocation = true
+                },
+                targetSqliteHome));
+        Assert.Contains("Cannot restore config.toml while relocating SQLite home", configError.Message);
         Assert.Equal("target", await ReadProviderAsync(targetDbPath, "thread-a"));
 
         await service.RunRestoreAsync(

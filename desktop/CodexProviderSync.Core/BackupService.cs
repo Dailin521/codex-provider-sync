@@ -185,56 +185,66 @@ public sealed class BackupService
                     $"state_5.sqlite not found in SQLite home {storage.SqliteHome}.");
             }
 
-            string targetSqliteHome = stateDb is null ? storage.SqliteHome : Path.GetDirectoryName(stateDb.Path)!;
-            if (stateDb is not null
-                && metadata.Version >= 2
+            string targetSqliteHome = ResolveRestoreSqliteHome(storage, metadata, stateDb);
+            bool sqliteHomeRelocation = metadata.Version >= 2
                 && !string.IsNullOrWhiteSpace(metadata.SqliteHome)
-                && !PathsEqual(metadata.SqliteHome, targetSqliteHome)
-                && !options.AllowSqliteHomeRelocation)
+                && !PathsEqual(metadata.SqliteHome, targetSqliteHome);
+            if (sqliteHomeRelocation && !options.AllowSqliteHomeRelocation)
             {
                 throw new InvalidOperationException(
                     $"Backup SQLite home is {metadata.SqliteHome}, but the current target is {targetSqliteHome}. "
                     + "Confirm SQLite Home relocation before restoring to a different location.");
+            }
+            if (sqliteHomeRelocation && options.RestoreConfig)
+            {
+                throw new InvalidOperationException(
+                    "Cannot restore config.toml while relocating SQLite home. "
+                    + "Disable config restore to preserve the current target configuration.");
             }
 
             if (stateDb is not null)
             {
                 CodexStorageLayout detectedStorage = storage with { StateDbLocation = stateDb };
                 await _sqliteStateService.AssertSqliteWritableAsync(detectedStorage);
+            }
 
-                IReadOnlyList<string> databaseFiles = metadata.Version >= 2
-                    ? metadata.SqliteDbFiles ?? []
-                    : metadata.DbFiles ?? [];
-                string databaseBackupRoot = metadata.Version >= 2
-                    ? Path.Combine(normalizedBackupDir, "db", "sqlite-home")
-                    : Path.Combine(normalizedBackupDir, "db");
-                string restoreRoot = metadata.Version >= 2 ? targetSqliteHome : codexHome;
-                foreach (string fileName in databaseFiles)
+            IReadOnlyList<string> databaseFiles = metadata.Version >= 2
+                ? metadata.SqliteDbFiles ?? []
+                : metadata.DbFiles ?? [];
+            if (!databaseFiles.Any(static fileName => Path.GetFileName(fileName) == AppConstants.DbFileBasename))
+            {
+                throw new InvalidOperationException(
+                    "Backup does not contain state_5.sqlite. Disable database restore to restore the remaining data.");
+            }
+            string databaseBackupRoot = metadata.Version >= 2
+                ? Path.Combine(normalizedBackupDir, "db", "sqlite-home")
+                : Path.Combine(normalizedBackupDir, "db");
+            string restoreRoot = metadata.Version >= 2 ? targetSqliteHome : codexHome;
+            foreach (string fileName in databaseFiles)
+            {
+                string targetPath = metadata.Version >= 2
+                    ? RestoreSqliteTargetPath(restoreRoot, fileName)
+                    : RestoreDbTargetPath(restoreRoot, fileName);
+                string sourcePath = Path.Combine(databaseBackupRoot, fileName);
+                if (!File.Exists(sourcePath))
                 {
-                    string targetPath = metadata.Version >= 2
-                        ? RestoreSqliteTargetPath(restoreRoot, fileName)
-                        : RestoreDbTargetPath(restoreRoot, fileName);
-                    string sourcePath = Path.Combine(databaseBackupRoot, fileName);
-                    if (!File.Exists(sourcePath))
-                    {
-                        throw new InvalidOperationException($"Backup declares a missing SQLite file: {sourcePath}");
-                    }
-                    databaseEntries.Add((sourcePath, targetPath));
+                    throw new InvalidOperationException($"Backup declares a missing SQLite file: {sourcePath}");
                 }
+                databaseEntries.Add((sourcePath, targetPath));
+            }
 
-                HashSet<string> backedUpFiles = new(databaseFiles, StringComparer.Ordinal);
-                foreach (string baseFile in databaseFiles.Where(
-                    static fileName => Path.GetFileName(fileName) == AppConstants.DbFileBasename))
+            HashSet<string> backedUpFiles = new(databaseFiles, StringComparer.Ordinal);
+            foreach (string baseFile in databaseFiles.Where(
+                static fileName => Path.GetFileName(fileName) == AppConstants.DbFileBasename))
+            {
+                string basePath = metadata.Version >= 2
+                    ? RestoreSqliteTargetPath(restoreRoot, baseFile)
+                    : RestoreDbTargetPath(restoreRoot, baseFile);
+                foreach (string suffix in new[] { "-shm", "-wal" })
                 {
-                    string basePath = metadata.Version >= 2
-                        ? RestoreSqliteTargetPath(restoreRoot, baseFile)
-                        : RestoreDbTargetPath(restoreRoot, baseFile);
-                    foreach (string suffix in new[] { "-shm", "-wal" })
+                    if (!backedUpFiles.Contains(baseFile + suffix))
                     {
-                        if (!backedUpFiles.Contains(baseFile + suffix))
-                        {
-                            sidecarsToRemove.Add(basePath + suffix);
-                        }
+                        sidecarsToRemove.Add(basePath + suffix);
                     }
                 }
             }
@@ -468,6 +478,29 @@ public sealed class BackupService
         }
 
         return Path.Combine(sqliteHome, relativePath);
+    }
+
+    private static string ResolveRestoreSqliteHome(
+        CodexStorageLayout storage,
+        BackupMetadataFile metadata,
+        StateDbLocation? stateDb)
+    {
+        if (stateDb is not null)
+        {
+            return Path.GetDirectoryName(stateDb.Path)!;
+        }
+        if (metadata.Version >= 2
+            && !string.IsNullOrWhiteSpace(metadata.SqliteHome)
+            && !storage.HasConfiguredSqliteHome)
+        {
+            StateDbLocation? matchingCandidate = storage.StateDbCandidates.FirstOrDefault(
+                candidate => PathsEqual(Path.GetDirectoryName(candidate.Path)!, metadata.SqliteHome));
+            if (matchingCandidate is not null)
+            {
+                return Path.GetDirectoryName(matchingCandidate.Path)!;
+            }
+        }
+        return storage.SqliteHome;
     }
 
     private static bool PathsEqual(string left, string right)

@@ -848,6 +848,16 @@ public sealed class MainForm : Form
                     string targetSqliteHome = targetStatus.StateDbLocation is null
                         ? targetStatus.SqliteHome
                         : Path.GetDirectoryName(targetStatus.StateDbLocation.Path)!;
+                    if (_restoreConfigCheck.Checked)
+                    {
+                        MessageBox.Show(
+                            this,
+                            "恢复到不同 SQLite Home 时不能同时恢复 config.toml。请取消勾选“恢复配置文件”后重试，以保留当前目标配置。",
+                            Text,
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
+                        return;
+                    }
                     DialogResult relocationConfirm = MessageBox.Show(
                         this,
                         $"备份中的 SQLite Home 与当前目标不同。{Environment.NewLine}{Environment.NewLine}"

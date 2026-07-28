@@ -57,6 +57,21 @@ function storagePathsEqual(left, right) {
     : normalizedLeft === normalizedRight;
 }
 
+function resolveRestoreSqliteHome(storage, metadata, stateDb) {
+  if (stateDb) {
+    return path.dirname(stateDb.path);
+  }
+  if (metadata.version >= 2 && metadata.sqliteHome && storage.sqliteHomeSource === "default") {
+    const matchingCandidate = storage.stateDbCandidates.find((candidate) =>
+      storagePathsEqual(path.dirname(candidate.path), metadata.sqliteHome)
+    );
+    if (matchingCandidate) {
+      return path.dirname(matchingCandidate.path);
+    }
+  }
+  return storage.sqliteHome;
+}
+
 async function removeIfPresent(targetPath) {
   await fs.rm(targetPath, { force: true });
 }
@@ -269,54 +284,62 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
     if (!stateDb && storage.sqliteHomeSource !== "default") {
       throw new Error(`state_5.sqlite not found in SQLite home ${storage.sqliteHome}.`);
     }
-    targetSqliteHome = stateDb ? path.dirname(stateDb.path) : storage.sqliteHome;
-    if (stateDb
-      && metadata.version >= 2
+    targetSqliteHome = resolveRestoreSqliteHome(storage, metadata, stateDb);
+    const sqliteHomeRelocation = metadata.version >= 2
       && metadata.sqliteHome
-      && !storagePathsEqual(metadata.sqliteHome, targetSqliteHome)
-      && !allowSqliteHomeRelocation) {
+      && !storagePathsEqual(metadata.sqliteHome, targetSqliteHome);
+    if (sqliteHomeRelocation && !allowSqliteHomeRelocation) {
       throw new Error(
         `Backup SQLite home is ${metadata.sqliteHome}, but the current target is ${targetSqliteHome}. `
         + "Use --allow-sqlite-home-relocation with an explicit --sqlite-home to restore to a different location."
       );
     }
+    if (sqliteHomeRelocation && restoreConfig) {
+      throw new Error(
+        "Cannot restore config.toml while relocating SQLite home. "
+        + "Use --no-config to preserve the current target configuration."
+      );
+    }
     if (stateDb) {
       await assertSqliteWritable(withStateDbLocation(storage, stateDb));
+    }
 
-      const dbDir = path.join(backupDir, "db");
-      const databaseFiles = metadata.version >= 2
-        ? (metadata.sqliteDbFiles ?? [])
-        : (metadata.dbFiles ?? []);
-      const databaseBackupRoot = metadata.version >= 2
-        ? path.join(dbDir, "sqlite-home")
-        : dbDir;
-      const restoreRoot = metadata.version >= 2 ? targetSqliteHome : codexHome;
-      const entries = [];
-      for (const fileName of databaseFiles) {
-        const targetPath = metadata.version >= 2
-          ? restoreSqliteTargetPath(restoreRoot, fileName)
-          : restoreDbTargetPath(restoreRoot, fileName);
-        const sourcePath = path.join(databaseBackupRoot, fileName);
-        await fs.access(sourcePath).catch(() => {
-          throw new Error(`Backup declares a missing SQLite file: ${sourcePath}`);
-        });
-        entries.push({ fileName, sourcePath, targetPath });
-      }
+    const dbDir = path.join(backupDir, "db");
+    const databaseFiles = metadata.version >= 2
+      ? (metadata.sqliteDbFiles ?? [])
+      : (metadata.dbFiles ?? []);
+    if (!databaseFiles.some((fileName) => path.basename(fileName) === DB_FILE_BASENAME)) {
+      throw new Error("Backup does not contain state_5.sqlite. Use --no-db to restore the remaining data.");
+    }
+    const databaseBackupRoot = metadata.version >= 2
+      ? path.join(dbDir, "sqlite-home")
+      : dbDir;
+    const restoreRoot = metadata.version >= 2 ? targetSqliteHome : codexHome;
+    const entries = [];
+    for (const fileName of databaseFiles) {
+      const targetPath = metadata.version >= 2
+        ? restoreSqliteTargetPath(restoreRoot, fileName)
+        : restoreDbTargetPath(restoreRoot, fileName);
+      const sourcePath = path.join(databaseBackupRoot, fileName);
+      await fs.access(sourcePath).catch(() => {
+        throw new Error(`Backup declares a missing SQLite file: ${sourcePath}`);
+      });
+      entries.push({ fileName, sourcePath, targetPath });
+    }
 
-      const backedUpFiles = new Set(databaseFiles);
-      const sidecarsToRemove = [];
-      for (const baseFile of databaseFiles.filter((fileName) => path.basename(fileName) === DB_FILE_BASENAME)) {
-        const basePath = metadata.version >= 2
-          ? restoreSqliteTargetPath(restoreRoot, baseFile)
-          : restoreDbTargetPath(restoreRoot, baseFile);
-        for (const suffix of ["-shm", "-wal"]) {
-          if (!backedUpFiles.has(`${baseFile}${suffix}`)) {
-            sidecarsToRemove.push(`${basePath}${suffix}`);
-          }
+    const backedUpFiles = new Set(databaseFiles);
+    const sidecarsToRemove = [];
+    for (const baseFile of databaseFiles.filter((fileName) => path.basename(fileName) === DB_FILE_BASENAME)) {
+      const basePath = metadata.version >= 2
+        ? restoreSqliteTargetPath(restoreRoot, baseFile)
+        : restoreDbTargetPath(restoreRoot, baseFile);
+      for (const suffix of ["-shm", "-wal"]) {
+        if (!backedUpFiles.has(`${baseFile}${suffix}`)) {
+          sidecarsToRemove.push(`${basePath}${suffix}`);
         }
       }
-      databaseRestorePlan = { entries, sidecarsToRemove };
     }
+    databaseRestorePlan = { entries, sidecarsToRemove };
   }
 
   const configBackupPath = path.join(backupDir, "config.toml");

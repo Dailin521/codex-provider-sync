@@ -88,7 +88,7 @@ codex-provider status --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/y
 codex-provider sync --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/you/.codex/sqlite
 ```
 
-`status` 会显示 effective SQLite Home 和来源。显式路径缺少 `state_5.sqlite` 时，状态查询只报告诊断，`sync`、`switch` 和数据库恢复不会偷偷回退到其它位置。
+`status` 会显示 effective SQLite Home 和来源。显式路径缺少 `state_5.sqlite` 时，状态查询只报告诊断，`sync`、`switch` 和数据库恢复不会偷偷回退到其它位置。默认布局中的数据库被删除时，`restore` 可以根据备份 metadata 在原默认位置重建数据库。
 
 ## 安全与限制
 
@@ -101,7 +101,7 @@ codex-provider sync --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/you
 - 不修改消息历史、会话标题、认证信息、`auth.json` 或 `updated_at`。
 - 不在多台设备之间复制配置或会话文件；它只修复当前 Codex Home 的 metadata。
 - SQLite 被占用时，需要先关闭 Codex、Codex App 和 app-server 后重试。
-- 新备份使用 metadata v2 记录独立 SQLite Home；恢复到其它 SQLite Home 默认拒绝。CLI 需要同时传入 `--sqlite-home` 和 `--allow-sqlite-home-relocation`。
+- 新备份使用 metadata v2 记录独立 SQLite Home；恢复到其它 SQLite Home 默认拒绝。CLI 需要同时传入 `--sqlite-home`、`--allow-sqlite-home-relocation` 和 `--no-config`，避免恢复后的 `config.toml` 重新指向原 SQLite Home。
 - 活跃会话锁住 rollout 文件时，工具会跳过该文件并继续处理其它会话；结束活跃会话后可再次同步。
 - 含 `encrypted_content` 的会话跨 Provider/account 后，可能只能恢复列表可见性，继续对话或 compact 仍可能报 `invalid_encrypted_content`。
 - Codex Desktop 首屏目前只显示最近 50 条会话。若 `/resume` 可见但项目侧仍不显示，请查看状态中的 `first page` / `ranks` 诊断；本工具不会修改时间戳来绕过此限制。

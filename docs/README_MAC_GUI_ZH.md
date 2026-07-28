@@ -65,7 +65,7 @@ DOTNET=/path/to/dotnet ./scripts/publish-gui-macos.sh
 
 如果看到 `state_5.sqlite is currently in use`，关闭上述进程后重试。
 
-SQLite Home 的解析优先级为：GUI override → `config.toml` 根级 `sqlite_home` → `CODEX_SQLITE_HOME` → `<Codex Home>/sqlite`。GUI override 按 Codex Home 保存在 App settings 中，不会写入 `config.toml`。显式位置缺库时只允许刷新诊断，写操作不会回退到其它数据库。
+SQLite Home 的解析优先级为：GUI override → `config.toml` 根级 `sqlite_home` → `CODEX_SQLITE_HOME` → `<Codex Home>/sqlite`。GUI override 按 Codex Home 保存在 App settings 中，不会写入 `config.toml`。显式位置缺库时只允许刷新诊断，写操作不会回退到其它数据库；默认布局中的数据库被删除时，可以从有效备份恢复到原默认位置。恢复到不同 SQLite Home 时必须取消勾选配置恢复，并再次确认来源和目标。
 
 如果日志显示跳过 locked rollout files，通常表示当前会话仍占用 rollout 文件。同步大多已完成；等会话结束后再运行一次 sync 可补齐这些文件。
 
