@@ -105,7 +105,14 @@ EOF
 rm -rf "$publish_dir"
 
 if command -v codesign >/dev/null 2>&1; then
-  codesign --force --deep --sign - "$app_dir" >/dev/null
+  signing_dir="$(mktemp -d "${TMPDIR:-/tmp}/codex-provider-sync-sign.XXXXXX")"
+  signing_app="$signing_dir/CodexProviderSync.app"
+  ditto --noextattr --noqtn "$app_dir" "$signing_app"
+  xattr -cr "$signing_app"
+  codesign --force --deep --sign - "$signing_app" >/dev/null
+  rm -rf "$app_dir"
+  ditto --noextattr --noqtn "$signing_app" "$app_dir"
+  rm -rf "$signing_dir"
 fi
 
 echo "macOS GUI app published to $app_dir"
