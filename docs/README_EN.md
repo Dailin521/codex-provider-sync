@@ -8,7 +8,7 @@
 [![Release](https://img.shields.io/github/v/release/Dailin521/codex-provider-sync)](https://github.com/Dailin521/codex-provider-sync/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
 
-[Download Windows GUI](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [中文](../README.md) · English
+[Download Windows GUI](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [Build macOS GUI](README_MAC_GUI_EN.md) · [中文](../README.md) · English
 
 </div>
 
@@ -51,7 +51,7 @@ The GUI keeps backups and displays the synchronization result. It checks for a s
 
 The Windows executable is currently unsigned, so browser downloads may trigger a SmartScreen warning. Download it only from this project's Releases and verify the matching SHA-256 when needed.
 
-See [README_GUI_ZH.md](README_GUI_ZH.md) for the full Windows guide. A self-built Avalonia macOS app is also available; see [README_MAC_GUI_ZH.md](README_MAC_GUI_ZH.md).
+See [README_GUI_ZH.md](README_GUI_ZH.md) for the full Windows guide. A self-built Avalonia macOS app is also available; see the [English macOS GUI guide](README_MAC_GUI_EN.md).
 
 ### CLI
 
@@ -97,7 +97,7 @@ Before each `sync` or `switch`, the tool creates a backup under:
 ## Documentation
 
 - [Windows GUI guide](README_GUI_ZH.md)
-- [macOS GUI guide](README_MAC_GUI_ZH.md)
+- [macOS GUI guide](README_MAC_GUI_EN.md)
 - [中文说明](../README.md)
 - [AI / Agent guide](../AGENTS.md)
 
