@@ -41,6 +41,7 @@ public sealed class CodexStorageLayoutService
         string sqliteHome = selected.Value is null
             ? Path.Combine(codexHome, AppConstants.SqliteDirBasename)
             : Path.GetFullPath(selected.Value.Trim());
+        SqliteAccessInfo sqliteAccess = ResolveSqliteAccess(sqliteHome, selected.Value?.Trim());
         bool allowLegacyRootFallback = string.Equals(selected.Source, "default", StringComparison.Ordinal);
         List<StateDbLocation> candidates =
         [
@@ -64,6 +65,7 @@ public sealed class CodexStorageLayoutService
             CodexHome = codexHome,
             SqliteHome = sqliteHome,
             SqliteHomeSource = selected.Source,
+            SqliteAccess = sqliteAccess,
             AllowLegacyRootFallback = allowLegacyRootFallback,
             StateDbCandidates = candidates
         };
@@ -76,5 +78,35 @@ public sealed class CodexStorageLayoutService
             explicitSqliteHome: null,
             configText: string.Empty,
             environment: new Dictionary<string, string?>());
+    }
+
+    private static SqliteAccessInfo ResolveSqliteAccess(string sqliteHome, string? rawSqliteHome)
+    {
+        if (OperatingSystem.IsWindows()
+            && (IsWslUncPath(rawSqliteHome) || IsWslUncPath(sqliteHome)))
+        {
+            string unsafePath = rawSqliteHome ?? sqliteHome;
+            return new SqliteAccessInfo(
+                false,
+                "windows-wsl-unc",
+                $"Windows cannot safely access SQLite through the WSL UNC path {unsafePath}. "
+                + "Run codex-provider inside WSL with a Linux SQLite Home path instead.");
+        }
+
+        return SqliteAccessInfo.Direct;
+    }
+
+    private static bool IsWslUncPath(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        string normalized = value.Replace('/', '\\');
+        return normalized.StartsWith(@"\\wsl.localhost\", StringComparison.OrdinalIgnoreCase)
+            || normalized.StartsWith(@"\\wsl$\", StringComparison.OrdinalIgnoreCase)
+            || normalized.StartsWith(@"\\?\UNC\wsl.localhost\", StringComparison.OrdinalIgnoreCase)
+            || normalized.StartsWith(@"\\?\UNC\wsl$\", StringComparison.OrdinalIgnoreCase);
     }
 }

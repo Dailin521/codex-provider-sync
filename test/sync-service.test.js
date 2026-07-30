@@ -476,6 +476,28 @@ test("runSync uses an explicit SQLite home and never touches a stale Codex Home 
   }
 });
 
+test("runSync blocks Windows WSL UNC SQLite homes before creating a backup", async () => {
+  const { root, codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const configPath = path.join(codexHome, "config.toml");
+  const originalConfig = await fs.readFile(configPath, "utf8");
+
+  try {
+    await assert.rejects(
+      () => runSync({
+        codexHome,
+        sqliteHome: "\\\\wsl.localhost\\Ubuntu\\home\\user\\.codex\\sqlite",
+        platform: "win32"
+      }),
+      /Cannot sync.*Run codex-provider inside WSL/
+    );
+    assert.equal(await fs.readFile(configPath, "utf8"), originalConfig);
+    await assert.rejects(() => fs.access(backupRoot(codexHome)));
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("configured SQLite home reports a missing database and blocks writes without fallback", async () => {
   const { root, codexHome } = await makeTempCodexHome();
   const sqliteHome = path.join(root, "missing-sqlite");
@@ -1460,6 +1482,28 @@ test("status reports implicit default provider and rollout/sqlite counts", async
   assert.match(renderStatus(status), new RegExp(`database: ${stateDbPath(codexHome).replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")}`));
 });
 
+test("status reports Windows WSL UNC SQLite homes without opening the database", async () => {
+  const { root, codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+
+  try {
+    const status = await getStatus({
+      codexHome,
+      sqliteHome: "\\\\wsl.localhost\\Ubuntu\\home\\user\\.codex\\sqlite",
+      platform: "win32"
+    });
+    const rendered = renderStatus(status);
+
+    assert.equal(status.sqliteAccess.supported, false);
+    assert.equal(status.stateDbLocation, null);
+    assert.equal(status.sqliteCounts, null);
+    assert.match(rendered, /Windows cannot safely access SQLite through the WSL UNC path/);
+    assert.doesNotMatch(rendered, /currently in use/i);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("status falls back to legacy root sqlite database", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome);
@@ -1596,6 +1640,48 @@ test("runSwitch rejects unknown custom providers", async () => {
     () => runSwitch({ codexHome, provider: "missing" }),
     /Provider "missing" is not available/
   );
+});
+
+test("runSwitch blocks Windows WSL UNC SQLite homes before updating config", async () => {
+  const { root, codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const configPath = path.join(codexHome, "config.toml");
+  const originalConfig = await fs.readFile(configPath, "utf8");
+
+  try {
+    await assert.rejects(
+      () => runSwitch({
+        codexHome,
+        sqliteHome: "\\\\wsl$\\Ubuntu\\home\\user\\.codex\\sqlite",
+        provider: "apigather",
+        platform: "win32"
+      }),
+      /Cannot switch.*Run codex-provider inside WSL/
+    );
+    assert.equal(await fs.readFile(configPath, "utf8"), originalConfig);
+    await assert.rejects(() => fs.access(backupRoot(codexHome)));
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("runRestore blocks Windows WSL UNC SQLite homes before reading the backup", async () => {
+  const { root, codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+
+  try {
+    await assert.rejects(
+      () => runRestore({
+        codexHome,
+        sqliteHome: "\\\\wsl.localhost\\Ubuntu\\home\\user\\.codex\\sqlite",
+        backupDir: path.join(root, "missing-backup"),
+        platform: "win32"
+      }),
+      /Cannot restore.*Run codex-provider inside WSL/
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });
 
 test("runSync leaves rollout files and sqlite untouched when sqlite is locked", async () => {

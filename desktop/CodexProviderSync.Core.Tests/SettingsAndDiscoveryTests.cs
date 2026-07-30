@@ -51,6 +51,25 @@ public sealed class SettingsAndDiscoveryTests
         Assert.Equal(2, defaultLayout.StateDbCandidates.Count);
     }
 
+    [Theory]
+    [InlineData(@"\\wsl.localhost\Ubuntu\home\user\.codex\sqlite")]
+    [InlineData(@"\\WSL$\Ubuntu\home\user\.codex\sqlite")]
+    [InlineData(@"\\?\UNC\wsl.localhost\Ubuntu\home\user\.codex\sqlite")]
+    public void StorageLayout_RejectsWslUncSqliteHomesOnlyForWindowsProcesses(string sqliteHome)
+    {
+        string codexHome = Path.Combine(Path.GetTempPath(), $"storage-layout-{Guid.NewGuid():N}", ".codex");
+        CodexStorageLayout layout = new CodexStorageLayoutService().Resolve(
+            codexHome,
+            sqliteHome,
+            string.Empty,
+            new Dictionary<string, string?>());
+
+        Assert.Equal(!OperatingSystem.IsWindows(), layout.SqliteAccess.Supported);
+        Assert.Equal(
+            OperatingSystem.IsWindows() ? "windows-wsl-unc" : null,
+            layout.SqliteAccess.Reason);
+    }
+
     [Fact]
     public void ConfigFileService_UpdatesCompactRootModelAssignment()
     {

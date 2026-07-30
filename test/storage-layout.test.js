@@ -54,3 +54,43 @@ test("resolveStorageLayout only enables legacy root fallback for the default lay
   );
   assert.equal(explicit.allowLegacyRootFallback, false);
 });
+
+test("resolveStorageLayout blocks Windows processes from accessing WSL UNC SQLite homes", () => {
+  for (const sqliteHome of [
+    "\\\\wsl.localhost\\Ubuntu\\home\\user\\.codex\\sqlite",
+    "\\\\WSL$\\Ubuntu\\home\\user\\.codex\\sqlite",
+    "\\\\?\\UNC\\wsl.localhost\\Ubuntu\\home\\user\\.codex\\sqlite"
+  ]) {
+    const layout = resolveStorageLayout({
+      codexHome,
+      sqliteHome,
+      env: {},
+      cwd,
+      platform: "win32"
+    });
+
+    assert.equal(layout.sqliteAccess.supported, false);
+    assert.equal(layout.sqliteAccess.reason, "windows-wsl-unc");
+    assert.match(layout.sqliteAccess.message, /Run codex-provider inside WSL/);
+  }
+});
+
+test("resolveStorageLayout allows WSL paths outside a Windows process", () => {
+  const wslUncOnLinux = resolveStorageLayout({
+    codexHome,
+    sqliteHome: "\\\\wsl.localhost\\Ubuntu\\home\\user\\.codex\\sqlite",
+    env: {},
+    cwd,
+    platform: "linux"
+  });
+  const linuxPath = resolveStorageLayout({
+    codexHome,
+    sqliteHome: "/home/user/.codex/sqlite",
+    env: {},
+    cwd,
+    platform: "linux"
+  });
+
+  assert.equal(wslUncOnLinux.sqliteAccess.supported, true);
+  assert.equal(linuxPath.sqliteAccess.supported, true);
+});

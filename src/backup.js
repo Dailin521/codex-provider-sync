@@ -11,7 +11,11 @@ import {
 } from "./constants.js";
 import { assertSessionFilesWritable, restoreSessionChanges } from "./session-files.js";
 import { assertSqliteWritable, detectStateDb } from "./sqlite-state.js";
-import { resolveStorageLayout, withStateDbLocation } from "./storage-layout.js";
+import {
+  assertSqliteAccessSupported,
+  resolveStorageLayout,
+  withStateDbLocation
+} from "./storage-layout.js";
 
 function timestampSlug(date = new Date()) {
   return date.toISOString().replaceAll(":", "").replaceAll("-", "").replace(".", "");
@@ -97,6 +101,7 @@ export async function createBackup({
   configBackupText
 }) {
   const effectiveStorage = storage ?? resolveStorageLayout({ codexHome, env: {} });
+  assertSqliteAccessSupported(effectiveStorage, "create a backup");
   codexHome = effectiveStorage.codexHome;
   const backupRoot = defaultBackupRoot(codexHome);
   const backupDir = path.join(backupRoot, timestampSlug());
@@ -257,6 +262,7 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
   const storage = typeof storageOrCodexHome === "string"
     ? resolveStorageLayout({ codexHome: storageOrCodexHome, env: {} })
     : storageOrCodexHome;
+  assertSqliteAccessSupported(storage, "restore");
   const codexHome = storage.codexHome;
   const metadataPath = path.join(backupDir, "metadata.json");
   const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));

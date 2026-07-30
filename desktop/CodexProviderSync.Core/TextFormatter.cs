@@ -183,6 +183,14 @@ public static class TextFormatter
 
     private static void AppendSqliteStatus(List<string> lines, StatusSnapshot status, bool chinese)
     {
+        if (!status.SqliteAccess.Supported)
+        {
+            lines.Add(chinese && status.SqliteAccess.Reason == "windows-wsl-unc"
+                ? $"  Windows 进程无法通过 WSL UNC 路径安全访问 SQLite：{status.SqliteHome}。请在 WSL 内运行 codex-provider，并使用 Linux SQLite Home 路径。"
+                : $"  {status.SqliteAccess.Message}");
+            return;
+        }
+
         if (status.StateDbLocation is not null)
         {
             string legacyNote = status.StateDbLocation.Source == "legacy-root"

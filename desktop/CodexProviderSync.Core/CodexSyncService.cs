@@ -56,14 +56,17 @@ public sealed class CodexSyncService
         IReadOnlyList<string> configuredProviders = _configFileService.ListConfiguredProviderIds(configText);
         SessionChangeCollection rolloutInfo = await _sessionRolloutService.CollectSessionChangesAsync(codexHome, "__status_only__", skipLockedReads: true);
         StateDbLocation? stateDbLocation = storage.StateDbLocation;
-        ProviderCounts? sqliteCounts = await _sqliteStateService.ReadSqliteProviderCountsAsync(storage);
+        ProviderCounts? sqliteCounts = storage.SqliteAccess.Supported
+            ? await _sqliteStateService.ReadSqliteProviderCountsAsync(storage)
+            : null;
         SqliteRepairStats? sqliteRepairStats = sqliteCounts is not null && !sqliteCounts.Unreadable
             ? await _sqliteStateService.ReadSqliteRepairStatsAsync(
                 storage,
                 rolloutInfo.UserEventThreadIds,
                 rolloutInfo.ThreadCwdsById)
             : null;
-        IReadOnlyList<ProjectThreadVisibility> projectThreadVisibility = sqliteCounts?.Unreadable == true
+        IReadOnlyList<ProjectThreadVisibility> projectThreadVisibility = !storage.SqliteAccess.Supported
+            || sqliteCounts?.Unreadable == true
             ? []
             : await _globalStateService.ReadProjectThreadVisibilityAsync(storage);
         BackupSummary backupSummary = await _backupService.GetBackupSummaryAsync(codexHome);
@@ -73,6 +76,7 @@ public sealed class CodexSyncService
             CodexHome = codexHome,
             SqliteHome = storage.SqliteHome,
             SqliteHomeSource = storage.SqliteHomeSource,
+            SqliteAccess = storage.SqliteAccess,
             CheckedStateDbPaths = storage.StateDbCandidates.Select(static candidate => candidate.Path).ToList(),
             CurrentProvider = currentProvider,
             ConfiguredProviders = configuredProviders,
@@ -119,6 +123,7 @@ public sealed class CodexSyncService
         string configPath = _codexHomeService.ConfigPath(codexHome);
         string configText = await _configFileService.ReadConfigTextAsync(configPath);
         CodexStorageLayout storage = await PrepareStorageAsync(codexHome, explicitSqliteHome, configText);
+        storage.EnsureSqliteAccessSupported("sync");
         EnsureWritableStorage(storage);
         CurrentProviderInfo current = _configFileService.ReadCurrentProviderFromConfigText(configText);
         string targetProvider = provider ?? current.Provider ?? AppConstants.DefaultProvider;
@@ -284,6 +289,7 @@ public sealed class CodexSyncService
         string configPath = _codexHomeService.ConfigPath(codexHome);
         string originalConfigText = await _configFileService.ReadConfigTextAsync(configPath);
         CodexStorageLayout storage = await PrepareStorageAsync(codexHome, explicitSqliteHome, originalConfigText);
+        storage.EnsureSqliteAccessSupported("switch");
         EnsureWritableStorage(storage);
         if (!_configFileService.ConfigDeclaresProvider(originalConfigText, provider))
         {
@@ -411,6 +417,7 @@ public sealed class CodexSyncService
         await _codexHomeService.EnsureCodexHomeAsync(codexHome);
         string configText = await _configFileService.ReadConfigTextAsync(_codexHomeService.ConfigPath(codexHome));
         CodexStorageLayout storage = await PrepareStorageAsync(codexHome, explicitSqliteHome, configText);
+        storage.EnsureSqliteAccessSupported("restore");
 
         await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "restore");
         return await _backupService.RestoreBackupAsync(Path.GetFullPath(backupDir), storage, options);
@@ -461,7 +468,9 @@ public sealed class CodexSyncService
             explicitSqliteHome,
             configText,
             explicitSource: "gui");
-        StateDbLocation? stateDb = _sqliteStateService.DetectStateDb(storage);
+        StateDbLocation? stateDb = storage.SqliteAccess.Supported
+            ? _sqliteStateService.DetectStateDb(storage)
+            : null;
         return storage with { StateDbLocation = stateDb };
     }
 

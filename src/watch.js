@@ -17,6 +17,7 @@ import path from "node:path";
 import { detectStateDb } from "./sqlite-state.js";
 import { readConfigText, readRootModelFromConfigText } from "./config-file.js";
 import {
+  assertSqliteAccessSupported,
   isConfiguredSqliteHome,
   missingConfiguredStateDbError,
   normalizeCodexHome,
@@ -63,7 +64,8 @@ export async function runWatch({
   onShutdown,
   runSyncImpl,
   signal,
-  sleepImpl
+  sleepImpl,
+  platform
 } = {}) {
   if (!Number.isInteger(debounceMs) || debounceMs < 0) {
     throw new Error(`Invalid --debounce-ms value: ${debounceMs}. Expected a non-negative integer.`);
@@ -91,8 +93,10 @@ export async function runWatch({
     const layout = resolveStorageLayout({
       codexHome,
       sqliteHome: explicitSqliteHome,
-      configText
+      configText,
+      platform
     });
+    assertSqliteAccessSupported(layout, "watch");
     return withStateDbLocation(layout, await detectStateDb(layout));
   };
 
@@ -226,6 +230,8 @@ export async function runWatch({
     inFlight = task;
   });
 
+  const initialStorage = await resolveCurrentStorage();
+
   const configWatcher = fs.watch(configPath, { persistent: true }, (eventType, filename) => {
     if (stopped) {
       return;
@@ -237,12 +243,12 @@ export async function runWatch({
 
   if (includeStateDb) {
     try {
-      await rebindStateWatchers(await resolveCurrentStorage());
+      await rebindStateWatchers(initialStorage);
     } catch (error) {
       log(`[${new Date().toISOString()}] Could not locate state database: ${error.message}`);
     }
   } else {
-    activeStorage = await resolveCurrentStorage();
+    activeStorage = initialStorage;
   }
 
   log(`[${new Date().toISOString()}] Watching ${configPath}${includeStateDb && stateDbInfo?.path ? `, ${stateDbInfo.path}, ${stateDbInfo.path}-wal, ${stateDbInfo.path}-shm` : ""} (debounce ${debounceMs}ms${once ? ", once" : ""})`);

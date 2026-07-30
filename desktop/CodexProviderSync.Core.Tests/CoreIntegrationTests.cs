@@ -1,10 +1,104 @@
 using System.Text.Json;
+using System.Diagnostics;
 using Microsoft.Data.Sqlite;
 
 namespace CodexProviderSync.Core.Tests;
 
 public sealed class CoreIntegrationTests
 {
+    [Fact]
+    public async Task GetStatus_ReportsWindowsWslUncSqliteHomeWithoutOpeningDatabase()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string sqliteHome = $@"\\wsl.localhost\Ubuntu\tmp\codex-provider-sync-{Guid.NewGuid():N}";
+        Stopwatch timer = Stopwatch.StartNew();
+
+        StatusSnapshot status = await new CodexSyncService().GetStatusAsync(fixture.CodexHome, sqliteHome);
+
+        timer.Stop();
+        Assert.False(status.SqliteAccess.Supported);
+        Assert.Null(status.StateDbLocation);
+        Assert.Null(status.SqliteCounts);
+        Assert.Contains("Windows cannot safely access SQLite", TextFormatter.FormatStatus(status));
+        string chineseStatus = TextFormatter.FormatStatus(status, TextFormatter.ChineseSimplified);
+        Assert.Contains("Windows 进程无法通过 WSL UNC 路径安全访问 SQLite", chineseStatus);
+        Assert.Contains("请在 WSL 内运行 codex-provider", chineseStatus);
+        Assert.DoesNotContain("currently in use", TextFormatter.FormatStatus(status));
+        Assert.True(timer.Elapsed < TimeSpan.FromSeconds(5), $"Status took {timer.Elapsed}.");
+    }
+
+    [Fact]
+    public async Task RunSync_BlocksWindowsWslUncBeforeCreatingBackup()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => new CodexSyncService().RunSyncAsync(
+                fixture.CodexHome,
+                explicitSqliteHome: @"\\wsl.localhost\Ubuntu\home\user\.codex\sqlite"));
+
+        Assert.Contains("Cannot sync", error.Message);
+        Assert.Contains("Run codex-provider inside WSL", error.Message);
+        Assert.False(Directory.Exists(fixture.BackupRoot()));
+    }
+
+    [Fact]
+    public async Task RunSwitch_BlocksWindowsWslUncBeforeUpdatingConfig()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string configPath = Path.Combine(fixture.CodexHome, "config.toml");
+        string originalConfig = await File.ReadAllTextAsync(configPath);
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => new CodexSyncService().RunSwitchAsync(
+                fixture.CodexHome,
+                "apigather",
+                explicitSqliteHome: @"\\wsl$\Ubuntu\home\user\.codex\sqlite"));
+
+        Assert.Contains("Cannot switch", error.Message);
+        Assert.Equal(originalConfig, await File.ReadAllTextAsync(configPath));
+        Assert.False(Directory.Exists(fixture.BackupRoot()));
+    }
+
+    [Fact]
+    public async Task RunRestore_BlocksWindowsWslUncBeforeReadingBackup()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => new CodexSyncService().RunRestoreAsync(
+                fixture.CodexHome,
+                Path.Combine(fixture.Root, "missing-backup"),
+                @"\\wsl.localhost\Ubuntu\home\user\.codex\sqlite"));
+
+        Assert.Contains("Cannot restore", error.Message);
+        Assert.Contains("Run codex-provider inside WSL", error.Message);
+    }
+
     [Fact]
     public async Task RunSync_RewritesRolloutFilesAndSqlite_ThenRestoreRevertsBoth()
     {

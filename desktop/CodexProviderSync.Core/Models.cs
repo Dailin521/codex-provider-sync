@@ -18,6 +18,7 @@ public sealed class StatusSnapshot
     public required string CodexHome { get; init; }
     public string SqliteHome { get; init; } = string.Empty;
     public string SqliteHomeSource { get; init; } = "default";
+    public SqliteAccessInfo SqliteAccess { get; init; } = SqliteAccessInfo.Direct;
     public IReadOnlyList<string> CheckedStateDbPaths { get; init; } = [];
     public required CurrentProviderInfo CurrentProvider { get; init; }
     public required IReadOnlyList<string> ConfiguredProviders { get; init; }
@@ -36,6 +37,11 @@ public sealed class StatusSnapshot
 
 public sealed record StateDbLocation(string Path, string RelativePath, string Source);
 
+public sealed record SqliteAccessInfo(bool Supported, string? Reason, string? Message)
+{
+    public static SqliteAccessInfo Direct { get; } = new(true, null, null);
+}
+
 public sealed record CodexStorageLayout
 {
     public required string CodexHome { get; init; }
@@ -44,8 +50,17 @@ public sealed record CodexStorageLayout
     public required bool AllowLegacyRootFallback { get; init; }
     public required IReadOnlyList<StateDbLocation> StateDbCandidates { get; init; }
     public StateDbLocation? StateDbLocation { get; init; }
+    public SqliteAccessInfo SqliteAccess { get; init; } = SqliteAccessInfo.Direct;
 
     public bool HasConfiguredSqliteHome => !string.Equals(SqliteHomeSource, "default", StringComparison.Ordinal);
+
+    public void EnsureSqliteAccessSupported(string operation)
+    {
+        if (!SqliteAccess.Supported)
+        {
+            throw new InvalidOperationException($"Cannot {operation}: {SqliteAccess.Message}");
+        }
+    }
 }
 
 public sealed class SqliteRepairStats

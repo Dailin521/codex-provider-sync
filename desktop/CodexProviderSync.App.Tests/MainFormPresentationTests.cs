@@ -73,6 +73,42 @@ public sealed class MainFormPresentationTests
         }
     }
 
+    [Fact]
+    public void MainForm_DisablesSqliteActionsForUnsupportedStorage()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"codex-provider-ui-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            using MainForm form = new(new ExecutionLogService(root));
+            SetField(form, "_currentStatus", new StatusSnapshot
+            {
+                CodexHome = @"C:\Users\user\.codex",
+                SqliteAccess = new SqliteAccessInfo(false, "windows-wsl-unc", "unsupported"),
+                CurrentProvider = new CurrentProviderInfo("openai", false),
+                ConfiguredProviders = ["openai"],
+                RolloutCounts = new ProviderCounts(),
+                LockedRolloutFiles = [],
+                UnreadableRolloutFiles = [],
+                EncryptedContentCounts = new ProviderCounts(),
+                SqliteCounts = null,
+                BackupRoot = root,
+                BackupSummary = new BackupSummary { Count = 0, TotalBytes = 0 }
+            });
+
+            Invoke(form, "SetBusy", false, "就绪");
+
+            Assert.False(Field<Button>(form, "_executeButton").Enabled);
+            Assert.False(Field<Button>(form, "_restoreButton").Enabled);
+            Assert.True(Field<Button>(form, "_refreshButton").Enabled);
+            Assert.True(Field<Button>(form, "_pruneBackupsButton").Enabled);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static T Field<T>(MainForm form, string name) where T : class
     {
         return typeof(MainForm)
@@ -86,5 +122,12 @@ public sealed class MainFormPresentationTests
         FieldInfo field = typeof(MainForm).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)
             ?? throw new InvalidOperationException($"Unable to find {name}.");
         field.SetValue(form, value);
+    }
+
+    private static void Invoke(MainForm form, string name, params object[] arguments)
+    {
+        MethodInfo method = typeof(MainForm).GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException($"Unable to find {name}.");
+        method.Invoke(form, arguments);
     }
 }

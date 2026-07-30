@@ -1318,6 +1318,7 @@ public sealed class MainForm : Form
 
     private void SetBusy(bool busy, string stateText)
     {
+        bool sqliteActionsSupported = _currentStatus?.SqliteAccess.Supported != false;
         _busy = busy;
         UseWaitCursor = busy;
         _busyLabel.Text = stateText;
@@ -1332,8 +1333,8 @@ public sealed class MainForm : Form
         _restoreConfigCheck.Enabled = !busy;
         _restoreDatabaseCheck.Enabled = !busy;
         _restoreSessionsCheck.Enabled = !busy;
-        _executeButton.Enabled = !busy;
-        _restoreButton.Enabled = !busy;
+        _executeButton.Enabled = !busy && sqliteActionsSupported;
+        _restoreButton.Enabled = !busy && sqliteActionsSupported;
         _openBackupButton.Enabled = !busy;
         _pruneBackupsButton.Enabled = !busy;
         UpdateCheckButtonState();

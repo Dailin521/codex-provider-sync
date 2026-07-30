@@ -35,6 +35,7 @@ public sealed class BackupService
         string configPath,
         string? configBackupText = null)
     {
+        storage.EnsureSqliteAccessSupported("create a backup");
         string codexHome = storage.CodexHome;
         string backupRoot = AppConstants.DefaultBackupRoot(codexHome);
         string backupDir = Path.Combine(backupRoot, DateTimeOffset.UtcNow.ToString("yyyyMMdd'T'HHmmssfff'Z'"));
@@ -144,6 +145,7 @@ public sealed class BackupService
         CodexStorageLayout storage,
         RestoreBackupOptions? options = null)
     {
+        storage.EnsureSqliteAccessSupported("restore");
         options ??= new RestoreBackupOptions();
         string codexHome = storage.CodexHome;
         string normalizedBackupDir = Path.GetFullPath(backupDir);

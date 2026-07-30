@@ -8,6 +8,26 @@ function resolvePath(value, cwd) {
   return path.resolve(cwd, value);
 }
 
+function isWslUncPath(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const normalized = value.replaceAll("/", "\\");
+  return /^\\\\(?:wsl\.localhost|wsl\$)\\/i.test(normalized)
+    || /^\\\\\?\\UNC\\(?:wsl\.localhost|wsl\$)\\/i.test(normalized);
+}
+
+function resolveSqliteAccess(sqliteHome, rawSqliteHome, platform) {
+  if (platform === "win32" && (isWslUncPath(rawSqliteHome) || isWslUncPath(sqliteHome))) {
+    return {
+      supported: false,
+      reason: "windows-wsl-unc",
+      message: `Windows cannot safely access SQLite through the WSL UNC path ${rawSqliteHome ?? sqliteHome}. Run codex-provider inside WSL with a Linux SQLite Home path instead.`
+    };
+  }
+  return { supported: true, reason: null, message: null };
+}
+
 export function normalizeCodexHome(explicitCodexHome, { env = process.env, cwd = process.cwd() } = {}) {
   return resolvePath(explicitCodexHome ?? env.CODEX_HOME ?? defaultCodexHome(), cwd);
 }
@@ -17,7 +37,8 @@ export function resolveStorageLayout({
   sqliteHome: explicitSqliteHome,
   configText = "",
   env = process.env,
-  cwd = process.cwd()
+  cwd = process.cwd(),
+  platform = process.platform
 } = {}) {
   const codexHome = normalizeCodexHome(explicitCodexHome, { env, cwd });
   const configuredSqliteHome = readSqliteHomeFromConfigText(configText);
@@ -31,6 +52,7 @@ export function resolveStorageLayout({
   const sqliteHome = selected
     ? resolvePath(selected[0].trim(), cwd)
     : path.join(codexHome, "sqlite");
+  const sqliteAccess = resolveSqliteAccess(sqliteHome, selected?.[0]?.trim(), platform);
   const allowLegacyRootFallback = sqliteHomeSource === "default";
   const stateDbCandidates = [
     {
@@ -53,6 +75,7 @@ export function resolveStorageLayout({
     codexHome,
     sqliteHome,
     sqliteHomeSource,
+    sqliteAccess,
     allowLegacyRootFallback,
     stateDbCandidates
   };
@@ -70,6 +93,12 @@ export function withStateDbLocation(storage, stateDbLocation) {
 
 export function isConfiguredSqliteHome(storage) {
   return storage.sqliteHomeSource !== "default";
+}
+
+export function assertSqliteAccessSupported(storage, operation) {
+  if (storage.sqliteAccess?.supported === false) {
+    throw new Error(`Cannot ${operation}: ${storage.sqliteAccess.message}`);
+  }
 }
 
 export function missingConfiguredStateDbError(storage) {

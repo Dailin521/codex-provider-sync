@@ -69,6 +69,26 @@ test("runWatch rejects when codex home or config.toml is missing", async () => {
   await fs.rm(root, { recursive: true, force: true });
 });
 
+test("runWatch blocks Windows WSL UNC SQLite homes before creating watchers", async () => {
+  const { root, codexHome } = await makeTempCodexHome();
+  let handle;
+  try {
+    await assert.rejects(
+      async () => {
+        handle = await runWatch({
+          codexHome,
+          sqliteHome: "\\\\wsl.localhost\\Ubuntu\\home\\user\\.codex\\sqlite",
+          platform: "win32"
+        });
+      },
+      /Cannot watch.*Run codex-provider inside WSL/
+    );
+  } finally {
+    await handle?.stop();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("runWatch invokes the injected sync handler when config.toml changes and stops on --once", async () => {
   const { codexHome } = await makeTempCodexHome();
   const configPath = path.join(codexHome, "config.toml");
