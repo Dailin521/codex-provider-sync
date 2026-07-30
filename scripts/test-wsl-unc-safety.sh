@@ -37,7 +37,14 @@ NODE
 
 sqlite_home_windows="$(wslpath -w "$sqlite_home")"
 project_windows="$(wslpath -w "$repo_dir/desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj")"
+database_hash_before="$(sha256sum "$sqlite_home/state_5.sqlite")"
 
-CODEX_PROVIDER_SYNC_WSL_SQLITE_HOME="$sqlite_home_windows" \
-  "$dotnet_exe" test "$project_windows" --no-restore \
+"$dotnet_exe" test "$project_windows" --no-restore \
+  --environment "CODEX_PROVIDER_SYNC_WSL_SQLITE_HOME=$sqlite_home_windows" \
   --filter "Category=WindowsWslIntegration"
+
+database_hash_after="$(sha256sum "$sqlite_home/state_5.sqlite")"
+if [[ "$database_hash_after" != "$database_hash_before" ]]; then
+  echo "WSL SQLite database changed during the Windows safety test." >&2
+  exit 1
+fi

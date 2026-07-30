@@ -1,25 +1,16 @@
 using System.Diagnostics;
-using System.Security.Cryptography;
 
 namespace CodexProviderSync.Core.Tests;
 
 public sealed class WslSqliteSafetyTests
 {
-    [Fact]
+    [WindowsWslIntegrationFact]
     [Trait("Category", "WindowsWslIntegration")]
     public async Task WindowsCore_DoesNotTouchRealWslSqliteHome()
     {
-        string? sqliteHome = Environment.GetEnvironmentVariable("CODEX_PROVIDER_SYNC_WSL_SQLITE_HOME");
-        if (string.IsNullOrWhiteSpace(sqliteHome))
-        {
-            return;
-        }
+        string sqliteHome = Environment.GetEnvironmentVariable("CODEX_PROVIDER_SYNC_WSL_SQLITE_HOME")!;
 
         Assert.True(OperatingSystem.IsWindows(), "This integration test must run in a Windows process.");
-        string stateDbPath = Path.Combine(sqliteHome, AppConstants.DbFileBasename);
-        Assert.True(File.Exists(stateDbPath), $"Expected a real WSL SQLite database at {stateDbPath}.");
-        string originalDatabaseHash = await Sha256Async(stateDbPath);
-
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
         await fixture.WriteConfigAsync("model_provider = \"openai\"");
         string rolloutPath = fixture.RolloutPath("sessions", "rollout-wsl-safety.jsonl");
@@ -67,13 +58,16 @@ public sealed class WslSqliteSafetyTests
         Assert.Equal(originalConfig, await File.ReadAllTextAsync(configPath));
         Assert.Equal(originalRollout, await File.ReadAllTextAsync(rolloutPath));
         Assert.False(Directory.Exists(fixture.BackupRoot()));
-        Assert.Equal(originalDatabaseHash, await Sha256Async(stateDbPath));
     }
+}
 
-    private static async Task<string> Sha256Async(string path)
+public sealed class WindowsWslIntegrationFactAttribute : FactAttribute
+{
+    public WindowsWslIntegrationFactAttribute()
     {
-        await using FileStream stream = File.OpenRead(path);
-        byte[] hash = await SHA256.HashDataAsync(stream);
-        return Convert.ToHexStringLower(hash);
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CODEX_PROVIDER_SYNC_WSL_SQLITE_HOME")))
+        {
+            Skip = "Run scripts/test-wsl-unc-safety.sh from WSL to provide a real ext4 SQLite Home.";
+        }
     }
 }
