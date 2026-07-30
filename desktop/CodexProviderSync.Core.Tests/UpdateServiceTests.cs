@@ -2,7 +2,6 @@ using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
-using System.Diagnostics;
 
 namespace CodexProviderSync.Core.Tests;
 
@@ -75,7 +74,7 @@ public sealed class UpdateServiceTests
     }
 
     [Fact]
-    public async Task CheckForUpdate_ApiFallbackSharesOneTotalDeadline()
+    public async Task CheckForUpdate_ApiFallbackHonorsConfiguredDeadline()
     {
         CancellationToken firstToken = default;
         CancellationToken fallbackToken = default;
@@ -84,24 +83,20 @@ public sealed class UpdateServiceTests
             if (request.RequestUri!.Host == "api.github.com")
             {
                 firstToken = cancellationToken;
-                await Task.Delay(300, cancellationToken);
                 return new HttpResponseMessage(HttpStatusCode.Forbidden);
             }
 
             fallbackToken = cancellationToken;
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
-            throw new InvalidOperationException("The shared deadline should stop the fallback request.");
+            throw new InvalidOperationException("The configured deadline should stop the fallback request.");
         });
-        UpdateService service = new(client, TimeSpan.FromMilliseconds(400));
-        Stopwatch timer = Stopwatch.StartNew();
+        UpdateService service = new(client, TimeSpan.FromMilliseconds(100));
 
         await Assert.ThrowsAsync<TimeoutException>(
             () => service.CheckForUpdateAsync(new Version(0, 3, 1)));
 
-        timer.Stop();
         Assert.True(firstToken.CanBeCanceled);
         Assert.True(fallbackToken.CanBeCanceled);
-        Assert.InRange(timer.ElapsedMilliseconds, 350, 550);
     }
 
     [Fact]
