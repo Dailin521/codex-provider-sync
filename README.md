@@ -49,7 +49,7 @@ Codex 切换 `model_provider` 后，旧会话可能从 Desktop 或 `/resume` 中
 
 GUI 会保留备份并显示同步结果。每天首次启动会在后台检查一次稳定版更新，网络查询最多等待 10 秒；也可以随时手动检查。执行日志保存在 `%AppData%\codex-provider-sync\logs`。
 
-如果 Codex Home 与 SQLite 分处 Windows/WSL，可在 GUI 顶部单独选择 SQLite Home。该 override 按 Codex Home 保存，不写入 `config.toml`；状态区会显示最终生效路径及来源。
+Windows GUI 支持为每个 Codex Home 单独指定 Windows 文件系统中的 SQLite Home。`\\wsl.localhost\...` 和 `\\wsl$\...` 一类 WSL UNC 路径仅用于安全诊断；GUI 会显示诊断信息并禁用同步和恢复。Windows Codex Home + WSL SQLite Home 场景应在 WSL 内运行 CLI。
 
 项目目前未做 Windows 代码签名，从浏览器下载后可能出现 SmartScreen 提示。请从本项目 Release 下载，并按需核对同版本 SHA-256。
 
@@ -101,6 +101,7 @@ codex-provider sync --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/you
 - 不修改消息历史、会话标题、认证信息、`auth.json` 或 `updated_at`。
 - 不在多台设备之间复制配置或会话文件；它只修复当前 Codex Home 的 metadata。
 - SQLite 被占用时，需要先关闭 Codex、Codex App 和 app-server 后重试。
+- Windows 进程检测到 WSL UNC SQLite Home 时会立即显示专用安全诊断并停止操作。后续操作应进入对应 WSL 发行版，并使用 `/home/...` 形式的 Linux 路径运行 CLI。
 - 新备份使用 metadata v2 记录独立 SQLite Home；恢复到其它 SQLite Home 默认拒绝。CLI 需要同时传入 `--sqlite-home`、`--allow-sqlite-home-relocation` 和 `--no-config`，避免恢复后的 `config.toml` 重新指向原 SQLite Home。
 - 活跃会话锁住 rollout 文件时，工具会跳过该文件并继续处理其它会话；结束活跃会话后可再次同步。
 - 含 `encrypted_content` 的会话跨 Provider/account 后，可能只能恢复列表可见性，继续对话或 compact 仍可能报 `invalid_encrypted_content`。
@@ -120,9 +121,12 @@ git clone https://github.com/Dailin521/codex-provider-sync.git
 cd codex-provider-sync
 npm test
 dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj
+./scripts/test-wsl-unc-safety.sh
 pwsh ./scripts/publish-gui.ps1
 ./scripts/publish-gui-macos.sh
 ```
+
+`test-wsl-unc-safety.sh` 需要从 WSL 运行，并调用 Windows `dotnet.exe` 验证真实 WSL ext4 SQLite 的安全阻断。
 
 ## License
 

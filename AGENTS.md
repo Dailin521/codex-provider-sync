@@ -19,6 +19,8 @@ The tool works by updating both:
 
 Resolve SQLite Home in this order: explicit CLI/GUI override, root `sqlite_home` in `config.toml`, `CODEX_SQLITE_HOME`, then `<codex-home>/sqlite`. Only the default layout may fall back to `<codex-home>/state_5.sqlite`. Never fall back when an explicit/config/environment SQLite Home is missing.
 
+On Windows, `\\wsl.localhost\...` and `\\wsl$\...` SQLite Homes are diagnostic-only. SQLite operations for these paths run inside WSL and use the corresponding Linux path.
+
 Do not solve this by manually editing rollout files only unless the user explicitly asks for manual intervention.
 
 ## Preferred Flow
@@ -88,6 +90,7 @@ GUI mapping:
 - `Restore Backup` = restore a previous backup
 - backup retention defaults to 5 and can be customized in the GUI
 - SQLite Home overrides are stored per Codex Home in app settings and are passed to refresh, sync, switch, and restore
+- Windows GUI refresh reports WSL UNC SQLite Homes as diagnostic-only paths; Execute and Restore are disabled for that layout
 - restoring a metadata v2 backup to a different SQLite Home requires a second confirmation showing source and target
 - `Clean Old Backups` = prune managed backups down to the selected retention count
 
@@ -108,6 +111,12 @@ If the output says `state_5.sqlite is currently in use`:
 
 - tell the user to close Codex, Codex App, and app-server
 - then rerun the same command
+
+If the output says Windows cannot safely access SQLite through a WSL UNC path:
+
+- identify the message as a WSL UNC path safety diagnostic
+- open the corresponding WSL distribution
+- run the CLI there with the Windows Codex Home mounted under `/mnt/<drive>/...` and SQLite Home expressed as a Linux `/home/...` path
 
 If sync reports `Skipped locked rollout files`:
 
@@ -130,6 +139,7 @@ If `switch <provider-id>` fails because the provider is missing:
 - by default the tool keeps the most recent 5 managed backups
 - use GUI retention settings or CLI `--keep <n>` when the user wants a different retention count
 - do not edit `state_5.sqlite` or rollout files manually if the tool can do it
+- classify WSL UNC messages as path safety diagnostics and route SQLite operations through WSL with Linux paths
 - metadata v2 backups record `sqliteHome` and `sqliteDbFiles`; a missing default-layout database may be rebuilt from a valid backup, but a missing explicit/config/environment database remains an error
 - CLI restore to a different SQLite Home requires `--sqlite-home`, `--allow-sqlite-home-relocation`, and `--no-config`; desktop apps must reject relocation while config restore is selected
 - GUI settings live in `%AppData%\codex-provider-sync\settings.json`
@@ -152,9 +162,15 @@ With an explicit Codex home:
 
 ```bash
 codex-provider status --codex-home C:\Users\you\.codex
-codex-provider status --codex-home C:\Users\you\.codex --sqlite-home \\wsl.localhost\Ubuntu\home\you\.codex\sqlite
 codex-provider sync --codex-home C:\Users\you\.codex
 codex-provider switch openai --codex-home C:\Users\you\.codex
+```
+
+From WSL when Codex Home is on Windows and SQLite Home is in WSL:
+
+```bash
+codex-provider status --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/you/.codex/sqlite
+codex-provider sync --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/you/.codex/sqlite
 ```
 
 ## One-Shot Prompt Template

@@ -49,7 +49,7 @@ For normal Windows use, download and extract `CodexProviderSync.exe` from [Relea
 
 The GUI keeps backups and displays the synchronization result. It checks for a stable release in the background on the first launch of each local day, with a 10-second lookup deadline. Manual update checks remain available. Execution logs are stored under `%AppData%\codex-provider-sync\logs`.
 
-When Codex Home and SQLite are split across Windows/WSL, select SQLite Home separately at the top of the GUI. This per-CodexHome override is stored in app settings, not `config.toml`; status shows the effective path and source. Restoring a metadata v2 backup to a different SQLite Home requires a second confirmation showing both paths.
+The Windows GUI supports a separate SQLite Home on the Windows filesystem for each Codex Home. WSL UNC paths such as `\\wsl.localhost\...` and `\\wsl$\...` are diagnostic-only; the GUI reports the safety boundary and disables synchronization and restore. Run the CLI inside WSL for a Windows Codex Home plus WSL SQLite Home layout.
 
 The Windows executable is currently unsigned, so browser downloads may trigger a SmartScreen warning. Download it only from this project's Releases and verify the matching SHA-256 when needed.
 
@@ -81,6 +81,13 @@ Common commands:
 
 SQLite Home precedence is: CLI override, root-level `sqlite_home` in `config.toml`, `CODEX_SQLITE_HOME`, then `<Codex Home>/sqlite`. The legacy `<Codex Home>/state_5.sqlite` fallback is enabled only for the default layout. An explicit SQLite Home never falls back to a stale database under Codex Home.
 
+For a Windows Codex Home with app-server and SQLite running in WSL, invoke the CLI from WSL:
+
+```bash
+codex-provider status --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/you/.codex/sqlite
+codex-provider sync --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/you/.codex/sqlite
+```
+
 `status` reports the effective SQLite Home and its source. If an explicit location has no `state_5.sqlite`, read-only status reports the diagnostic while write operations fail. If a database is deleted from the default layout, `restore` can rebuild it at its original default location from backup metadata. New metadata v2 backups record the separate SQLite Home. Restoring a v2 backup to a different SQLite Home is rejected unless relocation is explicitly confirmed; the CLI requires `--sqlite-home`, `--allow-sqlite-home-relocation`, and `--no-config` so the restored config cannot point Codex back to the source SQLite Home.
 
 Node.js 24+ uses the built-in `node:sqlite` module. Older supported Node.js releases use the optional `better-sqlite3` dependency.
@@ -96,6 +103,7 @@ Before each `sync` or `switch`, the tool creates a backup under:
 - It does not modify messages, session titles, authentication, `auth.json`, or `updated_at`.
 - It does not copy configuration or session files between devices; it only repairs metadata in the current Codex Home.
 - If SQLite is in use, close Codex, Codex App, and app-server before retrying.
+- A Windows process that resolves SQLite Home through a WSL UNC path reports a dedicated safety diagnostic and stops immediately. Continue inside that WSL distribution with the Linux `/home/...` path.
 - If a live session locks a rollout file, the tool skips that file and continues. Run sync again after the session ends for a complete update.
 - Sessions containing `encrypted_content` may become visible across Providers/accounts but still fail to continue or compact with `invalid_encrypted_content`.
 - Codex Desktop currently shows only the latest 50 sessions on its first page. If `/resume` can see a session but the project view cannot, inspect the `first page` / `ranks` diagnostics. This tool does not alter timestamps to bypass that upstream limit.
@@ -114,9 +122,12 @@ git clone https://github.com/Dailin521/codex-provider-sync.git
 cd codex-provider-sync
 npm test
 dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj
+./scripts/test-wsl-unc-safety.sh
 pwsh ./scripts/publish-gui.ps1
 ./scripts/publish-gui-macos.sh
 ```
+
+Run `test-wsl-unc-safety.sh` from WSL. It invokes Windows `dotnet.exe` to verify the safety guard against a real SQLite database on WSL ext4.
 
 ## License
 
