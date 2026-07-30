@@ -1,5 +1,7 @@
 # macOS GUI 使用说明
 
+中文 · [English](README_MAC_GUI_EN.md)
+
 `CodexProviderSync.app` 是 macOS 桌面版 GUI，使用 Avalonia 构建，复用 `desktop/CodexProviderSync.Core` 的状态、同步、切换、恢复和清理逻辑。
 
 ## 构建
@@ -69,4 +71,6 @@ DOTNET=/path/to/dotnet ./scripts/publish-gui-macos.sh
 
 `scripts/publish-gui-macos.sh` 默认发布 `osx-arm64` self-contained `.app` bundle，并在本机可用时执行 ad-hoc `codesign`。该脚本不修改 Windows GUI 发布脚本 `scripts/publish-gui.ps1`。
 
-当前 Avalonia 11.3.x 构建可能显示 `Tmds.DBus.Protocol` 的 NuGet advisory warning。该依赖来自 Avalonia 桌面包的跨平台传递依赖；macOS 发布产物可构建运行，但发布前仍应按团队安全策略评估或升级 Avalonia。
+macOS 桌面项目当前使用 Avalonia 12.0.4。ad-hoc 签名不等同于 Apple Developer ID 签名或公证。
+
+项目目前提供 macOS 构建脚本，GitHub Releases 中没有预构建的 macOS 产物，请使用上述命令在本地构建。

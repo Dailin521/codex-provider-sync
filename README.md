@@ -51,7 +51,7 @@ GUI 会保留备份并显示同步结果。每天首次启动会在后台检查�
 
 项目目前未做 Windows 代码签名，从浏览器下载后可能出现 SmartScreen 提示。请从本项目 Release 下载，并按需核对同版本 SHA-256。
 
-Windows 完整说明见 [README_GUI_ZH.md](docs/README_GUI_ZH.md)。macOS 用户可自行构建 Avalonia 桌面版，参见 [README_MAC_GUI_ZH.md](docs/README_MAC_GUI_ZH.md)。
+Windows 完整说明见 [README_GUI_ZH.md](docs/README_GUI_ZH.md)。macOS 用户可自行构建 Avalonia 桌面版，分别参见 [中文说明](docs/README_MAC_GUI_ZH.md)和[英文说明](docs/README_MAC_GUI_EN.md)。
 
 ### CLI
 
@@ -95,7 +95,7 @@ codex-provider sync
 ## 文档
 
 - [Windows GUI 说明](docs/README_GUI_ZH.md)
-- [macOS GUI 说明](docs/README_MAC_GUI_ZH.md)
+- macOS GUI 说明：[中文](docs/README_MAC_GUI_ZH.md) · [English](docs/README_MAC_GUI_EN.md)
 - [English documentation](docs/README_EN.md)
 - [AI / Agent 操作指南](AGENTS.md)
 
