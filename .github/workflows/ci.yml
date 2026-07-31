@@ -6,6 +6,9 @@ on:
       - main
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ${{ matrix.os }}
@@ -46,3 +49,25 @@ jobs:
           dotnet-version: "10.0.x"
       - run: dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj
       - run: dotnet build desktop/CodexProviderSync.Mac/CodexProviderSync.Mac.csproj --configuration Release
+
+  ci-gate:
+    name: ci-gate
+    if: ${{ always() }}
+    needs:
+      - test
+      - desktop-test
+      - desktop-macos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required jobs
+        env:
+          NODE_TEST_RESULT: ${{ needs.test.result }}
+          DESKTOP_TEST_RESULT: ${{ needs.desktop-test.result }}
+          MACOS_TEST_RESULT: ${{ needs.desktop-macos.result }}
+        run: |
+          if [ "$NODE_TEST_RESULT" != "success" ] ||
+             [ "$DESKTOP_TEST_RESULT" != "success" ] ||
+             [ "$MACOS_TEST_RESULT" != "success" ]; then
+            echo "One or more required CI jobs did not succeed."
+            exit 1
+          fi
