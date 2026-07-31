@@ -109,6 +109,123 @@ public sealed class MainFormPresentationTests
         }
     }
 
+    [Fact]
+    public void MainForm_KeepsActionOptionsInsideTheExecutionPanelAtMinimumSize()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"codex-provider-ui-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            using MainForm form = new(new ExecutionLogService(root));
+            form.Size = form.MinimumSize;
+            PerformLayoutRecursively(form);
+
+            GroupBox actionGroup = Descendants(form)
+                .OfType<GroupBox>()
+                .Single(control => control.Text == "执行");
+            TableLayoutPanel mainLayout = Assert.IsType<TableLayoutPanel>(actionGroup.Parent);
+            int actionColumn = mainLayout.GetColumn(actionGroup);
+            Assert.Equal(SizeType.AutoSize, mainLayout.ColumnStyles[actionColumn].SizeType);
+
+            RadioButton autoModel = Field<RadioButton>(form, "_modelAutoRadio");
+            RadioButton keepModel = Field<RadioButton>(form, "_modelKeepRadio");
+            RadioButton customModel = Field<RadioButton>(form, "_modelCustomRadio");
+            TableLayoutPanel modelLayout = Assert.IsType<TableLayoutPanel>(autoModel.Parent);
+            Assert.Same(modelLayout, keepModel.Parent);
+            Assert.Same(modelLayout, customModel.Parent);
+            Assert.NotEqual(modelLayout.GetRow(autoModel), modelLayout.GetRow(keepModel));
+            Assert.NotEqual(modelLayout.GetRow(keepModel), modelLayout.GetRow(customModel));
+
+            Assert.True(autoModel.Checked);
+            customModel.Checked = true;
+            Assert.False(autoModel.Checked);
+            Assert.False(keepModel.Checked);
+            Assert.True(customModel.Checked);
+            keepModel.Checked = true;
+            Assert.False(autoModel.Checked);
+            Assert.True(keepModel.Checked);
+            Assert.False(customModel.Checked);
+
+            CheckBox updateConfig = Field<CheckBox>(form, "_updateConfigCheck");
+            TextBox customModelText = Field<TextBox>(form, "_modelCustomText");
+            updateConfig.Checked = true;
+            customModel.Checked = true;
+            Assert.True(customModelText.Enabled);
+            Assert.False(autoModel.Checked);
+            autoModel.Checked = true;
+            Assert.False(customModel.Checked);
+            Assert.False(customModelText.Enabled);
+
+            Assert.Equal("同时更新 config.toml\r\n（切换 Provider）", updateConfig.Text);
+            Assert.True(
+                updateConfig.ClientSize.Height >= updateConfig.PreferredSize.Height,
+                $"Update-config checkbox is too short for its text: control height {updateConfig.ClientSize.Height}, preferred height {updateConfig.PreferredSize.Height}.");
+
+            Label modelHeader = modelLayout.Controls
+                .OfType<Label>()
+                .Single(control => control.Text == "顶层 model:");
+            Rectangle updateConfigBounds = BoundsRelativeTo(updateConfig, actionGroup);
+            Rectangle modelHeaderBounds = BoundsRelativeTo(modelHeader, actionGroup);
+            int updateConfigGap = modelHeaderBounds.Top - updateConfigBounds.Bottom;
+            Assert.True(
+                updateConfigGap >= 8,
+                $"Update-config text is too close to the model header: gap {updateConfigGap}px.");
+
+            Control[] criticalControls =
+            [
+                updateConfig,
+                autoModel,
+                keepModel,
+                customModel,
+                Field<TextBox>(form, "_modelCustomText"),
+                Field<CheckBox>(form, "_restoreSessionsCheck")
+            ];
+
+            foreach (Control control in criticalControls)
+            {
+                Rectangle bounds = BoundsRelativeTo(control, actionGroup);
+                Assert.True(
+                    bounds.Left >= 0 && bounds.Right <= actionGroup.ClientSize.Width,
+                    $"{control.Name}/{control.Text} extends outside the execution panel: {bounds}, panel width {actionGroup.ClientSize.Width}.");
+            }
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static Rectangle BoundsRelativeTo(Control control, Control ancestor)
+    {
+        Rectangle bounds = control.Bounds;
+        for (Control? parent = control.Parent; parent is not null && parent != ancestor; parent = parent.Parent)
+        {
+            bounds.Offset(parent.Left, parent.Top);
+        }
+        return bounds;
+    }
+
+    private static IEnumerable<Control> Descendants(Control control)
+    {
+        foreach (Control child in control.Controls)
+        {
+            yield return child;
+            foreach (Control descendant in Descendants(child))
+            {
+                yield return descendant;
+            }
+        }
+    }
+
+    private static void PerformLayoutRecursively(Control control)
+    {
+        control.PerformLayout();
+        foreach (Control child in control.Controls)
+        {
+            PerformLayoutRecursively(child);
+        }
+    }
+
     private static T Field<T>(MainForm form, string name) where T : class
     {
         return typeof(MainForm)

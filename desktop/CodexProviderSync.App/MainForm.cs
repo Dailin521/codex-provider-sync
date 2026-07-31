@@ -5,6 +5,8 @@ namespace CodexProviderSync.App;
 
 public sealed class MainForm : Form
 {
+    private const int ActionGroupMinimumWidth = 460;
+
     private readonly CodexSyncService _syncService = new();
     private readonly SettingsService _settingsService;
     private readonly UpdateService _updateService;
@@ -45,8 +47,9 @@ public sealed class MainForm : Form
     };
     private readonly CheckBox _updateConfigCheck = new()
     {
+        Text = "同时更新 config.toml\r\n（切换 Provider）",
         AutoSize = true,
-        Margin = new Padding(0, 4, 8, 0)
+        Margin = new Padding(0, 4, 0, 0)
     };
     private readonly RadioButton _modelAutoRadio = new()
     {
@@ -69,19 +72,12 @@ public sealed class MainForm : Form
     };
     private readonly TextBox _modelCustomText = new()
     {
-        Width = 240,
+        Width = 140,
         Margin = new Padding(0, 0, 0, 2)
     };
     private readonly CheckBox _restoreConfigCheck = new() { Text = "恢复配置文件（config.toml）", Checked = false, AutoSize = true };
     private readonly CheckBox _restoreDatabaseCheck = new() { Text = "恢复线程数据库（SQLite）", Checked = true, AutoSize = true };
     private readonly CheckBox _restoreSessionsCheck = new() { Text = "恢复会话文件元数据（rollout）", Checked = true, AutoSize = true };
-    private readonly Label _updateConfigLabel = new()
-    {
-        AutoSize = false,
-        Dock = DockStyle.Fill,
-        TextAlign = ContentAlignment.MiddleLeft,
-        Text = "同步时改写 config.toml"
-    };
     private readonly NumericUpDown _backupRetentionInput = new()
     {
         Minimum = 1,
@@ -217,8 +213,8 @@ public sealed class MainForm : Form
             Padding = new Padding(12)
         };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 68));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 32));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 72));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 28));
 
         root.Controls.Add(BuildTopPanel(), 0, 0);
         root.Controls.Add(BuildMainPanel(), 0, 1);
@@ -281,7 +277,7 @@ public sealed class MainForm : Form
         };
         main.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         main.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        main.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 380));
+        main.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
         main.Controls.Add(BuildStatusGroup(), 0, 0);
         main.Controls.Add(BuildProviderGroup(), 1, 0);
@@ -347,7 +343,12 @@ public sealed class MainForm : Form
 
     private Control BuildActionGroup()
     {
-        GroupBox group = new() { Text = "执行", Dock = DockStyle.Fill, MinimumSize = new Size(420, 0) };
+        GroupBox group = new()
+        {
+            Text = "执行",
+            Dock = DockStyle.Fill,
+            MinimumSize = new Size(ActionGroupMinimumWidth, 0)
+        };
         TableLayoutPanel panel = new()
         {
             Dock = DockStyle.Fill,
@@ -390,35 +391,48 @@ public sealed class MainForm : Form
         TableLayoutPanel panel = new()
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 2,
-            Margin = new Padding(0, 2, 0, 8)
-        };
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        panel.Controls.Add(_updateConfigCheck, 0, 0);
-        panel.Controls.Add(_updateConfigLabel, 1, 0);
-
-        FlowLayoutPanel modelOptions = new()
-        {
-            FlowDirection = FlowDirection.LeftToRight,
+            ColumnCount = 1,
+            RowCount = 2,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Margin = new Padding(24, 0, 0, 0),
-            Dock = DockStyle.Fill
+            Margin = new Padding(0, 2, 0, 8)
         };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        panel.Controls.Add(_updateConfigCheck, 0, 0);
+
+        TableLayoutPanel modelOptions = new()
+        {
+            Dock = DockStyle.Top,
+            ColumnCount = 2,
+            RowCount = 4,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Margin = new Padding(16, 8, 0, 0)
+        };
+        modelOptions.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        modelOptions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        modelOptions.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        modelOptions.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        modelOptions.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        modelOptions.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         Label modelHeader = new()
         {
             Text = "顶层 model:",
             AutoSize = true,
-            Margin = new Padding(0, 4, 8, 0)
+            Margin = new Padding(0, 4, 0, 0)
         };
-        modelOptions.Controls.Add(modelHeader);
-        modelOptions.Controls.Add(_modelAutoRadio);
-        modelOptions.Controls.Add(_modelKeepRadio);
-        modelOptions.Controls.Add(_modelCustomRadio);
-        modelOptions.Controls.Add(_modelCustomText);
+
+        modelOptions.Controls.Add(modelHeader, 0, 0);
+        modelOptions.SetColumnSpan(modelHeader, 2);
+        modelOptions.Controls.Add(_modelAutoRadio, 0, 1);
+        modelOptions.SetColumnSpan(_modelAutoRadio, 2);
+        modelOptions.Controls.Add(_modelKeepRadio, 0, 2);
+        modelOptions.SetColumnSpan(_modelKeepRadio, 2);
+        modelOptions.Controls.Add(_modelCustomRadio, 0, 3);
+        modelOptions.Controls.Add(_modelCustomText, 1, 3);
         panel.Controls.Add(modelOptions, 0, 1);
-        panel.SetColumnSpan(modelOptions, 2);
 
         _modelAutoRadio.CheckedChanged += (_, _) => UpdateModelOptionsEnabled();
         _modelKeepRadio.CheckedChanged += (_, _) => UpdateModelOptionsEnabled();
@@ -442,7 +456,7 @@ public sealed class MainForm : Form
         Panel panel = new()
         {
             Dock = DockStyle.Fill,
-            Height = 86,
+            Height = 72,
             Padding = new Padding(10, 8, 10, 8),
             Margin = new Padding(0, 4, 0, 8),
             BackColor = Color.FromArgb(255, 244, 214)
