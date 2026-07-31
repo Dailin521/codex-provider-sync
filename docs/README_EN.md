@@ -30,7 +30,7 @@ The tool does not sign in, manage accounts, or switch authentication. Switch Pro
 ## What It Updates
 
 - Rollout metadata under `~/.codex/sessions` and `~/.codex/archived_sessions`.
-- Codex SQLite thread records. It prefers `~/.codex/sqlite/state_5.sqlite` and supports the legacy `~/.codex/state_5.sqlite` location.
+- Codex SQLite thread records, including layouts where SQLite is stored outside Codex Home.
 - Project-visibility path information and related model metadata when required.
 - Managed backups before each synchronization, with restore and pruning support.
 - Large rollout files in place when safe, with automatic fallback to a full safe rewrite.
@@ -48,6 +48,8 @@ For normal Windows use, download and extract `CodexProviderSync.exe` from [Relea
 4. Click `立即同步` (Sync Now).
 
 The GUI keeps backups and displays the synchronization result. It checks for a stable release in the background on the first launch of each local day, with a 10-second lookup deadline. Manual update checks remain available. Execution logs are stored under `%AppData%\codex-provider-sync\logs`.
+
+The Windows GUI supports a separate SQLite Home on the Windows filesystem for each Codex Home. WSL UNC paths such as `\\wsl.localhost\...` and `\\wsl$\...` are diagnostic-only; the GUI reports the safety boundary and disables synchronization and restore. Run the CLI inside WSL for a Windows Codex Home plus WSL SQLite Home layout.
 
 The Windows executable is currently unsigned, so browser downloads may trigger a SmartScreen warning. Download it only from this project's Releases and verify the matching SHA-256 when needed.
 
@@ -75,7 +77,18 @@ Common commands:
 | `codex-provider watch` | Watch config, SQLite, and WAL changes and synchronize automatically |
 | `codex-provider watch --once` | Exit after the first change is synchronized successfully |
 
-`switch` accepts `--model <NAME>` to set the root model explicitly, or `--keep-root-model` to change only the Provider. All main commands accept `--codex-home <PATH>`.
+`switch` accepts `--model <NAME>` to set the root model explicitly, or `--keep-root-model` to change only the Provider. All main commands accept `--codex-home <PATH>` and `--sqlite-home <PATH>`.
+
+SQLite Home precedence is: CLI override, root-level `sqlite_home` in `config.toml`, `CODEX_SQLITE_HOME`, then `<Codex Home>/sqlite`. The legacy `<Codex Home>/state_5.sqlite` fallback is enabled only for the default layout. An explicit SQLite Home never falls back to a stale database under Codex Home.
+
+For a Windows Codex Home with app-server and SQLite running in WSL, invoke the CLI from WSL:
+
+```bash
+codex-provider status --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/you/.codex/sqlite
+codex-provider sync --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/you/.codex/sqlite
+```
+
+`status` reports the effective SQLite Home and its source. If an explicit location has no `state_5.sqlite`, read-only status reports the diagnostic while write operations fail. If a database is deleted from the default layout, `restore` can rebuild it at its original default location from backup metadata. New metadata v2 backups record the separate SQLite Home. Restoring a v2 backup to a different SQLite Home is rejected unless relocation is explicitly confirmed; the CLI requires `--sqlite-home`, `--allow-sqlite-home-relocation`, and `--no-config` so the restored config cannot point Codex back to the source SQLite Home.
 
 Node.js 24+ uses the built-in `node:sqlite` module. Older supported Node.js releases use the optional `better-sqlite3` dependency.
 
@@ -90,6 +103,7 @@ Before each `sync` or `switch`, the tool creates a backup under:
 - It does not modify messages, session titles, authentication, `auth.json`, or `updated_at`.
 - It does not copy configuration or session files between devices; it only repairs metadata in the current Codex Home.
 - If SQLite is in use, close Codex, Codex App, and app-server before retrying.
+- A Windows process that resolves SQLite Home through a WSL UNC path reports a dedicated safety diagnostic and stops immediately. Continue inside that WSL distribution with the Linux `/home/...` path.
 - If a live session locks a rollout file, the tool skips that file and continues. Run sync again after the session ends for a complete update.
 - Sessions containing `encrypted_content` may become visible across Providers/accounts but still fail to continue or compact with `invalid_encrypted_content`.
 - Codex Desktop currently shows only the latest 50 sessions on its first page. If `/resume` can see a session but the project view cannot, inspect the `first page` / `ranks` diagnostics. This tool does not alter timestamps to bypass that upstream limit.
@@ -108,9 +122,12 @@ git clone https://github.com/Dailin521/codex-provider-sync.git
 cd codex-provider-sync
 npm test
 dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj
+./scripts/test-wsl-unc-safety.sh
 pwsh ./scripts/publish-gui.ps1
 ./scripts/publish-gui-macos.sh
 ```
+
+Run `test-wsl-unc-safety.sh` from WSL. It invokes Windows `dotnet.exe` to verify the safety guard against a real SQLite database on WSL ext4.
 
 ## License
 

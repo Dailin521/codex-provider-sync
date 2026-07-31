@@ -1,11 +1,9 @@
-import fs from "node:fs/promises";
 import path from "node:path";
 
 import {
   DEFAULT_BACKUP_RETENTION_COUNT,
   DEFAULT_PROVIDER,
-  defaultBackupRoot,
-  defaultCodexHome
+  defaultBackupRoot
 } from "./constants.js";
 import {
   configDeclaresProvider,
@@ -46,13 +44,27 @@ import {
   readThreadCwdStats,
   syncWorkspaceRoots
 } from "./workspace-roots.js";
+import {
+  assertSqliteAccessSupported,
+  ensureCodexHome,
+  isConfiguredSqliteHome,
+  missingConfiguredStateDbError,
+  normalizeCodexHome,
+  resolveStorageLayout,
+  withStateDbLocation
+} from "./storage-layout.js";
 
-function normalizeCodexHome(explicitCodexHome) {
-  return path.resolve(explicitCodexHome ?? process.env.CODEX_HOME ?? defaultCodexHome());
-}
-
-async function ensureCodexHome(codexHome) {
-  await fs.access(codexHome);
+async function prepareStorage({ codexHome: explicitCodexHome, sqliteHome, configText, storage, platform }) {
+  if (storage) {
+    return storage;
+  }
+  const codexHome = normalizeCodexHome(explicitCodexHome);
+  const layout = resolveStorageLayout({ codexHome, sqliteHome, configText, platform });
+  await ensureCodexHome(layout);
+  if (!layout.sqliteAccess.supported) {
+    return withStateDbLocation(layout, null);
+  }
+  return withStateDbLocation(layout, await detectStateDb(layout));
 }
 
 function formatCounts(counts) {
@@ -98,11 +110,11 @@ function buildEncryptedContentWarning(encryptedContentCounts, targetProvider) {
   return `Encrypted content warning: ${total} rollout file(s) contain encrypted_content from provider(s) ${[...riskyProviders].sort().join(", ")}. Visibility metadata can be synchronized to ${targetProvider}, but continuing or compacting those histories may fail with invalid_encrypted_content. Return to the original provider/account or start a new session if you need reliable continuation.`;
 }
 
-export async function getStatus({ codexHome: explicitCodexHome } = {}) {
+export async function getStatus({ codexHome: explicitCodexHome, sqliteHome, platform } = {}) {
   const codexHome = normalizeCodexHome(explicitCodexHome);
-  await ensureCodexHome(codexHome);
   const configPath = path.join(codexHome, "config.toml");
   const configText = await readConfigText(configPath);
+  const storage = await prepareStorage({ codexHome, sqliteHome, configText, platform });
   const current = readCurrentProviderFromConfigText(configText);
   const configuredProviders = listConfiguredProviderIds(configText);
   const {
@@ -112,18 +124,24 @@ export async function getStatus({ codexHome: explicitCodexHome } = {}) {
     userEventThreadIds,
     threadCwdById
   } = await collectSessionChanges(codexHome, "__status_only__", { skipLockedReads: true });
-  const stateDbLocation = await detectStateDb(codexHome);
-  const sqliteCounts = await readSqliteProviderCounts(codexHome);
-  const sqliteRepairStats = sqliteCounts && !sqliteCounts.unreadable
-    ? await readSqliteRepairStats(codexHome, { userEventThreadIds, threadCwdById })
+  const stateDbLocation = storage.stateDbLocation;
+  const sqliteCounts = storage.sqliteAccess.supported
+    ? await readSqliteProviderCounts(storage)
     : null;
-  const projectThreadVisibility = sqliteCounts?.unreadable
+  const sqliteRepairStats = sqliteCounts && !sqliteCounts.unreadable
+    ? await readSqliteRepairStats(storage, { userEventThreadIds, threadCwdById })
+    : null;
+  const projectThreadVisibility = !storage.sqliteAccess.supported || sqliteCounts?.unreadable
     ? []
-    : await readProjectThreadVisibility(codexHome);
+    : await readProjectThreadVisibility(storage);
   const backupSummary = await getBackupSummary(codexHome);
 
   return {
     codexHome,
+    sqliteHome: storage.sqliteHome,
+    sqliteHomeSource: storage.sqliteHomeSource,
+    sqliteAccess: storage.sqliteAccess,
+    checkedStateDbPaths: storage.stateDbCandidates.map((candidate) => candidate.path),
     currentProvider: current.provider,
     currentProviderImplicit: current.implicit,
     configuredProviders,
@@ -143,6 +161,7 @@ export async function getStatus({ codexHome: explicitCodexHome } = {}) {
 export function renderStatus(status) {
   const lines = [
     `Codex home: ${status.codexHome}`,
+    `SQLite home: ${status.sqliteHome} (source: ${status.sqliteHomeSource})`,
     `Current provider: ${status.currentProvider}${status.currentProviderImplicit ? " (implicit default)" : ""}`,
     `Configured providers: ${status.configuredProviders.join(", ")}`,
     `Backups: ${status.backupSummary.count} (${formatBytes(status.backupSummary.totalBytes)})`,
@@ -166,11 +185,15 @@ export function renderStatus(status) {
 
   lines.push("");
   lines.push("SQLite state:");
+  if (!status.sqliteAccess?.supported) {
+    lines.push(`  ${status.sqliteAccess.message}`);
+    return lines.join("\n");
+  }
   if (status.stateDbLocation) {
     const legacyNote = status.stateDbLocation.source === "legacy-root" ? " (legacy root)" : "";
     lines.push(`  database: ${status.stateDbLocation.path}${legacyNote}`);
   } else {
-    lines.push("  database: not found (checked sqlite/state_5.sqlite, state_5.sqlite)");
+    lines.push(`  database: not found (checked ${status.checkedStateDbPaths.join(", ")})`);
   }
   if (status.sqliteCounts?.unreadable) {
     lines.push(`  ${status.sqliteCounts.error ?? "state_5.sqlite is malformed or unreadable"}`);
@@ -204,21 +227,28 @@ export function renderStatus(status) {
 
 export async function runSync({
   codexHome: explicitCodexHome,
+  sqliteHome,
+  storage: providedStorage,
   provider,
   configBackupText,
   keepCount = DEFAULT_BACKUP_RETENTION_COUNT,
   sqliteBusyTimeoutMs,
   onProgress,
-  model = null
+  model = null,
+  platform
 } = {}) {
   if (!Number.isInteger(keepCount) || keepCount < 1) {
     throw new Error(`Invalid automatic keep count: ${keepCount}. Expected an integer greater than or equal to 1.`);
   }
 
-  const codexHome = normalizeCodexHome(explicitCodexHome);
-  await ensureCodexHome(codexHome);
+  const codexHome = providedStorage?.codexHome ?? normalizeCodexHome(explicitCodexHome);
   const configPath = path.join(codexHome, "config.toml");
   const configText = await readConfigText(configPath);
+  const storage = await prepareStorage({ codexHome, sqliteHome, configText, storage: providedStorage, platform });
+  assertSqliteAccessSupported(storage, "sync");
+  if (!storage.stateDbLocation && isConfiguredSqliteHome(storage)) {
+    throw missingConfiguredStateDbError(storage);
+  }
   const current = readCurrentProviderFromConfigText(configText);
   const targetProvider = provider ?? current.provider ?? DEFAULT_PROVIDER;
 
@@ -235,7 +265,7 @@ export async function runSync({
       userEventThreadIds,
       threadCwdById
     } = await collectSessionChanges(codexHome, targetProvider, { skipLockedReads: true, targetModel: model });
-    const cwdStats = await readThreadCwdStats(codexHome);
+    const cwdStats = await readThreadCwdStats(storage);
     const encryptedContentWarning = buildEncryptedContentWarning(encryptedContentCounts, targetProvider);
     emitProgress(onProgress, {
       stage: "scan_rollout_files",
@@ -260,7 +290,7 @@ export async function runSync({
       ...lockedReadPaths,
       ...lockedChanges.map((change) => change.path)
     ])].sort((left, right) => left.localeCompare(right));
-    await assertSqliteWritable(codexHome, { busyTimeoutMs: sqliteBusyTimeoutMs });
+    await assertSqliteWritable(storage, { busyTimeoutMs: sqliteBusyTimeoutMs });
 
     emitProgress(onProgress, {
       stage: "create_backup",
@@ -269,6 +299,7 @@ export async function runSync({
     });
     const backupStartedAt = Date.now();
     backupDir = await createBackup({
+      storage,
       codexHome,
       targetProvider,
       sessionChanges: writableChanges,
@@ -300,7 +331,7 @@ export async function runSync({
         writableCount: writableChanges.length
       });
       const sqliteResult = await updateSqliteProvider(
-        codexHome,
+        storage,
         targetProvider,
         async () => {
           if (writableChanges.length > 0) {
@@ -310,7 +341,7 @@ export async function runSync({
             sessionRestoreNeeded = appliedSessionChanges.length > 0;
             await updateSessionBackupManifest(backupDir, appliedSessionChanges);
           }
-          workspaceRootResult = await syncWorkspaceRoots(codexHome, { cwdStats });
+          workspaceRootResult = await syncWorkspaceRoots(storage, { cwdStats });
           globalStateRestoreNeeded = workspaceRootResult.updated;
         },
         { busyTimeoutMs: sqliteBusyTimeoutMs, userEventThreadIds, threadCwdById, targetModel: model }
@@ -350,6 +381,8 @@ export async function runSync({
       });
       return {
         codexHome,
+        sqliteHome: storage.sqliteHome,
+        sqliteHomeSource: storage.sqliteHomeSource,
         targetProvider,
         previousProvider: current.provider,
         backupDir,
@@ -403,20 +436,26 @@ export async function runSync({
 
 export async function runSwitch({
   codexHome: explicitCodexHome,
+  sqliteHome,
   provider,
   model,
   keepRootModel = false,
   keepCount = DEFAULT_BACKUP_RETENTION_COUNT,
-  onProgress
+  onProgress,
+  platform
 }) {
   if (!provider) {
     throw new Error("Missing provider id. Usage: codex-provider switch <provider-id>");
   }
 
   const codexHome = normalizeCodexHome(explicitCodexHome);
-  await ensureCodexHome(codexHome);
   const configPath = path.join(codexHome, "config.toml");
   const originalConfigText = await readConfigText(configPath);
+  const storage = await prepareStorage({ codexHome, sqliteHome, configText: originalConfigText, platform });
+  assertSqliteAccessSupported(storage, "switch");
+  if (!storage.stateDbLocation && isConfiguredSqliteHome(storage)) {
+    throw missingConfiguredStateDbError(storage);
+  }
   if (!configDeclaresProvider(originalConfigText, provider)) {
     throw new Error(`Provider "${provider}" is not available in config.toml. Configure it first or use one of: ${listConfiguredProviderIds(originalConfigText).join(", ")}`);
   }
@@ -473,6 +512,7 @@ export async function runSwitch({
     }
     const syncResult = await runSync({
       codexHome,
+      storage,
       provider,
       configBackupText: originalConfigText,
       keepCount,
@@ -492,22 +532,34 @@ export async function runSwitch({
 
 export async function runRestore({
   codexHome: explicitCodexHome,
+  sqliteHome,
   backupDir,
   restoreConfig = true,
   restoreDatabase = true,
-  restoreSessions = true
+  restoreSessions = true,
+  allowSqliteHomeRelocation = false,
+  platform
 }) {
   if (!backupDir) {
     throw new Error("Missing backup path. Usage: codex-provider restore <backup-dir>");
   }
   const codexHome = normalizeCodexHome(explicitCodexHome);
-  await ensureCodexHome(codexHome);
+  if (allowSqliteHomeRelocation && !(typeof sqliteHome === "string" && sqliteHome.trim())) {
+    throw new Error("--allow-sqlite-home-relocation requires an explicit --sqlite-home path.");
+  }
+  const configText = await readConfigText(path.join(codexHome, "config.toml"));
+  const storage = await prepareStorage({ codexHome, sqliteHome, configText, platform });
+  assertSqliteAccessSupported(storage, "restore");
+  if (restoreDatabase && !storage.stateDbLocation && isConfiguredSqliteHome(storage)) {
+    throw missingConfiguredStateDbError(storage);
+  }
   const releaseLock = await acquireLock(codexHome, "restore");
   try {
-    return await restoreBackup(path.resolve(backupDir), codexHome, {
+    return await restoreBackup(path.resolve(backupDir), storage, {
       restoreConfig,
       restoreDatabase,
-      restoreSessions
+      restoreSessions,
+      allowSqliteHomeRelocation
     });
   } finally {
     await releaseLock();
@@ -523,7 +575,7 @@ export async function runPruneBackups({
   }
 
   const codexHome = normalizeCodexHome(explicitCodexHome);
-  await ensureCodexHome(codexHome);
+  await ensureCodexHome(resolveStorageLayout({ codexHome, env: {} }));
   const releaseLock = await acquireLock(codexHome, "prune-backups");
   try {
     return await pruneBackups(codexHome, keepCount);

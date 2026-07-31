@@ -104,6 +104,7 @@ public static class TextFormatter
         List<string> lines =
         [
             $"Codex home: {status.CodexHome}",
+            $"SQLite home: {status.SqliteHome} (source: {status.SqliteHomeSource})",
             $"Current provider: {status.CurrentProvider.Provider}{(status.CurrentProvider.Implicit ? " (implicit default)" : string.Empty)}",
             $"Configured providers: {string.Join(", ", status.ConfiguredProviders)}",
             $"Backups: {status.BackupSummary.Count} ({FormatBytes(status.BackupSummary.TotalBytes)})",
@@ -131,7 +132,7 @@ public static class TextFormatter
         {
             rolloutNotes.Add($"  {status.EncryptedContentWarning}");
         }
-        lines.InsertRange(11, rolloutNotes);
+        lines.InsertRange(12, rolloutNotes);
 
         AppendSqliteStatus(lines, status, chinese: false);
         AppendProjectVisibility(lines, status, chinese: false);
@@ -143,6 +144,7 @@ public static class TextFormatter
         List<string> lines =
         [
             $"Codex Home: {status.CodexHome}",
+            $"SQLite Home: {status.SqliteHome}（来源: {status.SqliteHomeSource}）",
             $"当前 Provider: {status.CurrentProvider.Provider}{(status.CurrentProvider.Implicit ? "（隐式默认）" : string.Empty)}",
             $"配置中的 Provider: {string.Join(", ", status.ConfiguredProviders)}",
             $"备份: {status.BackupSummary.Count}（{FormatBytes(status.BackupSummary.TotalBytes)}）",
@@ -172,7 +174,7 @@ public static class TextFormatter
                 status.EncryptedContentCounts,
                 status.CurrentProvider.Provider)}");
         }
-        lines.InsertRange(11, rolloutNotes);
+        lines.InsertRange(12, rolloutNotes);
 
         AppendSqliteStatus(lines, status, chinese: true);
         AppendProjectVisibility(lines, status, chinese: true);
@@ -181,6 +183,14 @@ public static class TextFormatter
 
     private static void AppendSqliteStatus(List<string> lines, StatusSnapshot status, bool chinese)
     {
+        if (!status.SqliteAccess.Supported)
+        {
+            lines.Add(chinese && status.SqliteAccess.Reason == "windows-wsl-unc"
+                ? $"  Windows 进程无法通过 WSL UNC 路径安全访问 SQLite：{status.SqliteHome}。请在 WSL 内运行 codex-provider，并使用 Linux SQLite Home 路径。"
+                : $"  {status.SqliteAccess.Message}");
+            return;
+        }
+
         if (status.StateDbLocation is not null)
         {
             string legacyNote = status.StateDbLocation.Source == "legacy-root"
@@ -192,9 +202,10 @@ public static class TextFormatter
         }
         else
         {
+            string checkedPaths = string.Join(", ", status.CheckedStateDbPaths);
             lines.Add(chinese
-                ? "  未找到数据库（已检查 sqlite/state_5.sqlite 和 state_5.sqlite）"
-                : "  database: not found (checked sqlite/state_5.sqlite, state_5.sqlite)");
+                ? $"  未找到数据库（已检查: {checkedPaths}）"
+                : $"  database: not found (checked: {checkedPaths})");
         }
 
         if (status.SqliteCounts?.Unreadable == true)
@@ -252,6 +263,7 @@ public static class TextFormatter
         [
             $"{label} provider: {result.TargetProvider}",
             $"Codex home: {result.CodexHome}",
+            $"SQLite home: {result.SqliteHome} (source: {result.SqliteHomeSource})",
             $"Backup: {result.BackupDir}",
             $"Updated rollout files: {result.ChangedSessionFiles}",
             $"Updated SQLite rows: {result.SqliteRowsUpdated}{(result.SqlitePresent ? string.Empty : " (state_5.sqlite not found)")}"
@@ -267,6 +279,7 @@ public static class TextFormatter
         [
             $"{label} Provider: {result.TargetProvider}",
             $"Codex Home: {result.CodexHome}",
+            $"SQLite Home: {result.SqliteHome}（来源: {result.SqliteHomeSource}）",
             $"备份目录: {result.BackupDir}",
             $"已更新 rollout 文件: {result.ChangedSessionFiles}",
             $"已更新 SQLite 行: {result.SqliteRowsUpdated}{(result.SqlitePresent ? string.Empty : "（未找到 state_5.sqlite）")}"

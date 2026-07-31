@@ -16,6 +16,10 @@ public sealed class ProviderCounts
 public sealed class StatusSnapshot
 {
     public required string CodexHome { get; init; }
+    public string SqliteHome { get; init; } = string.Empty;
+    public string SqliteHomeSource { get; init; } = "default";
+    public SqliteAccessInfo SqliteAccess { get; init; } = SqliteAccessInfo.Direct;
+    public IReadOnlyList<string> CheckedStateDbPaths { get; init; } = [];
     public required CurrentProviderInfo CurrentProvider { get; init; }
     public required IReadOnlyList<string> ConfiguredProviders { get; init; }
     public required ProviderCounts RolloutCounts { get; init; }
@@ -32,6 +36,32 @@ public sealed class StatusSnapshot
 }
 
 public sealed record StateDbLocation(string Path, string RelativePath, string Source);
+
+public sealed record SqliteAccessInfo(bool Supported, string? Reason, string? Message)
+{
+    public static SqliteAccessInfo Direct { get; } = new(true, null, null);
+}
+
+public sealed record CodexStorageLayout
+{
+    public required string CodexHome { get; init; }
+    public required string SqliteHome { get; init; }
+    public string SqliteHomeSource { get; init; } = "default";
+    public required bool AllowLegacyRootFallback { get; init; }
+    public required IReadOnlyList<StateDbLocation> StateDbCandidates { get; init; }
+    public StateDbLocation? StateDbLocation { get; init; }
+    public SqliteAccessInfo SqliteAccess { get; init; } = SqliteAccessInfo.Direct;
+
+    public bool HasConfiguredSqliteHome => !string.Equals(SqliteHomeSource, "default", StringComparison.Ordinal);
+
+    public void EnsureSqliteAccessSupported(string operation)
+    {
+        if (!SqliteAccess.Supported)
+        {
+            throw new InvalidOperationException($"Cannot {operation}: {SqliteAccess.Message}");
+        }
+    }
+}
 
 public sealed class SqliteRepairStats
 {
@@ -102,6 +132,8 @@ public sealed class SessionChangeCollection
 public sealed class SyncResult
 {
     public required string CodexHome { get; init; }
+    public string SqliteHome { get; init; } = string.Empty;
+    public string SqliteHomeSource { get; init; } = "default";
     public required string TargetProvider { get; init; }
     public required string PreviousProvider { get; init; }
     public required string BackupDir { get; init; }
@@ -169,6 +201,12 @@ public sealed class RestoreResult
     public int ChangedSessionFiles { get; init; }
 }
 
+public sealed class BackupStorageInfo
+{
+    public required int Version { get; init; }
+    public string? SqliteHome { get; init; }
+}
+
 public enum ProviderSource
 {
     Config,
@@ -199,6 +237,8 @@ public sealed class AppSettings
 {
     public List<string> RecentCodexHomes { get; init; } = [];
     public string? LastCodexHome { get; init; }
+    public Dictionary<string, string> SqliteHomeOverrides { get; init; } = new(
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
     public List<string> SavedProviders { get; init; } = [];
     public List<string> ManualProviders { get; init; } = [];
     public string? LastSelectedProvider { get; init; }
@@ -214,6 +254,7 @@ public sealed class RestoreBackupOptions
     public bool RestoreConfig { get; init; } = true;
     public bool RestoreDatabase { get; init; } = true;
     public bool RestoreSessions { get; init; } = true;
+    public bool AllowSqliteHomeRelocation { get; init; }
 }
 
 internal sealed class BackupMetadataFile
@@ -221,9 +262,11 @@ internal sealed class BackupMetadataFile
     public int Version { get; init; }
     public required string Namespace { get; init; }
     public required string CodexHome { get; init; }
+    public string? SqliteHome { get; init; }
     public required string TargetProvider { get; init; }
     public required DateTimeOffset CreatedAt { get; init; }
     public required List<string> DbFiles { get; init; }
+    public List<string> SqliteDbFiles { get; init; } = [];
     public int ChangedSessionFiles { get; init; }
 }
 

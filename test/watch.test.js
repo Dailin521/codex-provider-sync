@@ -6,8 +6,12 @@ import path from "node:path";
 
 import { runWatch } from "../src/watch.js";
 
+delete process.env.CODEX_SQLITE_HOME;
+
+const testTempDir = process.platform === "win32" ? os.tmpdir() : "/tmp";
+
 async function makeTempCodexHome() {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-provider-sync-watch-"));
+  const root = await fs.mkdtemp(path.join(testTempDir, "codex-provider-sync-watch-"));
   const codexHome = path.join(root, ".codex");
   await fs.mkdir(path.join(codexHome, "sqlite"), { recursive: true });
   await fs.writeFile(
@@ -30,6 +34,17 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+async function waitUntil(predicate, message, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(message);
+}
+
 test("runWatch rejects invalid debounce-ms values", async () => {
   const { codexHome } = await makeTempCodexHome();
   await assert.rejects(
@@ -40,7 +55,7 @@ test("runWatch rejects invalid debounce-ms values", async () => {
 });
 
 test("runWatch rejects when codex home or config.toml is missing", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-provider-sync-watch-"));
+  const root = await fs.mkdtemp(path.join(testTempDir, "codex-provider-sync-watch-"));
   await assert.rejects(
     () => runWatch({ codexHome: path.join(root, "does-not-exist") }),
     /Codex home not found/
@@ -52,6 +67,26 @@ test("runWatch rejects when codex home or config.toml is missing", async () => {
     /config\.toml not found/
   );
   await fs.rm(root, { recursive: true, force: true });
+});
+
+test("runWatch blocks Windows WSL UNC SQLite homes before creating watchers", async () => {
+  const { root, codexHome } = await makeTempCodexHome();
+  let handle;
+  try {
+    await assert.rejects(
+      async () => {
+        handle = await runWatch({
+          codexHome,
+          sqliteHome: "\\\\wsl.localhost\\Ubuntu\\home\\user\\.codex\\sqlite",
+          platform: "win32"
+        });
+      },
+      /Cannot watch.*Run codex-provider inside WSL/
+    );
+  } finally {
+    await handle?.stop();
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });
 
 test("runWatch invokes the injected sync handler when config.toml changes and stops on --once", async () => {
@@ -244,6 +279,68 @@ test("runWatch observes the active state database chosen by detectStateDb", asyn
   await fs.rm(codexHome, { recursive: true, force: true });
 });
 
+test("runWatch rebinds SQLite watchers after config changes and drops invalid homes", async () => {
+  const { root, codexHome } = await makeTempCodexHome();
+  const configPath = path.join(codexHome, "config.toml");
+  const originalDbPath = path.join(codexHome, "sqlite", "state_5.sqlite");
+  const sqliteHomeA = path.join(root, "sqlite-a");
+  const sqliteHomeB = path.join(root, "sqlite-b");
+  const dbPathA = path.join(sqliteHomeA, "state_5.sqlite");
+  const dbPathB = path.join(sqliteHomeB, "state_5.sqlite");
+  await fs.mkdir(sqliteHomeA, { recursive: true });
+  await fs.mkdir(sqliteHomeB, { recursive: true });
+  await fs.writeFile(dbPathA, "", "utf8");
+  await fs.writeFile(dbPathB, "", "utf8");
+
+  const syncCalls = [];
+  const handle = await runWatch({
+    codexHome,
+    debounceMs: 30,
+    includeStateDb: true,
+    onSync: async ({ reason, sqliteHome }) => {
+      syncCalls.push({ reason, sqliteHome });
+      return { targetProvider: "openai", changedSessionFiles: 0, sqliteRowsUpdated: 0 };
+    }
+  });
+
+  await fs.writeFile(
+    configPath,
+    `model_provider = "openai"\nsqlite_home = '${sqliteHomeA}'\n`,
+    "utf8"
+  );
+  await waitUntil(() => handle.watchedStateDbPath === dbPathA, "watcher did not bind SQLite home A");
+  const beforeA = syncCalls.length;
+  await fs.appendFile(dbPathA, "a", "utf8");
+  await waitUntil(() => syncCalls.length > beforeA, "watcher did not observe SQLite home A");
+
+  const missingSqliteHome = path.join(root, "missing-sqlite");
+  await fs.writeFile(
+    configPath,
+    `model_provider = "openai"\nsqlite_home = '${missingSqliteHome}'\n`,
+    "utf8"
+  );
+  await waitUntil(() => handle.watchedStateDbPath === null, "watcher did not drop the invalid SQLite home");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const beforeOldDbWrite = syncCalls.length;
+  await fs.appendFile(dbPathA, "stale", "utf8");
+  await fs.appendFile(originalDbPath, "stale", "utf8");
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assert.equal(syncCalls.length, beforeOldDbWrite, "invalid layout must leave only the config watcher active");
+
+  await fs.writeFile(
+    configPath,
+    `model_provider = "openai"\nsqlite_home = '${sqliteHomeB}'\n`,
+    "utf8"
+  );
+  await waitUntil(() => handle.watchedStateDbPath === dbPathB, "watcher did not bind SQLite home B");
+  const beforeB = syncCalls.length;
+  await fs.appendFile(dbPathB, "b", "utf8");
+  await waitUntil(() => syncCalls.length > beforeB, "watcher did not observe SQLite home B");
+
+  await handle.stop();
+  await fs.rm(root, { recursive: true, force: true });
+});
+
 test("runWatch reacts to writes in the SQLite WAL sidecar", async () => {
   // Regression guard for owner review: when Codex runs against a
   // SQLite database in WAL journal mode (the default), new
@@ -316,7 +413,7 @@ test("runWatch uses the top-level model field, ignoring provider sections", asyn
   // inside a `[model_providers.*]` section — otherwise the
   // provider-section model would be propagated to every
   // rollout's turn_context.model.
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-provider-sync-watch-"));
+  const root = await fs.mkdtemp(path.join(testTempDir, "codex-provider-sync-watch-"));
   const codexHome = path.join(root, ".codex");
   await fs.mkdir(path.join(codexHome, "sqlite"), { recursive: true });
   await fs.writeFile(

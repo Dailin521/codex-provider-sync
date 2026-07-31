@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { DB_FILE_BASENAME, SESSION_DIRS, SQLITE_DIR_BASENAME } from "./constants.js";
 import { openDatabase } from "./sqlite.js";
+import { resolveStorageLayout } from "./storage-layout.js";
 
 const DEFAULT_BUSY_TIMEOUT_MS = 5000;
 
@@ -14,19 +15,15 @@ export function legacyStateDbPath(codexHome) {
   return path.join(codexHome, DB_FILE_BASENAME);
 }
 
-export function stateDbCandidates(codexHome) {
-  return [
-    {
-      path: stateDbPath(codexHome),
-      relativePath: path.join(SQLITE_DIR_BASENAME, DB_FILE_BASENAME),
-      source: "sqlite-dir"
-    },
-    {
-      path: legacyStateDbPath(codexHome),
-      relativePath: DB_FILE_BASENAME,
-      source: "legacy-root"
-    }
-  ];
+function normalizeStorage(storageOrCodexHome) {
+  if (typeof storageOrCodexHome === "string") {
+    return resolveStorageLayout({ codexHome: storageOrCodexHome, env: {} });
+  }
+  return storageOrCodexHome;
+}
+
+export function stateDbCandidates(storageOrCodexHome) {
+  return normalizeStorage(storageOrCodexHome).stateDbCandidates;
 }
 
 async function countRolloutFilesInDir(rootDir) {
@@ -117,9 +114,10 @@ function compareStateDbCandidateStats(a, b) {
   return a.priority - b.priority;
 }
 
-export async function detectStateDb(codexHome) {
+export async function detectStateDb(storageOrCodexHome) {
+  const storage = normalizeStorage(storageOrCodexHome);
   const existingCandidates = [];
-  const candidates = stateDbCandidates(codexHome);
+  const candidates = stateDbCandidates(storage);
   for (const [priority, candidate] of candidates.entries()) {
     try {
       await fs.access(candidate.path);
@@ -132,7 +130,7 @@ export async function detectStateDb(codexHome) {
     return null;
   }
 
-  const rolloutCount = await countRolloutFiles(codexHome);
+  const rolloutCount = await countRolloutFiles(storage.codexHome);
   const readableCandidates = [];
   for (const { candidate, priority } of existingCandidates) {
     try {
@@ -154,8 +152,21 @@ export async function detectStateDb(codexHome) {
   return readableCandidates.sort(compareStateDbCandidateStats)[0].candidate;
 }
 
-export async function existingStateDbPath(codexHome) {
-  return (await detectStateDb(codexHome))?.path ?? null;
+async function resolveStateDbLocation(storageOrLocation) {
+  if (!storageOrLocation) {
+    return null;
+  }
+  if (Object.hasOwn(storageOrLocation, "stateDbLocation")) {
+    return storageOrLocation.stateDbLocation;
+  }
+  if (typeof storageOrLocation.path === "string" && typeof storageOrLocation.source === "string") {
+    return storageOrLocation;
+  }
+  return detectStateDb(storageOrLocation);
+}
+
+export async function existingStateDbPath(storageOrLocation) {
+  return (await resolveStateDbLocation(storageOrLocation))?.path ?? null;
 }
 
 function tableHasColumn(db, tableName, columnName) {
@@ -206,8 +217,8 @@ export function wrapSqliteMalformedError(error, action) {
   );
 }
 
-export async function readSqliteProviderCounts(codexHome) {
-  const dbPath = await existingStateDbPath(codexHome);
+export async function readSqliteProviderCounts(storageOrLocation) {
+  const dbPath = await existingStateDbPath(storageOrLocation);
   if (!dbPath) {
     return null;
   }
@@ -259,8 +270,8 @@ export async function readSqliteProviderCounts(codexHome) {
   }
 }
 
-export async function readSqliteRepairStats(codexHome, options = {}) {
-  const dbPath = await existingStateDbPath(codexHome);
+export async function readSqliteRepairStats(storageOrLocation, options = {}) {
+  const dbPath = await existingStateDbPath(storageOrLocation);
   if (!dbPath) {
     return null;
   }
@@ -307,8 +318,8 @@ export async function readSqliteRepairStats(codexHome, options = {}) {
   }
 }
 
-export async function assertSqliteWritable(codexHome, options = {}) {
-  const dbPath = await existingStateDbPath(codexHome);
+export async function assertSqliteWritable(storageOrLocation, options = {}) {
+  const dbPath = await existingStateDbPath(storageOrLocation);
   if (!dbPath) {
     return { databasePresent: false };
   }
@@ -330,7 +341,7 @@ export async function assertSqliteWritable(codexHome, options = {}) {
   }
 }
 
-export async function updateSqliteProvider(codexHome, targetProvider, afterUpdateOrOptions, maybeOptions) {
+export async function updateSqliteProvider(storageOrLocation, targetProvider, afterUpdateOrOptions, maybeOptions) {
   const afterUpdate = typeof afterUpdateOrOptions === "function" ? afterUpdateOrOptions : null;
   const options = typeof afterUpdateOrOptions === "function"
     ? (maybeOptions ?? {})
@@ -341,7 +352,7 @@ export async function updateSqliteProvider(codexHome, targetProvider, afterUpdat
   // untouched (legacy behaviour for callers that do not track model).
   const targetModel = options.targetModel ?? null;
 
-  const dbPath = await existingStateDbPath(codexHome);
+  const dbPath = await existingStateDbPath(storageOrLocation);
   if (!dbPath) {
     if (afterUpdate) {
       await afterUpdate({

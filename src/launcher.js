@@ -17,11 +17,12 @@ function quoteForVbs(value) {
   return String(value).replace(/"/g, "\"\"");
 }
 
-function buildBatchScript({ codexHome }) {
+function buildBatchScript({ codexHome, sqliteHome }) {
   const command = [
     "codex-provider",
     "sync",
-    ...(codexHome ? ["--codex-home", quoteForBatch(codexHome)] : [])
+    ...(codexHome ? ["--codex-home", quoteForBatch(codexHome)] : []),
+    ...(sqliteHome ? ["--sqlite-home", quoteForBatch(sqliteHome)] : [])
   ].join(" ");
 
   return [
@@ -32,11 +33,12 @@ function buildBatchScript({ codexHome }) {
   ].join("\r\n") + "\r\n";
 }
 
-function buildVbsScript({ codexHome }) {
+function buildVbsScript({ codexHome, sqliteHome }) {
   const syncCommand = [
     "codex-provider",
     "sync",
-    ...(codexHome ? [`--codex-home ""${quoteForVbs(codexHome)}""`] : [])
+    ...(codexHome ? [`--codex-home ""${quoteForVbs(codexHome)}""`] : []),
+    ...(sqliteHome ? [`--sqlite-home ""${quoteForVbs(sqliteHome)}""`] : [])
   ].join(" ");
 
   return [
@@ -92,7 +94,8 @@ function buildVbsScript({ codexHome }) {
 
 export async function installWindowsLauncher({
   dir,
-  codexHome
+  codexHome,
+  sqliteHome
 } = {}) {
   const targetDir = resolveLauncherDirectory(dir);
   await fs.mkdir(targetDir, { recursive: true });
@@ -100,13 +103,14 @@ export async function installWindowsLauncher({
   const cmdPath = path.join(targetDir, WINDOWS_CMD_LAUNCHER_FILENAME);
   const vbsPath = path.join(targetDir, WINDOWS_VBS_LAUNCHER_FILENAME);
 
-  await fs.writeFile(cmdPath, buildBatchScript({ codexHome }), "utf8");
-  await fs.writeFile(vbsPath, buildVbsScript({ codexHome }), "utf8");
+  await fs.writeFile(cmdPath, buildBatchScript({ codexHome, sqliteHome }), "utf8");
+  await fs.writeFile(vbsPath, buildVbsScript({ codexHome, sqliteHome }), "utf8");
 
   return {
     targetDir,
     cmdPath,
     vbsPath,
-    codexHome: codexHome ? path.resolve(codexHome) : null
+    codexHome: codexHome ? path.resolve(codexHome) : null,
+    sqliteHome: sqliteHome ? path.resolve(sqliteHome) : null
   };
 }

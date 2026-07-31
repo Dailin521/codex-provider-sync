@@ -29,3 +29,15 @@ test("installWindowsLauncher creates cmd and vbs launchers", async () => {
   assert.match(vbsText, /Codex Provider Sync/);
   assert.match(vbsText, /codex-provider sync --codex-home ""C:\\Users\\Example User\\.codex""/);
 });
+
+test("installWindowsLauncher preserves an explicit UNC SQLite home", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "codex-provider-launcher-"));
+  const sqliteHome = "\\\\wsl.localhost\\Ubuntu\\home\\user\\.codex\\sqlite";
+
+  const result = await installWindowsLauncher({ dir, sqliteHome });
+  const cmdText = await fs.readFile(result.cmdPath, "utf8");
+  const vbsText = await fs.readFile(result.vbsPath, "utf8");
+
+  assert.match(cmdText, /--sqlite-home "\\\\wsl\.localhost\\Ubuntu\\home\\user\\\.codex\\sqlite"/);
+  assert.match(vbsText, /--sqlite-home ""\\\\wsl\.localhost\\Ubuntu\\home\\user\\\.codex\\sqlite""/);
+});

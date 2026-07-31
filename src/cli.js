@@ -15,13 +15,13 @@ function printHelp() {
   console.log(`codex-provider
 
 Usage:
-  codex-provider status [--codex-home PATH]
-  codex-provider sync [--provider ID] [--keep N] [--codex-home PATH]
-  codex-provider switch <provider-id> [--model NAME] [--keep-root-model] [--keep N] [--codex-home PATH]
-  codex-provider watch [--codex-home PATH] [--debounce-ms N] [--once] [--no-state-db]
+  codex-provider status [--codex-home PATH] [--sqlite-home PATH]
+  codex-provider sync [--provider ID] [--keep N] [--codex-home PATH] [--sqlite-home PATH]
+  codex-provider switch <provider-id> [--model NAME] [--keep-root-model] [--keep N] [--codex-home PATH] [--sqlite-home PATH]
+  codex-provider watch [--codex-home PATH] [--sqlite-home PATH] [--debounce-ms N] [--once] [--no-state-db]
   codex-provider prune-backups [--keep N] [--codex-home PATH]
-  codex-provider restore <backup-dir> [--no-config] [--no-db] [--no-sessions] [--codex-home PATH]
-  codex-provider install-windows-launcher [--dir PATH] [--codex-home PATH]
+  codex-provider restore <backup-dir> [--no-config] [--no-db] [--no-sessions] [--allow-sqlite-home-relocation] [--codex-home PATH] [--sqlite-home PATH]
+  codex-provider install-windows-launcher [--dir PATH] [--codex-home PATH] [--sqlite-home PATH]
 
 switch flags:
   --model NAME         override root-level model field with NAME (e.g. "MiniMax-M3")
@@ -29,6 +29,7 @@ switch flags:
 
 watch flags:
   --codex-home PATH    override CODEX_HOME (default: ~/.codex or $CODEX_HOME)
+  --sqlite-home PATH   override sqlite_home and CODEX_SQLITE_HOME
   --debounce-ms N      wait N milliseconds after a change before syncing (default 750)
   --once               exit after the first successful sync
   --no-state-db        only watch config.toml, ignore SQLite state events
@@ -67,6 +68,7 @@ function summarizeSync(result, label) {
   const lines = [
     `${label} provider: ${result.targetProvider}`,
     `Codex home: ${result.codexHome}`,
+    `SQLite home: ${result.sqliteHome} (source: ${result.sqliteHomeSource})`,
     `Backup: ${result.backupDir}`,
     `Backup creation time: ${formatDuration(result.backupDurationMs ?? 0)}`,
     `Updated rollout files: ${result.changedSessionFiles}`,
@@ -196,7 +198,10 @@ async function main() {
 
   if (command === "status") {
     const { getStatus, renderStatus } = await loadService();
-    const status = await getStatus({ codexHome: flags["codex-home"] });
+    const status = await getStatus({
+      codexHome: flags["codex-home"],
+      sqliteHome: flags["sqlite-home"]
+    });
     console.log(renderStatus(status));
     return;
   }
@@ -219,6 +224,7 @@ async function main() {
     }
     const result = await runSync({
       codexHome: flags["codex-home"],
+      sqliteHome: flags["sqlite-home"],
       provider: flags.provider,
       keepCount: parseKeepCount(flags.keep),
       onProgress: createSyncProgressReporter(),
@@ -233,6 +239,7 @@ async function main() {
     const provider = positionals[1] ?? flags.provider;
     const result = await runSwitch({
       codexHome: flags["codex-home"],
+      sqliteHome: flags["sqlite-home"],
       provider,
       model: flags.model,
       keepRootModel: Boolean(flags["keep-root-model"]),
@@ -270,6 +277,7 @@ async function main() {
       : undefined;
     const handle = await runWatch({
       codexHome: flags["codex-home"],
+      sqliteHome: flags["sqlite-home"],
       debounceMs,
       includeStateDb: !flags["no-state-db"],
       once: Boolean(flags.once)
@@ -310,10 +318,12 @@ async function main() {
     const backupDir = positionals[1] ?? flags.backup;
     const result = await runRestore({
       codexHome: flags["codex-home"],
+      sqliteHome: flags["sqlite-home"],
       backupDir,
       restoreConfig: !flags["no-config"],
       restoreDatabase: !flags["no-db"],
-      restoreSessions: !flags["no-sessions"]
+      restoreSessions: !flags["no-sessions"],
+      allowSqliteHomeRelocation: Boolean(flags["allow-sqlite-home-relocation"])
     });
     console.log(`Restored backup from ${path.resolve(backupDir)}`);
     console.log(`Codex home: ${result.codexHome}`);
@@ -324,7 +334,8 @@ async function main() {
   if (command === "install-windows-launcher") {
     const result = await installWindowsLauncher({
       dir: flags.dir,
-      codexHome: flags["codex-home"]
+      codexHome: flags["codex-home"],
+      sqliteHome: flags["sqlite-home"]
     });
     console.log("Installed Windows launcher files:");
     console.log(`  Hidden double-click launcher: ${result.vbsPath}`);
@@ -334,6 +345,11 @@ async function main() {
       console.log(`  Fixed CODEX_HOME: ${result.codexHome}`);
     } else {
       console.log("  CODEX_HOME: default current environment / ~/.codex");
+    }
+    if (result.sqliteHome) {
+      console.log(`  Fixed SQLite home: ${result.sqliteHome}`);
+    } else {
+      console.log("  SQLite home: config / environment / Codex default");
     }
     return;
   }

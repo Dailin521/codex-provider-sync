@@ -14,13 +14,16 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
-import { defaultCodexHome } from "./constants.js";
 import { detectStateDb } from "./sqlite-state.js";
 import { readConfigText, readRootModelFromConfigText } from "./config-file.js";
-
-function normalizeCodexHome(explicitCodexHome) {
-  return path.resolve(explicitCodexHome ?? process.env.CODEX_HOME ?? defaultCodexHome());
-}
+import {
+  assertSqliteAccessSupported,
+  isConfiguredSqliteHome,
+  missingConfiguredStateDbError,
+  normalizeCodexHome,
+  resolveStorageLayout,
+  withStateDbLocation
+} from "./storage-layout.js";
 
 function defaultDebounceMs() {
   return 750;
@@ -52,6 +55,7 @@ function makeDebouncer(delayMs, run) {
 
 export async function runWatch({
   codexHome: explicitCodexHome,
+  sqliteHome: explicitSqliteHome,
   debounceMs = defaultDebounceMs(),
   includeStateDb = true,
   once = false,
@@ -60,7 +64,8 @@ export async function runWatch({
   onShutdown,
   runSyncImpl,
   signal,
-  sleepImpl
+  sleepImpl,
+  platform
 } = {}) {
   if (!Number.isInteger(debounceMs) || debounceMs < 0) {
     throw new Error(`Invalid --debounce-ms value: ${debounceMs}. Expected a non-negative integer.`);
@@ -83,7 +88,19 @@ export async function runWatch({
     }
   };
 
-  const invokeSync = async (reason) => {
+  const resolveCurrentStorage = async () => {
+    const configText = await readConfigText(configPath);
+    const layout = resolveStorageLayout({
+      codexHome,
+      sqliteHome: explicitSqliteHome,
+      configText,
+      platform
+    });
+    assertSqliteAccessSupported(layout, "watch");
+    return withStateDbLocation(layout, await detectStateDb(layout));
+  };
+
+  const invokeSync = async (reason, storage) => {
     // Read the current root-level model on every fire so the per-thread
     // model rewrite picks up the latest value the user has in config.toml.
     // We only consider the top-level (root) `model = "..."` line — anything
@@ -98,15 +115,16 @@ export async function runWatch({
       // Missing/unreadable config; carry on with a null model.
     }
     if (typeof onSync === "function") {
-      return onSync({ reason, codexHome, model: rootModel });
+      return onSync({ reason, codexHome, sqliteHome: storage.sqliteHome, storage, model: rootModel });
     }
     if (typeof runSyncImpl === "function") {
-      return runSyncImpl({ codexHome, reason, model: rootModel });
+      return runSyncImpl({ codexHome, sqliteHome: storage.sqliteHome, storage, reason, model: rootModel });
     }
     // Lazy import to avoid pulling in the full service module until needed.
     const { runSync } = await import("./service.js");
     return runSync({
       codexHome,
+      storage,
       model: rootModel,
       onProgress: (event) => {
         if (event?.stage && event.status === "start") {
@@ -118,7 +136,10 @@ export async function runWatch({
 
   let stopped = false;
   let watchers = [];
+  let stateWatchers = [];
+  let stateWatchGeneration = 0;
   let stateDbInfo = null;
+  let activeStorage = null;
   // Track the currently-running sync (if any) so that stop()/SIGINT can
   // wait for it to drain instead of yanking the watcher out from under
   // a half-written SQLite transaction.
@@ -152,7 +173,18 @@ export async function runWatch({
     log(`[${new Date().toISOString()}] Detected change (${reason}); running sync...`);
     const task = (async () => {
       try {
-        const result = await invokeSync(reason);
+        const nextStorage = await resolveCurrentStorage();
+        if (includeStateDb && reason === "config.toml") {
+          await rebindStateWatchers(nextStorage);
+        } else {
+          activeStorage = nextStorage;
+        }
+        if (!nextStorage.stateDbLocation && isConfiguredSqliteHome(nextStorage)) {
+          log(`[${new Date().toISOString()}] Sync paused: ${missingConfiguredStateDbError(nextStorage).message} Waiting for config.toml to be fixed.`);
+          consecutiveNonBusyFailures = 0;
+          return;
+        }
+        const result = await invokeSync(reason, nextStorage);
         log(`[${new Date().toISOString()}] Sync complete: provider=${result.targetProvider}, rollout_files=${result.changedSessionFiles}, sqlite_rows=${result.sqliteRowsUpdated}${result.skippedLockedRolloutFiles?.length ? `, skipped_locked=${result.skippedLockedRolloutFiles.length}` : ""}`);
         // A successful sync resets the consecutive-failure counter
         // so a transient error followed by recovery does not
@@ -198,6 +230,8 @@ export async function runWatch({
     inFlight = task;
   });
 
+  const initialStorage = await resolveCurrentStorage();
+
   const configWatcher = fs.watch(configPath, { persistent: true }, (eventType, filename) => {
     if (stopped) {
       return;
@@ -209,39 +243,12 @@ export async function runWatch({
 
   if (includeStateDb) {
     try {
-      stateDbInfo = await detectStateDb(codexHome);
+      await rebindStateWatchers(initialStorage);
     } catch (error) {
       log(`[${new Date().toISOString()}] Could not locate state database: ${error.message}`);
     }
-    if (stateDbInfo?.path) {
-      // Watch the active database *and* its WAL sidecar. SQLite by
-      // default runs in WAL journal mode: new transactions are
-      // appended to `state_5.sqlite-wal` and only checkpointed back
-      // to the main file on a checkpoint, so watching the main
-      // file alone would miss every write Codex makes between
-      // checkpoints. We watch both, plus the -shm shared-memory
-      // file so a checkpoint still fires the change event for
-      // long-running sessions.
-      const stateDbFile = stateDbInfo.path;
-      const walFile = `${stateDbFile}-wal`;
-      const shmFile = `${stateDbFile}-shm`;
-      for (const target of [stateDbFile, walFile, shmFile]) {
-        // Watch each file directly instead of its parent
-        // directory. Watching a directory on Windows enters a
-        // libuv path that asserts in src/win/fs-event.c around
-        // line 72 when any sibling under the directory is renamed
-        // during startup (a race condition Node 22 and 24 started
-        // hitting reliably on Windows runners). Watching a single
-        // file bypasses that path entirely. The downside is that
-        // SQLite's atomic-rename of the database (or its WAL)
-        // can leave us listening on a stale handle; we re-attach
-        // the watcher on any `rename` event so the next write
-        // burst still reaches us.
-        attachStateWatcher(target, target === stateDbFile ? "state_db" : "state_db-wal");
-      }
-    } else {
-      log(`[${new Date().toISOString()}] No state database found in ${codexHome}; skipping watcher`);
-    }
+  } else {
+    activeStorage = initialStorage;
   }
 
   log(`[${new Date().toISOString()}] Watching ${configPath}${includeStateDb && stateDbInfo?.path ? `, ${stateDbInfo.path}, ${stateDbInfo.path}-wal, ${stateDbInfo.path}-shm` : ""} (debounce ${debounceMs}ms${once ? ", once" : ""})`);
@@ -251,6 +258,7 @@ export async function runWatch({
       return;
     }
     stopped = true;
+    stateWatchGeneration += 1;
     for (const watcher of watchers) {
       try {
         watcher.close();
@@ -302,14 +310,41 @@ export async function runWatch({
     }
   }
 
-  function attachStateWatcher(stateDbFile, reasonLabel) {
+  async function rebindStateWatchers(storage) {
+    stateWatchGeneration += 1;
+    const generation = stateWatchGeneration;
+    for (const watcher of stateWatchers) {
+      try {
+        watcher.close();
+      } catch {
+        // best-effort
+      }
+      const index = watchers.indexOf(watcher);
+      if (index !== -1) {
+        watchers.splice(index, 1);
+      }
+    }
+    stateWatchers = [];
+    activeStorage = storage;
+    stateDbInfo = storage.stateDbLocation;
+    if (!stateDbInfo?.path) {
+      log(`[${new Date().toISOString()}] No state database found in ${storage.sqliteHome}; waiting for config.toml changes`);
+      return;
+    }
+    const stateDbFile = stateDbInfo.path;
+    for (const target of [stateDbFile, `${stateDbFile}-wal`, `${stateDbFile}-shm`]) {
+      attachStateWatcher(target, target === stateDbFile ? "state_db" : "state_db-wal", generation);
+    }
+  }
+
+  function attachStateWatcher(stateDbFile, reasonLabel, generation) {
     // Attach (or re-attach after a rename) a single-file fs.watch
     // for the active SQLite database (or its WAL/SHM sidecar).
     // Returns when the watcher is attached so we can drive startup
     // synchronously.
     let current = null;
     const tryAttach = () => {
-      if (stopped || current !== null) {
+      if (stopped || generation !== stateWatchGeneration || current !== null) {
         return;
       }
       // WAL and SHM sidecars may not exist when the watcher starts.
@@ -338,6 +373,10 @@ export async function runWatch({
             if (idx !== -1) {
               watchers.splice(idx, 1);
             }
+            const stateIndex = stateWatchers.indexOf(watcher);
+            if (stateIndex !== -1) {
+              stateWatchers.splice(stateIndex, 1);
+            }
             setTimeout(tryAttach, 50);
             return;
           }
@@ -360,6 +399,7 @@ export async function runWatch({
         return;
       }
       watchers.push(watcher);
+      stateWatchers.push(watcher);
       current = watcher;
     };
     tryAttach();
@@ -368,7 +408,12 @@ export async function runWatch({
   return {
     codexHome,
     watchedConfigPath: configPath,
-    watchedStateDbPath: stateDbInfo?.path ?? null,
+    get watchedStateDbPath() {
+      return stateDbInfo?.path ?? null;
+    },
+    get sqliteHome() {
+      return activeStorage?.sqliteHome ?? null;
+    },
     stop: () => shutdown("external"),
     signalPromise,
     done: donePromise

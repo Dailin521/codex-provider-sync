@@ -20,7 +20,12 @@ public sealed class GlobalStateService
 
     public async Task<IReadOnlyList<ThreadCwdStat>> ReadThreadCwdStatsAsync(string codexHome)
     {
-        string? dbPath = _sqliteStateService.ExistingStateDbPath(codexHome);
+        return await ReadThreadCwdStatsAsync(new CodexStorageLayoutService().CreateDefault(codexHome));
+    }
+
+    public async Task<IReadOnlyList<ThreadCwdStat>> ReadThreadCwdStatsAsync(CodexStorageLayout storage)
+    {
+        string? dbPath = _sqliteStateService.ExistingStateDbPath(storage);
         if (dbPath is null)
         {
             return [];
@@ -90,6 +95,16 @@ public sealed class GlobalStateService
         string codexHome,
         IReadOnlyList<ThreadCwdStat>? cwdStats = null)
     {
+        return await SyncWorkspaceRootsAsync(
+            new CodexStorageLayoutService().CreateDefault(codexHome),
+            cwdStats);
+    }
+
+    public async Task<WorkspaceRootSyncResult> SyncWorkspaceRootsAsync(
+        CodexStorageLayout storage,
+        IReadOnlyList<ThreadCwdStat>? cwdStats = null)
+    {
+        string codexHome = storage.CodexHome;
         string statePath = StatePath(codexHome);
         if (!File.Exists(statePath))
         {
@@ -104,7 +119,7 @@ public sealed class GlobalStateService
 
         JsonObject state = JsonNode.Parse(await File.ReadAllTextAsync(statePath))?.AsObject()
             ?? throw new InvalidOperationException($"Global state file is invalid: {statePath}");
-        IReadOnlyList<ThreadCwdStat> effectiveCwdStats = cwdStats ?? await ReadThreadCwdStatsAsync(codexHome);
+        IReadOnlyList<ThreadCwdStat> effectiveCwdStats = cwdStats ?? await ReadThreadCwdStatsAsync(storage);
 
         List<string> existingSavedRoots = ToPathList(state["electron-saved-workspace-roots"]);
         List<string> existingProjectOrder = ToPathList(state["project-order"]);
@@ -179,6 +194,16 @@ public sealed class GlobalStateService
         string codexHome,
         int pageSize = 50)
     {
+        return await ReadProjectThreadVisibilityAsync(
+            new CodexStorageLayoutService().CreateDefault(codexHome),
+            pageSize);
+    }
+
+    public async Task<IReadOnlyList<ProjectThreadVisibility>> ReadProjectThreadVisibilityAsync(
+        CodexStorageLayout storage,
+        int pageSize = 50)
+    {
+        string codexHome = storage.CodexHome;
         string statePath = StatePath(codexHome);
         if (!File.Exists(statePath))
         {
@@ -193,7 +218,7 @@ public sealed class GlobalStateService
             return [];
         }
 
-        string? dbPath = _sqliteStateService.ExistingStateDbPath(codexHome);
+        string? dbPath = _sqliteStateService.ExistingStateDbPath(storage);
         if (dbPath is null)
         {
             return roots

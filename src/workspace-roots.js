@@ -20,6 +20,12 @@ export function globalStateBackupPath(codexHome) {
   return path.join(codexHome, GLOBAL_STATE_BACKUP_FILE_BASENAME);
 }
 
+function codexHomeFrom(storageOrCodexHome) {
+  return typeof storageOrCodexHome === "string"
+    ? storageOrCodexHome
+    : storageOrCodexHome.codexHome;
+}
+
 export function normalizeComparablePath(value) {
   if (typeof value !== "string") {
     return null;
@@ -163,8 +169,8 @@ function copyResolvedObjectKeys(input, cwdStats) {
   return result;
 }
 
-export async function readThreadCwdStats(codexHome) {
-  const dbPath = await existingStateDbPath(codexHome);
+export async function readThreadCwdStats(storageOrCodexHome) {
+  const dbPath = await existingStateDbPath(storageOrCodexHome);
   if (!dbPath) {
     return [];
   }
@@ -236,7 +242,8 @@ function formatRankPreview(ranks, maxCount = 12) {
   return remaining > 0 ? `${preview} (+${remaining} more)` : preview;
 }
 
-export async function readProjectThreadVisibility(codexHome, options = {}) {
+export async function readProjectThreadVisibility(storageOrCodexHome, options = {}) {
+  const codexHome = codexHomeFrom(storageOrCodexHome);
   const pageSize = Number.isInteger(options.pageSize) && options.pageSize > 0
     ? options.pageSize
     : 50;
@@ -256,7 +263,7 @@ export async function readProjectThreadVisibility(codexHome, options = {}) {
     return [];
   }
 
-  const dbPath = await existingStateDbPath(codexHome);
+  const dbPath = await existingStateDbPath(storageOrCodexHome);
   if (!dbPath) {
     return roots.map((root) => ({
       root,
@@ -353,7 +360,8 @@ export async function readProjectThreadVisibility(codexHome, options = {}) {
   }
 }
 
-export async function syncWorkspaceRoots(codexHome, options = {}) {
+export async function syncWorkspaceRoots(storageOrCodexHome, options = {}) {
+  const codexHome = codexHomeFrom(storageOrCodexHome);
   const filePath = globalStatePath(codexHome);
   const backupPath = globalStateBackupPath(codexHome);
 
@@ -373,7 +381,7 @@ export async function syncWorkspaceRoots(codexHome, options = {}) {
   }
 
   const state = JSON.parse(originalText);
-  const cwdStats = options.cwdStats ?? await readThreadCwdStats(codexHome);
+  const cwdStats = options.cwdStats ?? await readThreadCwdStats(storageOrCodexHome);
   const existingSavedRoots = toPathArray(state["electron-saved-workspace-roots"]);
   const existingProjectOrder = toPathArray(state["project-order"]);
   const existingActiveRoots = toPathArray(state["active-workspace-roots"]);
