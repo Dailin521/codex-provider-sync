@@ -2,6 +2,30 @@
 
 This file is for AI assistants, coding agents, and automation tools.
 
+## Architecture And Development Contracts
+
+The approved AI automation and Windows GUI designs are documented in:
+
+- `docs/AI_AUTOMATION_INTERFACE_V1.md`
+- `docs/WINDOWS_GUI_DEVELOPMENT_CONTRACT.md`
+
+The Automation interface is an approved design and is not implemented yet.
+Do not claim that `CodexProviderSync.Automation.exe` is available until its
+implementation and release packaging have landed.
+
+For future Windows GUI work:
+
+- put application state, validation, linkage, and command construction in the
+  shared application/controller layer
+- keep WinForms event handlers limited to presentation and typed command
+  dispatch
+- give every test-relevant control a stable ID and accessibility metadata
+- do not add reflection-based tests for private MainForm fields
+- route real sync, switch, restore, and backup-pruning behavior through the
+  shared plan/execute flow once that layer exists
+- add controller, Automation-contract, and UI-probe coverage for new business
+  behavior
+
 ## Goal
 
 Help the user make historical Codex sessions visible again after switching `model_provider`.
