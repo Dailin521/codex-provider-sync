@@ -29,7 +29,7 @@ static class Program
             MainForm mainForm = new(executionLogService);
             using FocusRequestServer focusServer = new(mainForm.BringToFront);
             focusServer.Start();
-            Application.Run(mainForm);
+            System.Windows.Forms.Application.Run(mainForm);
         }
         catch (Exception error)
         {
