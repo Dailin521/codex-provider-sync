@@ -12,6 +12,8 @@ public sealed class CodexSyncService
     private readonly ProviderDiscoveryService _providerDiscoveryService;
     private readonly CodexStorageLayoutService _storageLayoutService;
 
+    internal Func<string, string?, int, Task>? FaultInjector { get; set; }
+
     public CodexSyncService()
         : this(
             new CodexHomeService(),
@@ -70,6 +72,7 @@ public sealed class CodexSyncService
             ? []
             : await _globalStateService.ReadProjectThreadVisibilityAsync(storage);
         BackupSummary backupSummary = await _backupService.GetBackupSummaryAsync(codexHome);
+        IReadOnlyList<PendingTransactionInfo> pendingTransactions = await FileTransactionJournal.FindPendingAsync(codexHome);
 
         return new StatusSnapshot
         {
@@ -90,7 +93,14 @@ public sealed class CodexSyncService
             SqliteRepairStats = sqliteRepairStats,
             ProjectThreadVisibility = projectThreadVisibility,
             BackupRoot = _codexHomeService.BackupRoot(codexHome),
-            BackupSummary = backupSummary
+            BackupSummary = backupSummary,
+            PendingTransactions = pendingTransactions
+                .Select(static item => new TransactionRecoveryInfo(
+                    item.OperationId,
+                    item.State,
+                    item.BackupDir,
+                    item.JournalPath))
+                .ToArray()
         };
     }
 
@@ -111,7 +121,8 @@ public sealed class CodexSyncService
         int keepCount = AppConstants.DefaultBackupRetentionCount,
         int? sqliteBusyTimeoutMs = null,
         string? model = null,
-        string? explicitSqliteHome = null)
+        string? explicitSqliteHome = null,
+        CancellationToken cancellationToken = default)
     {
         return RunSyncCoreAsync(
             explicitCodexHome,
@@ -121,7 +132,8 @@ public sealed class CodexSyncService
             sqliteBusyTimeoutMs,
             model,
             explicitSqliteHome,
-            afterBackup: null);
+            afterBackup: null,
+            cancellationToken);
     }
 
     private async Task<SyncResult> RunSyncCoreAsync(
@@ -132,7 +144,8 @@ public sealed class CodexSyncService
         int? sqliteBusyTimeoutMs,
         string? model,
         string? explicitSqliteHome,
-        Func<string, Task>? afterBackup)
+        Func<string, Task>? afterBackup,
+        CancellationToken cancellationToken = default)
     {
         if (keepCount < 1)
         {
@@ -141,6 +154,9 @@ public sealed class CodexSyncService
 
         string codexHome = _codexHomeService.NormalizeCodexHome(explicitCodexHome);
         await _codexHomeService.EnsureCodexHomeAsync(codexHome);
+        await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "sync");
+        await FileTransactionJournal.AssertNoPendingAsync(codexHome);
+        cancellationToken.ThrowIfCancellationRequested();
         string configPath = _codexHomeService.ConfigPath(codexHome);
         string configText = await _configFileService.ReadConfigTextAsync(configPath);
         CodexStorageLayout storage = await PrepareStorageAsync(codexHome, explicitSqliteHome, configText);
@@ -160,8 +176,6 @@ public sealed class CodexSyncService
             targetModel = _configFileService.ReadRootModelFromConfigText(configText);
         }
 
-        await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "sync");
-
         SessionChangeCollection sessionInfo = await _sessionRolloutService.CollectSessionChangesAsync(
             codexHome,
             targetProvider,
@@ -179,15 +193,37 @@ public sealed class CodexSyncService
             .ToList();
 
         await _sqliteStateService.AssertSqliteWritableAsync(storage, sqliteBusyTimeoutMs);
-        string backupDir = await _backupService.CreateBackupAsync(storage, targetProvider, writableChanges, configPath, configBackupText);
-        if (afterBackup is not null)
+        cancellationToken.ThrowIfCancellationRequested();
+        if (FaultInjector is not null)
         {
-            await afterBackup(backupDir);
+            await FaultInjector("before_backup", null, 0);
         }
-
+        string backupDir = await _backupService.CreateBackupAsync(storage, targetProvider, writableChanges, configPath, configBackupText);
         bool sessionRestoreNeeded = false;
         List<SessionChange> appliedSessionChanges = [];
         bool globalStateRestoreNeeded = false;
+        string globalStatePath = _globalStateService.StatePath(codexHome);
+        string globalStateBackupPath = _globalStateService.BackupPath(codexHome);
+        string[] potentialTargets = writableChanges.Select(static change => Path.GetFullPath(change.Path))
+            .Append(Path.GetFullPath(globalStatePath))
+            .Append(Path.GetFullPath(globalStateBackupPath))
+            .Concat(configBackupText is null ? [] : [Path.GetFullPath(configPath)])
+            .Concat(storage.StateDbCandidates.Select(static candidate => Path.GetFullPath(candidate.Path)))
+            .ToArray();
+        FileTransactionJournal journal = await FileTransactionJournal.CreateAsync(
+            backupDir,
+            codexHome,
+            targetProvider,
+            potentialTargets);
+        List<string> completedTargets = [];
+        void RecordCompletedTarget(string targetPath)
+        {
+            string fullPath = Path.GetFullPath(targetPath);
+            if (!completedTargets.Contains(fullPath, StringComparer.Ordinal))
+            {
+                completedTargets.Add(fullPath);
+            }
+        }
         WorkspaceRootSyncResult workspaceRootResult = new()
         {
             Present = false,
@@ -197,7 +233,21 @@ public sealed class CodexSyncService
         };
         try
         {
+            if (afterBackup is not null)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                await journal.ApplyingAsync("config", configPath);
+                await afterBackup(backupDir);
+                await journal.AppliedAsync("config", configPath);
+                RecordCompletedTarget(configPath);
+                if (FaultInjector is not null)
+                {
+                    await FaultInjector("after_config_apply", configPath, 1);
+                }
+            }
+
             SessionApplyResult? applyResult = null;
+            await journal.ApplyingAsync("sqlite", storage.StateDbLocation?.Path ?? storage.SqliteHome);
             (int updatedRows, int providerRowsUpdated, int modelRowsUpdated, int userEventRowsUpdated, int cwdRowsUpdated, bool databasePresent) = await _sqliteStateService.UpdateSqliteProviderAsync(
                 storage,
                 targetProvider,
@@ -206,18 +256,58 @@ public sealed class CodexSyncService
                 {
                     if (writableChanges.Count > 0)
                     {
-                        applyResult = await _sessionRolloutService.ApplySessionChangesAsync(writableChanges, targetModel);
-                        HashSet<string> appliedPathSet = new(applyResult.AppliedPaths, StringComparer.Ordinal);
-                        appliedSessionChanges = writableChanges.Where(change => appliedPathSet.Contains(change.Path)).ToList();
-                        sessionRestoreNeeded = appliedSessionChanges.Count > 0;
-                        await _backupService.UpdateSessionBackupManifestAsync(backupDir, appliedSessionChanges);
+                        applyResult = await _sessionRolloutService.ApplySessionChangesAsync(
+                            writableChanges,
+                            targetModel,
+                            async change =>
+                            {
+                                cancellationToken.ThrowIfCancellationRequested();
+                                await journal.ApplyingAsync("rollout", change.Path);
+                                if (FaultInjector is not null)
+                                {
+                                    await FaultInjector(
+                                        "before_rollout_apply",
+                                        change.Path,
+                                        appliedSessionChanges.Count + 1);
+                                }
+                            },
+                            async change =>
+                            {
+                                appliedSessionChanges.Add(change);
+                                sessionRestoreNeeded = true;
+                                await journal.AppliedAsync("rollout", change.Path);
+                                RecordCompletedTarget(change.Path);
+                                await _backupService.UpdateSessionBackupManifestAsync(backupDir, appliedSessionChanges);
+                                if (FaultInjector is not null)
+                                {
+                                    await FaultInjector("after_rollout_apply", change.Path, appliedSessionChanges.Count);
+                                }
+                            });
                     }
-                    workspaceRootResult = await _globalStateService.SyncWorkspaceRootsAsync(storage, workspaceCwdStats);
-                    globalStateRestoreNeeded = workspaceRootResult.Updated;
+                    workspaceRootResult = await _globalStateService.SyncWorkspaceRootsAsync(
+                        storage,
+                        workspaceCwdStats,
+                        async targetPath =>
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            await journal.ApplyingAsync("globalState", targetPath);
+                        },
+                        async targetPath =>
+                        {
+                            globalStateRestoreNeeded = true;
+                            await journal.AppliedAsync("globalState", targetPath);
+                            RecordCompletedTarget(targetPath);
+                            if (FaultInjector is not null)
+                            {
+                                await FaultInjector("after_global_state_apply", targetPath, 1);
+                            }
+                        });
                 },
                 sqliteBusyTimeoutMs,
                 sessionInfo.UserEventThreadIds,
                 sessionInfo.ThreadCwdsById);
+            await journal.AppliedAsync("sqlite", storage.StateDbLocation?.Path ?? storage.SqliteHome);
+            RecordCompletedTarget(storage.StateDbLocation?.Path ?? storage.SqliteHome);
 
             skippedRolloutFiles.AddRange(applyResult?.SkippedPaths ?? []);
             skippedRolloutFiles = skippedRolloutFiles.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToList();
@@ -233,7 +323,7 @@ public sealed class CodexSyncService
                 autoPruneWarning = $"Automatic backup cleanup failed: {error.Message}";
             }
 
-            return new SyncResult
+            SyncResult result = new()
             {
                 CodexHome = codexHome,
                 SqliteHome = storage.SqliteHome,
@@ -258,14 +348,28 @@ public sealed class CodexSyncService
                 AutoPruneResult = autoPruneResult,
                 AutoPruneWarning = autoPruneWarning
             };
+            await journal.CommittedAsync();
+            return result;
         }
         catch (Exception error)
         {
             List<string> restoreFailures = [];
+            try
+            {
+                await journal.RollingBackAsync(error);
+            }
+            catch (Exception journalError)
+            {
+                restoreFailures.Add($"transaction journal: {journalError.Message}");
+            }
             if (sessionRestoreNeeded)
             {
                 try
                 {
+                    if (FaultInjector is not null)
+                    {
+                        await FaultInjector("before_rollout_rollback", null, appliedSessionChanges.Count);
+                    }
                     await _sessionRolloutService.RestoreSessionChangesAsync(appliedSessionChanges);
                 }
                 catch (Exception restoreError)
@@ -277,6 +381,10 @@ public sealed class CodexSyncService
             {
                 try
                 {
+                    if (FaultInjector is not null)
+                    {
+                        await FaultInjector("before_global_state_rollback", null, 1);
+                    }
                     await _backupService.RestoreGlobalStateFilesAsync(backupDir, codexHome);
                 }
                 catch (Exception restoreError)
@@ -285,14 +393,63 @@ public sealed class CodexSyncService
                 }
             }
 
-            if (restoreFailures.Count > 0)
+            if (configBackupText is not null)
             {
-                throw new InvalidOperationException(
-                    $"Failed to restore state after sync error. Original error: {error.Message}. Restore error: {string.Join("; ", restoreFailures)}",
-                    error);
+                try
+                {
+                    await _configFileService.WriteConfigTextAsync(configPath, configBackupText);
+                }
+                catch (Exception restoreError)
+                {
+                    restoreFailures.Add($"config: {restoreError.Message}");
+                }
             }
 
-            throw;
+            if (restoreFailures.Count == 0)
+            {
+                try
+                {
+                    await journal.RolledBackAsync();
+                }
+                catch (Exception journalError)
+                {
+                    restoreFailures.Add($"transaction journal: {journalError.Message}");
+                }
+            }
+            if (restoreFailures.Count > 0)
+            {
+                try
+                {
+                    await journal.RecoveryRequiredAsync(error, restoreFailures);
+                }
+                catch
+                {
+                    // Preserve the original and rollback failures when the
+                    // journal itself is no longer writable.
+                }
+                HashSet<string> completedTargetSet = new(completedTargets, StringComparer.Ordinal);
+                IReadOnlyList<string> uncompletedTargets = potentialTargets
+                    .Where(targetPath => !completedTargetSet.Contains(targetPath))
+                    .ToArray();
+                throw new SyncTransactionException(
+                    error,
+                    restoreFailures,
+                    backupDir,
+                    completedTargets,
+                    uncompletedTargets,
+                    rollbackStatus: "incomplete",
+                    recoveryRequired: true);
+            }
+
+            HashSet<string> completedSet = new(completedTargets, StringComparer.Ordinal);
+            throw new SyncTransactionException(
+                error,
+                [],
+                backupDir,
+                completedTargets,
+                potentialTargets.Where(targetPath => !completedSet.Contains(targetPath)).ToArray(),
+                rollbackStatus: "complete",
+                recoveryRequired: false);
         }
     }
 
@@ -453,7 +610,10 @@ public sealed class CodexSyncService
         storage.EnsureSqliteAccessSupported("restore");
 
         await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "restore");
-        return await _backupService.RestoreBackupAsync(Path.GetFullPath(backupDir), storage, options);
+        string normalizedBackupDir = Path.GetFullPath(backupDir);
+        RestoreResult result = await _backupService.RestoreBackupAsync(normalizedBackupDir, storage, options);
+        await FileTransactionJournal.MarkBackupRolledBackAsync(normalizedBackupDir);
+        return result;
     }
 
     public async Task<BackupPruneResult> RunPruneBackupsAsync(

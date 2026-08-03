@@ -165,7 +165,9 @@ public sealed class SessionRolloutService
 
     public async Task<SessionApplyResult> ApplySessionChangesAsync(
         IEnumerable<SessionChange> changes,
-        string? targetModel = null)
+        string? targetModel = null,
+        Func<SessionChange, Task>? onBeforeApply = null,
+        Func<SessionChange, Task>? onApplied = null)
     {
         int appliedCount = 0;
         List<string> appliedPaths = [];
@@ -173,6 +175,10 @@ public sealed class SessionRolloutService
 
         foreach (SessionChange change in changes)
         {
+            if (onBeforeApply is not null)
+            {
+                await onBeforeApply(change);
+            }
             bool providerApplied = change.ModelOnlyChange || await TryRewriteCollectedSessionChangeAsync(change);
             if (!providerApplied)
             {
@@ -210,6 +216,10 @@ public sealed class SessionRolloutService
             TryRestoreLastWriteTimeUtc(change.Path, change.OriginalLastWriteTimeUtcTicks);
             appliedCount += 1;
             appliedPaths.Add(change.Path);
+            if (onApplied is not null)
+            {
+                await onApplied(change);
+            }
         }
 
         appliedPaths.Sort(StringComparer.Ordinal);
@@ -603,9 +613,7 @@ public sealed class SessionRolloutService
                 return ModelRewriteResult.Empty;
             }
 
-            await OverwriteOpenFileFromTempAsync(sourceStream, tempPath);
-
-            File.Delete(tempPath);
+            await AtomicFile.ReplaceOpenFileFromTempAsync(sourceStream, tempPath);
             return new ModelRewriteResult(replacements, originalModels);
         }
         catch (Exception error)
@@ -732,8 +740,7 @@ public sealed class SessionRolloutService
                 return;
             }
 
-            await OverwriteOpenFileFromTempAsync(sourceStream, tempPath);
-            File.Delete(tempPath);
+            await AtomicFile.ReplaceOpenFileFromTempAsync(sourceStream, tempPath);
         }
         catch (Exception error)
         {
@@ -786,69 +793,6 @@ public sealed class SessionRolloutService
         return bytesRead == 1 && tail[0] == (byte)'\n';
     }
 
-    private static async Task OverwriteOpenFileFromTempAsync(
-        FileStream destination,
-        string tempPath)
-    {
-        string rollbackPath = $"{tempPath}.rollback";
-        try
-        {
-            destination.Seek(0, SeekOrigin.Begin);
-            await using (FileStream rollbackWriter = new(
-                rollbackPath,
-                FileMode.CreateNew,
-                FileAccess.Write,
-                FileShare.None,
-                64 * 1024,
-                FileOptions.Asynchronous | FileOptions.SequentialScan))
-            {
-                await destination.CopyToAsync(rollbackWriter);
-                await rollbackWriter.FlushAsync();
-            }
-
-            try
-            {
-                await using FileStream tempReader = new(
-                    tempPath,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.Read,
-                    64 * 1024,
-                    FileOptions.Asynchronous | FileOptions.SequentialScan);
-                destination.SetLength(0);
-                destination.Seek(0, SeekOrigin.Begin);
-                await tempReader.CopyToAsync(destination);
-                await destination.FlushAsync();
-            }
-            catch
-            {
-                await using FileStream rollbackReader = new(
-                    rollbackPath,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.Read,
-                    64 * 1024,
-                    FileOptions.Asynchronous | FileOptions.SequentialScan);
-                destination.SetLength(0);
-                destination.Seek(0, SeekOrigin.Begin);
-                await rollbackReader.CopyToAsync(destination);
-                await destination.FlushAsync();
-                throw;
-            }
-        }
-        finally
-        {
-            try
-            {
-                File.Delete(rollbackPath);
-            }
-            catch
-            {
-                // The original exception, if any, is more useful than cleanup failure.
-            }
-        }
-    }
-
     private static async Task RewriteFirstLineAsync(
         FileStream sourceStream,
         string filePath,
@@ -884,21 +828,7 @@ public sealed class SessionRolloutService
                 }
             }
 
-            await using (FileStream tempReader = new(
-                tempPath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                64 * 1024,
-                FileOptions.Asynchronous | FileOptions.SequentialScan))
-            {
-                sourceStream.SetLength(0);
-                sourceStream.Seek(0, SeekOrigin.Begin);
-                await tempReader.CopyToAsync(sourceStream);
-                await sourceStream.FlushAsync();
-            }
-
-            File.Delete(tempPath);
+            await AtomicFile.ReplaceOpenFileFromTempAsync(sourceStream, tempPath);
         }
         catch
         {

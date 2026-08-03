@@ -16,6 +16,7 @@ import {
   resolveStorageLayout,
   withStateDbLocation
 } from "./storage-layout.js";
+import { findPendingTransactions } from "./transaction-journal.js";
 
 function timestampSlug(date = new Date()) {
   return date.toISOString().replaceAll(":", "").replaceAll("-", "").replace(".", "");
@@ -237,7 +238,11 @@ export async function pruneBackups(codexHome, keepCount = DEFAULT_BACKUP_RETENTI
 
   const backupRoot = defaultBackupRoot(codexHome);
   const backupDirs = await listManagedBackupDirectories(backupRoot);
-  const toDelete = backupDirs.slice(keepCount);
+  const pending = await findPendingTransactions(codexHome);
+  const protectedBackups = new Set(pending.map((transaction) => path.resolve(transaction.backupDir)));
+  const toDelete = backupDirs
+    .slice(keepCount)
+    .filter((entry) => !protectedBackups.has(path.resolve(entry.fullPath)));
   let freedBytes = 0;
   for (const entry of toDelete) {
     freedBytes += await getDirectorySize(entry.fullPath);

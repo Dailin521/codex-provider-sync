@@ -33,7 +33,14 @@ public sealed class StatusSnapshot
     public IReadOnlyList<ProjectThreadVisibility> ProjectThreadVisibility { get; init; } = [];
     public required string BackupRoot { get; init; }
     public required BackupSummary BackupSummary { get; init; }
+    public IReadOnlyList<TransactionRecoveryInfo> PendingTransactions { get; init; } = [];
 }
+
+public sealed record TransactionRecoveryInfo(
+    string? OperationId,
+    string State,
+    string BackupDirectory,
+    string JournalPath);
 
 public sealed record StateDbLocation(string Path, string RelativePath, string Source);
 
@@ -296,6 +303,45 @@ public sealed class WorkspaceRootSyncResult
     public required bool Updated { get; init; }
     public required int UpdatedWorkspaceRoots { get; init; }
     public required int SavedWorkspaceRootCount { get; init; }
+}
+
+public sealed class SyncTransactionException : InvalidOperationException
+{
+    public SyncTransactionException(
+        Exception originalError,
+        IReadOnlyList<string> rollbackErrors,
+        string backupDirectory,
+        IReadOnlyList<string> completedTargets,
+        IReadOnlyList<string> uncompletedTargets,
+        string rollbackStatus = "incomplete",
+        bool recoveryRequired = true)
+        : base(
+            recoveryRequired
+                ? $"Failed to restore state after sync error. Original error: {originalError.Message}. Restore error: {string.Join("; ", rollbackErrors)}"
+                : $"Provider sync failed and all observed changes were rolled back. Original error: {originalError.Message}",
+            originalError)
+    {
+        OriginalError = originalError;
+        RollbackErrors = rollbackErrors;
+        BackupDirectory = backupDirectory;
+        CompletedTargets = completedTargets;
+        UncompletedTargets = uncompletedTargets;
+        RollbackStatus = rollbackStatus;
+        RecoveryRequired = recoveryRequired;
+    }
+
+    public string Code => RecoveryRequired ? "RECOVERY_REQUIRED" : "SYNC_FAILED_ROLLED_BACK";
+    public Exception OriginalError { get; }
+    public IReadOnlyList<string> RollbackErrors { get; }
+    public string BackupDirectory { get; }
+    public IReadOnlyList<string> CompletedTargets { get; }
+    public IReadOnlyList<string> UncompletedTargets { get; }
+    public string RollbackStatus { get; }
+    public bool RecoveryRequired { get; }
+    public string RecoveryInstructions =>
+        RecoveryRequired
+            ? $"Restore the managed backup at {BackupDirectory}, inspect the pending transaction journal, then retry."
+            : "No manual recovery is required. Inspect the original error, correct its cause, and retry.";
 }
 
 public sealed class ThreadCwdStat

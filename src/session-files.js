@@ -1157,7 +1157,7 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
 
 export async function applySessionChanges(changes, options = {}) {
   const normalizedChanges = changes ?? [];
-  const { targetModel = null } = options ?? {};
+  const { targetModel = null, onBeforeApply, onApplied } = options ?? {};
   const skippedPaths = [];
   const appliedPaths = [];
   let appliedChanges = 0;
@@ -1174,14 +1174,16 @@ export async function applySessionChanges(changes, options = {}) {
   const firstLineChanges = normalizedChanges.filter((change) => !change?.modelOnlyChange);
 
   if (process.platform === "win32") {
-    const results = firstLineChanges.length > 0
-      ? await invokeWindowsExclusiveRewriteBatch(firstLineChanges, { requireOriginalMatch: true })
-      : [];
-    for (let index = 0; index < firstLineChanges.length; index += 1) {
-      const change = firstLineChanges[index];
-      if (results[index] === "APPLIED" || results[index] === "APPLIED_IN_PLACE") {
+    // Process one file per helper invocation. A failed Windows batch cannot
+    // report which earlier members were already replaced, which was the root
+    // cause of #69. Per-target calls let the durable coordinator observe each
+    // successful mutation before the next target starts.
+    for (const change of firstLineChanges) {
+      await onBeforeApply?.(change);
+      const [result] = await invokeWindowsExclusiveRewriteBatch([change], { requireOriginalMatch: true });
+      if (result === "APPLIED" || result === "APPLIED_IN_PLACE") {
         appliedChanges += 1;
-        inPlaceChanges += results[index] === "APPLIED_IN_PLACE" ? 1 : 0;
+        inPlaceChanges += result === "APPLIED_IN_PLACE" ? 1 : 0;
         appliedPaths.push(change.path);
         if (change.modelRewriteRequired) {
           const modelResult = await rewriteRolloutModelField(change, targetModel);
@@ -1189,12 +1191,14 @@ export async function applySessionChanges(changes, options = {}) {
           change.appliedTurnContextRewrites = modelResult.replacedLines;
         }
         await restoreOriginalMtime(change.path, change.originalMtimeMs);
+        await onApplied?.(change);
       } else {
         skippedPaths.push(change.path);
       }
     }
   } else {
     for (const change of firstLineChanges) {
+      await onBeforeApply?.(change);
       const result = await tryRewriteCollectedFirstLine(change);
       if (result === "APPLIED" || result === "APPLIED_IN_PLACE") {
         appliedChanges += 1;
@@ -1206,6 +1210,7 @@ export async function applySessionChanges(changes, options = {}) {
           change.appliedTurnContextRewrites = modelResult.replacedLines;
         }
         await restoreOriginalMtime(change.path, change.originalMtimeMs);
+        await onApplied?.(change);
       } else {
         skippedPaths.push(change.path);
       }
@@ -1220,6 +1225,7 @@ export async function applySessionChanges(changes, options = {}) {
   // the file's timestamp is preserved exactly the way the user
   // set it.
   for (const change of modelOnlyChanges) {
+    await onBeforeApply?.(change);
     let modelResult;
     try {
       modelResult = await rewriteRolloutModelField(change, targetModel);
@@ -1233,6 +1239,7 @@ export async function applySessionChanges(changes, options = {}) {
       appliedPaths.push(change.path);
       change.originalTurnContextModels = modelResult.originalTurnContextModels;
       change.appliedTurnContextRewrites = modelResult.replacedLines;
+      await onApplied?.(change);
     } else {
       skippedPaths.push(change.path);
     }

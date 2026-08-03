@@ -396,7 +396,7 @@ public sealed class BackupService
         });
     }
 
-    public Task<BackupPruneResult> PruneBackupsAsync(string codexHome, int keepCount = AppConstants.DefaultBackupRetentionCount)
+    public async Task<BackupPruneResult> PruneBackupsAsync(string codexHome, int keepCount = AppConstants.DefaultBackupRetentionCount)
     {
         if (keepCount < 0)
         {
@@ -404,7 +404,11 @@ public sealed class BackupService
         }
 
         string backupRoot = AppConstants.DefaultBackupRoot(codexHome);
-        return Task.Run(() =>
+        IReadOnlyList<PendingTransactionInfo> pending = await FileTransactionJournal.FindPendingAsync(codexHome);
+        HashSet<string> protectedBackups = new(
+            pending.Select(static transaction => Path.GetFullPath(transaction.BackupDir)),
+            StringComparer.Ordinal);
+        return await Task.Run(() =>
         {
             if (!Directory.Exists(backupRoot))
             {
@@ -419,7 +423,10 @@ public sealed class BackupService
 
             List<DirectoryInfo> entries = GetManagedBackupDirectories(backupRoot);
 
-            List<DirectoryInfo> toDelete = entries.Skip(keepCount).ToList();
+            List<DirectoryInfo> toDelete = entries
+                .Skip(keepCount)
+                .Where(entry => !protectedBackups.Contains(Path.GetFullPath(entry.FullName)))
+                .ToList();
             long freedBytes = 0;
             foreach (DirectoryInfo entry in toDelete)
             {

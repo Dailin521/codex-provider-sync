@@ -53,6 +53,50 @@ import {
   resolveStorageLayout,
   withStateDbLocation
 } from "./storage-layout.js";
+import {
+  TransactionJournal,
+  assertNoPendingTransactions,
+  findPendingTransactions,
+  markBackupTransactionRolledBack
+} from "./transaction-journal.js";
+
+export class SyncTransactionError extends Error {
+  constructor(
+    originalError,
+    rollbackErrors,
+    backupDir,
+    completedTargets,
+    uncompletedTargets,
+    { rollbackStatus = "incomplete", recoveryRequired = true } = {}
+  ) {
+    const message = recoveryRequired
+      ? `Failed to restore state after sync error. Original error: ${originalError.message}. Restore error: ${rollbackErrors.join("; ")}`
+      : `Provider sync failed and all observed changes were rolled back. Original error: ${originalError.message}`;
+    super(message, { cause: originalError });
+    this.name = "SyncTransactionError";
+    this.code = recoveryRequired ? "RECOVERY_REQUIRED" : "SYNC_FAILED_ROLLED_BACK";
+    this.originalError = originalError;
+    this.rollbackErrors = rollbackErrors;
+    this.backupDir = backupDir;
+    this.completedTargets = completedTargets;
+    this.uncompletedTargets = uncompletedTargets;
+    this.rollbackStatus = rollbackStatus;
+    this.recoveryRequired = recoveryRequired;
+    this.recoveryInstructions = recoveryRequired
+      ? `Restore the managed backup at ${backupDir}, inspect the pending transaction journal, then retry.`
+      : "No manual recovery is required. Inspect the original error, correct its cause, and retry.";
+  }
+}
+
+function throwIfAborted(signal) {
+  if (!signal?.aborted) {
+    return;
+  }
+  const error = new Error("The provider-sync operation was cancelled.");
+  error.name = "AbortError";
+  error.code = "ABORT_ERR";
+  throw error;
+}
 
 async function prepareStorage({ codexHome: explicitCodexHome, sqliteHome, configText, storage, platform }) {
   if (storage) {
@@ -135,6 +179,7 @@ export async function getStatus({ codexHome: explicitCodexHome, sqliteHome, plat
     ? []
     : await readProjectThreadVisibility(storage);
   const backupSummary = await getBackupSummary(codexHome);
+  const pendingTransactions = await findPendingTransactions(codexHome);
 
   return {
     codexHome,
@@ -154,7 +199,13 @@ export async function getStatus({ codexHome: explicitCodexHome, sqliteHome, plat
     sqliteRepairStats,
     projectThreadVisibility,
     backupRoot: defaultBackupRoot(codexHome),
-    backupSummary
+    backupSummary,
+    pendingTransactions: pendingTransactions.map((transaction) => ({
+      operationId: transaction.operationId ?? null,
+      state: transaction.state,
+      backupDir: transaction.backupDir,
+      journalPath: transaction.filePath
+    }))
   };
 }
 
@@ -167,6 +218,15 @@ export function renderStatus(status) {
     `Backups: ${status.backupSummary.count} (${formatBytes(status.backupSummary.totalBytes)})`,
     `Backup root: ${status.backupRoot}`
   ];
+
+  if (status.pendingTransactions?.length) {
+    lines.push("");
+    lines.push("Recovery required:");
+    for (const transaction of status.pendingTransactions) {
+      lines.push(`  ${transaction.state}: ${transaction.backupDir}`);
+    }
+    lines.push("  Run restore with the listed backup before the next write operation.");
+  }
 
   lines.push("");
   lines.push("Rollout files:");
@@ -239,7 +299,9 @@ async function runSyncCore({
   sqliteBusyTimeoutMs,
   onProgress,
   model = null,
-  platform
+  platform,
+  faultInjector,
+  signal
 } = {}, { afterBackup } = {}) {
   if (!Number.isInteger(keepCount) || keepCount < 1) {
     throw new Error(`Invalid automatic keep count: ${keepCount}. Expected an integer greater than or equal to 1.`);
@@ -247,19 +309,21 @@ async function runSyncCore({
 
   const codexHome = providedStorage?.codexHome ?? normalizeCodexHome(explicitCodexHome);
   const configPath = path.join(codexHome, "config.toml");
-  const configText = await readConfigText(configPath);
-  const storage = await prepareStorage({ codexHome, sqliteHome, configText, storage: providedStorage, platform });
-  assertSqliteAccessSupported(storage, "sync");
-  if (!storage.stateDbLocation && isConfiguredSqliteHome(storage)) {
-    throw missingConfiguredStateDbError(storage);
-  }
-  const current = readCurrentProviderFromConfigText(configText);
-  const targetProvider = provider ?? current.provider ?? DEFAULT_PROVIDER;
-
   const releaseLock = await acquireLock(codexHome, "sync");
   let backupDir = null;
+  let journal = null;
   let backupDurationMs = 0;
   try {
+    await assertNoPendingTransactions(codexHome);
+    throwIfAborted(signal);
+    const configText = await readConfigText(configPath);
+    const storage = await prepareStorage({ codexHome, sqliteHome, configText, storage: providedStorage, platform });
+    assertSqliteAccessSupported(storage, "sync");
+    if (!storage.stateDbLocation && isConfiguredSqliteHome(storage)) {
+      throw missingConfiguredStateDbError(storage);
+    }
+    const current = readCurrentProviderFromConfigText(configText);
+    const targetProvider = provider ?? current.provider ?? DEFAULT_PROVIDER;
     emitProgress(onProgress, { stage: "scan_rollout_files", status: "start" });
     const {
       changes,
@@ -301,6 +365,8 @@ async function runSyncCore({
       status: "start",
       writableCount: writableChanges.length
     });
+    throwIfAborted(signal);
+    await faultInjector?.({ point: "before_backup" });
     const backupStartedAt = Date.now();
     backupDir = await createBackup({
       storage,
@@ -318,12 +384,30 @@ async function runSyncCore({
       durationMs: backupDurationMs
     });
 
-    if (typeof afterBackup === "function") {
-      await afterBackup(backupDir);
-    }
+    const globalStatePath = path.join(codexHome, ".codex-global-state.json");
+    const globalStateBackupPath = path.join(codexHome, ".codex-global-state.json.bak");
+    const potentialTargets = [
+      ...writableChanges.map((change) => change.path),
+      globalStatePath,
+      globalStateBackupPath,
+      ...(configBackupText !== undefined ? [configPath] : []),
+      ...(storage.stateDbCandidates ?? []).map((candidate) => candidate.path)
+    ].map((targetPath) => path.resolve(targetPath));
+    journal = await TransactionJournal.create(backupDir, {
+      codexHome,
+      targetProvider,
+      potentialTargets
+    });
 
     let sessionRestoreNeeded = false;
     let appliedSessionChanges = [];
+    const completedTargets = [];
+    const recordCompletedTarget = (targetPath) => {
+      const fullPath = path.resolve(targetPath);
+      if (!completedTargets.includes(fullPath)) {
+        completedTargets.push(fullPath);
+      }
+    };
     let globalStateRestoreNeeded = false;
     let workspaceRootResult = {
       updated: false,
@@ -331,6 +415,15 @@ async function runSyncCore({
       savedWorkspaceRootCount: 0
     };
     try {
+      if (typeof afterBackup === "function") {
+        throwIfAborted(signal);
+        await journal.applying("config", configPath);
+        await afterBackup(backupDir);
+        await journal.applied("config", configPath);
+        recordCompletedTarget(configPath);
+        await faultInjector?.({ point: "after_config_apply", path: configPath });
+      }
+
       let applyResult = { appliedChanges: 0, appliedPaths: [], skippedPaths: [] };
       emitProgress(onProgress, { stage: "update_sqlite", status: "start" });
       emitProgress(onProgress, {
@@ -343,14 +436,40 @@ async function runSyncCore({
         targetProvider,
         async () => {
           if (writableChanges.length > 0) {
-            applyResult = await applySessionChanges(writableChanges, { targetModel: model });
-            const appliedPathSet = new Set(applyResult.appliedPaths ?? []);
-            appliedSessionChanges = writableChanges.filter((change) => appliedPathSet.has(change.path));
-            sessionRestoreNeeded = appliedSessionChanges.length > 0;
-            await updateSessionBackupManifest(backupDir, appliedSessionChanges);
+            applyResult = await applySessionChanges(writableChanges, {
+              targetModel: model,
+              onBeforeApply: async (change) => {
+                throwIfAborted(signal);
+                await journal.applying("rollout", change.path);
+                await faultInjector?.({
+                  point: "before_rollout_apply",
+                  path: change.path,
+                  targetIndex: appliedSessionChanges.length + 1
+                });
+              },
+              onApplied: async (change) => {
+                appliedSessionChanges.push(change);
+                sessionRestoreNeeded = true;
+                await journal.applied("rollout", change.path);
+                recordCompletedTarget(change.path);
+                await updateSessionBackupManifest(backupDir, appliedSessionChanges);
+                await faultInjector?.({ point: "after_rollout_apply", path: change.path, appliedCount: appliedSessionChanges.length });
+              }
+            });
           }
-          workspaceRootResult = await syncWorkspaceRoots(storage, { cwdStats });
-          globalStateRestoreNeeded = workspaceRootResult.updated;
+          workspaceRootResult = await syncWorkspaceRoots(storage, {
+            cwdStats,
+            onBeforeWrite: async (targetPath) => {
+              throwIfAborted(signal);
+              await journal.applying("globalState", targetPath);
+            },
+            onApplied: async (targetPath) => {
+              globalStateRestoreNeeded = true;
+              await journal.applied("globalState", targetPath);
+              recordCompletedTarget(targetPath);
+              await faultInjector?.({ point: "after_global_state_apply", path: targetPath });
+            }
+          });
         },
         { busyTimeoutMs: sqliteBusyTimeoutMs, userEventThreadIds, threadCwdById, targetModel: model }
       );
@@ -365,6 +484,7 @@ async function runSyncCore({
         status: "complete",
         updatedRows: sqliteResult.updatedRows
       });
+      recordCompletedTarget(storage.stateDbLocation?.path ?? storage.sqliteHome);
       const skippedLockedRolloutFiles = [...new Set([
         ...skippedRolloutFiles,
         ...applyResult.skippedPaths
@@ -387,7 +507,7 @@ async function runSyncCore({
         deletedCount: autoPruneResult?.deletedCount ?? 0,
         warning: autoPruneWarning
       });
-      return {
+      const result = {
         codexHome,
         sqliteHome: storage.sqliteHome,
         sqliteHomeSource: storage.sqliteHomeSource,
@@ -410,32 +530,72 @@ async function runSyncCore({
         autoPruneResult,
         autoPruneWarning
       };
+      await journal.committed();
+      return result;
     } catch (error) {
       const restoreFailures = [];
+      try {
+        await journal?.rollingBack(error);
+      } catch (journalError) {
+        restoreFailures.push(`transaction journal: ${journalError.message}`);
+      }
       if (sessionRestoreNeeded) {
         try {
-          await restoreSessionChanges(appliedSessionChanges.map((change) => ({
-            path: change.path,
-            originalFirstLine: change.originalFirstLine,
-            originalSeparator: change.originalSeparator
-          })));
+          await faultInjector?.({ point: "before_rollout_rollback", appliedCount: appliedSessionChanges.length });
+          await restoreSessionChanges(appliedSessionChanges);
         } catch (restoreError) {
           restoreFailures.push(`rollout files: ${restoreError.message}`);
         }
       }
       if (globalStateRestoreNeeded && backupDir) {
         try {
+          await faultInjector?.({ point: "before_global_state_rollback" });
           await restoreGlobalStateFilesFromBackup(backupDir, codexHome);
         } catch (restoreError) {
           restoreFailures.push(`global state: ${restoreError.message}`);
         }
       }
+      if (configBackupText !== undefined) {
+        try {
+          await writeConfigText(configPath, configBackupText);
+        } catch (restoreError) {
+          restoreFailures.push(`config: ${restoreError.message}`);
+        }
+      }
+      if (restoreFailures.length === 0) {
+        try {
+          await journal?.rolledBack();
+        } catch (journalError) {
+          restoreFailures.push(`transaction journal: ${journalError.message}`);
+        }
+      }
       if (restoreFailures.length > 0) {
-        throw new Error(
-          `Failed to restore state after sync error. Original error: ${error.message}. Restore error: ${restoreFailures.join("; ")}`
+        try {
+          await journal?.recoveryRequired(error, restoreFailures);
+        } catch {
+          // Preserve the original and rollback errors even if the journal is
+          // no longer writable.
+        }
+        const completedSet = new Set(completedTargets);
+        const uncompletedTargets = potentialTargets.filter((targetPath) => !completedSet.has(targetPath));
+        throw new SyncTransactionError(
+          error,
+          restoreFailures,
+          backupDir,
+          completedTargets,
+          uncompletedTargets,
+          { rollbackStatus: "incomplete", recoveryRequired: true }
         );
       }
-      throw error;
+      const completedSet = new Set(completedTargets);
+      throw new SyncTransactionError(
+        error,
+        [],
+        backupDir,
+        completedTargets,
+        potentialTargets.filter((targetPath) => !completedSet.has(targetPath)),
+        { rollbackStatus: "complete", recoveryRequired: false }
+      );
     }
   } finally {
     await releaseLock();
@@ -571,12 +731,15 @@ export async function runRestore({
   }
   const releaseLock = await acquireLock(codexHome, "restore");
   try {
-    return await restoreBackup(path.resolve(backupDir), storage, {
+    const normalizedBackupDir = path.resolve(backupDir);
+    const result = await restoreBackup(normalizedBackupDir, storage, {
       restoreConfig,
       restoreDatabase,
       restoreSessions,
       allowSqliteHomeRelocation
     });
+    await markBackupTransactionRolledBack(normalizedBackupDir);
+    return result;
   } finally {
     await releaseLock();
   }

@@ -7,6 +7,300 @@ namespace CodexProviderSync.Core.Tests;
 public sealed class CoreIntegrationTests
 {
     [Fact]
+    public async Task RunSync_RollsBackFirstRollout_WhenLaterTargetFails_Issue69()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string firstPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        string secondPath = fixture.RolloutPath("sessions", "rollout-b.jsonl");
+        await fixture.WriteRolloutAsync(firstPath, "thread-a", "apigather");
+        await fixture.WriteRolloutAsync(secondPath, "thread-b", "apigather");
+        await fixture.WriteStateDbAsync([
+            ("thread-a", "apigather", false),
+            ("thread-b", "apigather", false)
+        ]);
+        string firstBefore = await File.ReadAllTextAsync(firstPath);
+        string secondBefore = await File.ReadAllTextAsync(secondPath);
+
+        CodexSyncService service = new();
+        service.FaultInjector = (point, _, appliedCount) =>
+        {
+            if (point == "after_rollout_apply" && appliedCount == 1)
+            {
+                throw new IOException("injected second-target failure");
+            }
+            return Task.CompletedTask;
+        };
+
+        SyncTransactionException error = await Assert.ThrowsAsync<SyncTransactionException>(
+            () => service.RunSyncAsync(fixture.CodexHome, provider: "openai"));
+        Assert.Contains("injected second-target failure", error.OriginalError.Message);
+        Assert.Equal("complete", error.RollbackStatus);
+        Assert.False(error.RecoveryRequired);
+        Assert.Equal(firstBefore, await File.ReadAllTextAsync(firstPath));
+        Assert.Equal(secondBefore, await File.ReadAllTextAsync(secondPath));
+        Assert.Equal("apigather", await ReadProviderAsync(fixture.StateDbPath(), "thread-a"));
+        Assert.Equal("apigather", await ReadProviderAsync(fixture.StateDbPath(), "thread-b"));
+        Assert.Empty(await FileTransactionJournal.FindPendingAsync(fixture.CodexHome));
+    }
+
+    [Fact]
+    public async Task RunSync_RestoresGlobalStatePrimary_WhenBackupWriteFails_Issue69()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        await fixture.WriteGlobalStateAsync(new Dictionary<string, object?>
+        {
+            ["electron-saved-workspace-roots"] = new[] { @"\\?\D:\Workspace\sample" },
+            ["project-order"] = new[] { @"\\?\D:\Workspace\sample" },
+            ["active-workspace-roots"] = new[] { @"\\?\D:\Workspace\sample" }
+        });
+        await fixture.WriteStateDbWithCwdAsync([
+            ("thread-global", "openai", false, @"\\?\D:\Workspace\sample")
+        ]);
+        string primaryPath = Path.Combine(fixture.CodexHome, AppConstants.GlobalStateFileBasename);
+        string backupPath = Path.Combine(fixture.CodexHome, AppConstants.GlobalStateBackupFileBasename);
+        string primaryBefore = await File.ReadAllTextAsync(primaryPath);
+        string backupBefore = await File.ReadAllTextAsync(backupPath);
+
+        CodexSyncService service = new();
+        service.FaultInjector = (point, appliedPath, _) =>
+        {
+            if (point == "after_global_state_apply"
+                && string.Equals(appliedPath, primaryPath, StringComparison.Ordinal))
+            {
+                throw new IOException("injected global-state backup failure");
+            }
+            return Task.CompletedTask;
+        };
+
+        SyncTransactionException error = await Assert.ThrowsAsync<SyncTransactionException>(
+            () => service.RunSyncAsync(fixture.CodexHome));
+        Assert.Contains("injected global-state backup failure", error.OriginalError.Message);
+        Assert.Equal("complete", error.RollbackStatus);
+        Assert.False(error.RecoveryRequired);
+        Assert.Equal(primaryBefore, await File.ReadAllTextAsync(primaryPath));
+        Assert.Equal(backupBefore, await File.ReadAllTextAsync(backupPath));
+        Assert.Empty(await FileTransactionJournal.FindPendingAsync(fixture.CodexHome));
+    }
+
+    [Fact]
+    public async Task UnfinishedJournal_BlocksWrites_UntilBoundBackupIsRestored()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        await fixture.WriteStateDbAsync([("thread-recovery", "openai", false)]);
+        string configPath = Path.Combine(fixture.CodexHome, "config.toml");
+        BackupService backupService = new(new SessionRolloutService(), new SqliteStateService());
+        string backupDir = await backupService.CreateBackupAsync(
+            fixture.CodexHome,
+            "openai",
+            [],
+            configPath);
+        await FileTransactionJournal.CreateAsync(
+            backupDir,
+            fixture.CodexHome,
+            "openai",
+            [configPath]);
+
+        CodexSyncService service = new();
+        StatusSnapshot status = await service.GetStatusAsync(fixture.CodexHome);
+        Assert.Single(status.PendingTransactions);
+        Assert.Contains("Recovery required:", TextFormatter.FormatStatus(status));
+        Assert.Contains("需要恢复:", TextFormatter.FormatStatus(status, TextFormatter.ChineseSimplified));
+        RecoveryRequiredException error = await Assert.ThrowsAsync<RecoveryRequiredException>(
+            () => service.RunSyncAsync(fixture.CodexHome));
+        Assert.Single(error.PendingBackupDirectories);
+
+        await service.RunRestoreAsync(fixture.CodexHome, backupDir);
+        Assert.Empty(await FileTransactionJournal.FindPendingAsync(fixture.CodexHome));
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+        Assert.Equal("openai", result.TargetProvider);
+    }
+
+    [Fact]
+    public async Task RollbackFailure_PreservesBothErrors_AndManualRecoveryEvidence()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-rollback-failure.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-rollback", "apigather");
+        await fixture.WriteStateDbAsync([("thread-rollback", "apigather", false)]);
+
+        CodexSyncService service = new();
+        service.FaultInjector = (point, _, _) =>
+        {
+            if (point == "after_rollout_apply")
+            {
+                throw new IOException("injected original failure");
+            }
+            if (point == "before_rollout_rollback")
+            {
+                throw new IOException("injected rollback failure");
+            }
+            return Task.CompletedTask;
+        };
+
+        SyncTransactionException error = await Assert.ThrowsAsync<SyncTransactionException>(
+            () => service.RunSyncAsync(fixture.CodexHome));
+        Assert.Contains("injected original failure", error.OriginalError.Message);
+        Assert.Contains(error.RollbackErrors, value => value.Contains("injected rollback failure"));
+        Assert.Equal("incomplete", error.RollbackStatus);
+        Assert.True(error.RecoveryRequired);
+        Assert.Single(await FileTransactionJournal.FindPendingAsync(fixture.CodexHome));
+
+        await service.RunRestoreAsync(fixture.CodexHome, error.BackupDirectory);
+        using JsonDocument restored = JsonDocument.Parse(
+            (await File.ReadAllTextAsync(sessionPath)).Split('\n', StringSplitOptions.RemoveEmptyEntries)[0]);
+        Assert.Equal("apigather", restored.RootElement.GetProperty("payload").GetProperty("model_provider").GetString());
+        Assert.Empty(await FileTransactionJournal.FindPendingAsync(fixture.CodexHome));
+    }
+
+    [Fact]
+    public async Task Cancellation_AfterFirstTarget_RollsBackDiskAndSqlite_WithStructuredEvidence()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string firstPath = fixture.RolloutPath("sessions", "rollout-cancel-a.jsonl");
+        string secondPath = fixture.RolloutPath("sessions", "rollout-cancel-b.jsonl");
+        await fixture.WriteRolloutAsync(firstPath, "thread-cancel-a", "apigather");
+        await fixture.WriteRolloutAsync(secondPath, "thread-cancel-b", "apigather");
+        await fixture.WriteStateDbAsync([
+            ("thread-cancel-a", "apigather", false),
+            ("thread-cancel-b", "apigather", false)
+        ]);
+        string firstBefore = await File.ReadAllTextAsync(firstPath);
+        string secondBefore = await File.ReadAllTextAsync(secondPath);
+        using CancellationTokenSource cancellation = new();
+        CodexSyncService service = new();
+        service.FaultInjector = (point, _, appliedCount) =>
+        {
+            if (point == "after_rollout_apply" && appliedCount == 1)
+            {
+                cancellation.Cancel();
+            }
+            return Task.CompletedTask;
+        };
+
+        SyncTransactionException error = await Assert.ThrowsAsync<SyncTransactionException>(
+            () => service.RunSyncAsync(
+                fixture.CodexHome,
+                provider: "openai",
+                cancellationToken: cancellation.Token));
+
+        Assert.IsType<OperationCanceledException>(error.OriginalError);
+        Assert.Equal("SYNC_FAILED_ROLLED_BACK", error.Code);
+        Assert.Equal("complete", error.RollbackStatus);
+        Assert.False(error.RecoveryRequired);
+        Assert.Contains(Path.GetFullPath(firstPath), error.CompletedTargets);
+        Assert.Equal(firstBefore, await File.ReadAllTextAsync(firstPath));
+        Assert.Equal(secondBefore, await File.ReadAllTextAsync(secondPath));
+        Assert.Equal("apigather", await ReadProviderAsync(fixture.StateDbPath(), "thread-cancel-a"));
+        Assert.Equal("apigather", await ReadProviderAsync(fixture.StateDbPath(), "thread-cancel-b"));
+        Assert.Empty(await FileTransactionJournal.FindPendingAsync(fixture.CodexHome));
+    }
+
+    [Fact]
+    public async Task BackupFailure_OccursBeforeJournalOrTargetMutation()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-backup-failure.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-backup-failure", "apigather");
+        await fixture.WriteStateDbAsync([("thread-backup-failure", "apigather", false)]);
+        string before = await File.ReadAllTextAsync(sessionPath);
+        CodexSyncService service = new();
+        service.FaultInjector = (point, _, _) =>
+        {
+            if (point == "before_backup")
+            {
+                throw new IOException("injected backup creation failure");
+            }
+            return Task.CompletedTask;
+        };
+
+        IOException error = await Assert.ThrowsAsync<IOException>(
+            () => service.RunSyncAsync(fixture.CodexHome));
+        Assert.Contains("injected backup creation failure", error.Message);
+        Assert.Equal(before, await File.ReadAllTextAsync(sessionPath));
+        Assert.Empty(await FileTransactionJournal.FindPendingAsync(fixture.CodexHome));
+        Assert.False(Directory.Exists(fixture.BackupRoot()));
+    }
+
+    [Fact]
+    public async Task AtomicReplacementFailure_PreservesOriginalAndRemovesStaging()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        string targetPath = Path.Combine(fixture.Root, "atomic-target.txt");
+        await File.WriteAllTextAsync(targetPath, "before");
+        await using (FileStream locked = new(
+            targetPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.None))
+        {
+            await Assert.ThrowsAnyAsync<Exception>(
+                () => AtomicFile.WriteAllTextAsync(targetPath, "after"));
+        }
+        Assert.Equal("before", await File.ReadAllTextAsync(targetPath));
+        Assert.Empty(Directory.GetFiles(fixture.Root, "*.provider-sync.*.tmp"));
+    }
+
+    [Theory]
+    [InlineData("before_stage_write")]
+    [InlineData("before_atomic_replace")]
+    public async Task AtomicWriter_InjectedFailure_PreservesOriginalAndRemovesStaging(string faultPoint)
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        string targetPath = Path.Combine(fixture.Root, $"atomic-{faultPoint}.txt");
+        await File.WriteAllTextAsync(targetPath, "before");
+
+        IOException error = await Assert.ThrowsAsync<IOException>(
+            () => AtomicFile.WriteAllTextAsync(
+                targetPath,
+                "after",
+                faultInjector: (point, _, _) =>
+                {
+                    if (point == faultPoint)
+                    {
+                        throw new IOException($"injected {faultPoint}");
+                    }
+                    return Task.CompletedTask;
+                }));
+
+        Assert.Contains($"injected {faultPoint}", error.Message);
+        Assert.Equal("before", await File.ReadAllTextAsync(targetPath));
+        Assert.Empty(Directory.GetFiles(fixture.Root, "*.provider-sync.*.tmp"));
+    }
+
+    [Fact]
+    public async Task PruneBackups_NeverDeletesBackupReferencedByUnfinishedTransaction()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteBackupAsync("20260319T000000000Z", ("note.txt", "pending"));
+        await fixture.WriteBackupAsync("20260320T000000000Z", ("note.txt", "terminal"));
+        string pendingDir = fixture.BackupPath("20260319T000000000Z");
+        await FileTransactionJournal.CreateAsync(
+            pendingDir,
+            fixture.CodexHome,
+            "openai",
+            []);
+
+        BackupPruneResult result = await new BackupService(
+            new SessionRolloutService(),
+            new SqliteStateService()).PruneBackupsAsync(fixture.CodexHome, 0);
+
+        Assert.Equal(1, result.DeletedCount);
+        Assert.Equal(1, result.RemainingCount);
+        Assert.True(Directory.Exists(pendingDir));
+        Assert.False(Directory.Exists(fixture.BackupPath("20260320T000000000Z")));
+    }
+
+    [Fact]
     public async Task GetStatus_ReportsWindowsWslUncSqliteHomeWithoutOpeningDatabase()
     {
         if (!OperatingSystem.IsWindows())

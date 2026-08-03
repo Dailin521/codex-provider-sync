@@ -17,8 +17,269 @@ import { DB_FILE_BASENAME, DEFAULT_BACKUP_RETENTION_COUNT, SQLITE_DIR_BASENAME }
 import { getUnsupportedNodeVersionMessage } from "../src/node-version.js";
 import { applySessionChanges, collectSessionChanges } from "../src/session-files.js";
 import { openDatabase } from "../src/sqlite.js";
+import { TransactionJournal, findPendingTransactions } from "../src/transaction-journal.js";
+import { writeFileAtomic } from "../src/atomic-file.js";
 
 delete process.env.CODEX_SQLITE_HOME;
+
+test("runSync rolls back the first rollout when a later target fails (#69)", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const firstPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");
+  const secondPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-b.jsonl");
+  await writeRollout(firstPath, "thread-a", "apigather");
+  await writeRollout(secondPath, "thread-b", "apigather");
+  await writeStateDb(codexHome, [
+    { id: "thread-a", model_provider: "apigather" },
+    { id: "thread-b", model_provider: "apigather" }
+  ]);
+  const firstBefore = await fs.readFile(firstPath, "utf8");
+  const secondBefore = await fs.readFile(secondPath, "utf8");
+
+  await assert.rejects(
+    runSync({
+      codexHome,
+      provider: "openai",
+      faultInjector: ({ point, appliedCount }) => {
+        if (point === "after_rollout_apply" && appliedCount === 1) {
+          throw new Error("injected second-target failure");
+        }
+      }
+    }),
+    /injected second-target failure/
+  );
+
+  assert.equal(await fs.readFile(firstPath, "utf8"), firstBefore);
+  assert.equal(await fs.readFile(secondPath, "utf8"), secondBefore);
+  const db = await openDatabase(stateDbPath(codexHome));
+  try {
+    const providers = db.prepare("SELECT model_provider FROM threads ORDER BY id").all();
+    assert.deepEqual(providers.map((row) => row.model_provider), ["apigather", "apigather"]);
+  } finally {
+    db.close();
+  }
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("runSync restores global-state primary when backup write fails (#69)", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const originalState = {
+    "electron-saved-workspace-roots": ["\\\\?\\D:\\Workspace\\sample"],
+    "project-order": ["\\\\?\\D:\\Workspace\\sample"],
+    "active-workspace-roots": ["\\\\?\\D:\\Workspace\\sample"]
+  };
+  await writeGlobalState(codexHome, originalState);
+  await writeStateDb(codexHome, [
+    { id: "thread-global", model_provider: "openai", cwd: "\\\\?\\D:\\Workspace\\sample" }
+  ]);
+  const primaryPath = path.join(codexHome, ".codex-global-state.json");
+  const backupPath = path.join(codexHome, ".codex-global-state.json.bak");
+  const primaryBefore = await fs.readFile(primaryPath, "utf8");
+  const backupBefore = await fs.readFile(backupPath, "utf8");
+
+  await assert.rejects(
+    runSync({
+      codexHome,
+      faultInjector: ({ point, path: appliedPath }) => {
+        if (point === "after_global_state_apply" && appliedPath === primaryPath) {
+          throw new Error("injected global-state backup failure");
+        }
+      }
+    }),
+    /injected global-state backup failure/
+  );
+
+  assert.equal(await fs.readFile(primaryPath, "utf8"), primaryBefore);
+  assert.equal(await fs.readFile(backupPath, "utf8"), backupBefore);
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("unfinished journal blocks writes until the bound backup is restored", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  await writeStateDb(codexHome, [{ id: "thread-recovery", model_provider: "openai" }]);
+  const configPath = path.join(codexHome, "config.toml");
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: [],
+    configPath
+  });
+  await TransactionJournal.create(backupDir, {
+    codexHome,
+    targetProvider: "openai",
+    potentialTargets: [configPath]
+  });
+
+  const status = await getStatus({ codexHome });
+  assert.equal(status.pendingTransactions.length, 1);
+  assert.match(renderStatus(status), /Recovery required:[\s\S]*Run restore/);
+  await assert.rejects(
+    runSync({ codexHome }),
+    (error) => error?.code === "RECOVERY_REQUIRED" && error.pendingTransactions.length === 1
+  );
+
+  await runRestore({ backupDir, codexHome });
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+  const result = await runSync({ codexHome });
+  assert.equal(result.targetProvider, "openai");
+});
+
+test("rollback failure preserves both errors and manual recovery evidence", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-rollback-failure.jsonl");
+  await writeRollout(sessionPath, "thread-rollback", "apigather");
+  await writeStateDb(codexHome, [{ id: "thread-rollback", model_provider: "apigather" }]);
+
+  let error;
+  try {
+    await runSync({
+      codexHome,
+      faultInjector: ({ point }) => {
+        if (point === "after_rollout_apply") {
+          throw new Error("injected original failure");
+        }
+        if (point === "before_rollout_rollback") {
+          throw new Error("injected rollback failure");
+        }
+      }
+    });
+    assert.fail("runSync should fail when rollback is injected to fail");
+  } catch (caught) {
+    error = caught;
+  }
+
+  assert.equal(error.name, "SyncTransactionError");
+  assert.equal(error.code, "RECOVERY_REQUIRED");
+  assert.match(error.originalError.message, /injected original failure/);
+  assert.ok(error.rollbackErrors.some((value) => value.includes("injected rollback failure")));
+  assert.equal(error.rollbackStatus, "incomplete");
+  assert.equal(error.recoveryRequired, true);
+  assert.equal((await findPendingTransactions(codexHome)).length, 1);
+
+  await runRestore({ backupDir: error.backupDir, codexHome });
+  const firstLine = (await fs.readFile(sessionPath, "utf8")).split("\n")[0];
+  assert.equal(JSON.parse(firstLine).payload.model_provider, "apigather");
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("cancellation after the first target rolls back disk and SQLite with structured evidence", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const firstPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-cancel-a.jsonl");
+  const secondPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-cancel-b.jsonl");
+  await writeRollout(firstPath, "thread-cancel-a", "apigather");
+  await writeRollout(secondPath, "thread-cancel-b", "apigather");
+  await writeStateDb(codexHome, [
+    { id: "thread-cancel-a", model_provider: "apigather" },
+    { id: "thread-cancel-b", model_provider: "apigather" }
+  ]);
+  const before = await Promise.all([fs.readFile(firstPath, "utf8"), fs.readFile(secondPath, "utf8")]);
+  const controller = new AbortController();
+
+  let error;
+  try {
+    await runSync({
+      codexHome,
+      provider: "openai",
+      signal: controller.signal,
+      faultInjector: ({ point, appliedCount }) => {
+        if (point === "after_rollout_apply" && appliedCount === 1) {
+          controller.abort();
+        }
+      }
+    });
+    assert.fail("runSync should observe cancellation at the next target checkpoint");
+  } catch (caught) {
+    error = caught;
+  }
+
+  assert.equal(error.name, "SyncTransactionError");
+  assert.equal(error.code, "SYNC_FAILED_ROLLED_BACK");
+  assert.equal(error.originalError.name, "AbortError");
+  assert.equal(error.rollbackStatus, "complete");
+  assert.equal(error.recoveryRequired, false);
+  assert.ok(error.completedTargets.includes(path.resolve(firstPath)));
+  assert.equal(await fs.readFile(firstPath, "utf8"), before[0]);
+  assert.equal(await fs.readFile(secondPath, "utf8"), before[1]);
+  const db = await openDatabase(stateDbPath(codexHome));
+  try {
+    const providers = db.prepare("SELECT model_provider FROM threads ORDER BY id").all();
+    assert.deepEqual(providers.map((row) => row.model_provider), ["apigather", "apigather"]);
+  } finally {
+    db.close();
+  }
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("backup failure occurs before journal or target mutation", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-backup-failure.jsonl");
+  await writeRollout(sessionPath, "thread-backup-failure", "apigather");
+  await writeStateDb(codexHome, [{ id: "thread-backup-failure", model_provider: "apigather" }]);
+  const before = await fs.readFile(sessionPath, "utf8");
+
+  await assert.rejects(
+    runSync({
+      codexHome,
+      faultInjector: ({ point }) => {
+        if (point === "before_backup") {
+          throw new Error("injected backup creation failure");
+        }
+      }
+    }),
+    /injected backup creation failure/
+  );
+
+  assert.equal(await fs.readFile(sessionPath, "utf8"), before);
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+  await assert.rejects(fs.access(backupRoot(codexHome)));
+});
+
+test("atomic replacement failure preserves the original file and removes staging", async () => {
+  if (process.platform !== "win32") {
+    return;
+  }
+  const { root } = await makeTempCodexHome();
+  const targetPath = path.join(root, "atomic-target.txt");
+  await fs.writeFile(targetPath, "before", "utf8");
+  const lockProcess = await lockRolloutFile(targetPath);
+  try {
+    await assert.rejects(() => writeFileAtomic(targetPath, "after"));
+  } finally {
+    lockProcess.kill();
+    await new Promise((resolve) => lockProcess.once("exit", resolve));
+  }
+  assert.equal(await fs.readFile(targetPath, "utf8"), "before");
+  const staging = (await fs.readdir(root)).filter((name) => name.includes(".provider-sync.") && name.endsWith(".tmp"));
+  assert.deepEqual(staging, []);
+});
+
+for (const faultPoint of ["before_stage_write", "before_atomic_replace"]) {
+  test(`atomic writer ${faultPoint} failure preserves the original and removes staging`, async () => {
+    const { root } = await makeTempCodexHome();
+    const targetPath = path.join(root, `atomic-${faultPoint}.txt`);
+    await fs.writeFile(targetPath, "before", "utf8");
+
+    await assert.rejects(
+      () => writeFileAtomic(targetPath, "after", "utf8", {
+        faultInjector: ({ point }) => {
+          if (point === faultPoint) {
+            throw new Error(`injected ${faultPoint}`);
+          }
+        }
+      }),
+      new RegExp(`injected ${faultPoint}`)
+    );
+
+    assert.equal(await fs.readFile(targetPath, "utf8"), "before");
+    const staging = (await fs.readdir(root)).filter((name) => name.includes(".provider-sync.") && name.endsWith(".tmp"));
+    assert.deepEqual(staging, []);
+  });
+}
 
 async function makeTempCodexHome() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-provider-sync-"));
@@ -2213,6 +2474,25 @@ test("pruneBackups ignores directories without managed backup metadata", async (
   assert.equal(result.deletedCount, 1);
   assert.equal(result.remainingCount, 0);
   await fs.access(junkDirectory);
+});
+
+test("pruneBackups never deletes a backup referenced by an unfinished transaction", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  const pendingDir = path.join(backupRoot(codexHome), "20260319T000000000Z");
+  await writeBackup(codexHome, "20260319T000000000Z", [["note.txt", "pending"]]);
+  await writeBackup(codexHome, "20260320T000000000Z", [["note.txt", "terminal"]]);
+  await TransactionJournal.create(pendingDir, {
+    codexHome,
+    targetProvider: "openai",
+    potentialTargets: []
+  });
+
+  const result = await pruneBackups(codexHome, 0);
+
+  assert.equal(result.deletedCount, 1);
+  assert.equal(result.remainingCount, 1);
+  await fs.access(pendingDir);
+  await assert.rejects(fs.access(path.join(backupRoot(codexHome), "20260320T000000000Z")));
 });
 
 test("runSync auto-prunes backups to the default retention count", async () => {
