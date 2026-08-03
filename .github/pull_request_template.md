@@ -10,8 +10,6 @@
 
 <!-- 列出关键改动，保持范围明确。 / List the key changes and keep the scope focused. -->
 
--
-
 ## 影响范围 / Impact
 
 <!-- 勾选所有适用项。 / Check all that apply. -->
@@ -36,19 +34,13 @@
 
 <!-- 写出实际运行的命令和结果，例如 npm test: 100 passed。 / List the commands actually run and their results. -->
 
--
-
 ### Manual
 
 <!-- 写出平台、操作步骤和结果；GUI 改动还请注明缩放比例并附前后截图。 / Include platform, steps, and results; for GUI changes, also include display scaling and screenshots. -->
 
--
-
 ### Not run
 
 <!-- 未运行的测试、原因以及剩余风险。没有则写“无”。 / List tests not run, why, and any remaining risk; otherwise write "None". -->
-
--
 
 ## 检查清单 / Checklist
 

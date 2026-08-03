@@ -121,3 +121,5 @@ PR 中请特别说明：
 ## License
 
 提交贡献即表示你同意按照本仓库的 [MIT License](LICENSE) 发布你的贡献。
+
+By contributing, you agree that your contribution will be licensed under the repository's [MIT License](LICENSE).
