@@ -22,7 +22,7 @@
 - [ ] macOS GUI
 - [ ] WSL / SQLite paths
 - [ ] Backup / restore
-- [ ] CI / Release
+- [ ] CI / GitHub Actions
 - [ ] Documentation
 
 ### 数据写入 / Data writes

@@ -68,7 +68,7 @@ dotnet build desktop/CodexProviderSync.Mac/CodexProviderSync.Mac.csproj --config
 
 - 保持 PR 范围单一，避免把无关重构和功能修改混在一起。
 - 优先补充能够复现问题并验证修复的自动化测试。
-- 不要为了测试而操作真实的 `~/.codex`；使用临时目录和测试夹具。
+- 自动化测试和复现脚本必须使用临时目录或测试夹具，不得依赖、读取或改写真实用户的 `~/.codex`。人工验证时优先使用专用测试 Codex Home，并在 PR 中说明验证范围。
 - 不要绕过备份、SQLite Home 解析、WSL UNC 安全阻断或跨 SQLite Home 恢复确认。
 - 不要修改消息正文、认证信息、`auth.json` 或 `updated_at`。
 - 修改用户可见行为、命令参数或安全边界时，更新受影响的文档；同一行为同时有中英文说明时，请保持一致。
@@ -84,7 +84,7 @@ dotnet build desktop/CodexProviderSync.Mac/CodexProviderSync.Mac.csproj --config
 | Windows GUI | Core Tests、App Tests；布局改动附 Windows 截图或说明未手测原因 |
 | macOS GUI | Core Tests、macOS Release build；真实 macOS GUI 手测无法完成时，在 PR 中明确记录 |
 | WSL/SQLite 路径 | 相关自动化测试；条件允许时运行真实 WSL 安全脚本 |
-| CI / 发布工作流 | 通过 PR 说明并验证 YAML、权限和构建逻辑；正式发布由维护者负责 |
+| CI / GitHub Actions | 检查 YAML、权限和受影响的工作流行为；相关构建命令能在本地运行时一并验证 |
 
 无法运行某项平台测试并不会自动阻止贡献，但必须在 PR 的 `Not run` 中写明原因和剩余风险。
 
@@ -106,20 +106,17 @@ PR 中请特别说明：
 - 自动化测试、真实手测和未执行项目。
 - GUI 变化的前后截图。
 
-## 发布
-
-正式发布由维护者负责。贡献者只需要提交 PR、说明验证结果和剩余风险，不需要创建或操作任何 Release Tag。
-
 ## English quick guide
 
 - Small fixes, tests, and documentation updates can be submitted directly as a PR. Please open an Issue before starting a large feature, behavior change, or refactor.
 - If you do not have write access, fork the repository, push your branch to your fork, and open a PR against this repository's `main` branch.
 - Use Node.js 16 or later and run `npm ci` followed by `npm test`. Changes to shared .NET or desktop code also require the relevant .NET 10 tests listed above.
-- Use temporary directories and test fixtures. Never include real credentials, `auth.json`, Codex sessions, SQLite databases, backups, logs, tokens, or personal data.
+- Automated tests and reproduction scripts must use temporary directories or fixtures and must not depend on, read, or modify a real user's `~/.codex`. Prefer a dedicated test Codex Home for manual validation and describe its scope in the PR.
+- Never include unredacted credentials, `auth.json`, Codex sessions, SQLite databases, backups, logs, tokens, or personal data.
 - Keep each PR focused. Explain why the change is needed, what it writes, which platforms it affects, what was tested, and what was not tested.
 - GUI changes should include screenshots and the platform and display scaling used. If real macOS GUI testing is unavailable, say so clearly; it is not automatically a reason to reject the contribution.
 - Update affected documentation when user-visible behavior, command options, or safety boundaries change.
-- All changes go through a PR and must pass `ci-gate`. Release creation and Release Tags are maintained by the repository owner; contributors do not need to manage them.
+- All changes go through a PR and must pass `ci-gate`.
 
 ## License
 
