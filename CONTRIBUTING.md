@@ -4,6 +4,8 @@
 
 This project welcomes issues, pull requests, documentation, and tests in either Chinese or English.
 
+[English quick guide](#english-quick-guide)
+
 ## 开始之前
 
 - 小型修复、测试和文档改进可以直接提交 PR。
@@ -33,7 +35,7 @@ This project welcomes issues, pull requests, documentation, and tests in either 
 - Node.js 16 或更高版本；CI 同时验证 Node.js 16 和 24
 - npm
 - .NET 10 SDK（修改 .NET Core 或 GUI 时）
-- PowerShell 7（运行 Windows 发布脚本时）
+- PowerShell 7（修改或验证 Windows 打包脚本时）
 
 安装依赖并运行 CLI 测试：
 
@@ -69,31 +71,32 @@ dotnet build desktop/CodexProviderSync.Mac/CodexProviderSync.Mac.csproj --config
 - 不要为了测试而操作真实的 `~/.codex`；使用临时目录和测试夹具。
 - 不要绕过备份、SQLite Home 解析、WSL UNC 安全阻断或跨 SQLite Home 恢复确认。
 - 不要修改消息正文、认证信息、`auth.json` 或 `updated_at`。
-- 修改用户可见行为、命令参数或安全边界时，同步更新中文和英文文档。
+- 修改用户可见行为、命令参数或安全边界时，更新受影响的文档；同一行为同时有中英文说明时，请保持一致。
 - GUI 布局改动请附截图，并注明平台、缩放比例和是否完成真实手测。
 
 ## 按改动范围验证
 
 | 改动范围 | 最低验证要求 |
 | --- | --- |
-| 文档 | 检查链接、路径、命令和中英文内容是否一致 |
+| 文档 | 检查链接、路径和命令；同一内容有多个语言版本时保持一致 |
 | Node.js CLI | `npm test` |
 | 共享 .NET Core | Core Tests；涉及 CLI 时同时运行 `npm test` |
 | Windows GUI | Core Tests、App Tests；布局改动附 Windows 截图或说明未手测原因 |
 | macOS GUI | Core Tests、macOS Release build；真实 macOS GUI 手测无法完成时，在 PR 中明确记录 |
 | WSL/SQLite 路径 | 相关自动化测试；条件允许时运行真实 WSL 安全脚本 |
-| 发布工作流 | 不要创建测试 `v*` Tag；通过 PR 验证 YAML、权限和构建逻辑 |
+| CI / 发布工作流 | 通过 PR 说明并验证 YAML、权限和构建逻辑；正式发布由维护者负责 |
 
 无法运行某项平台测试并不会自动阻止贡献，但必须在 PR 的 `Not run` 中写明原因和剩余风险。
 
 ## 提交 Pull Request
 
-1. 从最新的 `main` 创建功能分支。
-2. 完成范围明确的修改和相关验证。
-3. 使用简洁、可读的提交说明。
-4. 推送分支并创建 PR；不要直接修改 `main`。
-5. 按 PR 模板填写目的、改动、测试结果、平台影响和风险。
-6. 等待 CI 的 `ci-gate` 通过，并解决所有审查对话。
+1. 没有本仓库 Write 权限时，先 Fork 仓库并克隆自己的 Fork。
+2. 从最新的上游 `main` 创建功能分支。
+3. 完成范围明确的修改和相关验证。
+4. 使用简洁、可读的提交说明，并将分支推送到自己的 Fork 或有权限的远程分支。
+5. 创建一个目标为本仓库 `main` 的 PR；不要直接修改 `main`。
+6. 按 PR 模板填写目的、改动、测试结果、平台影响和风险。
+7. 等待 CI 的 `ci-gate` 通过，并解决所有审查对话。
 
 PR 中请特别说明：
 
@@ -105,7 +108,18 @@ PR 中请特别说明：
 
 ## 发布
 
-正式版本由维护者从受保护的 `main` 创建 `v*` Tag。贡献者不应创建、移动或删除发布 Tag，也不要为了验证工作流创建测试版本标签。
+正式发布由维护者负责。贡献者只需要提交 PR、说明验证结果和剩余风险，不需要创建或操作任何 Release Tag。
+
+## English quick guide
+
+- Small fixes, tests, and documentation updates can be submitted directly as a PR. Please open an Issue before starting a large feature, behavior change, or refactor.
+- If you do not have write access, fork the repository, push your branch to your fork, and open a PR against this repository's `main` branch.
+- Use Node.js 16 or later and run `npm ci` followed by `npm test`. Changes to shared .NET or desktop code also require the relevant .NET 10 tests listed above.
+- Use temporary directories and test fixtures. Never include real credentials, `auth.json`, Codex sessions, SQLite databases, backups, logs, tokens, or personal data.
+- Keep each PR focused. Explain why the change is needed, what it writes, which platforms it affects, what was tested, and what was not tested.
+- GUI changes should include screenshots and the platform and display scaling used. If real macOS GUI testing is unavailable, say so clearly; it is not automatically a reason to reject the contribution.
+- Update affected documentation when user-visible behavior, command options, or safety boundaries change.
+- All changes go through a PR and must pass `ci-gate`. Release creation and Release Tags are maintained by the repository owner; contributors do not need to manage them.
 
 ## License
 
