@@ -1,6 +1,7 @@
 # `main` 分支保护方案
 
-> 状态：`ci-gate` 已通过 PR #63 合并到 `main`；Ruleset 尚未创建。
+> 状态：`ci-gate` 已通过 PR #63 合并到 `main`；`main-protection`
+> Ruleset 已启用，等待测试 PR 验证。
 >
 > 适用仓库：`Dailin521/codex-provider-sync`
 
@@ -22,10 +23,16 @@
 
 ## 2. 当前状态
 
-截至 2026-07-31：
+截至 2026-08-03：
 
-- `main` 没有 Branch Protection Rule
-- 仓库没有 Repository Ruleset
+- `main` 没有重复配置旧式 Branch Protection Rule
+- [`main-protection`](https://github.com/Dailin521/codex-provider-sync/rules/20265235)
+  Repository Ruleset 已创建并处于 `Active`
+- Ruleset 只匹配 Default branch；当前即 `main`
+- `Repository admin` 的 Bypass 模式为 `For pull requests only`
+- Required approvals 为 `0`，并要求解决所有 review conversation
+- Required status check 只有来源为 GitHub Actions 的 `ci-gate`
+- Restrict deletions 和 Block force pushes 已开启，Strict / Up-to-date 已关闭
 - [PR #63](https://github.com/Dailin521/codex-provider-sync/pull/63) 已把稳定的
   `ci-gate` 合并到 `main`
 - PR #63 的七项检查全部成功；合并后的 `main` push 工作流也成功运行
@@ -183,14 +190,14 @@ Bypass mode 选择 `For pull requests only`，不要选择 `Always allow`。
 2. [已完成] 确认该 PR 的六项现有检查和 `ci-gate` 全部通过。
 3. [已完成] 合并 CI PR。
 4. [已完成] 确认 `main` push 工作流中也出现成功的 `ci-gate`。
-5. [待完成] 打开仓库 `Settings → Rules → Rulesets`。
-6. [待完成] 创建 `main-protection` Branch Ruleset，并只匹配 Default branch。
-7. [待完成] 添加 `Repository admin` Bypass，模式选择
+5. [已完成] 打开仓库 `Settings → Rules → Rulesets`。
+6. [已完成] 创建 `main-protection` Branch Ruleset，并只匹配 Default branch。
+7. [已完成] 添加 `Repository admin` Bypass，模式选择
    `For pull requests only`。
-8. [待完成] 只把来源为 `GitHub Actions` 的 `ci-gate` 设为 Required
+8. [已完成] 只把来源为 `GitHub Actions` 的 `ci-gate` 设为 Required
    status check。
-9. [待完成] 启用 PR、对话解决、禁止删除和禁止强推。
-10. [待完成] 把 Enforcement status 设为 `Active` 并创建 Ruleset。
+9. [已完成] 启用 PR、对话解决、禁止删除和禁止强推。
+10. [已完成] 把 Enforcement status 设为 `Active` 并创建 Ruleset。
 11. [待完成] 使用一个无风险测试 PR 验证规则。
 
 不要在 `ci-gate` 进入 `main` 之前就把它设为 Required check，否则 GitHub 没有
