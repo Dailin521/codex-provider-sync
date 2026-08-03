@@ -252,6 +252,67 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
+    public async Task RunSwitch_BackupCapturesPreSwitchProviderAndModel()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\nmodel = \"gpt-5.4-mini\"");
+        string configPath = Path.Combine(fixture.CodexHome, "config.toml");
+        string originalConfig = await File.ReadAllTextAsync(configPath);
+
+        SyncResult result = await new CodexSyncService().RunSwitchAsync(
+            fixture.CodexHome,
+            "apigather",
+            model: "apigather-prod");
+
+        Assert.Equal(
+            originalConfig,
+            await File.ReadAllTextAsync(Path.Combine(result.BackupDir, "config.toml")));
+        string switchedConfig = await File.ReadAllTextAsync(configPath);
+        Assert.Contains("model_provider = \"apigather\"", switchedConfig);
+        Assert.Contains("model = \"apigather-prod\"", switchedConfig);
+    }
+
+    [Fact]
+    public async Task RunSwitch_DoesNotTouchConfig_WhenPreSwitchBackupCreationFails()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\nmodel = \"gpt-5.4-mini\"");
+        string configPath = Path.Combine(fixture.CodexHome, "config.toml");
+        string originalConfig = await File.ReadAllTextAsync(configPath);
+        DateTime pinnedLastWriteTime = new(2001, 2, 3, 4, 5, 6, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(configPath, pinnedLastWriteTime);
+
+        Directory.CreateDirectory(Path.GetDirectoryName(fixture.BackupRoot())!);
+        await File.WriteAllTextAsync(fixture.BackupRoot(), "blocks backup directory creation");
+
+        await Assert.ThrowsAnyAsync<Exception>(
+            () => new CodexSyncService().RunSwitchAsync(fixture.CodexHome, "apigather"));
+        Assert.Equal(originalConfig, await File.ReadAllTextAsync(configPath));
+        Assert.Equal(pinnedLastWriteTime, File.GetLastWriteTimeUtc(configPath));
+    }
+
+    [Fact]
+    public async Task RunSwitch_RestoresConfig_AfterPostBackupSyncFailure()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"\nmodel = \"gpt-5.4-mini\"");
+        string configPath = Path.Combine(fixture.CodexHome, "config.toml");
+        string originalConfig = await File.ReadAllTextAsync(configPath);
+        await File.WriteAllTextAsync(
+            Path.Combine(fixture.CodexHome, AppConstants.GlobalStateFileBasename),
+            "{not-json");
+
+        await Assert.ThrowsAnyAsync<Exception>(
+            () => new CodexSyncService().RunSwitchAsync(fixture.CodexHome, "apigather"));
+        Assert.Equal(originalConfig, await File.ReadAllTextAsync(configPath));
+
+        string backupDir = Assert.Single(Directory.GetDirectories(fixture.BackupRoot()));
+        Assert.Equal(
+            originalConfig,
+            await File.ReadAllTextAsync(Path.Combine(backupDir, "config.toml")));
+    }
+
+    [Fact]
     public async Task RunSync_RepairsSqliteHasUserEventFromRolloutUserMessages()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();

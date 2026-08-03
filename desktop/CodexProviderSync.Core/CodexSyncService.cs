@@ -104,7 +104,7 @@ public sealed class CodexSyncService
         return _providerDiscoveryService.ExtractDetectedProviderIds(status);
     }
 
-    public async Task<SyncResult> RunSyncAsync(
+    public Task<SyncResult> RunSyncAsync(
         string? explicitCodexHome = null,
         string? provider = null,
         string? configBackupText = null,
@@ -112,6 +112,27 @@ public sealed class CodexSyncService
         int? sqliteBusyTimeoutMs = null,
         string? model = null,
         string? explicitSqliteHome = null)
+    {
+        return RunSyncCoreAsync(
+            explicitCodexHome,
+            provider,
+            configBackupText,
+            keepCount,
+            sqliteBusyTimeoutMs,
+            model,
+            explicitSqliteHome,
+            afterBackup: null);
+    }
+
+    private async Task<SyncResult> RunSyncCoreAsync(
+        string? explicitCodexHome,
+        string? provider,
+        string? configBackupText,
+        int keepCount,
+        int? sqliteBusyTimeoutMs,
+        string? model,
+        string? explicitSqliteHome,
+        Func<string, Task>? afterBackup)
     {
         if (keepCount < 1)
         {
@@ -159,6 +180,10 @@ public sealed class CodexSyncService
 
         await _sqliteStateService.AssertSqliteWritableAsync(storage, sqliteBusyTimeoutMs);
         string backupDir = await _backupService.CreateBackupAsync(storage, targetProvider, writableChanges, configPath, configBackupText);
+        if (afterBackup is not null)
+        {
+            await afterBackup(backupDir);
+        }
 
         bool sessionRestoreNeeded = false;
         List<SessionChange> appliedSessionChanges = [];
@@ -305,8 +330,7 @@ public sealed class CodexSyncService
             nextConfigText = _configFileService.SetRootModelInConfigText(nextConfigText, modelSync.Model!);
         }
 
-        await _configFileService.WriteConfigTextAsync(configPath, nextConfigText);
-
+        bool configMutationAttempted = false;
         try
         {
             // Even when the switch keeps the existing root model, keep
@@ -314,13 +338,19 @@ public sealed class CodexSyncService
             string? modelForThreads = modelSync.Applied
                 ? modelSync.Model
                 : _configFileService.ReadRootModelFromConfigText(nextConfigText);
-            SyncResult result = await RunSyncAsync(
+            SyncResult result = await RunSyncCoreAsync(
                 codexHome,
                 provider,
                 originalConfigText,
                 keepCount,
+                sqliteBusyTimeoutMs: null,
                 model: modelForThreads,
-                explicitSqliteHome: explicitSqliteHome);
+                explicitSqliteHome: explicitSqliteHome,
+                afterBackup: async _ =>
+                {
+                    configMutationAttempted = true;
+                    await _configFileService.WriteConfigTextAsync(configPath, nextConfigText);
+                });
             return new SyncResult
             {
                 CodexHome = result.CodexHome,
@@ -351,7 +381,10 @@ public sealed class CodexSyncService
         }
         catch
         {
-            await _configFileService.WriteConfigTextAsync(configPath, originalConfigText);
+            if (configMutationAttempted)
+            {
+                await _configFileService.WriteConfigTextAsync(configPath, originalConfigText);
+            }
             throw;
         }
     }

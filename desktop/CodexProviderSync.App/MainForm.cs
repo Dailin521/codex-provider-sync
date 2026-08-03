@@ -1285,28 +1285,23 @@ public sealed class MainForm : Form
 
     private WindowBoundsState CaptureWindowBounds()
     {
-        Rectangle bounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
-        return new WindowBoundsState
-        {
-            X = bounds.X,
-            Y = bounds.Y,
-            Width = bounds.Width,
-            Height = bounds.Height,
-            Maximized = WindowState == FormWindowState.Maximized
-        };
+        return WindowPlacementPolicy.Capture(Bounds, RestoreBounds, WindowState);
     }
 
     private void ApplyWindowBounds(WindowBoundsState? bounds)
     {
-        if (bounds is null || bounds.Width < 800 || bounds.Height < 600)
-        {
-            Size = new Size(1280, 820);
-            return;
-        }
-
+        Rectangle[] workingAreas = Screen.AllScreens.Select(screen => screen.WorkingArea).ToArray();
+        Rectangle fallbackWorkingArea = Screen.PrimaryScreen?.WorkingArea
+            ?? workingAreas.FirstOrDefault();
+        WindowPlacement placement = WindowPlacementPolicy.Restore(
+            bounds,
+            workingAreas,
+            fallbackWorkingArea,
+            defaultSize: new Size(1280, 820),
+            minimumSavedSize: new Size(800, 600));
         StartPosition = FormStartPosition.Manual;
-        Bounds = new Rectangle(bounds.X, bounds.Y, bounds.Width, bounds.Height);
-        if (bounds.Maximized)
+        Bounds = placement.Bounds;
+        if (placement.Maximized)
         {
             WindowState = FormWindowState.Maximized;
         }

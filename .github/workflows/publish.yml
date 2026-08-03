@@ -32,6 +32,12 @@ jobs:
           node-version: "24"
           cache: npm
 
+      - name: Verify release version consistency
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/verify-release-version.js --tag $env:RELEASE_TAG
+
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: "10.0.x"

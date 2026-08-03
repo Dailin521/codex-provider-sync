@@ -225,7 +225,11 @@ export function renderStatus(status) {
   return lines.join("\n");
 }
 
-export async function runSync({
+export async function runSync(options = {}) {
+  return runSyncCore(options);
+}
+
+async function runSyncCore({
   codexHome: explicitCodexHome,
   sqliteHome,
   storage: providedStorage,
@@ -236,7 +240,7 @@ export async function runSync({
   onProgress,
   model = null,
   platform
-} = {}) {
+} = {}, { afterBackup } = {}) {
   if (!Number.isInteger(keepCount) || keepCount < 1) {
     throw new Error(`Invalid automatic keep count: ${keepCount}. Expected an integer greater than or equal to 1.`);
   }
@@ -313,6 +317,10 @@ export async function runSync({
       backupDir,
       durationMs: backupDurationMs
     });
+
+    if (typeof afterBackup === "function") {
+      await afterBackup(backupDir);
+    }
 
     let sessionRestoreNeeded = false;
     let appliedSessionChanges = [];
@@ -488,44 +496,52 @@ export async function runSwitch({
     }
   }
 
-  emitProgress(onProgress, {
-    stage: "update_config",
-    status: "start",
-    provider
-  });
-  await writeConfigText(configPath, nextConfigText);
-  emitProgress(onProgress, {
-    stage: "update_config",
-    status: "complete",
-    provider
-  });
-
+  let configMutationAttempted = false;
   try {
-    // After the config update, `nextConfigText` has the final root-level
-    // `model` value. We use that to drive the per-thread `model` column
-    // rewrite so old sessions pick up the same model that new ones will.
+    // `nextConfigText` has the final root-level `model` value. Use that to
+    // drive the per-thread rewrite so old sessions match new sessions.
     let modelForThreads = null;
     if (modelSync.applied && modelSync.model) {
       modelForThreads = modelSync.model;
     } else {
       modelForThreads = readRootModelFromConfigText(nextConfigText);
     }
-    const syncResult = await runSync({
-      codexHome,
-      storage,
-      provider,
-      configBackupText: originalConfigText,
-      keepCount,
-      onProgress,
-      model: modelForThreads
-    });
+    const syncResult = await runSyncCore(
+      {
+        codexHome,
+        storage,
+        provider,
+        configBackupText: originalConfigText,
+        keepCount,
+        onProgress,
+        model: modelForThreads
+      },
+      {
+        afterBackup: async () => {
+          emitProgress(onProgress, {
+            stage: "update_config",
+            status: "start",
+            provider
+          });
+          configMutationAttempted = true;
+          await writeConfigText(configPath, nextConfigText);
+          emitProgress(onProgress, {
+            stage: "update_config",
+            status: "complete",
+            provider
+          });
+        }
+      }
+    );
     return {
       ...syncResult,
       configUpdated: true,
       modelSync
     };
   } catch (error) {
-    await writeConfigText(configPath, originalConfigText);
+    if (configMutationAttempted) {
+      await writeConfigText(configPath, originalConfigText);
+    }
     throw error;
   }
 }
