@@ -113,6 +113,7 @@ codex-provider sync --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/you
 - macOS GUI 说明：[中文](docs/README_MAC_GUI_ZH.md) · [English](docs/README_MAC_GUI_EN.md)
 - [English documentation](docs/README_EN.md)
 - [AI / Agent 操作指南](AGENTS.md)
+- [贡献指南](CONTRIBUTING.md)
 
 ## 开发
 
