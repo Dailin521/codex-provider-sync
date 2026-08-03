@@ -911,6 +911,76 @@ test("runSwitch updates config and syncs provider metadata", async () => {
   assert.match(rollout, /"model_provider":"apigather"/);
 });
 
+test("runSwitch completes a pre-switch backup before mutating config", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  const originalConfig = `model_provider = "openai"\nmodel = "gpt-5.4-mini"\n\n[model_providers.apigather]\nmodel = "apigather-prod"\nbase_url = "https://example.com"\n`;
+  const configPath = path.join(codexHome, "config.toml");
+  await fs.writeFile(configPath, originalConfig, "utf8");
+
+  const progressEvents = [];
+  const result = await runSwitch({
+    codexHome,
+    provider: "apigather",
+    onProgress(event) {
+      progressEvents.push(event);
+    }
+  });
+
+  const backupCompleteIndex = progressEvents.findIndex(
+    (event) => event.stage === "create_backup" && event.status === "complete"
+  );
+  const configUpdateIndex = progressEvents.findIndex(
+    (event) => event.stage === "update_config" && event.status === "start"
+  );
+  assert.ok(backupCompleteIndex >= 0);
+  assert.ok(configUpdateIndex > backupCompleteIndex);
+  assert.equal(
+    await fs.readFile(path.join(result.backupDir, "config.toml"), "utf8"),
+    originalConfig
+  );
+
+  const switchedConfig = await fs.readFile(configPath, "utf8");
+  assert.match(switchedConfig, /^model_provider = "apigather"/m);
+  assert.match(switchedConfig, /^model = "apigather-prod"/m);
+});
+
+test("runSwitch does not touch config when pre-switch backup creation fails", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  const originalConfig = `model_provider = "openai"\nmodel = "gpt-5.4-mini"\n\n[model_providers.apigather]\nbase_url = "https://example.com"\n`;
+  const configPath = path.join(codexHome, "config.toml");
+  await fs.writeFile(configPath, originalConfig, "utf8");
+  const pinnedMtime = new Date("2001-02-03T04:05:06.000Z");
+  await fs.utimes(configPath, pinnedMtime, pinnedMtime);
+
+  await fs.mkdir(path.dirname(backupRoot(codexHome)), { recursive: true });
+  await fs.writeFile(backupRoot(codexHome), "blocks backup directory creation", "utf8");
+
+  await assert.rejects(() => runSwitch({ codexHome, provider: "apigather" }));
+  assert.equal(await fs.readFile(configPath, "utf8"), originalConfig);
+  assert.equal((await fs.stat(configPath)).mtimeMs, pinnedMtime.getTime());
+});
+
+test("runSwitch restores config after a post-backup sync failure", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  const originalConfig = `model_provider = "openai"\nmodel = "gpt-5.4-mini"\n\n[model_providers.apigather]\nbase_url = "https://example.com"\n`;
+  const configPath = path.join(codexHome, "config.toml");
+  await fs.writeFile(configPath, originalConfig, "utf8");
+  await fs.writeFile(path.join(codexHome, ".codex-global-state.json"), "{not-json", "utf8");
+
+  await assert.rejects(
+    () => runSwitch({ codexHome, provider: "apigather" }),
+    /JSON|position|property name/i
+  );
+  assert.equal(await fs.readFile(configPath, "utf8"), originalConfig);
+
+  const backupDirectories = await fs.readdir(backupRoot(codexHome));
+  assert.equal(backupDirectories.length, 1);
+  assert.equal(
+    await fs.readFile(path.join(backupRoot(codexHome), backupDirectories[0], "config.toml"), "utf8"),
+    originalConfig
+  );
+});
+
 test("runSwitch copies root-level model from the new provider section", async () => {
   const { codexHome } = await makeTempCodexHome();
   const config = `model_provider = "openai"\nmodel = "gpt-5.4-mini"\n\n[model_providers.apigather]\nmodel = "apigather-prod"\nbase_url = "https://example.com"\n`;
