@@ -114,6 +114,7 @@ Before each `sync` or `switch`, the tool creates a backup under:
 - [macOS GUI guide](README_MAC_GUI_EN.md)
 - [中文说明](../README.md)
 - [AI / Agent guide](../AGENTS.md)
+- [Contributing guide](../CONTRIBUTING.md)
 
 ## Development
 
