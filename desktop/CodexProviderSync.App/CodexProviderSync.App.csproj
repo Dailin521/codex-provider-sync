@@ -1,6 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <ProjectReference Include="..\CodexProviderSync.Application\CodexProviderSync.Application.csproj" />
     <ProjectReference Include="..\CodexProviderSync.Core\CodexProviderSync.Core.csproj" />
   </ItemGroup>
 

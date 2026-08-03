@@ -45,6 +45,7 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj
+      - run: dotnet test desktop/CodexProviderSync.Application.Tests/CodexProviderSync.Application.Tests.csproj
       - run: dotnet test desktop/CodexProviderSync.App.Tests/CodexProviderSync.App.Tests.csproj
 
       - name: Build Windows GUI

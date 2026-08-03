@@ -38,6 +38,7 @@ jobs:
         with:
           dotnet-version: "10.0.x"
       - run: dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj
+      - run: dotnet test desktop/CodexProviderSync.Application.Tests/CodexProviderSync.Application.Tests.csproj
       - run: dotnet test desktop/CodexProviderSync.App.Tests/CodexProviderSync.App.Tests.csproj
 
   desktop-macos:
@@ -48,6 +49,7 @@ jobs:
         with:
           dotnet-version: "10.0.x"
       - run: dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj
+      - run: dotnet test desktop/CodexProviderSync.Application.Tests/CodexProviderSync.Application.Tests.csproj
       - run: dotnet build desktop/CodexProviderSync.Mac/CodexProviderSync.Mac.csproj --configuration Release
 
   ci-gate:

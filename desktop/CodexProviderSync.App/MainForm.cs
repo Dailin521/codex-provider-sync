@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using CodexProviderSync.Application;
 using CodexProviderSync.Core;
 
 namespace CodexProviderSync.App;
@@ -8,6 +9,7 @@ public sealed class MainForm : Form
     private const int ActionGroupMinimumWidth = 460;
 
     private readonly CodexSyncService _syncService = new();
+    private readonly AppController _appController;
     private readonly SettingsService _settingsService;
     private readonly UpdateService _updateService;
     private readonly ExecutionLogService _executionLogService;
@@ -126,6 +128,7 @@ public sealed class MainForm : Form
     private bool _logFailureReported;
     private bool _busy;
     private bool _updateCheckInProgress;
+    private bool _renderingControllerState;
     private string? _sqliteOverrideCodexHome;
 
     public MainForm() : this(new ExecutionLogService())
@@ -142,6 +145,10 @@ public sealed class MainForm : Form
         _settingsService = settingsService ?? new SettingsService();
         _updateService = updateService ?? new UpdateService();
         _localDate = localDate ?? (() => DateOnly.FromDateTime(DateTime.Now));
+        _appController = new AppController(new CoreApplicationAdapter(
+            _syncService,
+            _settingsService,
+            new CodexHomeService()));
         Text = "Codex Provider Sync";
         MinimumSize = new Size(1180, 760);
         StartPosition = FormStartPosition.CenterScreen;
@@ -434,17 +441,42 @@ public sealed class MainForm : Form
         modelOptions.Controls.Add(_modelCustomText, 1, 3);
         panel.Controls.Add(modelOptions, 0, 1);
 
-        _modelAutoRadio.CheckedChanged += (_, _) => UpdateModelOptionsEnabled();
-        _modelKeepRadio.CheckedChanged += (_, _) => UpdateModelOptionsEnabled();
-        _modelCustomRadio.CheckedChanged += (_, _) => UpdateModelOptionsEnabled();
-        _updateConfigCheck.CheckedChanged += (_, _) => UpdateModelOptionsEnabled();
+        _modelAutoRadio.CheckedChanged += (_, _) => UpdateControllerModelState();
+        _modelKeepRadio.CheckedChanged += (_, _) => UpdateControllerModelState();
+        _modelCustomRadio.CheckedChanged += (_, _) => UpdateControllerModelState();
+        _modelCustomText.TextChanged += (_, _) => UpdateControllerModelState();
+        _updateConfigCheck.CheckedChanged += (_, _) => UpdateControllerModelState();
         UpdateModelOptionsEnabled();
         return panel;
     }
 
+    private void UpdateControllerModelState()
+    {
+        if (_renderingControllerState)
+        {
+            return;
+        }
+
+        _appController.SetUpdateConfig(_updateConfigCheck.Checked);
+        if (_modelCustomRadio.Checked)
+        {
+            _appController.SetModelMode(ModelMode.Custom);
+        }
+        else if (_modelKeepRadio.Checked)
+        {
+            _appController.SetModelMode(ModelMode.KeepRootModel);
+        }
+        else
+        {
+            _appController.SetModelMode(ModelMode.FollowProvider);
+        }
+        _appController.SetCustomModel(_modelCustomText.Text);
+        UpdateModelOptionsEnabled();
+    }
+
     private void UpdateModelOptionsEnabled()
     {
-        bool enabled = _updateConfigCheck.Checked;
+        bool enabled = !_busy && _updateConfigCheck.Checked;
         _modelAutoRadio.Enabled = enabled;
         _modelKeepRadio.Enabled = enabled;
         _modelCustomRadio.Enabled = enabled;
@@ -580,9 +612,23 @@ public sealed class MainForm : Form
         _pruneBackupsButton.Click += async (_, _) => await PruneBackupsAsync();
         _checkUpdateButton.Click += async (_, _) => await CheckForUpdatesAsync(UpdateCheckTrigger.Manual);
         _openLogButton.Click += (_, _) => OpenLogFolder();
-        _providerList.SelectedIndexChanged += (_, _) => UpdateSelectionLabel();
+        _providerList.SelectedIndexChanged += (_, _) => UpdateControllerProviderSelection();
         _codexHomeCombo.Leave += async (_, _) => await PersistHomeSelectionAsync();
         _sqliteHomeText.Leave += async (_, _) => await PersistSqliteHomeOverrideAsync(CaptureStorageSelection());
+    }
+
+    private void UpdateControllerProviderSelection()
+    {
+        if (_renderingControllerState)
+        {
+            return;
+        }
+
+        string? provider = _providerList.SelectedItems.Count == 0
+            ? null
+            : _providerList.SelectedItems[0].Tag as string;
+        _appController.SetProvider(provider);
+        UpdateSelectionLabel();
     }
 
     private async Task LoadStateAsync()
@@ -597,14 +643,18 @@ public sealed class MainForm : Form
         AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 已加载设置: {_settingsService.SettingsPath}");
         AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 执行日志文件: {_executionLogService.CurrentLogPath}");
         _loadingSettings = false;
-        await RefreshStatusAsync();
+        await RunBusyAsync("刷新中...", async () =>
+        {
+            AppSnapshot snapshot = await Task.Run(async () => await _appController.InitializeAsync());
+            await ApplyControllerRefreshAsync(snapshot);
+        });
     }
 
-    private async Task RefreshStatusAsync()
+    private async Task RefreshStatusAsync(string? preferredProviderId = null)
     {
         (string codexHome, string? sqliteHome) = CaptureStorageSelection();
         await PersistSqliteHomeOverrideAsync((codexHome, sqliteHome));
-        await RunBusyAsync("刷新中...", () => RefreshStatusCoreAsync(codexHome, sqliteHome));
+        await RunBusyAsync("刷新中...", () => RefreshStatusCoreAsync(codexHome, sqliteHome, preferredProviderId));
     }
 
     private async Task BrowseCodexHomeAsync()
@@ -712,8 +762,7 @@ public sealed class MainForm : Form
         _settings = _settingsService.AddManualProvider(_settings, provider);
         await _settingsService.SaveAsync(_settings);
         _manualProviderText.Clear();
-        ReloadProviderList();
-        SelectProvider(provider);
+        RefreshControllerProviderOptions(provider);
         AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 已添加手动 Provider: {provider}");
     }
 
@@ -728,16 +777,30 @@ public sealed class MainForm : Form
 
         _settings = _settingsService.RemoveManualProvider(_settings, provider);
         await _settingsService.SaveAsync(_settings);
-        ReloadProviderList();
-        SelectProvider(_currentStatus?.CurrentProvider.Provider);
+        RefreshControllerProviderOptions(_currentStatus?.CurrentProvider.Provider);
         AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 已删除手动 Provider: {provider}");
+    }
+
+    private void RefreshControllerProviderOptions(string? preferredProviderId)
+    {
+        if (_currentStatus is null)
+        {
+            return;
+        }
+
+        _appController.ApplyProviderOptions(
+            _syncService.BuildProviderOptions(_currentStatus, _settings),
+            preferredProviderId);
+        ReloadProviderList();
     }
 
     private async Task ExecuteSyncOrSwitchAsync()
     {
         (string codexHome, string? sqliteHome) = CaptureStorageSelection();
-        string? provider = SelectedProvider();
-        if (string.IsNullOrWhiteSpace(provider))
+        _appController.SetStorage(codexHome, sqliteHome);
+        UpdateControllerModelState();
+        SyncRequestPreparation preparation = _appController.PrepareSyncRequest();
+        if (preparation.ValidationIssues.Contains(AppValidationIssue.ProviderRequired))
         {
             MessageBox.Show(this, "请先选择目标 Provider。", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
@@ -748,35 +811,50 @@ public sealed class MainForm : Form
             return;
         }
 
+        if (preparation.ValidationIssues.Contains(AppValidationIssue.CustomModelRequired))
+        {
+            MessageBox.Show(this, "请填写自定义 model 名称,或改成 \"跟随 provider\"。", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (!preparation.IsValid)
+        {
+            MessageBox.Show(this, "当前状态无法执行同步，请先刷新后重试。", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        PreparedSyncRequest request = preparation.Request!;
+        string provider = request.ProviderId;
+        int backupRetentionCount = CurrentBackupRetentionCount();
+
         await RunBusyAsync("执行中...", async () =>
         {
-            await PersistSqliteHomeOverrideAsync((codexHome, sqliteHome));
-            int backupRetentionCount = CurrentBackupRetentionCount();
+            await PersistSqliteHomeOverrideAsync((request.CodexHome, request.SqliteHomeOverride));
             SyncResult result;
-            if (_updateConfigCheck.Checked)
+            if (request is SwitchProviderRequest switchRequest)
             {
-                bool keepRootModel = _modelKeepRadio.Checked;
-                string? explicitModel = _modelCustomRadio.Checked ? _modelCustomText.Text.Trim() : null;
-                if (_modelCustomRadio.Checked && string.IsNullOrEmpty(explicitModel))
-                {
-                    MessageBox.Show(this, "请填写自定义 model 名称,或改成 \"跟随 provider\"。", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
-                }
+                bool keepRootModel = switchRequest.ModelSelection is KeepRootModelSelection;
+                string? explicitModel = switchRequest.ModelSelection is CustomModelSelection custom
+                    ? custom.Model
+                    : null;
                 result = await Task.Run(async () => await _syncService.RunSwitchAsync(
-                    codexHome,
-                    provider,
+                    switchRequest.CodexHome,
+                    switchRequest.ProviderId,
                     backupRetentionCount,
                     model: explicitModel,
                     keepRootModel: keepRootModel,
-                    explicitSqliteHome: sqliteHome));
+                    explicitSqliteHome: switchRequest.SqliteHomeOverride));
+            }
+            else if (request is SyncProviderRequest syncRequest)
+            {
+                result = await Task.Run(async () => await _syncService.RunSyncAsync(
+                    syncRequest.CodexHome,
+                    provider: syncRequest.ProviderId,
+                    keepCount: backupRetentionCount,
+                    explicitSqliteHome: syncRequest.SqliteHomeOverride));
             }
             else
             {
-                result = await Task.Run(async () => await _syncService.RunSyncAsync(
-                    codexHome,
-                    provider: provider,
-                    keepCount: backupRetentionCount,
-                    explicitSqliteHome: sqliteHome));
+                throw new InvalidOperationException("Unsupported prepared sync request.");
             }
 
             _settings = _settingsService.UpdateState(_settings, provider, result.BackupDir, CaptureWindowBounds(), backupRetentionCount);
@@ -784,12 +862,11 @@ public sealed class MainForm : Form
             AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 执行完成");
             AppendLog(TextFormatter.FormatSyncResult(
                 result,
-                _updateConfigCheck.Checked ? "已切换并同步" : "已同步",
+                request is SwitchProviderRequest ? "已切换并同步" : "已同步",
                 TextFormatter.ChineseSimplified));
             AppendLog(FormatModelSyncOutcome(result.ModelSync));
             AppendLog(string.Empty);
-            await RefreshStatusCoreAsync(codexHome, sqliteHome);
-            SelectProvider(provider);
+            await RefreshStatusCoreAsync(request.CodexHome, request.SqliteHomeOverride, provider);
         });
     }
 
@@ -1165,34 +1242,45 @@ public sealed class MainForm : Form
 
     private void ReloadProviderList()
     {
-        _providerList.BeginUpdate();
-        _providerList.Items.Clear();
-
-        if (_currentStatus is not null)
+        _renderingControllerState = true;
+        try
         {
-            foreach (ProviderOption option in _syncService.BuildProviderOptions(_currentStatus, _settings))
+            _providerList.BeginUpdate();
+            _providerList.Items.Clear();
+            foreach (ProviderOptionState option in _appController.Snapshot.Providers)
             {
                 ListViewItem item = new(option.Id)
                 {
                     Tag = option.Id
                 };
-                item.SubItems.Add(TextFormatter.FormatProviderSources(option, TextFormatter.ChineseSimplified));
+                item.SubItems.Add(TextFormatter.FormatProviderSources(new ProviderOption
+                {
+                    Id = option.Id,
+                    Sources = option.Sources,
+                    IsCurrentProvider = option.IsCurrentProvider,
+                    IsManual = option.IsManual,
+                    IsSaved = option.IsSaved
+                }, TextFormatter.ChineseSimplified));
                 item.SubItems.Add(option.IsCurrentProvider ? "是" : string.Empty);
                 item.SubItems.Add(option.IsManual ? "是" : string.Empty);
                 item.SubItems.Add(option.IsSaved ? "是" : string.Empty);
                 _providerList.Items.Add(item);
             }
+            _providerList.EndUpdate();
+            SelectProviderInList(_appController.Snapshot.SelectedProviderId);
+            UpdateSelectionLabel();
         }
-
-        _providerList.EndUpdate();
-        SelectProvider(_settings.LastSelectedProvider ?? _currentStatus?.CurrentProvider.Provider);
-        UpdateSelectionLabel();
+        finally
+        {
+            _renderingControllerState = false;
+        }
     }
 
-    private void SelectProvider(string? provider)
+    private void SelectProviderInList(string? provider)
     {
         if (string.IsNullOrWhiteSpace(provider))
         {
+            _providerList.SelectedItems.Clear();
             return;
         }
 
@@ -1217,7 +1305,7 @@ public sealed class MainForm : Form
 
     private string? SelectedProvider()
     {
-        return _providerList.SelectedItems.Count == 0 ? null : _providerList.SelectedItems[0].Tag as string;
+        return _appController.Snapshot.SelectedProviderId;
     }
 
     private string CurrentCodexHome()
@@ -1266,14 +1354,33 @@ public sealed class MainForm : Form
         }
     }
 
-    private async Task RefreshStatusCoreAsync(string codexHome, string? sqliteHome)
+    private async Task RefreshStatusCoreAsync(
+        string codexHome,
+        string? sqliteHome,
+        string? preferredProviderId = null)
     {
-        _currentStatus = await Task.Run(async () => await _syncService.GetStatusAsync(
+        AppSnapshot snapshot = await Task.Run(async () => await _appController.RefreshAsync(
             codexHome,
-            sqliteHome));
-        _settings = _settingsService.RecordCodexHome(_settings, _currentStatus.CodexHome);
-        _settings = _settingsService.MergeDetectedProviders(_settings, _syncService.ExtractDetectedProviderIds(_currentStatus));
-        _settings = _settingsService.UpdateState(_settings, SelectedProvider(), _settings.LastBackupDirectory, CaptureWindowBounds(), CurrentBackupRetentionCount());
+            sqliteHome,
+            preferredProviderId));
+        await ApplyControllerRefreshAsync(snapshot);
+    }
+
+    private async Task ApplyControllerRefreshAsync(AppSnapshot snapshot)
+    {
+        if (snapshot.Activity == AppActivity.Faulted || snapshot.Status is null)
+        {
+            throw new InvalidOperationException(snapshot.ErrorMessage ?? "Unable to refresh application state.");
+        }
+
+        _currentStatus = snapshot.Status;
+        _settings = await _settingsService.LoadAsync();
+        _settings = _settingsService.UpdateState(
+            _settings,
+            snapshot.SelectedProviderId,
+            _settings.LastBackupDirectory,
+            CaptureWindowBounds(),
+            CurrentBackupRetentionCount());
         await _settingsService.SaveAsync(_settings);
 
         _statusBox.Text = TextFormatter.FormatStatus(_currentStatus, TextFormatter.ChineseSimplified);
@@ -1327,7 +1434,8 @@ public sealed class MainForm : Form
 
     private void SetBusy(bool busy, string stateText)
     {
-        bool sqliteActionsSupported = _currentStatus?.SqliteAccess.Supported != false;
+        bool sqliteActionsSupported = _appController.Snapshot.Activity == AppActivity.Ready
+            && _currentStatus?.SqliteAccess.Supported != false;
         _busy = busy;
         UseWaitCursor = busy;
         _busyLabel.Text = stateText;
@@ -1352,6 +1460,7 @@ public sealed class MainForm : Form
         _manualProviderText.Enabled = !busy;
         _codexHomeCombo.Enabled = !busy;
         _sqliteHomeText.Enabled = !busy;
+        UpdateModelOptionsEnabled();
     }
 
     private static bool PathsEqual(string left, string right)
