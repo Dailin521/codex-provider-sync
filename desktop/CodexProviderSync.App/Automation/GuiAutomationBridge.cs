@@ -330,7 +330,7 @@ internal sealed class GuiAutomationDispatcher
             "ui.snapshot" => await OnUiAsync(Snapshot, cancellationToken).ConfigureAwait(false),
             "ui.get" => await OnUiAsync(() => Get(request.RequiredParameter("automationId")), cancellationToken).ConfigureAwait(false),
             "ui.set" => await OnUiAsync(() => Set(request), cancellationToken).ConfigureAwait(false),
-            "ui.invoke" => await OnUiAsync(() => Invoke(request), cancellationToken).ConfigureAwait(false),
+            "ui.invoke" => await InvokeAsync(request, cancellationToken).ConfigureAwait(false),
             "ui.wait" => await WaitAsync(request, cancellationToken).ConfigureAwait(false),
             "ui.shutdown" => await OnUiAsync(() => Shutdown(request), cancellationToken).ConfigureAwait(false),
             _ => throw new InvalidDataException($"Unsupported method: {request.Method}")
@@ -389,21 +389,49 @@ internal sealed class GuiAutomationDispatcher
             throw new InvalidDataException("value is required.");
         }
         Control control = FindControl(automationId);
+        if (!control.Enabled)
+        {
+            throw new InvalidOperationException($"{automationId} is disabled and cannot accept GUI automation input.");
+        }
         _form.ValidateAutomationValue(automationId, value);
         string eventName = SetControlValue(control, value, out bool eventObserved);
         _trace.Append(request.Id, request.Method, automationId, eventName, eventObserved);
         return DescribeControl(control);
     }
 
-    private JsonNode Invoke(GuiAutomationRequest request)
+    private async Task<JsonNode> InvokeAsync(
+        GuiAutomationRequest request,
+        CancellationToken cancellationToken)
+    {
+        InvokeStart started = await OnUiAsync(
+            () => StartInvoke(request),
+            cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<ApplicationOperationTraceRecord> operations = started.Window is null
+            ? []
+            : await started.Window.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        _trace.Append(
+            request.Id,
+            request.Method,
+            started.AutomationId,
+            started.GuiEvent,
+            started.EventObserved,
+            operations);
+        JsonObject result = (await OnUiAsync(
+            () => DescribeControl(FindControl(started.AutomationId)),
+            cancellationToken).ConfigureAwait(false)).AsObject();
+        AddApplicationLink(result, operations);
+        return result;
+    }
+
+    private InvokeStart StartInvoke(GuiAutomationRequest request)
     {
         string automationId = request.RequiredParameter("automationId");
         Control control = FindControl(automationId);
         if (control is MainForm window)
         {
             window.RequestBringToFront();
-            _trace.Append(request.Id, request.Method, automationId, "Activated", true);
-            return DescribeControl(control);
+            return new InvokeStart(automationId, "Activated", true, null);
         }
         if (control is not Button button)
         {
@@ -415,22 +443,67 @@ internal sealed class GuiAutomationDispatcher
         }
         bool observed = false;
         EventHandler observer = (_, _) => observed = true;
+        ApplicationInvocationWindow? invocationWindow = null;
         button.Click += observer;
         try
         {
-            button.PerformClick();
+            if (MainForm.IsApplicationBoundAutomationId(automationId))
+            {
+                using ApplicationOperationTraceHub.ApplicationInvocationScope scope =
+                    _form.ApplicationTraceHub.BeginInvocation(request.Id, automationId);
+                invocationWindow = scope.Window;
+                button.PerformClick();
+            }
+            else
+            {
+                button.PerformClick();
+            }
         }
         finally
         {
             button.Click -= observer;
         }
-        _trace.Append(request.Id, request.Method, automationId, "Click", observed);
         if (!observed)
         {
             throw new InvalidOperationException($"{automationId} did not raise its real Click event.");
         }
-        return DescribeControl(control);
+        return new InvokeStart(automationId, "Click", observed, invocationWindow);
     }
+
+    private static void AddApplicationLink(
+        JsonObject result,
+        IReadOnlyList<ApplicationOperationTraceRecord> operations)
+    {
+        ApplicationOperationTraceRecord? primary = SelectPrimaryOperation(operations);
+        result["applicationOperationLinked"] = primary is not null;
+        result["applicationOperationId"] = primary?.OperationId;
+        result["applicationOperation"] = primary?.Operation.ToString();
+        result["applicationLifecycle"] = primary?.Lifecycle.ToString();
+        result["applicationOperations"] = new JsonArray(
+            operations.Select(static operation => (JsonNode)new JsonObject
+            {
+                ["operationId"] = operation.OperationId,
+                ["operation"] = operation.Operation.ToString(),
+                ["lifecycle"] = operation.Lifecycle.ToString(),
+                ["startedAtUtc"] = operation.StartedAtUtc,
+                ["completedAtUtc"] = operation.CompletedAtUtc,
+                ["errorCodes"] = new JsonArray(
+                    operation.ErrorCodes.Select(static code => (JsonNode)JsonValue.Create(code)!).ToArray())
+            }).ToArray());
+    }
+
+    private static ApplicationOperationTraceRecord? SelectPrimaryOperation(
+        IReadOnlyList<ApplicationOperationTraceRecord> operations) =>
+        operations.LastOrDefault(static operation => operation.Operation is not (
+            CodexProviderSync.Application.ApplicationOperationKind.Plan
+            or CodexProviderSync.Application.ApplicationOperationKind.Status))
+        ?? operations.LastOrDefault();
+
+    private sealed record InvokeStart(
+        string AutomationId,
+        string GuiEvent,
+        bool EventObserved,
+        ApplicationInvocationWindow? Window);
 
     private async Task<JsonNode?> WaitAsync(GuiAutomationRequest request, CancellationToken cancellationToken)
     {
@@ -492,6 +565,10 @@ internal sealed class GuiAutomationDispatcher
         result = null;
         if (TryFindProviderRow(automationId, out ListViewItem? providerRow, out ListView? providerList))
         {
+            if (!providerList!.Enabled)
+            {
+                throw new InvalidOperationException($"{automationId} is disabled and cannot be selected.");
+            }
             RequireSelectionValue(request);
             bool observed = false;
             EventHandler observer = (_, _) => observed = true;
@@ -519,6 +596,10 @@ internal sealed class GuiAutomationDispatcher
 
         if (TryFindRecentHome(automationId, out AutomationComboBoxItem? recentHome, out ComboBox? combo))
         {
+            if (!combo!.Enabled)
+            {
+                throw new InvalidOperationException($"{automationId} is disabled and cannot be selected.");
+            }
             RequireSelectionValue(request);
             bool observed = false;
             EventHandler observer = (_, _) => observed = true;
@@ -769,14 +850,21 @@ internal sealed class GuiAutomationTraceSink
         string method,
         string automationId,
         string guiEvent,
-        bool eventObserved)
+        bool eventObserved,
+        IReadOnlyList<ApplicationOperationTraceRecord>? applicationOperations = null)
     {
+        IReadOnlyList<ApplicationOperationTraceRecord> operations = applicationOperations ?? [];
+        ApplicationOperationTraceRecord? primary = operations.LastOrDefault(
+            static operation => operation.Operation is not (
+                CodexProviderSync.Application.ApplicationOperationKind.Plan
+                or CodexProviderSync.Application.ApplicationOperationKind.Status))
+            ?? operations.LastOrDefault();
         lock (_gate)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
             JsonObject record = new()
             {
-                ["schemaVersion"] = 1,
+                ["schemaVersion"] = 2,
                 ["sequence"] = ++_sequence,
                 ["timestampUtc"] = DateTimeOffset.UtcNow,
                 ["requestId"] = requestId,
@@ -784,8 +872,21 @@ internal sealed class GuiAutomationTraceSink
                 ["automationId"] = automationId,
                 ["guiEvent"] = guiEvent,
                 ["eventObserved"] = eventObserved,
-                ["applicationOperationId"] = null,
-                ["applicationOperationLinked"] = false
+                ["applicationOperationId"] = primary?.OperationId,
+                ["applicationOperation"] = primary?.Operation.ToString(),
+                ["applicationLifecycle"] = primary?.Lifecycle.ToString(),
+                ["applicationOperationLinked"] = primary is not null,
+                ["applicationOperations"] = new JsonArray(
+                    operations.Select(static operation => (JsonNode)new JsonObject
+                    {
+                        ["operationId"] = operation.OperationId,
+                        ["operation"] = operation.Operation.ToString(),
+                        ["lifecycle"] = operation.Lifecycle.ToString(),
+                        ["startedAtUtc"] = operation.StartedAtUtc,
+                        ["completedAtUtc"] = operation.CompletedAtUtc,
+                        ["errorCodes"] = new JsonArray(
+                            operation.ErrorCodes.Select(static code => (JsonNode)JsonValue.Create(code)!).ToArray())
+                    }).ToArray())
             };
             using FileStream stream = new(_path, FileMode.Append, FileAccess.Write, FileShare.Read);
             using StreamWriter writer = new(stream, new UTF8Encoding(false), leaveOpen: true);

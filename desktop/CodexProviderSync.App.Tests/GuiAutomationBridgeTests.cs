@@ -66,6 +66,24 @@ public sealed class GuiAutomationBridgeTests
     }
 
     [Fact]
+    public async Task Set_RejectsDisabledRealControl()
+    {
+        using Fixture fixture = new();
+        TextBox input = fixture.Form.Controls.Find(GuiAutomationCatalog.Ids.ManualProviderId, true)
+            .OfType<TextBox>()
+            .Single();
+        input.Enabled = false;
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            fixture.Dispatch(
+                "ui.set",
+                "{\"automationId\":\"provider.manualId\",\"value\":\"blocked\"}"));
+
+        Assert.Contains("disabled", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(string.Empty, input.Text);
+    }
+
+    [Fact]
     public async Task AutomationStorageInputs_CannotEscapeTheIsolationRoot()
     {
         using Fixture fixture = new();

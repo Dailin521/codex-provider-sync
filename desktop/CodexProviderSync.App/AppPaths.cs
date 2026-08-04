@@ -181,6 +181,10 @@ internal interface IAppPlatformBoundary
 {
     bool UpdatesEnabled { get; }
     string? PickFolder(IWin32Window owner, FolderPickerRequest request);
+    Task<UpdateCheckResult> CheckForUpdateAsync(
+        UpdateService updateService,
+        Version currentVersion,
+        CancellationToken cancellationToken = default);
     void OpenPath(string path);
     void StartUpdate(string downloadedExePath, string targetExePath, string expectedSha256);
 }
@@ -190,21 +194,36 @@ internal sealed record FolderPickerRequest(
     string InitialDirectory,
     bool AllowCreate = false);
 
-internal sealed class SystemAppPlatformBoundary(IAppPathProvider paths) : IAppPlatformBoundary
+internal static class AppFolderPickerDialog
 {
-    public bool UpdatesEnabled => true;
-
-    public string? PickFolder(IWin32Window owner, FolderPickerRequest request)
+    internal static FolderBrowserDialog Create(FolderPickerRequest request)
     {
-        using FolderBrowserDialog dialog = new()
+        ArgumentNullException.ThrowIfNull(request);
+        return new FolderBrowserDialog
         {
             Description = request.Description,
             UseDescriptionForTitle = true,
             InitialDirectory = request.InitialDirectory,
             ShowNewFolderButton = request.AllowCreate
         };
+    }
+}
+
+internal sealed class SystemAppPlatformBoundary(IAppPathProvider paths) : IAppPlatformBoundary
+{
+    public bool UpdatesEnabled => true;
+
+    public string? PickFolder(IWin32Window owner, FolderPickerRequest request)
+    {
+        using FolderBrowserDialog dialog = AppFolderPickerDialog.Create(request);
         return dialog.ShowDialog(owner) == DialogResult.OK ? dialog.SelectedPath : null;
     }
+
+    public Task<UpdateCheckResult> CheckForUpdateAsync(
+        UpdateService updateService,
+        Version currentVersion,
+        CancellationToken cancellationToken = default) =>
+        updateService.CheckForUpdateAsync(currentVersion, cancellationToken);
 
     public void OpenPath(string path)
     {
@@ -221,12 +240,35 @@ internal sealed class SystemAppPlatformBoundary(IAppPathProvider paths) : IAppPl
 
 internal sealed class IsolatedAppPlatformBoundary(IAppPathProvider paths) : IAppPlatformBoundary
 {
-    public bool UpdatesEnabled => false;
+    public bool UpdatesEnabled => true;
 
     public string? PickFolder(IWin32Window owner, FolderPickerRequest request)
     {
         EnsureContained(request.InitialDirectory);
-        return null;
+        using FolderBrowserDialog dialog = AppFolderPickerDialog.Create(request);
+        if (dialog.ShowDialog(owner) != DialogResult.OK)
+        {
+            return null;
+        }
+
+        EnsureContained(dialog.SelectedPath);
+        return Path.GetFullPath(dialog.SelectedPath);
+    }
+
+    public Task<UpdateCheckResult> CheckForUpdateAsync(
+        UpdateService updateService,
+        Version currentVersion,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(updateService);
+        ArgumentNullException.ThrowIfNull(currentVersion);
+        cancellationToken.ThrowIfCancellationRequested();
+        Version normalized = UpdateService.NormalizeVersion(currentVersion);
+        ReleaseInfo release = new($"v{normalized}", normalized, []);
+        return Task.FromResult(new UpdateCheckResult(
+            normalized,
+            release,
+            IsUpdateAvailable: false));
     }
 
     public void OpenPath(string path)

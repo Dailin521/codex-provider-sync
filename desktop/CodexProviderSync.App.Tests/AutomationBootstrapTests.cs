@@ -4,11 +4,66 @@ using System.Text;
 using System.Text.Json;
 using CodexProviderSync.App.Automation;
 using CodexProviderSync.Core;
+using System.Windows.Forms;
 
 namespace CodexProviderSync.App.Tests;
 
 public sealed class AutomationBootstrapTests
 {
+    [Fact]
+    public void FolderPickerFactory_ProducesARealConfiguredWinFormsDialog()
+    {
+        string initial = Path.GetTempPath();
+        FolderPickerRequest request = new(
+            "isolated real folder picker",
+            initial,
+            AllowCreate: true);
+
+        using FolderBrowserDialog dialog = AppFolderPickerDialog.Create(request);
+
+        Assert.Equal(request.Description, dialog.Description);
+        Assert.True(dialog.UseDescriptionForTitle);
+        Assert.Equal(initial, dialog.InitialDirectory);
+        Assert.True(dialog.ShowNewFolderButton);
+    }
+
+    [Fact]
+    public void IsolatedFolderPicker_RejectsAnExternalInitialPathBeforeShowingUi()
+    {
+        using AutomationRoot fixture = new();
+        IAppPathProvider paths = new IsolatedAppPathProvider(fixture.Root);
+        IsolatedAppPlatformBoundary boundary = new(paths);
+        string outside = Path.Combine(
+            Path.GetDirectoryName(fixture.Root)!,
+            $"outside-picker-{Guid.NewGuid():N}");
+
+        InvalidOperationException error = Assert.Throws<InvalidOperationException>(() =>
+            boundary.PickFolder(
+                owner: null!,
+                new FolderPickerRequest("must stay isolated", outside)));
+
+        Assert.Contains("outside", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task IsolatedUpdateEntry_IsEnabledAndReturnsDeterministicNoNetworkState()
+    {
+        using AutomationRoot fixture = new();
+        IAppPathProvider paths = new IsolatedAppPathProvider(fixture.Root);
+        IsolatedAppPlatformBoundary boundary = new(paths);
+        RejectingNetworkHandler handler = new();
+        UpdateService updateService = new(new HttpClient(handler));
+
+        UpdateCheckResult result = await boundary.CheckForUpdateAsync(
+            updateService,
+            new Version(0, 4, 0));
+
+        Assert.True(boundary.UpdatesEnabled);
+        Assert.False(result.IsUpdateAvailable);
+        Assert.Equal(new Version(0, 4, 0), result.CurrentVersion);
+        Assert.Equal(0, handler.RequestCount);
+    }
+
     [Fact]
     public void ValidDescriptor_IsClaimedOnce_AndEveryPathStaysInsideTheSentinelRoot()
     {
@@ -252,6 +307,20 @@ public sealed class AutomationBootstrapTests
                     pendingPath,
                     Path.Combine(pendingPath, "transaction.jsonl"))]
         };
+    }
+
+    private sealed class RejectingNetworkHandler : HttpMessageHandler
+    {
+        internal int RequestCount { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            RequestCount++;
+            return Task.FromException<HttpResponseMessage>(
+                new InvalidOperationException("The isolated update entry attempted network access."));
+        }
     }
 
     [Fact]

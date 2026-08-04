@@ -7,6 +7,7 @@ public sealed class CoreApplicationAdapter : ICoreApplicationAdapter
     private readonly CodexSyncService _syncService;
     private readonly SettingsService _settingsService;
     private readonly CodexHomeService _codexHomeService;
+    private readonly IApplicationService? _applicationService;
 
     public CoreApplicationAdapter()
         : this(new CodexSyncService(), new SettingsService(), new CodexHomeService())
@@ -16,11 +17,13 @@ public sealed class CoreApplicationAdapter : ICoreApplicationAdapter
     public CoreApplicationAdapter(
         CodexSyncService syncService,
         SettingsService settingsService,
-        CodexHomeService codexHomeService)
+        CodexHomeService codexHomeService,
+        IApplicationService? applicationService = null)
     {
         _syncService = syncService ?? throw new ArgumentNullException(nameof(syncService));
         _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
         _codexHomeService = codexHomeService ?? throw new ArgumentNullException(nameof(codexHomeService));
+        _applicationService = applicationService;
     }
 
     public async Task<CoreInitializationState> InitializeAsync(CancellationToken cancellationToken = default)
@@ -50,7 +53,11 @@ public sealed class CoreApplicationAdapter : ICoreApplicationAdapter
         cancellationToken.ThrowIfCancellationRequested();
         string codexHome = _codexHomeService.NormalizeCodexHome(request.CodexHome);
         string? sqliteHomeOverride = NormalizeOptional(request.SqliteHomeOverride);
-        StatusSnapshot status = await _syncService.GetStatusAsync(codexHome, sqliteHomeOverride);
+        StatusSnapshot status = _applicationService is null
+            ? await _syncService.GetStatusAsync(codexHome, sqliteHomeOverride)
+            : RequireStatus(await _applicationService.GetStatusAsync(
+                new ApplicationStatusRequest(codexHome, sqliteHomeOverride),
+                cancellationToken));
         cancellationToken.ThrowIfCancellationRequested();
 
         AppSettings nextSettings = _settingsService.RecordCodexHome(settings, status.CodexHome);
@@ -76,5 +83,23 @@ public sealed class CoreApplicationAdapter : ICoreApplicationAdapter
     private static string? NormalizeOptional(string? value)
     {
         return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    }
+
+    private static StatusSnapshot RequireStatus(ApplicationOutcome<StatusSnapshot> outcome)
+    {
+        if (outcome.IsSuccess && outcome.Data is not null)
+        {
+            return outcome.Data;
+        }
+
+        string message = outcome.Errors.Count == 0
+            ? $"Application status operation ended as {outcome.Lifecycle}."
+            : string.Join(Environment.NewLine, outcome.Errors.Select(static error => error.Message));
+        if (outcome.Lifecycle == ApplicationOperationLifecycle.Cancelled)
+        {
+            throw new OperationCanceledException(message);
+        }
+
+        throw new InvalidOperationException(message);
     }
 }

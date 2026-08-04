@@ -9,7 +9,9 @@ public sealed class MainForm : Form
 {
     private const int ActionGroupMinimumWidth = 460;
 
-    private readonly CodexSyncService _syncService = new();
+    private readonly CodexSyncService _syncService;
+    private readonly IApplicationService _applicationService;
+    private readonly ApplicationOperationTraceHub _applicationTraceHub;
     private readonly AppController _appController;
     private readonly SettingsService _settingsService;
     private readonly UpdateService _updateService;
@@ -152,7 +154,10 @@ public sealed class MainForm : Form
         UpdateService? updateService = null,
         Func<DateOnly>? localDate = null,
         IAppPathProvider? paths = null,
-        IAppPlatformBoundary? platformBoundary = null)
+        IAppPlatformBoundary? platformBoundary = null,
+        CodexSyncService? syncService = null,
+        IApplicationService? applicationService = null,
+        ApplicationOperationTraceHub? applicationTraceHub = null)
     {
         _paths = paths ?? new SystemAppPathProvider();
         _platformBoundary = platformBoundary ?? new SystemAppPlatformBoundary(_paths);
@@ -160,10 +165,20 @@ public sealed class MainForm : Form
         _settingsService = settingsService ?? new SettingsService(_paths.SettingsPath);
         _updateService = updateService ?? new UpdateService();
         _localDate = localDate ?? (() => DateOnly.FromDateTime(DateTime.Now));
+        _syncService = syncService ?? new CodexSyncService();
+        _applicationTraceHub = applicationTraceHub ?? new ApplicationOperationTraceHub();
+        IApplicationService sharedApplicationService = applicationService ?? new ApplicationService(
+            new CoreApplicationStatusPort(_syncService),
+            new CoreApplicationWritePort(_syncService, new CodexHomeService()),
+            new InMemoryApplicationPlanLedger());
+        _applicationService = new TrackedApplicationService(
+            sharedApplicationService,
+            _applicationTraceHub);
         _appController = new AppController(new CoreApplicationAdapter(
             _syncService,
             _settingsService,
-            new CodexHomeService()));
+            new CodexHomeService(),
+            _applicationService));
         Text = "Codex Provider Sync";
         ConfigureAutomationIdentities();
         MinimumSize = new Size(1180, 760);
@@ -225,8 +240,11 @@ public sealed class MainForm : Form
     protected override async void OnLoad(EventArgs e)
     {
         base.OnLoad(e);
+        // Disable all mutable entry points before the first asynchronous
+        // settings read can yield and the form becomes visible.
+        SetBusy(true, "初始化中...");
         await LoadStateAsync();
-        if (_platformBoundary.UpdatesEnabled)
+        if (_platformBoundary.UpdatesEnabled && !_paths.IsAutomation)
         {
             _ = CheckForUpdatesAsync(UpdateCheckTrigger.Automatic);
         }
@@ -257,6 +275,15 @@ public sealed class MainForm : Form
         TopMost = false;
         Focus();
     }
+
+    internal ApplicationOperationTraceHub ApplicationTraceHub => _applicationTraceHub;
+
+    internal static bool IsApplicationBoundAutomationId(string automationId) =>
+        automationId is
+            GuiAutomationCatalog.Ids.RefreshStatus
+            or GuiAutomationCatalog.Ids.Execute
+            or GuiAutomationCatalog.Ids.Restore
+            or GuiAutomationCatalog.Ids.PruneBackups;
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
@@ -656,14 +683,14 @@ public sealed class MainForm : Form
     {
         _browseButton.Click += async (_, _) => await BrowseCodexHomeAsync();
         _browseSqliteHomeButton.Click += async (_, _) => await BrowseSqliteHomeAsync();
-        _refreshButton.Click += async (_, _) => await RefreshStatusAsync();
+        _refreshButton.Click += async (_, _) => await RunApplicationControlEventAsync(() => RefreshStatusAsync());
         _addProviderButton.Click += async (_, _) => await AddManualProviderAsync();
         _removeProviderButton.Click += async (_, _) => await RemoveManualProviderAsync();
         _backupRetentionInput.ValueChanged += async (_, _) => await PersistBackupRetentionAsync();
-        _executeButton.Click += async (_, _) => await ExecuteSyncOrSwitchAsync();
-        _restoreButton.Click += async (_, _) => await RestoreBackupAsync();
+        _executeButton.Click += async (_, _) => await RunApplicationControlEventAsync(ExecuteSyncOrSwitchAsync);
+        _restoreButton.Click += async (_, _) => await RunApplicationControlEventAsync(RestoreBackupAsync);
         _openBackupButton.Click += (_, _) => OpenBackupFolder();
-        _pruneBackupsButton.Click += async (_, _) => await PruneBackupsAsync();
+        _pruneBackupsButton.Click += async (_, _) => await RunApplicationControlEventAsync(PruneBackupsAsync);
         _checkUpdateButton.Click += async (_, _) => await CheckForUpdatesAsync(UpdateCheckTrigger.Manual);
         _openLogButton.Click += (_, _) => OpenLogFolder();
         _providerList.SelectedIndexChanged += (_, _) => UpdateControllerProviderSelection();
@@ -879,35 +906,33 @@ public sealed class MainForm : Form
                 request.CodexHome,
                 request.SqliteHomeOverride,
                 selectedBackupPath: null);
-            await PersistSqliteHomeOverrideAsync((request.CodexHome, request.SqliteHomeOverride));
-            SyncResult result;
-            if (request is SwitchProviderRequest switchRequest)
+            ApplicationWriteIntent intent = request switch
             {
-                bool keepRootModel = switchRequest.ModelSelection is KeepRootModelSelection;
-                string? explicitModel = switchRequest.ModelSelection is CustomModelSelection custom
-                    ? custom.Model
-                    : null;
-                result = await Task.Run(async () => await _syncService.RunSwitchAsync(
+                SwitchProviderRequest switchRequest => new SwitchIntent(
                     switchRequest.CodexHome,
+                    switchRequest.SqliteHomeOverride,
                     switchRequest.ProviderId,
-                    backupRetentionCount,
-                    model: explicitModel,
-                    keepRootModel: keepRootModel,
-                    explicitSqliteHome: switchRequest.SqliteHomeOverride));
-            }
-            else if (request is SyncProviderRequest syncRequest)
-            {
-                result = await Task.Run(async () => await _syncService.RunSyncAsync(
+                    switchRequest.ModelSelection,
+                    backupRetentionCount),
+                SyncProviderRequest syncRequest => new SyncIntent(
                     syncRequest.CodexHome,
-                    provider: syncRequest.ProviderId,
-                    keepCount: backupRetentionCount,
-                    explicitSqliteHome: syncRequest.SqliteHomeOverride));
-            }
-            else
-            {
-                throw new InvalidOperationException("Unsupported prepared sync request.");
-            }
+                    syncRequest.SqliteHomeOverride,
+                    syncRequest.ProviderId,
+                    backupRetentionCount),
+                _ => throw new InvalidOperationException("Unsupported prepared sync request.")
+            };
+            SyncResult result = await ExecutePlannedWriteAsync<SyncResult>(
+                intent,
+                authorization => intent switch
+                {
+                    SwitchIntent switchIntent => Task.Run(() => _applicationService.SwitchAsync(
+                        new SwitchApplicationRequest(switchIntent, authorization))),
+                    SyncIntent syncIntent => Task.Run(() => _applicationService.SyncAsync(
+                        new SyncApplicationRequest(syncIntent, authorization))),
+                    _ => throw new InvalidOperationException("Unsupported Application write intent.")
+                });
 
+            await PersistSqliteHomeOverrideAsync((request.CodexHome, request.SqliteHomeOverride));
             _settings = _settingsService.UpdateState(_settings, provider, result.BackupDir, CaptureWindowBounds(), backupRetentionCount);
             await _settingsService.SaveAsync(_settings);
             AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 执行完成");
@@ -937,7 +962,10 @@ public sealed class MainForm : Form
             return;
         }
 
-        if (!_restoreConfigCheck.Checked && !_restoreDatabaseCheck.Checked && !_restoreSessionsCheck.Checked)
+        bool restoreConfig = _restoreConfigCheck.Checked;
+        bool restoreDatabase = _restoreDatabaseCheck.Checked;
+        bool restoreSessions = _restoreSessionsCheck.Checked;
+        if (!restoreConfig && !restoreDatabase && !restoreSessions)
         {
             MessageBox.Show(this, "请至少选择一种要恢复的内容。", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
@@ -945,9 +973,9 @@ public sealed class MainForm : Form
 
         string restoreTargets = string.Join("、", new[]
         {
-            _restoreConfigCheck.Checked ? "配置文件（config.toml）" : null,
-            _restoreDatabaseCheck.Checked ? "线程数据库（SQLite）" : null,
-            _restoreSessionsCheck.Checked ? "会话文件元数据（rollout）" : null
+            restoreConfig ? "配置文件（config.toml）" : null,
+            restoreDatabase ? "线程数据库（SQLite）" : null,
+            restoreSessions ? "会话文件元数据（rollout）" : null
         }.Where(static item => item is not null));
 
         DialogResult confirm = MessageBox.Show(
@@ -970,10 +998,12 @@ public sealed class MainForm : Form
         try
         {
             EnsureAutomationMutationBoundary(codexHome, sqliteHome, selectedBackupPath);
-            if (_restoreDatabaseCheck.Checked)
+            if (restoreDatabase)
             {
                 BackupStorageInfo backupStorage = await _syncService.GetBackupStorageInfoAsync(selectedBackupPath);
-                StatusSnapshot targetStatus = await _syncService.GetStatusAsync(codexHome, sqliteHome);
+                StatusSnapshot targetStatus = RequireApplicationSuccess(
+                    await Task.Run(() => _applicationService.GetStatusAsync(
+                        new ApplicationStatusRequest(codexHome, sqliteHome))));
                 ValidateAutomationStatusSnapshot(targetStatus);
                 if (backupStorage.Version >= 2
                     && !string.IsNullOrWhiteSpace(backupStorage.SqliteHome)
@@ -984,7 +1014,7 @@ public sealed class MainForm : Form
                     string targetSqliteHome = targetStatus.StateDbLocation is null
                         ? targetStatus.SqliteHome
                         : Path.GetDirectoryName(targetStatus.StateDbLocation.Path)!;
-                    if (_restoreConfigCheck.Checked)
+                    if (restoreConfig)
                     {
                         MessageBox.Show(
                             this,
@@ -1021,17 +1051,18 @@ public sealed class MainForm : Form
         await RunBusyAsync("恢复中...", async () =>
         {
             EnsureAutomationMutationBoundary(codexHome, sqliteHome, selectedBackupPath);
-            RestoreResult result = await Task.Run(async () => await _syncService.RunRestoreAsync(
-                codexHome,
-                selectedBackupPath,
-                new RestoreBackupOptions
-                {
-                    RestoreConfig = _restoreConfigCheck.Checked,
-                    RestoreDatabase = _restoreDatabaseCheck.Checked,
-                    RestoreSessions = _restoreSessionsCheck.Checked,
-                    AllowSqliteHomeRelocation = allowSqliteHomeRelocation
-                },
-                sqliteHome));
+            RestoreIntent intent = new(
+                CodexHome: codexHome,
+                SqliteHomeOverride: sqliteHome,
+                BackupDirectory: selectedBackupPath,
+                RestoreConfig: restoreConfig,
+                RestoreDatabase: restoreDatabase,
+                RestoreSessions: restoreSessions,
+                AllowSqliteHomeRelocation: allowSqliteHomeRelocation);
+            RestoreResult result = await ExecutePlannedWriteAsync<RestoreResult>(
+                intent,
+                authorization => Task.Run(() => _applicationService.RestoreAsync(
+                    new RestoreApplicationRequest(intent, authorization))));
             _settings = _settingsService.UpdateState(_settings, SelectedProvider(), selectedBackupPath, CaptureWindowBounds(), CurrentBackupRetentionCount());
             await _settingsService.SaveAsync(_settings);
             AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 恢复完成");
@@ -1075,7 +1106,11 @@ public sealed class MainForm : Form
         await RunBusyAsync("正在清理备份...", async () =>
         {
             EnsureAutomationMutationBoundary(codexHome, sqliteHome, selectedBackupPath: null);
-            BackupPruneResult result = await Task.Run(async () => await _syncService.RunPruneBackupsAsync(codexHome, CurrentBackupRetentionCount()));
+            PruneIntent intent = new(codexHome, sqliteHome, CurrentBackupRetentionCount());
+            BackupPruneResult result = await ExecutePlannedWriteAsync<BackupPruneResult>(
+                intent,
+                authorization => Task.Run(() => _applicationService.PruneAsync(
+                    new PruneApplicationRequest(intent, authorization))));
             AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 旧备份清理完成");
             AppendLog(TextFormatter.FormatBackupPruneResult(result, TextFormatter.ChineseSimplified));
             AppendLog(string.Empty);
@@ -1160,7 +1195,9 @@ public sealed class MainForm : Form
         UpdateCheckResult update;
         try
         {
-            update = await _updateService.CheckForUpdateAsync(currentVersion);
+            update = await _platformBoundary.CheckForUpdateAsync(
+                _updateService,
+                currentVersion);
         }
         catch (TimeoutException error)
         {
@@ -1580,12 +1617,166 @@ public sealed class MainForm : Form
         }
     }
 
+    private async Task RunApplicationControlEventAsync(Func<Task> action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        try
+        {
+            await action();
+        }
+        finally
+        {
+            _applicationTraceHub.CompleteCurrentInvocation();
+        }
+    }
+
+    private T RequireApplicationSuccess<T>(ApplicationOutcome<T> outcome)
+        where T : class
+    {
+        AppendLog(
+            $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Application {outcome.Operation} "
+            + $"[{outcome.OperationId}] -> {outcome.Lifecycle}");
+        foreach (ApplicationWarning warning in outcome.Warnings)
+        {
+            AppendLog($"  警告 [{warning.Code}]: {warning.Message}");
+        }
+
+        if (outcome.IsSuccess && outcome.Data is not null)
+        {
+            return outcome.Data;
+        }
+
+        string detail = outcome.Errors.Count == 0
+            ? $"Application 操作结束状态为 {outcome.Lifecycle}。"
+            : string.Join(Environment.NewLine, outcome.Errors.Select(FormatApplicationError));
+        throw new GuiApplicationOutcomeException(
+            outcome.OperationId,
+            outcome.Operation,
+            outcome.Lifecycle,
+            detail);
+    }
+
+    private async Task<T> ExecutePlannedWriteAsync<T>(
+        ApplicationWriteIntent intent,
+        Func<ApplicationApplyAuthorization, Task<ApplicationOutcome<ApplicationWriteResult<T>>>> apply)
+        where T : class
+    {
+        ArgumentNullException.ThrowIfNull(intent);
+        ArgumentNullException.ThrowIfNull(apply);
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            ApplicationOperationPlan plan = RequireReadyPlan(
+                await Task.Run(() => _applicationService.CreatePlanAsync(
+                    new CreateApplicationPlanRequest(intent))));
+            AppendPlanSummary(plan);
+            ApplicationOutcome<ApplicationWriteResult<T>> outcome = await apply(
+                new ApplicationApplyAuthorization(
+                    Apply: true,
+                    Plan: plan,
+                    PlanDigest: plan.Digest));
+            if (GuiApplicationOutcomePolicy.IsPlanStale(outcome) && attempt == 0)
+            {
+                AppendLog(
+                    $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 计划应用前状态发生变化，"
+                    + "将基于同一输入重新生成一次计划。");
+                continue;
+            }
+            return RequireAppliedOutcome(outcome);
+        }
+
+        throw new InvalidOperationException("The bounded plan retry was exhausted.");
+    }
+
+    private ApplicationOperationPlan RequireReadyPlan(
+        ApplicationOutcome<ApplicationOperationPlan> outcome)
+    {
+        ApplicationOperationPlan plan = RequireApplicationSuccess(outcome);
+        if (outcome.Lifecycle != ApplicationOperationLifecycle.ReadyToApply)
+        {
+            throw new GuiApplicationOutcomeException(
+                outcome.OperationId,
+                outcome.Operation,
+                outcome.Lifecycle,
+                "Application did not return a ready-to-apply plan.");
+        }
+        return plan;
+    }
+
+    private T RequireAppliedOutcome<T>(
+        ApplicationOutcome<ApplicationWriteResult<T>> outcome)
+        where T : class
+    {
+        ApplicationWriteResult<T> writeResult = RequireApplicationSuccess(outcome);
+        if (!GuiApplicationOutcomePolicy.IsAppliedSuccess(outcome))
+        {
+            throw new GuiApplicationOutcomeException(
+                outcome.OperationId,
+                outcome.Operation,
+                outcome.Lifecycle,
+                "Application returned a dry-run result where the GUI required explicit apply.");
+        }
+        return writeResult.Result!;
+    }
+
+    private void AppendPlanSummary(ApplicationOperationPlan plan)
+    {
+        AppendLog(
+            $"计划摘要: id={plan.PlanId}, digest={plan.Digest}, "
+            + $"目标={plan.Targets.Count}, 自动清理={plan.AutoPruneDeletionTargets.Count}, "
+            + $"过期={plan.ExpiresAtUtc:O}");
+        foreach (ApplicationPlanTarget target in plan.Targets)
+        {
+            AppendLog($"  {target.Action}: {target.Path} [{target.Fingerprint}]");
+        }
+        foreach (ApplicationPlanTarget target in plan.AutoPruneDeletionTargets)
+        {
+            AppendLog($"  auto-prune {target.Action}: {target.Path} [{target.Fingerprint}]");
+        }
+    }
+
+    private static string FormatApplicationError(ApplicationError error)
+    {
+        List<string> evidence = [];
+        if (!string.IsNullOrWhiteSpace(error.RollbackStatus))
+        {
+            evidence.Add($"rollback={error.RollbackStatus}");
+        }
+        if (!string.IsNullOrWhiteSpace(error.EvidencePath))
+        {
+            evidence.Add($"evidence={error.EvidencePath}");
+        }
+        string suffix = evidence.Count == 0 ? string.Empty : $" ({string.Join(", ", evidence)})";
+        return $"[{error.Code}] {error.Message}{suffix}";
+    }
+
     private async Task RunBusyAsync(string stateText, Func<Task> action)
     {
         SetBusy(true, stateText);
         try
         {
             await action();
+        }
+        catch (GuiApplicationOutcomeException error)
+            when (error.Lifecycle == ApplicationOperationLifecycle.Cancelled)
+        {
+            AppendLog(
+                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 操作已取消 "
+                + $"[{error.OperationId}]: {error.Message}");
+        }
+        catch (GuiApplicationOutcomeException error)
+        {
+            AppendLog(
+                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Application 错误 "
+                + $"[{error.OperationId}]: {error}");
+            string prefix = error.Lifecycle == ApplicationOperationLifecycle.RecoveryRequired
+                ? "操作未能安全完成，需要恢复检查。"
+                : "操作失败。";
+            MessageBox.Show(
+                this,
+                $"{prefix}{Environment.NewLine}{Environment.NewLine}{error.Message}",
+                Text,
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
         }
         catch (Exception error)
         {
@@ -1596,6 +1787,27 @@ public sealed class MainForm : Form
         {
             SetBusy(false, "就绪");
         }
+    }
+
+    private sealed class GuiApplicationOutcomeException : InvalidOperationException
+    {
+        internal GuiApplicationOutcomeException(
+            string operationId,
+            ApplicationOperationKind operation,
+            ApplicationOperationLifecycle lifecycle,
+            string message)
+            : base(message)
+        {
+            OperationId = operationId;
+            Operation = operation;
+            Lifecycle = lifecycle;
+        }
+
+        internal string OperationId { get; }
+
+        internal ApplicationOperationKind Operation { get; }
+
+        internal ApplicationOperationLifecycle Lifecycle { get; }
     }
 
     private void SetBusy(bool busy, string stateText)
