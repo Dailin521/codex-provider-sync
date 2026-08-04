@@ -5,9 +5,9 @@
 >
 > The v0.4 source and Windows Release build contain an Automation executable,
 > protocol schema, GUI manifest, and isolated GUI bridge. Implementation commit
-> `7545b5d` passed the visible Headful Windows release gate; v0.4 has not been
-> tagged or published as a formal Release. Protocol `0.4` is a pre-1.0
-> compatibility boundary.
+> `7545b5d` passed the visible Headful Windows release gate, and v0.4.0 was
+> published on 2026-08-04. Protocol `0.4` remains a pre-1.0 compatibility
+> boundary.
 
 ## Motivation
 
