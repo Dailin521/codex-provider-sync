@@ -27,6 +27,17 @@ Codex 切换 `model_provider` 后，旧会话可能从 Desktop 或 `/resume` 中
 
 本工具不负责登录、认证或切换账号；请先用原有方式完成 Provider 切换，再执行同步。
 
+## 它与 Provider 切换工具的关系
+
+包括 cc-switch 在内的 Provider 管理工具，主要负责账号、API Key、`auth.json` 或 `config.toml` 的切换，有些工具也提供自己的历史会话处理能力。codex-provider-sync 刻意不接管认证，它专注于切换之后的会话可见性元数据、rollout、SQLite、备份和恢复。
+
+如果你正在使用的切换工具已经能让全部历史会话保持可见，就不需要重复同步。以下情况仍适合使用本工具：
+
+- 使用多个切换工具，或先切换后才发现旧会话已经按 Provider 分开。
+- 需要同时核对并修复 rollout、SQLite 和项目可见性，而不只修改配置文件。
+- SQLite Home 与 Codex Home 分开存放，特别是 Windows Codex Home + WSL SQLite Home。
+- 需要可恢复的批量同步、明确的备份记录和事务回滚保护。
+
 ## 它会处理什么
 
 - 同步 `~/.codex/sessions` 和 `~/.codex/archived_sessions` 中的 rollout metadata。
@@ -40,7 +51,13 @@ Codex 切换 `model_provider` 后，旧会话可能从 Desktop 或 `/resume` 中
 
 ### Windows GUI
 
-普通 Windows 用户建议直接从 [Releases](https://github.com/Dailin521/codex-provider-sync/releases/latest) 下载并解压：
+普通 Windows 用户只需从 [Releases](https://github.com/Dailin521/codex-provider-sync/releases/latest) 下载单文件 GUI：
+
+| 使用场景 | Release 资产 | 更新方式 |
+| --- | --- | --- |
+| 只需要 Windows GUI | `CodexProviderSync.exe` | 支持软件内自动更新 |
+| 脚本、CI 或 AI Agent | `codex-provider-sync-v<版本>-automation-win-x64.zip` | 手动下载更新 |
+| GUI 与自动化接口都需要 | `codex-provider-sync-v<版本>-win-x64.zip` | 手动下载更新 |
 
 1. 打开 `CodexProviderSync.exe`
 2. 点击“刷新”
@@ -90,9 +107,9 @@ codex-provider sync --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/you
 
 `status` 会显示 effective SQLite Home 和来源。显式路径缺少 `state_5.sqlite` 时，状态查询只报告诊断，`sync`、`switch` 和数据库恢复不会偷偷回退到其它位置。默认布局中的数据库被删除时，`restore` 可以根据备份 metadata 在原默认位置重建数据库。
 
-### Business Automation API（v0.4 实验性）
+### 自动化接口（v0.4 实验性）
 
-v0.4 Windows Release 构建同时包含 `CodexProviderSync.Automation.exe` 和 `automation-protocol-v0.4.schema.json`。这个一次性进程接口与 Windows GUI 共用同一套 Application 用例；每次调用只在 stdout 输出一份协议 `0.4` JSON，诊断信息写入 stderr。
+Release 提供独立的 Windows 自动化接口包，内含 `CodexProviderSync.Automation.exe`、`automation-protocol-v0.4.schema.json` 和中文快速说明；Windows 完整包也包含这些文件。这个一次性进程接口与 Windows GUI 共用同一套 Application 用例；每次调用只在 stdout 输出一份协议 `0.4` JSON，诊断信息写入 stderr。普通桌面用户不需要下载自动化接口包。
 
 | 命令 | 用途 |
 | --- | --- |
@@ -118,6 +135,8 @@ $planDigest = $planResponse.data.digest
 
 计划有有效期、绑定规范化输入和目标状态，并由持久化 ledger 保证只能使用一次；默认 ledger 位于 `<Codex Home>\tmp\provider-sync-automation-ledger`。所有路径参数必须是绝对路径，不能穿过符号链接或 reparse point，Automation 也拒绝直接指向或访问 `auth.json`。协议仍处于 pre-1.0 实验阶段，`0.4` 之外不承诺兼容。
 
+中文分步示例见 [自动化接口快速开始](docs/AUTOMATION_QUICKSTART_ZH.md)。
+
 ## 安全与限制
 
 每次 `sync` / `switch` 前都会备份到：
@@ -139,7 +158,10 @@ $planDigest = $planResponse.data.digest
 
 - [Windows GUI 说明](docs/README_GUI_ZH.md)
 - macOS GUI 说明：[中文](docs/README_MAC_GUI_ZH.md) · [English](docs/README_MAC_GUI_EN.md)
-- [v0.4.0 Release Notes（Draft）](docs/RELEASE_NOTES_V0.4.0.md)
+- [v0.4.0 中文发布说明](docs/release-notes/v0.4.0-zh.md)
+- [v0.4.0 技术发布说明](docs/RELEASE_NOTES_V0.4.0.md)
+- [更新日志](CHANGELOG.md)
+- [自动化接口快速开始](docs/AUTOMATION_QUICKSTART_ZH.md)
 - [v0.4 Automation 执行计划](docs/V0.4_AUTOMATION_PLAN.md)
 - [English documentation](docs/README_EN.md)
 - [AI / Agent 操作指南](AGENTS.md)

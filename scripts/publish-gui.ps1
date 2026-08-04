@@ -9,6 +9,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = [System.IO.Path]::GetFullPath((Resolve-Path (Join-Path $PSScriptRoot "..")).Path)
 $project = Join-Path $repoRoot "desktop\CodexProviderSync.App\CodexProviderSync.App.csproj"
 $automationProject = Join-Path $repoRoot "desktop\CodexProviderSync.Automation\CodexProviderSync.Automation.csproj"
+$automationQuickStart = Join-Path $repoRoot "docs\AUTOMATION_QUICKSTART_ZH.md"
 $outputDir = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $Output))
 $automationOutputDir = [System.IO.Path]::GetFullPath("$outputDir-automation")
 
@@ -22,6 +23,10 @@ function Assert-WorkspaceOutputPath([string]$Candidate, [string]$Label) {
 
 Assert-WorkspaceOutputPath $outputDir "Publish output"
 Assert-WorkspaceOutputPath $automationOutputDir "Automation staging output"
+
+if (-not (Test-Path -LiteralPath $automationQuickStart -PathType Leaf)) {
+    throw "Automation quick-start document is missing: $automationQuickStart"
+}
 
 if (Test-Path $outputDir) {
     try {
@@ -74,6 +79,7 @@ try {
     }
     Copy-Item -LiteralPath $automationExecutable -Destination $outputDir -Force
     Copy-Item -LiteralPath $automationSchema -Destination $outputDir -Force
+    Copy-Item -LiteralPath $automationQuickStart -Destination (Join-Path $outputDir "README-AUTOMATION.zh-CN.md") -Force
 }
 finally {
     if (Test-Path -LiteralPath $automationOutputDir) {

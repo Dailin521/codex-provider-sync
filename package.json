@@ -5,6 +5,7 @@
   "type": "module",
   "files": [
     "README.md",
+    "CHANGELOG.md",
     "AGENTS.md",
     "docs",
     "src"

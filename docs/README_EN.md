@@ -27,6 +27,12 @@ If all of your relays can reliably reuse one `model_provider` ID and history rem
 
 The tool does not sign in, manage accounts, or switch authentication. Switch Provider using your normal workflow first, then synchronize history.
 
+## Relationship to Provider Switchers
+
+Provider managers, including cc-switch, primarily switch accounts, API keys, `auth.json`, or `config.toml`; some also provide their own history handling. codex-provider-sync deliberately leaves authentication alone and focuses on post-switch visibility metadata, rollout files, SQLite state, managed backups, and restoration.
+
+If your current switcher already keeps all history visible, you do not need to run another synchronization. This project remains useful when several switching workflows have split existing history, rollout and SQLite need to be reconciled together, SQLite Home is separate from Codex Home, or backup-backed transactional repair is required.
+
 ## What It Updates
 
 - Rollout metadata under `~/.codex/sessions` and `~/.codex/archived_sessions`.
@@ -40,7 +46,13 @@ The tool does not sign in, manage accounts, or switch authentication. Switch Pro
 
 ### Windows GUI
 
-For normal Windows use, download and extract `CodexProviderSync.exe` from [Releases](https://github.com/Dailin521/codex-provider-sync/releases/latest):
+For normal Windows use, download the standalone GUI from [Releases](https://github.com/Dailin521/codex-provider-sync/releases/latest):
+
+| Use case | Release asset | Update method |
+| --- | --- | --- |
+| Windows GUI only | `CodexProviderSync.exe` | Built-in updates supported |
+| Scripts, CI, or AI agents | `codex-provider-sync-v<version>-automation-win-x64.zip` | Manual update |
+| GUI and Automation together | `codex-provider-sync-v<version>-win-x64.zip` | Manual update |
 
 1. Open `CodexProviderSync.exe`.
 2. Click `刷新` (Refresh).
@@ -92,9 +104,9 @@ codex-provider sync --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/you
 
 Node.js 24+ uses the built-in `node:sqlite` module. Older supported Node.js releases use the optional `better-sqlite3` dependency.
 
-### Business Automation API (experimental v0.4)
+### Automation API (experimental v0.4)
 
-The v0.4 Windows Release build also contains `CodexProviderSync.Automation.exe` and `automation-protocol-v0.4.schema.json`. This one-shot process interface uses the same Application use cases as the Windows GUI. Each invocation emits exactly one protocol `0.4` JSON document on stdout and sends diagnostics to stderr.
+Releases provide a separate Windows Automation package containing `CodexProviderSync.Automation.exe`, `automation-protocol-v0.4.schema.json`, and a Chinese quick start. The complete Windows package contains the same files. This one-shot process interface uses the same Application use cases as the Windows GUI. Each invocation emits exactly one protocol `0.4` JSON document on stdout and sends diagnostics to stderr. Normal desktop users do not need the Automation package.
 
 | Command | Purpose |
 | --- | --- |
@@ -140,7 +152,10 @@ Before each `sync` or `switch`, the tool creates a backup under:
 
 - [Windows GUI guide](README_GUI_ZH.md)
 - [macOS GUI guide](README_MAC_GUI_EN.md)
-- [v0.4.0 Release Notes (Draft)](RELEASE_NOTES_V0.4.0.md)
+- [v0.4.0 Chinese release announcement](release-notes/v0.4.0-zh.md)
+- [v0.4.0 technical release notes](RELEASE_NOTES_V0.4.0.md)
+- [Changelog](../CHANGELOG.md)
+- [Chinese Automation quick start](AUTOMATION_QUICKSTART_ZH.md)
 - [v0.4 Automation execution plan](V0.4_AUTOMATION_PLAN.md)
 - [中文说明](../README.md)
 - [AI / Agent guide](../AGENTS.md)
