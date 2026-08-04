@@ -3231,7 +3231,7 @@ test("restoreBackup rejects escaped and non-rollout session manifest targets", a
 
   const escapedPath = path.join(root, "rollout-escaped.jsonl");
   await fs.writeFile(escapedPath, "outside", "utf8");
-  const escapedManifest = structuredClone(originalManifest);
+  const escapedManifest = JSON.parse(JSON.stringify(originalManifest));
   escapedManifest.files[0].path = escapedPath;
   await fs.writeFile(manifestPath, JSON.stringify(escapedManifest), "utf8");
   await assert.rejects(
@@ -3245,7 +3245,7 @@ test("restoreBackup rejects escaped and non-rollout session manifest targets", a
 
   const nonRolloutPath = path.join(codexHome, "sessions", "2026", "03", "19", "arbitrary.jsonl");
   await fs.writeFile(nonRolloutPath, "inside but not a rollout", "utf8");
-  const nonRolloutManifest = structuredClone(originalManifest);
+  const nonRolloutManifest = JSON.parse(JSON.stringify(originalManifest));
   nonRolloutManifest.files[0].path = nonRolloutPath;
   await fs.writeFile(manifestPath, JSON.stringify(nonRolloutManifest), "utf8");
   await assert.rejects(
@@ -3595,7 +3595,7 @@ test("runRestore rejects all-disabled recovery when the first journal record is 
       assert.equal(error.code, "RECOVERY_REQUIRED");
       assert.deepEqual(
         new Set(error.missingRestoreKinds),
-        new Set(["rollout sessions", "SQLite database", "config.toml"])
+        new Set(["rollout sessions", "SQLite database", "config.toml", "global state"])
       );
       return true;
     }

@@ -490,6 +490,7 @@ export async function acquirePathLock(lockPath, label = "codex-provider-sync", o
     currentDirectory: process.cwd()
   };
   let published = false;
+  let canonicalReserved = false;
   let claimPath = null;
   try {
     claimPath = await publishClaim(
@@ -530,11 +531,21 @@ export async function acquirePathLock(lockPath, label = "codex-provider-sync", o
     let attempts = 0;
     while (true) {
       try {
-        await fsImpl.rename(candidateDir, lockDir);
+        // Directory rename is not an exclusive publish on POSIX: it may replace
+        // an existing empty directory. Reserve the canonical name with mkdir,
+        // then publish the already-durable owner inode with a no-replace link.
+        await fsImpl.mkdir(lockDir, { mode: 0o700 });
+        canonicalReserved = true;
+        await fsImpl.link(candidateOwnerPath, ownerPath);
         published = true;
+        await syncDirectoryImpl(lockDir, { fsImpl, platform });
         await syncDirectoryImpl(parentDir, { fsImpl, platform });
+        await fsImpl.rm(candidateDir, { recursive: true, force: true });
         break;
       } catch (error) {
+        if (canonicalReserved) {
+          throw error;
+        }
         const canonicalExists = await pathExists(lockDir, fsImpl);
         if (canonicalExists) {
           const existingOwner = await readLockOwner(ownerPath, fsImpl);
@@ -566,7 +577,7 @@ export async function acquirePathLock(lockPath, label = "codex-provider-sync", o
     }
   } catch (error) {
     const cleanupFailures = [];
-    let canonicalCleanupSafe = !published;
+    let canonicalCleanupSafe = !published && !canonicalReserved;
     if (published) {
       try {
         await removeOwnedCanonical(
@@ -581,12 +592,21 @@ export async function acquirePathLock(lockPath, label = "codex-provider-sync", o
       } catch (cleanupError) {
         cleanupFailures.push(cleanupError);
       }
-    } else {
+    } else if (canonicalReserved) {
       try {
-        await fsImpl.rm(candidateDir, { recursive: true, force: true });
+        // rmdir is intentionally non-recursive: if another runtime populated
+        // the reserved directory, preserve it and retain our claim fail-closed.
+        await fsImpl.rmdir(lockDir);
+        await syncDirectoryImpl(parentDir, { fsImpl, platform });
+        canonicalCleanupSafe = true;
       } catch (cleanupError) {
         cleanupFailures.push(cleanupError);
       }
+    }
+    try {
+      await fsImpl.rm(candidateDir, { recursive: true, force: true });
+    } catch (cleanupError) {
+      cleanupFailures.push(cleanupError);
     }
     if (claimPath && canonicalCleanupSafe) {
       try {

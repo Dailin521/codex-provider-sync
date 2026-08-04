@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { rmSync } from "node:fs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
@@ -11,10 +12,21 @@ import { DEFAULT_LOCK_NAME } from "../src/constants.js";
 
 const TEST_STARTED_AT = "2024-01-02T03:04:05.000Z";
 const TEST_MARKER = `test:${TEST_STARTED_AT}`;
+const tempLockHomes = new Set();
 
-async function makeLockHome(t) {
+process.once("exit", () => {
+  for (const root of tempLockHomes) {
+    try {
+      rmSync(root, { recursive: true, force: true });
+    } catch {
+      // Best-effort cleanup after the test process has released its handles.
+    }
+  }
+});
+
+async function makeLockHome() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "provider-sync-lock-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  tempLockHomes.add(root);
   return root;
 }
 
@@ -92,6 +104,35 @@ test("acquireLock retries transient candidate creation failures", async (t) => {
   assert.equal(candidateAttempts, 3);
   assert.deepEqual(sleepCalls, [25, 25]);
   await release();
+});
+
+test("owner publication failure removes its empty canonical reservation and claim", async (t) => {
+  const codexHome = await makeLockHome(t);
+  const lockDir = path.join(codexHome, "tmp", DEFAULT_LOCK_NAME);
+  const fsImpl = new Proxy(fs, {
+    get(target, property) {
+      if (property === "link") {
+        return async () => {
+          const error = new Error("injected owner publication failure");
+          error.code = "EIO";
+          throw error;
+        };
+      }
+      const value = target[property];
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
+
+  await assert.rejects(
+    acquireLock(codexHome, "sync", lockOptions({ fsImpl })),
+    /injected owner publication failure/
+  );
+  await assert.rejects(fs.access(lockDir), { code: "ENOENT" });
+  assert.deepEqual(await fs.readdir(`${lockDir}.claims`), []);
+  assert.equal(
+    (await fs.readdir(path.dirname(lockDir))).some((name) => name.includes(".candidate.")),
+    false
+  );
 });
 
 test("acquirePathLock supports an arbitrary future SQLite resource path", async (t) => {
