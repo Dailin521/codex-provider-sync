@@ -4,6 +4,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import { createBackup } from "../src/backup.js";
+import { DB_FILE_BASENAME, SQLITE_DIR_BASENAME } from "../src/constants.js";
 import { openDatabase } from "../src/sqlite.js";
 import {
   configureSqliteWriteDurability,
@@ -116,5 +118,65 @@ test("official SQLite online backup captures live WAL into one standalone main f
   } finally {
     backup.close();
     await fs.rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("managed backup snapshots live WAL and manifests only standalone main databases", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "provider-sync-managed-online-backup-"));
+  const codexHome = path.join(root, ".codex");
+  const sqliteHome = path.join(codexHome, SQLITE_DIR_BASENAME);
+  const dbPath = path.join(sqliteHome, DB_FILE_BASENAME);
+  const configPath = path.join(codexHome, "config.toml");
+  await fs.mkdir(sqliteHome, { recursive: true });
+  await fs.writeFile(configPath, 'model_provider = "openai"\n', "utf8");
+
+  const source = await openDatabase(dbPath);
+  try {
+    assert.equal(source.prepare("PRAGMA journal_mode = WAL").get().journal_mode, "wal");
+    source.exec(`
+      CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT);
+      INSERT INTO threads VALUES ('live-wal-row', 'apigather');
+    `);
+    assert.ok((await fs.stat(`${dbPath}-wal`)).size > 0);
+
+    const backupDir = await createBackup({
+      codexHome,
+      targetProvider: "openai",
+      sessionChanges: [],
+      configPath
+    });
+    const metadata = JSON.parse(await fs.readFile(path.join(backupDir, "metadata.json"), "utf8"));
+    assert.deepEqual(metadata.sqliteDbFiles, [DB_FILE_BASENAME]);
+    assert.deepEqual(
+      metadata.dbFiles.map((fileName) => fileName.replaceAll("\\", "/")),
+      [`${SQLITE_DIR_BASENAME}/${DB_FILE_BASENAME}`]
+    );
+
+    const canonicalBackupPath = path.join(backupDir, "db", "sqlite-home", DB_FILE_BASENAME);
+    const legacyMirrorPath = path.join(
+      backupDir,
+      "db",
+      SQLITE_DIR_BASENAME,
+      DB_FILE_BASENAME
+    );
+    for (const backupPath of [canonicalBackupPath, legacyMirrorPath]) {
+      assert.equal((await fs.stat(backupPath)).isFile(), true);
+      await assert.rejects(fs.access(`${backupPath}-wal`), { code: "ENOENT" });
+      await assert.rejects(fs.access(`${backupPath}-shm`), { code: "ENOENT" });
+    }
+
+    const backup = await openDatabase(canonicalBackupPath, { readOnly: true });
+    try {
+      assert.equal(
+        backup.prepare("SELECT model_provider FROM threads WHERE id = ?")
+          .get("live-wal-row").model_provider,
+        "apigather"
+      );
+    } finally {
+      backup.close();
+    }
+  } finally {
+    source.close();
+    await fs.rm(root, { recursive: true, force: true });
   }
 });

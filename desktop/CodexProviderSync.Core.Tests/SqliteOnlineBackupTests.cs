@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 
 namespace CodexProviderSync.Core.Tests;
@@ -90,6 +91,70 @@ public sealed class SqliteOnlineBackupTests
             Convert.ToString(await ScalarObjectAsync(
                 backup,
                 "SELECT model_provider FROM threads WHERE id = 'wal-row'")));
+    }
+
+    [Fact]
+    public async Task ManagedBackup_SnapshotsLiveWal_AndManifestsOnlyStandaloneMainDatabases()
+    {
+        await using Fixture fixture = Fixture.Create();
+        string configPath = Path.Combine(fixture.CodexHome, "config.toml");
+        await File.WriteAllTextAsync(configPath, "model_provider = \"openai\"\n");
+
+        await using SqliteConnection source = Open(fixture.DbPath);
+        await source.OpenAsync();
+        Assert.Equal("wal", Convert.ToString(await ScalarObjectAsync(source, "PRAGMA journal_mode = WAL")));
+        await ExecuteAsync(source, """
+            CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT);
+            INSERT INTO threads VALUES ('live-wal-row', 'apigather');
+            """);
+        Assert.True(new FileInfo(fixture.DbPath + "-wal").Length > 0);
+
+        BackupService backups = new(new SessionRolloutService(), fixture.Service);
+        string backupDir = await backups.CreateBackupAsync(
+            fixture.Storage,
+            "openai",
+            [],
+            configPath);
+
+        using JsonDocument metadata = JsonDocument.Parse(
+            await File.ReadAllTextAsync(Path.Combine(backupDir, "metadata.json")));
+        Assert.Equal(
+            [AppConstants.DbFileBasename],
+            metadata.RootElement.GetProperty("sqliteDbFiles")
+                .EnumerateArray()
+                .Select(static value => value.GetString()!)
+                .ToArray());
+        Assert.Equal(
+            [Path.Combine(AppConstants.SqliteDirBasename, AppConstants.DbFileBasename)],
+            metadata.RootElement.GetProperty("dbFiles")
+                .EnumerateArray()
+                .Select(static value => value.GetString()!)
+                .ToArray());
+
+        string canonicalBackupPath = Path.Combine(
+            backupDir,
+            "db",
+            "sqlite-home",
+            AppConstants.DbFileBasename);
+        string legacyMirrorPath = Path.Combine(
+            backupDir,
+            "db",
+            AppConstants.SqliteDirBasename,
+            AppConstants.DbFileBasename);
+        foreach (string backupPath in new[] { canonicalBackupPath, legacyMirrorPath })
+        {
+            Assert.True(File.Exists(backupPath));
+            Assert.False(File.Exists(backupPath + "-wal"));
+            Assert.False(File.Exists(backupPath + "-shm"));
+        }
+
+        await using SqliteConnection backup = Open(canonicalBackupPath, SqliteOpenMode.ReadOnly);
+        await backup.OpenAsync();
+        Assert.Equal(
+            "apigather",
+            Convert.ToString(await ScalarObjectAsync(
+                backup,
+                "SELECT model_provider FROM threads WHERE id = 'live-wal-row'")));
     }
 
     private sealed class Fixture : IAsyncDisposable

@@ -11,7 +11,11 @@ import {
   GLOBAL_STATE_FILE_BASENAME
 } from "./constants.js";
 import { restoreSessionChanges } from "./session-files.js";
-import { assertSqliteWritable, detectStateDb } from "./sqlite-state.js";
+import {
+  assertSqliteWritable,
+  createSqliteOnlineBackup,
+  detectStateDb
+} from "./sqlite-state.js";
 import {
   assertSqliteAccessSupported,
   resolveStorageLayout,
@@ -255,20 +259,21 @@ export async function createBackup({
     : await detectStateDb(effectiveStorage);
   const actualSqliteHome = stateDb ? path.dirname(stateDb.path) : effectiveStorage.sqliteHome;
   if (stateDb) {
-    for (const suffix of ["", "-shm", "-wal"]) {
-      const sourcePath = `${stateDb.path}${suffix}`;
-      const sqliteRelativePath = `${DB_FILE_BASENAME}${suffix}`;
-      const copied = await copyIfPresent(sourcePath, path.join(dbDir, "sqlite-home", sqliteRelativePath));
-      if (!copied) {
-        continue;
-      }
-      copiedSqliteDbFiles.push(sqliteRelativePath);
+    const sqliteRelativePath = DB_FILE_BASENAME;
+    const sqliteBackupPath = path.join(dbDir, "sqlite-home", sqliteRelativePath);
+    const sqliteBackup = await createSqliteOnlineBackup(stateDb, sqliteBackupPath);
+    if (!sqliteBackup.databasePresent) {
+      throw new Error(`state_5.sqlite disappeared while creating a backup: ${stateDb.path}`);
+    }
+    copiedSqliteDbFiles.push(sqliteRelativePath);
 
-      const legacyRelativePath = safeRelativePath(codexHome, sourcePath);
-      if (legacyRelativePath) {
-        await copyIfPresent(sourcePath, path.join(dbDir, legacyRelativePath));
-        copiedDbFiles.push(legacyRelativePath);
-      }
+    // Keep the v2 legacy mirror for readers that still consult dbFiles, but
+    // derive it from the already-consistent standalone snapshot. Never copy
+    // live WAL/SHM sidecars independently into a managed backup.
+    const legacyRelativePath = safeRelativePath(codexHome, stateDb.path);
+    if (legacyRelativePath) {
+      await copyFileAtomic(sqliteBackupPath, path.join(dbDir, legacyRelativePath));
+      copiedDbFiles.push(legacyRelativePath);
     }
   }
 

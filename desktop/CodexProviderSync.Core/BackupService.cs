@@ -50,25 +50,30 @@ public sealed class BackupService
         string actualSqliteHome = stateDb is null ? storage.SqliteHome : Path.GetDirectoryName(stateDb.Path)!;
         if (stateDb is not null)
         {
-            foreach (string suffix in new[] { string.Empty, "-shm", "-wal" })
+            string sqliteRelativePath = AppConstants.DbFileBasename;
+            string sqliteBackupPath = Path.Combine(dbDir, "sqlite-home", sqliteRelativePath);
+            CodexStorageLayout detectedStorage = storage with { StateDbLocation = stateDb };
+            SqliteOnlineBackupResult sqliteBackup = await _sqliteStateService.CreateSqliteOnlineBackupAsync(
+                detectedStorage,
+                sqliteBackupPath);
+            if (!sqliteBackup.DatabasePresent)
             {
-                string sourcePath = stateDb.Path + suffix;
-                string sqliteRelativePath = AppConstants.DbFileBasename + suffix;
-                if (!await CopyIfPresentAsync(
-                    sourcePath,
-                    Path.Combine(dbDir, "sqlite-home", sqliteRelativePath),
-                    overwrite: false))
-                {
-                    continue;
-                }
+                throw new InvalidOperationException(
+                    $"state_5.sqlite disappeared while creating a backup: {stateDb.Path}");
+            }
+            copiedSqliteDbFiles.Add(sqliteRelativePath);
 
-                copiedSqliteDbFiles.Add(sqliteRelativePath);
-                string? legacyRelativePath = SafeRelativePath(codexHome, sourcePath);
-                if (legacyRelativePath is not null)
-                {
-                    await CopyIfPresentAsync(sourcePath, Path.Combine(dbDir, legacyRelativePath), overwrite: false);
-                    copiedDbFiles.Add(legacyRelativePath);
-                }
+            // Keep the v2 legacy mirror for readers that still consult DbFiles,
+            // but derive it from the consistent standalone snapshot. Never
+            // copy live WAL/SHM sidecars independently into a managed backup.
+            string? legacyRelativePath = SafeRelativePath(codexHome, stateDb.Path);
+            if (legacyRelativePath is not null)
+            {
+                await AtomicFile.CopyAsync(
+                    sqliteBackupPath,
+                    Path.Combine(dbDir, legacyRelativePath),
+                    overwrite: false);
+                copiedDbFiles.Add(legacyRelativePath);
             }
         }
 
