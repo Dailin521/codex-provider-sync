@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import { syncDirectory } from "./atomic-file.js";
 import { DB_FILE_BASENAME, SESSION_DIRS, SQLITE_DIR_BASENAME } from "./constants.js";
 import { openDatabase } from "./sqlite.js";
 import { resolveStorageLayout } from "./storage-layout.js";
@@ -186,6 +187,15 @@ function setBusyTimeout(db, busyTimeoutMs) {
   db.exec(`PRAGMA busy_timeout = ${normalizeBusyTimeoutMs(busyTimeoutMs)}`);
 }
 
+export function configureSqliteWriteDurability(db) {
+  db.exec("PRAGMA synchronous = FULL");
+  const synchronous = Number(db.prepare("PRAGMA synchronous").get().synchronous);
+  if (synchronous !== 2) {
+    throw new Error(`Unable to configure SQLite synchronous=FULL (reported ${synchronous}).`);
+  }
+  return { synchronous: "full", value: synchronous };
+}
+
 function isSqliteBusyError(error) {
   const message = `${error?.code ?? ""} ${error?.message ?? ""}`.toLowerCase();
   return message.includes("database is locked") || message.includes("sqlite_busy") || message.includes("busy");
@@ -328,6 +338,7 @@ export async function assertSqliteWritable(storageOrLocation, options = {}) {
   try {
     db = await openDatabase(dbPath);
     setBusyTimeout(db, options.busyTimeoutMs);
+    configureSqliteWriteDurability(db);
     db.exec("BEGIN IMMEDIATE");
     db.exec("ROLLBACK");
     return { databasePresent: true };
@@ -358,6 +369,7 @@ export async function updateSqliteProvider(storageOrLocation, targetProvider, af
       await afterUpdate({
         updatedRows: 0,
         providerRowsUpdated: 0,
+        modelRowsUpdated: 0,
         userEventRowsUpdated: 0,
         cwdRowsUpdated: 0,
         databasePresent: false
@@ -366,6 +378,7 @@ export async function updateSqliteProvider(storageOrLocation, targetProvider, af
     return {
       updatedRows: 0,
       providerRowsUpdated: 0,
+      modelRowsUpdated: 0,
       userEventRowsUpdated: 0,
       cwdRowsUpdated: 0,
       databasePresent: false
@@ -377,6 +390,7 @@ export async function updateSqliteProvider(storageOrLocation, targetProvider, af
   try {
     db = await openDatabase(dbPath);
     setBusyTimeout(db, options.busyTimeoutMs);
+    configureSqliteWriteDurability(db);
     db.exec("BEGIN IMMEDIATE");
     transactionOpen = true;
     // When a target model is provided, align every thread's `model` column
@@ -387,16 +401,22 @@ export async function updateSqliteProvider(storageOrLocation, targetProvider, af
     // with tableHasColumn to keep legacy layouts working.
     const wantsModel = targetModel != null && targetModel.length > 0
       && tableHasColumn(db, "threads", "model");
-    const stmt = db.prepare(wantsModel
-      ? `UPDATE threads
-         SET model_provider = ?, model = ?
-         WHERE COALESCE(model_provider, '') <> ? OR COALESCE(model, '') <> ?`
-      : `UPDATE threads
-         SET model_provider = ?
-         WHERE COALESCE(model_provider, '') <> ?`);
-    const result = wantsModel
-      ? stmt.run(targetProvider, targetModel, targetProvider, targetModel)
-      : stmt.run(targetProvider, targetProvider);
+    // Keep the update shape and counters identical to .NET: provider and
+    // optional model are independent writes, and a row changed in both
+    // columns contributes two to updatedRows.
+    const providerResult = db.prepare(`
+      UPDATE threads
+      SET model_provider = ?
+      WHERE COALESCE(model_provider, '') <> ?
+    `).run(targetProvider, targetProvider);
+    let modelUpdatedRows = 0;
+    if (wantsModel) {
+      modelUpdatedRows = db.prepare(`
+        UPDATE threads
+        SET model = ?
+        WHERE COALESCE(model, '') <> ?
+      `).run(targetModel, targetModel).changes ?? 0;
+    }
     let userEventUpdatedRows = 0;
     if (tableHasColumn(db, "threads", "has_user_event") && options.userEventThreadIds?.size) {
       const userEventStmt = db.prepare(`
@@ -422,11 +442,13 @@ export async function updateSqliteProvider(storageOrLocation, targetProvider, af
         cwdUpdatedRows += cwdStmt.run(cwd, threadId, cwd).changes ?? 0;
       }
     }
-    const updatedRows = (result.changes ?? 0) + userEventUpdatedRows + cwdUpdatedRows;
+    const providerUpdatedRows = providerResult.changes ?? 0;
+    const updatedRows = providerUpdatedRows + modelUpdatedRows + userEventUpdatedRows + cwdUpdatedRows;
     if (afterUpdate) {
       await afterUpdate({
         updatedRows,
-        providerRowsUpdated: result.changes ?? 0,
+        providerRowsUpdated: providerUpdatedRows,
+        modelRowsUpdated: modelUpdatedRows,
         userEventRowsUpdated: userEventUpdatedRows,
         cwdRowsUpdated: cwdUpdatedRows,
         databasePresent: true
@@ -436,7 +458,8 @@ export async function updateSqliteProvider(storageOrLocation, targetProvider, af
     transactionOpen = false;
     return {
       updatedRows,
-      providerRowsUpdated: result.changes ?? 0,
+      providerRowsUpdated: providerUpdatedRows,
+      modelRowsUpdated: modelUpdatedRows,
       userEventRowsUpdated: userEventUpdatedRows,
       cwdRowsUpdated: cwdUpdatedRows,
       databasePresent: true
@@ -452,6 +475,124 @@ export async function updateSqliteProvider(storageOrLocation, targetProvider, af
     throw wrapSqliteMalformedError(
       wrapSqliteBusyError(error, "update session provider metadata"),
       "update session provider metadata"
+    );
+  } finally {
+    db?.close();
+  }
+}
+
+function readSqliteConnectionMetadata(db) {
+  return {
+    journalMode: String(db.prepare("PRAGMA journal_mode").get().journal_mode).toLowerCase(),
+    pageSize: Number(db.prepare("PRAGMA page_size").get().page_size),
+    userVersion: Number(db.prepare("PRAGMA user_version").get().user_version),
+    applicationId: Number(db.prepare("PRAGMA application_id").get().application_id)
+  };
+}
+
+async function readStandaloneSqliteHeaderMetadata(dbPath) {
+  const handle = await fs.open(dbPath, "r");
+  try {
+    const header = Buffer.alloc(100);
+    const { bytesRead } = await handle.read(header, 0, header.length, 0);
+    if (bytesRead !== header.length
+      || header.subarray(0, 16).toString("binary") !== "SQLite format 3\u0000") {
+      throw new Error("SQLite online backup did not produce a valid standalone database header.");
+    }
+    const rawPageSize = header.readUInt16BE(16);
+    return {
+      journalMode: header[18] === 2 && header[19] === 2 ? "wal" : "delete",
+      pageSize: rawPageSize === 1 ? 65536 : rawPageSize,
+      userVersion: header.readInt32BE(60),
+      applicationId: header.readInt32BE(68)
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function pathExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Create one consistent SQLite database file via the active driver's official
+ * online-backup API. WAL/SHM sidecars are intentionally neither copied nor
+ * emitted; metadata is read from the standalone main-file header.
+ */
+export async function createSqliteOnlineBackup(storageOrLocation, destinationPath, options = {}) {
+  const dbPath = await existingStateDbPath(storageOrLocation);
+  if (!dbPath) {
+    return { databasePresent: false, backupPath: null, driver: null, metadata: null };
+  }
+
+  const fullSourcePath = path.resolve(dbPath);
+  const fullDestinationPath = path.resolve(destinationPath);
+  const sourceIdentityPath = process.platform === "win32" ? fullSourcePath.toLowerCase() : fullSourcePath;
+  const destinationIdentityPath = process.platform === "win32"
+    ? fullDestinationPath.toLowerCase()
+    : fullDestinationPath;
+  if (sourceIdentityPath === destinationIdentityPath) {
+    throw new Error("SQLite online backup destination must differ from the source database.");
+  }
+  await fs.mkdir(path.dirname(fullDestinationPath), { recursive: true });
+  if (await pathExists(fullDestinationPath)) {
+    throw new Error("SQLite online backup destination already exists.");
+  }
+
+  let db;
+  try {
+    db = await openDatabase(fullSourcePath);
+    setBusyTimeout(db, options.busyTimeoutMs);
+    const sourceMetadata = readSqliteConnectionMetadata(db);
+    const driver = db.driver ?? "unknown";
+    await db.backup(fullDestinationPath, options.backupOptions ?? {});
+
+    const handle = await fs.open(fullDestinationPath, "r+");
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await syncDirectory(path.dirname(fullDestinationPath));
+
+    const sidecars = [`${fullDestinationPath}-wal`, `${fullDestinationPath}-shm`];
+    if ((await Promise.all(sidecars.map(pathExists))).some(Boolean)) {
+      throw new Error("SQLite online backup unexpectedly emitted a WAL/SHM sidecar.");
+    }
+    const backupMetadata = await readStandaloneSqliteHeaderMetadata(fullDestinationPath);
+    return {
+      databasePresent: true,
+      backupPath: fullDestinationPath,
+      driver,
+      metadata: {
+        source: sourceMetadata,
+        backup: backupMetadata,
+        preserved: {
+          journalMode: sourceMetadata.journalMode === backupMetadata.journalMode,
+          pageSize: sourceMetadata.pageSize === backupMetadata.pageSize,
+          userVersion: sourceMetadata.userVersion === backupMetadata.userVersion,
+          applicationId: sourceMetadata.applicationId === backupMetadata.applicationId
+        }
+      }
+    };
+  } catch (error) {
+    await Promise.all([
+      fullDestinationPath,
+      `${fullDestinationPath}-wal`,
+      `${fullDestinationPath}-shm`
+    ].map((filePath) => fs.rm(filePath, { force: true }).catch(() => {})));
+    throw wrapSqliteMalformedError(
+      wrapSqliteBusyError(error, "create a consistent SQLite online backup"),
+      "create a consistent SQLite online backup"
     );
   } finally {
     db?.close();

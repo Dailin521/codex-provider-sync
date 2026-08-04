@@ -132,7 +132,7 @@ public sealed class CodexSyncService
             sqliteBusyTimeoutMs,
             model,
             explicitSqliteHome,
-            afterBackup: null,
+            switchPreparationFactory: null,
             cancellationToken);
     }
 
@@ -144,7 +144,7 @@ public sealed class CodexSyncService
         int? sqliteBusyTimeoutMs,
         string? model,
         string? explicitSqliteHome,
-        Func<string, Task>? afterBackup,
+        Func<string, SwitchPreparation>? switchPreparationFactory,
         CancellationToken cancellationToken = default)
     {
         if (keepCount < 1)
@@ -159,18 +159,22 @@ public sealed class CodexSyncService
         cancellationToken.ThrowIfCancellationRequested();
         string configPath = _codexHomeService.ConfigPath(codexHome);
         string configText = await _configFileService.ReadConfigTextAsync(configPath);
+        SwitchPreparation? switchPreparation = switchPreparationFactory?.Invoke(configText);
         CodexStorageLayout storage = await PrepareStorageAsync(codexHome, explicitSqliteHome, configText);
-        storage.EnsureSqliteAccessSupported("sync");
+        storage.EnsureSqliteAccessSupported(switchPreparation is null ? "sync" : "switch");
         EnsureWritableStorage(storage);
         CurrentProviderInfo current = _configFileService.ReadCurrentProviderFromConfigText(configText);
-        string targetProvider = provider ?? current.Provider ?? AppConstants.DefaultProvider;
+        string targetProvider = switchPreparation?.Provider
+            ?? provider
+            ?? current.Provider
+            ?? AppConstants.DefaultProvider;
 
         // When the caller did not pin a model, mirror the active root-level
         // `model = "..."` field from config.toml into the per-thread SQLite
         // `model` column. Without this, old sessions keep showing the model
         // they were created with in Codex's bottom-right UI label, even after
         // the root-level `model` changes.
-        string? targetModel = model;
+        string? targetModel = switchPreparation?.ThreadModel ?? model;
         if (string.IsNullOrEmpty(targetModel))
         {
             targetModel = _configFileService.ReadRootModelFromConfigText(configText);
@@ -198,17 +202,23 @@ public sealed class CodexSyncService
         {
             await FaultInjector("before_backup", null, 0);
         }
-        string backupDir = await _backupService.CreateBackupAsync(storage, targetProvider, writableChanges, configPath, configBackupText);
-        bool sessionRestoreNeeded = false;
+        string? effectiveConfigBackupText = switchPreparation is null ? configBackupText : configText;
+        string backupDir = await _backupService.CreateBackupAsync(
+            storage,
+            targetProvider,
+            writableChanges,
+            configPath,
+            effectiveConfigBackupText);
         List<SessionChange> appliedSessionChanges = [];
-        bool globalStateRestoreNeeded = false;
+        bool sqliteMutationCommitted = false;
         string globalStatePath = _globalStateService.StatePath(codexHome);
         string globalStateBackupPath = _globalStateService.BackupPath(codexHome);
         string[] potentialTargets = writableChanges.Select(static change => Path.GetFullPath(change.Path))
-            .Append(Path.GetFullPath(globalStatePath))
-            .Append(Path.GetFullPath(globalStateBackupPath))
-            .Concat(configBackupText is null ? [] : [Path.GetFullPath(configPath)])
-            .Concat(storage.StateDbCandidates.Select(static candidate => Path.GetFullPath(candidate.Path)))
+            .Concat(File.Exists(globalStatePath)
+                ? [Path.GetFullPath(globalStatePath), Path.GetFullPath(globalStateBackupPath)]
+                : [])
+            .Concat(switchPreparation is null ? [] : [Path.GetFullPath(configPath)])
+            .Concat(storage.StateDbLocation is null ? [] : [Path.GetFullPath(storage.StateDbLocation.Path)])
             .ToArray();
         FileTransactionJournal journal = await FileTransactionJournal.CreateAsync(
             backupDir,
@@ -216,6 +226,8 @@ public sealed class CodexSyncService
             targetProvider,
             potentialTargets);
         List<string> completedTargets = [];
+        HashSet<string> observedMutatedTargets = new(PathComparer);
+        bool transactionCommitted = false;
         void RecordCompletedTarget(string targetPath)
         {
             string fullPath = Path.GetFullPath(targetPath);
@@ -233,11 +245,20 @@ public sealed class CodexSyncService
         };
         try
         {
-            if (afterBackup is not null)
+            if (switchPreparation is not null)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 await journal.ApplyingAsync("config", configPath);
-                await afterBackup(backupDir);
+                if (FaultInjector is not null)
+                {
+                    await FaultInjector("before_config_apply", configPath, 0);
+                }
+                await _configFileService.WriteConfigTextAsync(configPath, switchPreparation.NextConfigText);
+                observedMutatedTargets.Add(Path.GetFullPath(configPath));
+                if (FaultInjector is not null)
+                {
+                    await FaultInjector("after_config_mutation_before_applied", configPath, 1);
+                }
                 await journal.AppliedAsync("config", configPath);
                 RecordCompletedTarget(configPath);
                 if (FaultInjector is not null)
@@ -247,7 +268,11 @@ public sealed class CodexSyncService
             }
 
             SessionApplyResult? applyResult = null;
-            await journal.ApplyingAsync("sqlite", storage.StateDbLocation?.Path ?? storage.SqliteHome);
+            string? sqliteTargetPath = storage.StateDbLocation?.Path;
+            if (sqliteTargetPath is not null)
+            {
+                await journal.ApplyingAsync("sqlite", sqliteTargetPath);
+            }
             (int updatedRows, int providerRowsUpdated, int modelRowsUpdated, int userEventRowsUpdated, int cwdRowsUpdated, bool databasePresent) = await _sqliteStateService.UpdateSqliteProviderAsync(
                 storage,
                 targetProvider,
@@ -273,15 +298,25 @@ public sealed class CodexSyncService
                             },
                             async change =>
                             {
+                                observedMutatedTargets.Add(Path.GetFullPath(change.Path));
+                                if (FaultInjector is not null)
+                                {
+                                    await FaultInjector(
+                                        "after_rollout_mutation_before_applied",
+                                        change.Path,
+                                        appliedSessionChanges.Count + 1);
+                                }
                                 appliedSessionChanges.Add(change);
-                                sessionRestoreNeeded = true;
                                 await journal.AppliedAsync("rollout", change.Path);
                                 RecordCompletedTarget(change.Path);
-                                await _backupService.UpdateSessionBackupManifestAsync(backupDir, appliedSessionChanges);
                                 if (FaultInjector is not null)
                                 {
                                     await FaultInjector("after_rollout_apply", change.Path, appliedSessionChanges.Count);
                                 }
+                            },
+                            async change =>
+                            {
+                                await journal.SkippedAsync("rollout", change.Path);
                             });
                     }
                     workspaceRootResult = await _globalStateService.SyncWorkspaceRootsAsync(
@@ -294,7 +329,11 @@ public sealed class CodexSyncService
                         },
                         async targetPath =>
                         {
-                            globalStateRestoreNeeded = true;
+                            observedMutatedTargets.Add(Path.GetFullPath(targetPath));
+                            if (FaultInjector is not null)
+                            {
+                                await FaultInjector("after_global_state_mutation_before_applied", targetPath, 1);
+                            }
                             await journal.AppliedAsync("globalState", targetPath);
                             RecordCompletedTarget(targetPath);
                             if (FaultInjector is not null)
@@ -302,15 +341,46 @@ public sealed class CodexSyncService
                                 await FaultInjector("after_global_state_apply", targetPath, 1);
                             }
                         });
+                    cancellationToken.ThrowIfCancellationRequested();
                 },
                 sqliteBusyTimeoutMs,
                 sessionInfo.UserEventThreadIds,
                 sessionInfo.ThreadCwdsById);
-            await journal.AppliedAsync("sqlite", storage.StateDbLocation?.Path ?? storage.SqliteHome);
-            RecordCompletedTarget(storage.StateDbLocation?.Path ?? storage.SqliteHome);
+            sqliteMutationCommitted = databasePresent && updatedRows > 0;
+            if (sqliteMutationCommitted)
+            {
+                observedMutatedTargets.Add(Path.GetFullPath(sqliteTargetPath!));
+                RecordCompletedTarget(sqliteTargetPath!);
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            if (sqliteTargetPath is not null)
+            {
+                if (FaultInjector is not null)
+                {
+                    await FaultInjector("after_sqlite_mutation_before_applied", sqliteTargetPath, 1);
+                }
+                await journal.AppliedAsync("sqlite", sqliteTargetPath);
+            }
+            if (FaultInjector is not null)
+            {
+                await FaultInjector("after_sqlite_commit", sqliteTargetPath ?? storage.SqliteHome, 1);
+            }
+            cancellationToken.ThrowIfCancellationRequested();
 
             skippedRolloutFiles.AddRange(applyResult?.SkippedPaths ?? []);
             skippedRolloutFiles = skippedRolloutFiles.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToList();
+
+            cancellationToken.ThrowIfCancellationRequested();
+            if (FaultInjector is not null)
+            {
+                await FaultInjector("before_transaction_commit", null, completedTargets.Count);
+            }
+            await journal.CommittedAsync();
+            transactionCommitted = true;
+            if (FaultInjector is not null)
+            {
+                await FaultInjector("after_transaction_commit", null, completedTargets.Count);
+            }
 
             BackupPruneResult? autoPruneResult = null;
             string? autoPruneWarning = null;
@@ -346,14 +416,36 @@ public sealed class CodexSyncService
                 EncryptedContentCounts = sessionInfo.EncryptedContentCounts,
                 EncryptedContentWarning = encryptedContentWarning,
                 AutoPruneResult = autoPruneResult,
-                AutoPruneWarning = autoPruneWarning
+                AutoPruneWarning = autoPruneWarning,
+                ConfigUpdated = switchPreparation is not null,
+                ModelSync = switchPreparation?.ModelSync ?? ModelSyncOutcome.NotApplicable()
             };
-            await journal.CommittedAsync();
             return result;
         }
         catch (Exception error)
         {
+            if (transactionCommitted)
+            {
+                throw;
+            }
+
             List<string> restoreFailures = [];
+            IReadOnlyList<TransactionTargetInfo> affectedTargets;
+            try
+            {
+                PendingTransactionInfo persisted = await journal.ReadCurrentInfoAsync();
+                affectedTargets = persisted.AffectedTargets;
+            }
+            catch (Exception journalReadError)
+            {
+                restoreFailures.Add($"transaction journal read: {journalReadError.Message}");
+                affectedTargets = BuildConservativeRollbackTargets(
+                    writableChanges,
+                    switchPreparation is not null ? configPath : null,
+                    File.Exists(globalStatePath) ? globalStatePath : null,
+                    File.Exists(globalStateBackupPath) ? globalStateBackupPath : null,
+                    sqliteMutationCommitted ? storage.StateDbLocation?.Path : null);
+            }
             try
             {
                 await journal.RollingBackAsync(error);
@@ -362,48 +454,13 @@ public sealed class CodexSyncService
             {
                 restoreFailures.Add($"transaction journal: {journalError.Message}");
             }
-            if (sessionRestoreNeeded)
-            {
-                try
-                {
-                    if (FaultInjector is not null)
-                    {
-                        await FaultInjector("before_rollout_rollback", null, appliedSessionChanges.Count);
-                    }
-                    await _sessionRolloutService.RestoreSessionChangesAsync(appliedSessionChanges);
-                }
-                catch (Exception restoreError)
-                {
-                    restoreFailures.Add($"rollout files: {restoreError.Message}");
-                }
-            }
-            if (globalStateRestoreNeeded)
-            {
-                try
-                {
-                    if (FaultInjector is not null)
-                    {
-                        await FaultInjector("before_global_state_rollback", null, 1);
-                    }
-                    await _backupService.RestoreGlobalStateFilesAsync(backupDir, codexHome);
-                }
-                catch (Exception restoreError)
-                {
-                    restoreFailures.Add($"global state: {restoreError.Message}");
-                }
-            }
-
-            if (configBackupText is not null)
-            {
-                try
-                {
-                    await _configFileService.WriteConfigTextAsync(configPath, configBackupText);
-                }
-                catch (Exception restoreError)
-                {
-                    restoreFailures.Add($"config: {restoreError.Message}");
-                }
-            }
+            restoreFailures.AddRange(await RollBackTargetsAsync(
+                affectedTargets
+                    .Where(target => target.Kind != "sqlite" || sqliteMutationCommitted)
+                    .ToArray(),
+                backupDir,
+                codexHome,
+                storage));
 
             if (restoreFailures.Count == 0)
             {
@@ -427,7 +484,10 @@ public sealed class CodexSyncService
                     // Preserve the original and rollback failures when the
                     // journal itself is no longer writable.
                 }
-                HashSet<string> completedTargetSet = new(completedTargets, StringComparer.Ordinal);
+                IReadOnlyList<string> reportedCompletedTargets = BuildReportedCompletedTargets(
+                    completedTargets,
+                    observedMutatedTargets);
+                HashSet<string> completedTargetSet = new(reportedCompletedTargets, PathComparer);
                 IReadOnlyList<string> uncompletedTargets = potentialTargets
                     .Where(targetPath => !completedTargetSet.Contains(targetPath))
                     .ToArray();
@@ -435,22 +495,158 @@ public sealed class CodexSyncService
                     error,
                     restoreFailures,
                     backupDir,
-                    completedTargets,
+                    reportedCompletedTargets,
                     uncompletedTargets,
                     rollbackStatus: "incomplete",
                     recoveryRequired: true);
             }
 
-            HashSet<string> completedSet = new(completedTargets, StringComparer.Ordinal);
+            IReadOnlyList<string> completedAfterRollback = BuildReportedCompletedTargets(
+                completedTargets,
+                observedMutatedTargets);
+            HashSet<string> completedSet = new(completedAfterRollback, PathComparer);
             throw new SyncTransactionException(
                 error,
                 [],
                 backupDir,
-                completedTargets,
+                completedAfterRollback,
                 potentialTargets.Where(targetPath => !completedSet.Contains(targetPath)).ToArray(),
                 rollbackStatus: "complete",
                 recoveryRequired: false);
         }
+    }
+
+    private async Task<IReadOnlyList<string>> RollBackTargetsAsync(
+        IReadOnlyList<TransactionTargetInfo> affectedTargets,
+        string backupDir,
+        string codexHome,
+        CodexStorageLayout storage)
+    {
+        List<string> failures = [];
+        Dictionary<string, SessionBackupManifestEntry>? sessionEntries = null;
+        HashSet<string> restoredTargets = new(PathComparer);
+        foreach (TransactionTargetInfo target in affectedTargets.Reverse())
+        {
+            string normalizedTarget = Path.GetFullPath(target.TargetPath);
+            string targetKey = target.Kind + "\0" + normalizedTarget;
+            if (!restoredTargets.Add(targetKey))
+            {
+                continue;
+            }
+
+            try
+            {
+                switch (target.Kind)
+                {
+                    case "rollout":
+                        if (FaultInjector is not null)
+                        {
+                            await FaultInjector("before_rollout_rollback", normalizedTarget, 1);
+                        }
+                        if (sessionEntries is null)
+                        {
+                            sessionEntries = (await _backupService.ReadSessionBackupEntriesAsync(backupDir, codexHome))
+                                .ToDictionary(
+                                    static entry => Path.GetFullPath(entry.Path),
+                                    static entry => entry,
+                                    PathComparer);
+                        }
+                        if (!sessionEntries.TryGetValue(normalizedTarget, out SessionBackupManifestEntry? entry))
+                        {
+                            throw new InvalidOperationException(
+                                $"Immutable session backup does not contain rollback target {normalizedTarget}.");
+                        }
+                        await _sessionRolloutService.RestoreSessionChangesAsync([entry]);
+                        break;
+
+                    case "globalState":
+                        if (FaultInjector is not null)
+                        {
+                            await FaultInjector("before_global_state_rollback", normalizedTarget, 1);
+                        }
+                        await _backupService.RestoreGlobalStateTargetAsync(backupDir, codexHome, normalizedTarget);
+                        break;
+
+                    case "config":
+                        if (FaultInjector is not null)
+                        {
+                            await FaultInjector("before_config_rollback", normalizedTarget, 1);
+                        }
+                        await _backupService.RestoreConfigFileAsync(backupDir, codexHome);
+                        break;
+
+                    case "sqlite":
+                        if (FaultInjector is not null)
+                        {
+                            await FaultInjector("before_sqlite_rollback", normalizedTarget, 1);
+                        }
+                        await _backupService.RestoreBackupAsync(
+                            backupDir,
+                            storage,
+                            new RestoreBackupOptions
+                            {
+                                RestoreConfig = false,
+                                RestoreDatabase = true,
+                                RestoreSessions = false
+                            });
+                        break;
+
+                    default:
+                        throw new InvalidOperationException(
+                            $"Unsupported transaction rollback target kind \"{target.Kind}\".");
+                }
+            }
+            catch (Exception restoreError)
+            {
+                failures.Add($"{target.Kind} {normalizedTarget}: {restoreError.Message}");
+            }
+        }
+        return failures;
+    }
+
+    private static IReadOnlyList<TransactionTargetInfo> BuildConservativeRollbackTargets(
+        IReadOnlyList<SessionChange> writableChanges,
+        string? configPath,
+        string? globalStatePath,
+        string? globalStateBackupPath,
+        string? sqlitePath)
+    {
+        List<TransactionTargetInfo> targets = writableChanges
+            .Select(static change => new TransactionTargetInfo("rollout", Path.GetFullPath(change.Path), "applying"))
+            .ToList();
+        if (globalStatePath is not null)
+        {
+            targets.Add(new TransactionTargetInfo("globalState", Path.GetFullPath(globalStatePath), "applying"));
+        }
+        if (globalStateBackupPath is not null)
+        {
+            targets.Add(new TransactionTargetInfo("globalState", Path.GetFullPath(globalStateBackupPath), "applying"));
+        }
+        if (sqlitePath is not null)
+        {
+            targets.Add(new TransactionTargetInfo("sqlite", Path.GetFullPath(sqlitePath), "applying"));
+        }
+        if (configPath is not null)
+        {
+            targets.Add(new TransactionTargetInfo("config", Path.GetFullPath(configPath), "applying"));
+        }
+        return targets;
+    }
+
+    private static IReadOnlyList<string> BuildReportedCompletedTargets(
+        IEnumerable<string> journaledCompletedTargets,
+        IEnumerable<string> observedMutatedTargets)
+    {
+        List<string> result = [];
+        foreach (string target in journaledCompletedTargets.Concat(observedMutatedTargets))
+        {
+            string fullPath = Path.GetFullPath(target);
+            if (!result.Contains(fullPath, PathComparer))
+            {
+                result.Add(fullPath);
+            }
+        }
+        return result;
     }
 
     public async Task<SyncResult> RunSwitchAsync(
@@ -459,91 +655,50 @@ public sealed class CodexSyncService
         int keepCount = AppConstants.DefaultBackupRetentionCount,
         string? model = null,
         bool keepRootModel = false,
-        string? explicitSqliteHome = null)
+        string? explicitSqliteHome = null,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(provider))
         {
             throw new InvalidOperationException("Missing provider id. Usage: codex-provider switch <provider-id>");
         }
 
-        string codexHome = _codexHomeService.NormalizeCodexHome(explicitCodexHome);
-        await _codexHomeService.EnsureCodexHomeAsync(codexHome);
-        string configPath = _codexHomeService.ConfigPath(codexHome);
-        string originalConfigText = await _configFileService.ReadConfigTextAsync(configPath);
-        CodexStorageLayout storage = await PrepareStorageAsync(codexHome, explicitSqliteHome, originalConfigText);
-        storage.EnsureSqliteAccessSupported("switch");
-        EnsureWritableStorage(storage);
-        if (!_configFileService.ConfigDeclaresProvider(originalConfigText, provider))
-        {
-            string configuredProviders = string.Join(", ", _configFileService.ListConfiguredProviderIds(originalConfigText));
-            throw new InvalidOperationException(
-                $"Provider \"{provider}\" is not available in config.toml. Configure it first or use one of: {configuredProviders}");
-        }
-
-        string nextConfigText = _configFileService.SetRootProviderInConfigText(originalConfigText, provider);
-        ModelSyncOutcome modelSync = ResolveModelSyncOutcome(originalConfigText, provider, model, keepRootModel);
-        if (modelSync.Applied)
-        {
-            nextConfigText = _configFileService.SetRootModelInConfigText(nextConfigText, modelSync.Model!);
-        }
-
-        bool configMutationAttempted = false;
-        try
-        {
-            // Even when the switch keeps the existing root model, keep
-            // SQLite and rollout turn_context fields aligned with it.
-            string? modelForThreads = modelSync.Applied
-                ? modelSync.Model
-                : _configFileService.ReadRootModelFromConfigText(nextConfigText);
-            SyncResult result = await RunSyncCoreAsync(
-                codexHome,
-                provider,
-                originalConfigText,
-                keepCount,
-                sqliteBusyTimeoutMs: null,
-                model: modelForThreads,
-                explicitSqliteHome: explicitSqliteHome,
-                afterBackup: async _ =>
+        return await RunSyncCoreAsync(
+            explicitCodexHome,
+            provider: null,
+            configBackupText: null,
+            keepCount,
+            sqliteBusyTimeoutMs: null,
+            model: null,
+            explicitSqliteHome,
+            switchPreparationFactory: originalConfigText =>
+            {
+                if (!_configFileService.ConfigDeclaresProvider(originalConfigText, provider))
                 {
-                    configMutationAttempted = true;
-                    await _configFileService.WriteConfigTextAsync(configPath, nextConfigText);
-                });
-            return new SyncResult
-            {
-                CodexHome = result.CodexHome,
-                SqliteHome = result.SqliteHome,
-                SqliteHomeSource = result.SqliteHomeSource,
-                TargetProvider = result.TargetProvider,
-                PreviousProvider = result.PreviousProvider,
-                BackupDir = result.BackupDir,
-                ChangedSessionFiles = result.ChangedSessionFiles,
-                SkippedLockedRolloutFiles = result.SkippedLockedRolloutFiles,
-                SkippedUnreadableRolloutFiles = result.SkippedUnreadableRolloutFiles,
-                SqliteRowsUpdated = result.SqliteRowsUpdated,
-                SqliteProviderRowsUpdated = result.SqliteProviderRowsUpdated,
-                SqliteModelRowsUpdated = result.SqliteModelRowsUpdated,
-                SqliteUserEventRowsUpdated = result.SqliteUserEventRowsUpdated,
-                SqliteCwdRowsUpdated = result.SqliteCwdRowsUpdated,
-                UpdatedWorkspaceRoots = result.UpdatedWorkspaceRoots,
-                SavedWorkspaceRootCount = result.SavedWorkspaceRootCount,
-                SqlitePresent = result.SqlitePresent,
-                RolloutCountsBefore = result.RolloutCountsBefore,
-                EncryptedContentCounts = result.EncryptedContentCounts,
-                EncryptedContentWarning = result.EncryptedContentWarning,
-                ConfigUpdated = true,
-                ModelSync = modelSync,
-                AutoPruneResult = result.AutoPruneResult,
-                AutoPruneWarning = result.AutoPruneWarning
-            };
-        }
-        catch
-        {
-            if (configMutationAttempted)
-            {
-                await _configFileService.WriteConfigTextAsync(configPath, originalConfigText);
-            }
-            throw;
-        }
+                    string configuredProviders = string.Join(", ", _configFileService.ListConfiguredProviderIds(originalConfigText));
+                    throw new InvalidOperationException(
+                        $"Provider \"{provider}\" is not available in config.toml. Configure it first or use one of: {configuredProviders}");
+                }
+
+                string nextConfigText = _configFileService.SetRootProviderInConfigText(originalConfigText, provider);
+                ModelSyncOutcome modelSync = ResolveModelSyncOutcome(
+                    originalConfigText,
+                    provider,
+                    model,
+                    keepRootModel);
+                if (modelSync.Applied)
+                {
+                    nextConfigText = _configFileService.SetRootModelInConfigText(nextConfigText, modelSync.Model!);
+                }
+
+                // Even when the switch keeps the existing root model, keep
+                // SQLite and rollout turn_context fields aligned with it.
+                string? modelForThreads = modelSync.Applied
+                    ? modelSync.Model
+                    : _configFileService.ReadRootModelFromConfigText(nextConfigText);
+                return new SwitchPreparation(provider, nextConfigText, modelForThreads, modelSync);
+            },
+            cancellationToken);
     }
 
     private ModelSyncOutcome ResolveModelSyncOutcome(
@@ -611,9 +766,69 @@ public sealed class CodexSyncService
 
         await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "restore");
         string normalizedBackupDir = Path.GetFullPath(backupDir);
+        await EnsurePendingRecoveryCoverageAsync(normalizedBackupDir, codexHome, options);
         RestoreResult result = await _backupService.RestoreBackupAsync(normalizedBackupDir, storage, options);
-        await FileTransactionJournal.MarkBackupRolledBackAsync(normalizedBackupDir);
+        await FileTransactionJournal.MarkBackupRolledBackAsync(
+            normalizedBackupDir,
+            codexHome,
+            result.TargetProvider);
         return result;
+    }
+
+    private async Task EnsurePendingRecoveryCoverageAsync(
+        string backupDir,
+        string codexHome,
+        RestoreBackupOptions options)
+    {
+        string journalPath = Path.Combine(backupDir, FileTransactionJournal.FileName);
+        if (!File.Exists(journalPath))
+        {
+            return;
+        }
+
+        PendingTransactionInfo journal = await FileTransactionJournal.ReadInfoAsync(journalPath);
+        if (journal.Terminal)
+        {
+            return;
+        }
+
+        bool requireConfig;
+        bool requireDatabase;
+        bool requireSessions;
+        if (journal.InvalidTail || string.IsNullOrWhiteSpace(journal.OperationId))
+        {
+            BackupRecoveryCoverage coverage = await _backupService.GetRecoveryCoverageAsync(backupDir, codexHome);
+            requireConfig = coverage.Config;
+            requireDatabase = coverage.Database;
+            requireSessions = coverage.Sessions;
+        }
+        else
+        {
+            requireConfig = journal.AffectedTargets.Any(
+                static target => target.Kind is "config" or "globalState");
+            requireDatabase = journal.AffectedTargets.Any(static target => target.Kind == "sqlite");
+            requireSessions = journal.AffectedTargets.Any(static target => target.Kind == "rollout");
+        }
+
+        List<string> missing = [];
+        if (requireConfig && !options.RestoreConfig)
+        {
+            missing.Add("config/global state");
+        }
+        if (requireDatabase && !options.RestoreDatabase)
+        {
+            missing.Add("SQLite");
+        }
+        if (requireSessions && !options.RestoreSessions)
+        {
+            missing.Add("rollout sessions");
+        }
+        if (missing.Count > 0)
+        {
+            throw new InvalidOperationException(
+                "Cannot resolve the pending transaction with a partial restore. "
+                + $"Enable restore for: {string.Join(", ", missing)}. The recovery journal remains pending.");
+        }
     }
 
     public async Task<BackupPruneResult> RunPruneBackupsAsync(
@@ -676,4 +891,14 @@ public sealed class CodexSyncService
                 + $"(source: {storage.SqliteHomeSource}).");
         }
     }
+
+    private static StringComparer PathComparer => OperatingSystem.IsWindows()
+        ? StringComparer.OrdinalIgnoreCase
+        : StringComparer.Ordinal;
+
+    private sealed record SwitchPreparation(
+        string Provider,
+        string NextConfigText,
+        string? ThreadModel,
+        ModelSyncOutcome ModelSync);
 }

@@ -7,6 +7,8 @@ public sealed class BackupService
     private readonly SessionRolloutService _sessionRolloutService;
     private readonly SqliteStateService _sqliteStateService;
 
+    internal Func<string, string, string, Task>? AtomicWriteFaultInjector { get; set; }
+
     public BackupService(SessionRolloutService sessionRolloutService, SqliteStateService sqliteStateService)
     {
         _sessionRolloutService = sessionRolloutService;
@@ -73,7 +75,10 @@ public sealed class BackupService
         string configBackupPath = Path.Combine(backupDir, "config.toml");
         if (configBackupText is not null)
         {
-            await File.WriteAllTextAsync(configBackupPath, configBackupText);
+            await AtomicFile.WriteAllTextAsync(
+                configBackupPath,
+                configBackupText,
+                faultInjector: AtomicWriteFaultInjector);
         }
         else
         {
@@ -96,20 +101,17 @@ public sealed class BackupService
             CodexHome = codexHome,
             TargetProvider = targetProvider,
             CreatedAt = createdAt,
-            Files = sessionChanges.Select(static change => new SessionBackupManifestEntry
-            {
-                Path = change.Path,
-                OriginalFirstLine = change.OriginalFirstLine,
-                OriginalSeparator = change.OriginalSeparator,
-                OriginalLastWriteTimeUtcTicks = change.OriginalLastWriteTimeUtcTicks,
-                ModelOnlyChange = change.ModelOnlyChange,
-                OriginalTurnContextModels = [.. change.OriginalTurnContextModels]
-            }).ToList()
+            Files = sessionChanges.Select(SessionBackupManifestEntry.FromChange).ToList()
         };
-        await File.WriteAllTextAsync(
+        await AtomicFile.WriteAllTextAsync(
             Path.Combine(backupDir, "session-meta-backup.json"),
-            JsonSerializer.Serialize(sessionManifest, JsonOptions()));
+            JsonSerializer.Serialize(sessionManifest, JsonOptions()),
+            faultInjector: AtomicWriteFaultInjector);
 
+        bool globalStateFilePresent = File.Exists(
+            Path.Combine(codexHome, AppConstants.GlobalStateFileBasename));
+        bool globalStateBackupFilePresent = File.Exists(
+            Path.Combine(codexHome, AppConstants.GlobalStateBackupFileBasename));
         BackupMetadataFile metadata = new()
         {
             Version = 2,
@@ -120,11 +122,19 @@ public sealed class BackupService
             CreatedAt = createdAt,
             DbFiles = copiedDbFiles,
             SqliteDbFiles = copiedSqliteDbFiles,
-            ChangedSessionFiles = sessionChanges.Count
+            ChangedSessionFiles = sessionChanges.Count,
+            GlobalStateFiles = new Dictionary<string, bool>(StringComparer.Ordinal)
+            {
+                [AppConstants.GlobalStateFileBasename] = globalStateFilePresent,
+                [AppConstants.GlobalStateBackupFileBasename] = globalStateBackupFilePresent
+            },
+            GlobalStateFilePresent = globalStateFilePresent,
+            GlobalStateBackupFilePresent = globalStateBackupFilePresent
         };
-        await File.WriteAllTextAsync(
+        await AtomicFile.WriteAllTextAsync(
             Path.Combine(backupDir, "metadata.json"),
-            JsonSerializer.Serialize(metadata, JsonOptions()));
+            JsonSerializer.Serialize(metadata, JsonOptions()),
+            faultInjector: AtomicWriteFaultInjector);
 
         return backupDir;
     }
@@ -165,12 +175,20 @@ public sealed class BackupService
             throw new InvalidOperationException($"Backup was created for {metadata.CodexHome}, not {codexHome}.");
         }
 
+        if (options.RestoreConfig)
+        {
+            ValidateGlobalStatePresenceMetadata(metadata);
+        }
+
         SessionBackupManifest? sessionManifest = null;
         if (options.RestoreSessions)
         {
             sessionManifest = JsonSerializer.Deserialize<SessionBackupManifest>(
                 await File.ReadAllTextAsync(Path.Combine(normalizedBackupDir, "session-meta-backup.json")),
                 JsonOptions()) ?? throw new InvalidOperationException($"Session backup manifest is invalid: {backupDir}");
+
+            ValidateSessionManifest(sessionManifest, codexHome, normalizedBackupDir);
+            sessionManifest = await SelectSessionEntriesForRestoreAsync(normalizedBackupDir, sessionManifest);
 
             await _sessionRolloutService.AssertSessionFilesWritableAsync(
                 sessionManifest.Files.Select(static entry => entry.Path));
@@ -273,8 +291,11 @@ public sealed class BackupService
 
             foreach ((string sourcePath, string targetPath) in databaseEntries)
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
-                File.Copy(sourcePath, targetPath, overwrite: true);
+                await AtomicFile.CopyAsync(
+                    sourcePath,
+                    targetPath,
+                    overwrite: true,
+                    faultInjector: AtomicWriteFaultInjector);
             }
         }
 
@@ -313,15 +334,7 @@ public sealed class BackupService
             CodexHome = sessionManifest.CodexHome,
             TargetProvider = sessionManifest.TargetProvider,
             CreatedAt = sessionManifest.CreatedAt,
-            Files = sessionChanges.Select(static change => new SessionBackupManifestEntry
-            {
-                Path = change.Path,
-                OriginalFirstLine = change.OriginalFirstLine,
-                OriginalSeparator = change.OriginalSeparator,
-                OriginalLastWriteTimeUtcTicks = change.OriginalLastWriteTimeUtcTicks,
-                ModelOnlyChange = change.ModelOnlyChange,
-                OriginalTurnContextModels = [.. change.OriginalTurnContextModels]
-            }).ToList()
+            Files = sessionChanges.Select(SessionBackupManifestEntry.FromChange).ToList()
         };
         metadata = new BackupMetadataFile
         {
@@ -333,24 +346,129 @@ public sealed class BackupService
             CreatedAt = metadata.CreatedAt,
             DbFiles = metadata.DbFiles,
             SqliteDbFiles = metadata.SqliteDbFiles,
-            ChangedSessionFiles = sessionChanges.Count
+            ChangedSessionFiles = sessionChanges.Count,
+            GlobalStateFiles = metadata.GlobalStateFiles,
+            GlobalStateFilePresent = metadata.GlobalStateFilePresent,
+            GlobalStateBackupFilePresent = metadata.GlobalStateBackupFilePresent
         };
 
-        await File.WriteAllTextAsync(manifestPath, JsonSerializer.Serialize(sessionManifest, JsonOptions()));
-        await File.WriteAllTextAsync(metadataPath, JsonSerializer.Serialize(metadata, JsonOptions()));
+        await AtomicFile.WriteAllTextAsync(
+            manifestPath,
+            JsonSerializer.Serialize(sessionManifest, JsonOptions()),
+            faultInjector: AtomicWriteFaultInjector);
+        await AtomicFile.WriteAllTextAsync(
+            metadataPath,
+            JsonSerializer.Serialize(metadata, JsonOptions()),
+            faultInjector: AtomicWriteFaultInjector);
+    }
+
+    internal async Task<IReadOnlyList<SessionBackupManifestEntry>> ReadSessionBackupEntriesAsync(
+        string backupDir,
+        string codexHome)
+    {
+        string normalizedBackupDir = Path.GetFullPath(backupDir);
+        SessionBackupManifest manifest = JsonSerializer.Deserialize<SessionBackupManifest>(
+            await File.ReadAllTextAsync(Path.Combine(normalizedBackupDir, "session-meta-backup.json")),
+            JsonOptions()) ?? throw new InvalidOperationException($"Session backup manifest is invalid: {backupDir}");
+        ValidateSessionManifest(manifest, codexHome, normalizedBackupDir);
+        return manifest.Files;
+    }
+
+    internal async Task<BackupRecoveryCoverage> GetRecoveryCoverageAsync(
+        string backupDir,
+        string codexHome)
+    {
+        string normalizedBackupDir = Path.GetFullPath(backupDir);
+        BackupMetadataFile metadata = JsonSerializer.Deserialize<BackupMetadataFile>(
+            await File.ReadAllTextAsync(Path.Combine(normalizedBackupDir, "metadata.json")),
+            JsonOptions()) ?? throw new InvalidOperationException($"Backup metadata is invalid: {backupDir}");
+        if (!string.Equals(metadata.Namespace, AppConstants.BackupNamespace, StringComparison.Ordinal)
+            || metadata.Version is not (1 or 2)
+            || !PathsEqual(metadata.CodexHome, codexHome))
+        {
+            throw new InvalidOperationException($"Backup metadata is not valid for recovery: {backupDir}");
+        }
+
+        bool database = (metadata.Version >= 2 ? metadata.SqliteDbFiles : metadata.DbFiles)
+            .Any(static fileName => Path.GetFileName(fileName) == AppConstants.DbFileBasename);
+        bool sessions = false;
+        string sessionManifestPath = Path.Combine(normalizedBackupDir, "session-meta-backup.json");
+        if (File.Exists(sessionManifestPath))
+        {
+            sessions = (await ReadSessionBackupEntriesAsync(normalizedBackupDir, codexHome)).Count > 0;
+        }
+        bool? globalStatePresent = ResolveGlobalStatePresence(
+            metadata,
+            AppConstants.GlobalStateFileBasename);
+        bool? globalStateBackupPresent = ResolveGlobalStatePresence(
+            metadata,
+            AppConstants.GlobalStateBackupFileBasename);
+        bool config = File.Exists(Path.Combine(normalizedBackupDir, "config.toml"))
+            || globalStatePresent == true
+            || globalStateBackupPresent == true;
+        return new BackupRecoveryCoverage(config, database, sessions);
+    }
+
+    internal async Task RestoreConfigFileAsync(string backupDir, string codexHome)
+    {
+        string sourcePath = Path.Combine(Path.GetFullPath(backupDir), "config.toml");
+        if (!await CopyIfPresentAsync(sourcePath, Path.Combine(codexHome, "config.toml"), overwrite: true))
+        {
+            throw new InvalidOperationException($"Backup config is missing: {sourcePath}");
+        }
+    }
+
+    internal async Task RestoreGlobalStateTargetAsync(string backupDir, string codexHome, string targetPath)
+    {
+        string statePath = Path.GetFullPath(Path.Combine(codexHome, AppConstants.GlobalStateFileBasename));
+        string backupPath = Path.GetFullPath(Path.Combine(codexHome, AppConstants.GlobalStateBackupFileBasename));
+        string normalizedTarget = Path.GetFullPath(targetPath);
+        string fileName;
+        if (PathsEqual(normalizedTarget, statePath))
+        {
+            fileName = AppConstants.GlobalStateFileBasename;
+        }
+        else if (PathsEqual(normalizedTarget, backupPath))
+        {
+            fileName = AppConstants.GlobalStateBackupFileBasename;
+        }
+        else
+        {
+            throw new InvalidOperationException($"Unexpected global-state rollback target: {targetPath}");
+        }
+
+        string normalizedBackupDir = Path.GetFullPath(backupDir);
+        BackupMetadataFile metadata = JsonSerializer.Deserialize<BackupMetadataFile>(
+            await File.ReadAllTextAsync(Path.Combine(normalizedBackupDir, "metadata.json")),
+            JsonOptions()) ?? throw new InvalidOperationException($"Backup metadata is invalid: {backupDir}");
+        ValidateGlobalStatePresenceMetadata(metadata);
+        await RestoreOptionalFileAsync(
+            Path.Combine(normalizedBackupDir, fileName),
+            normalizedTarget,
+            ResolveGlobalStatePresence(metadata, fileName));
     }
 
     public async Task RestoreGlobalStateFilesAsync(string backupDir, string codexHome)
     {
         string normalizedBackupDir = Path.GetFullPath(backupDir);
-        await CopyIfPresentAsync(
+        string metadataPath = Path.Combine(normalizedBackupDir, "metadata.json");
+        BackupMetadataFile metadata = JsonSerializer.Deserialize<BackupMetadataFile>(
+            await File.ReadAllTextAsync(metadataPath),
+            JsonOptions()) ?? throw new InvalidOperationException($"Backup metadata is invalid: {backupDir}");
+        bool? globalStatePresent = ResolveGlobalStatePresence(
+            metadata,
+            AppConstants.GlobalStateFileBasename);
+        bool? globalStateBackupPresent = ResolveGlobalStatePresence(
+            metadata,
+            AppConstants.GlobalStateBackupFileBasename);
+        await RestoreOptionalFileAsync(
             Path.Combine(normalizedBackupDir, AppConstants.GlobalStateFileBasename),
             Path.Combine(codexHome, AppConstants.GlobalStateFileBasename),
-            overwrite: true);
-        await CopyIfPresentAsync(
+            globalStatePresent);
+        await RestoreOptionalFileAsync(
             Path.Combine(normalizedBackupDir, AppConstants.GlobalStateBackupFileBasename),
             Path.Combine(codexHome, AppConstants.GlobalStateBackupFileBasename),
-            overwrite: true);
+            globalStateBackupPresent);
     }
 
     public async Task<BackupStorageInfo> GetBackupStorageInfoAsync(string backupDir)
@@ -444,17 +562,183 @@ public sealed class BackupService
         });
     }
 
-    private static async Task<bool> CopyIfPresentAsync(string sourcePath, string destinationPath, bool overwrite)
+    private static async Task<SessionBackupManifest> SelectSessionEntriesForRestoreAsync(
+        string backupDir,
+        SessionBackupManifest manifest)
     {
-        if (!File.Exists(sourcePath))
+        string journalPath = Path.Combine(backupDir, FileTransactionJournal.FileName);
+        if (!File.Exists(journalPath))
         {
-            return false;
+            return manifest;
         }
 
-        Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);
-        File.Copy(sourcePath, destinationPath, overwrite);
-        await Task.CompletedTask;
-        return true;
+        PendingTransactionInfo journal = await FileTransactionJournal.ReadInfoAsync(journalPath);
+        if (string.IsNullOrWhiteSpace(journal.OperationId))
+        {
+            // A legacy or externally damaged journal cannot authoritatively
+            // narrow the immutable backup manifest. An explicit restore is
+            // safest when it restores the whole validated manifest.
+            return manifest;
+        }
+
+        HashSet<string> affectedRollouts = new(
+            journal.AffectedTargets
+                .Where(static target => target.Kind == "rollout")
+                .Select(static target => Path.GetFullPath(target.TargetPath)),
+            PathComparer);
+        return new SessionBackupManifest
+        {
+            Version = manifest.Version,
+            Namespace = manifest.Namespace,
+            CodexHome = manifest.CodexHome,
+            TargetProvider = manifest.TargetProvider,
+            CreatedAt = manifest.CreatedAt,
+            Files = manifest.Files
+                .Where(entry => affectedRollouts.Contains(Path.GetFullPath(entry.Path)))
+                .ToList()
+        };
+    }
+
+    private static void ValidateSessionManifest(
+        SessionBackupManifest manifest,
+        string codexHome,
+        string backupDir)
+    {
+        if (!string.Equals(manifest.Namespace, AppConstants.BackupNamespace, StringComparison.Ordinal)
+            || manifest.Version is not (1 or 2))
+        {
+            throw new InvalidOperationException(
+                $"Unsupported session backup manifest in {Path.Combine(backupDir, "session-meta-backup.json")}.");
+        }
+        if (!PathsEqual(manifest.CodexHome, codexHome))
+        {
+            throw new InvalidOperationException(
+                $"Session backup was created for {manifest.CodexHome}, not {codexHome}.");
+        }
+
+        HashSet<string> seen = new(PathComparer);
+        foreach (SessionBackupManifestEntry entry in manifest.Files)
+        {
+            string fullPath = ValidateSessionRestorePath(codexHome, entry.Path);
+            _ = entry.ResolveOriginalLastWriteTimeUtcTicks();
+            if (!seen.Add(fullPath))
+            {
+                throw new InvalidOperationException(
+                    $"Session backup manifest contains a duplicate rollout path: {entry.Path}");
+            }
+        }
+    }
+
+    private static string ValidateSessionRestorePath(string codexHome, string candidatePath)
+    {
+        if (string.IsNullOrWhiteSpace(candidatePath))
+        {
+            throw new InvalidOperationException("Session backup manifest contains an empty rollout path.");
+        }
+
+        string fullHome = Path.GetFullPath(codexHome);
+        string fullPath = Path.GetFullPath(candidatePath);
+        string relativePath = Path.GetRelativePath(fullHome, fullPath);
+        string[] segments = relativePath.Split(
+            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+            StringSplitOptions.RemoveEmptyEntries);
+        bool validRoot = segments.Length >= 2
+            && AppConstants.SessionDirectories.Contains(segments[0], PathComparer);
+        if (Path.IsPathRooted(relativePath)
+            || relativePath == ".."
+            || relativePath.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+            || relativePath.StartsWith(".." + Path.AltDirectorySeparatorChar, StringComparison.Ordinal)
+            || !validRoot
+            || !Path.GetFileName(fullPath).StartsWith("rollout-", StringComparison.Ordinal)
+            || !string.Equals(Path.GetExtension(fullPath), ".jsonl", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Session backup path escapes the Codex rollout directories: {candidatePath}");
+        }
+
+        string currentPath = fullHome;
+        foreach (string segment in segments)
+        {
+            currentPath = Path.Combine(currentPath, segment);
+            if (!File.Exists(currentPath) && !Directory.Exists(currentPath))
+            {
+                continue;
+            }
+            if ((File.GetAttributes(currentPath) & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidOperationException(
+                    $"Session backup path crosses a symbolic link or reparse point: {candidatePath}");
+            }
+        }
+        return fullPath;
+    }
+
+    private static StringComparer PathComparer => OperatingSystem.IsWindows()
+        ? StringComparer.OrdinalIgnoreCase
+        : StringComparer.Ordinal;
+
+    private static async Task<bool> CopyIfPresentAsync(string sourcePath, string destinationPath, bool overwrite)
+    {
+        return await AtomicFile.CopyAsync(sourcePath, destinationPath, overwrite);
+    }
+
+    private static async Task RestoreOptionalFileAsync(
+        string sourcePath,
+        string destinationPath,
+        bool? originallyPresent)
+    {
+        if (await CopyIfPresentAsync(sourcePath, destinationPath, overwrite: true))
+        {
+            return;
+        }
+
+        if (originallyPresent == true)
+        {
+            throw new InvalidOperationException(
+                $"Backup declares an original file but the backup copy is missing: {sourcePath}");
+        }
+
+        // Nullable markers keep metadata v1 and early-v2 backups backward
+        // compatible. A new backup explicitly records absence so rollback can
+        // remove a .bak file created by the interrupted operation.
+        if (originallyPresent == false && File.Exists(destinationPath))
+        {
+            File.Delete(destinationPath);
+        }
+    }
+
+    private static bool? ResolveGlobalStatePresence(
+        BackupMetadataFile metadata,
+        string fileName)
+    {
+        bool? legacy = fileName switch
+        {
+            AppConstants.GlobalStateFileBasename => metadata.GlobalStateFilePresent,
+            AppConstants.GlobalStateBackupFileBasename => metadata.GlobalStateBackupFilePresent,
+            _ => throw new InvalidOperationException(
+                $"Unsupported global-state metadata key: {fileName}")
+        };
+        if (metadata.GlobalStateFiles is null)
+        {
+            return legacy;
+        }
+        if (!metadata.GlobalStateFiles.TryGetValue(fileName, out bool canonical))
+        {
+            throw new InvalidOperationException(
+                $"Backup globalStateFiles is missing required key {fileName}.");
+        }
+        if (legacy is not null && legacy.Value != canonical)
+        {
+            throw new InvalidOperationException(
+                $"Backup global-state metadata disagrees for {fileName}.");
+        }
+        return canonical;
+    }
+
+    private static void ValidateGlobalStatePresenceMetadata(BackupMetadataFile metadata)
+    {
+        _ = ResolveGlobalStatePresence(metadata, AppConstants.GlobalStateFileBasename);
+        _ = ResolveGlobalStatePresence(metadata, AppConstants.GlobalStateBackupFileBasename);
     }
 
     private static string? SafeRelativePath(string root, string target)
@@ -571,3 +855,5 @@ public sealed class BackupService
         }
     }
 }
+
+internal sealed record BackupRecoveryCoverage(bool Config, bool Database, bool Sessions);

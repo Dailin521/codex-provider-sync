@@ -1,6 +1,29 @@
+using System.Buffers.Binary;
 using Microsoft.Data.Sqlite;
 
 namespace CodexProviderSync.Core;
+
+public sealed record SqliteFileMetadata(
+    string JournalMode,
+    long PageSize,
+    long UserVersion,
+    long ApplicationId);
+
+public sealed record SqliteOnlineBackupPreservation(
+    bool JournalMode,
+    bool PageSize,
+    bool UserVersion,
+    bool ApplicationId);
+
+public sealed record SqliteOnlineBackupMetadata(
+    SqliteFileMetadata Source,
+    SqliteFileMetadata Backup,
+    SqliteOnlineBackupPreservation Preserved);
+
+public sealed record SqliteOnlineBackupResult(
+    bool DatabasePresent,
+    string? BackupPath,
+    SqliteOnlineBackupMetadata? Metadata);
 
 public sealed class SqliteStateService
 {
@@ -267,6 +290,7 @@ public sealed class SqliteStateService
         {
             await connection.OpenAsync();
             await SetBusyTimeoutAsync(connection, busyTimeoutMs);
+            await ConfigureSqliteWriteDurabilityAsync(connection);
             await ExecuteNonQueryAsync(connection, "BEGIN IMMEDIATE");
             await ExecuteNonQueryAsync(connection, "ROLLBACK");
             return true;
@@ -324,6 +348,7 @@ public sealed class SqliteStateService
         {
             await connection.OpenAsync();
             await SetBusyTimeoutAsync(connection, busyTimeoutMs);
+            await ConfigureSqliteWriteDurabilityAsync(connection);
             await ExecuteNonQueryAsync(connection, "BEGIN IMMEDIATE");
             transactionOpen = true;
 
@@ -424,6 +449,188 @@ public sealed class SqliteStateService
             throw WrapSqliteMalformedError(
                 WrapSqliteBusyError(error, "update session provider metadata"),
                 "update session provider metadata");
+        }
+    }
+
+    /// <summary>
+    /// Creates one consistent SQLite main database via SQLite's online-backup
+    /// API. WAL/SHM sidecars are neither copied nor emitted.
+    /// </summary>
+    public async Task<SqliteOnlineBackupResult> CreateSqliteOnlineBackupAsync(
+        CodexStorageLayout storage,
+        string destinationPath,
+        int? busyTimeoutMs = null)
+    {
+        string? dbPath = ExistingStateDbPath(storage);
+        if (dbPath is null)
+        {
+            return new SqliteOnlineBackupResult(false, null, null);
+        }
+
+        string fullSourcePath = Path.GetFullPath(dbPath);
+        string fullDestinationPath = Path.GetFullPath(destinationPath);
+        StringComparison pathComparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        if (string.Equals(fullSourcePath, fullDestinationPath, pathComparison))
+        {
+            throw new InvalidOperationException(
+                "SQLite online backup destination must differ from the source database.");
+        }
+        if (File.Exists(fullDestinationPath))
+        {
+            throw new IOException("SQLite online backup destination already exists.");
+        }
+        string? destinationDirectory = Path.GetDirectoryName(fullDestinationPath);
+        if (string.IsNullOrEmpty(destinationDirectory))
+        {
+            throw new InvalidOperationException("Cannot resolve SQLite online backup directory.");
+        }
+        Directory.CreateDirectory(destinationDirectory);
+
+        try
+        {
+            SqliteFileMetadata sourceMetadata;
+            await using (SqliteConnection source = OpenConnection(
+                fullSourcePath,
+                SqliteOpenMode.ReadWrite))
+            {
+                await source.OpenAsync();
+                await SetBusyTimeoutAsync(source, busyTimeoutMs);
+                sourceMetadata = await ReadSqliteConnectionMetadataAsync(source);
+                await using SqliteConnection destination = OpenConnection(
+                    fullDestinationPath,
+                    SqliteOpenMode.ReadWriteCreate);
+                await destination.OpenAsync();
+                source.BackupDatabase(destination);
+            }
+
+            await using (FileStream stream = new(
+                fullDestinationPath,
+                FileMode.Open,
+                FileAccess.ReadWrite,
+                FileShare.Read,
+                4096,
+                FileOptions.WriteThrough))
+            {
+                await stream.FlushAsync();
+                stream.Flush(flushToDisk: true);
+            }
+
+            if (File.Exists(fullDestinationPath + "-wal")
+                || File.Exists(fullDestinationPath + "-shm"))
+            {
+                throw new InvalidOperationException(
+                    "SQLite online backup unexpectedly emitted a WAL/SHM sidecar.");
+            }
+
+            SqliteFileMetadata backupMetadata = await ReadStandaloneSqliteHeaderMetadataAsync(
+                fullDestinationPath);
+            SqliteOnlineBackupPreservation preserved = new(
+                sourceMetadata.JournalMode == backupMetadata.JournalMode,
+                sourceMetadata.PageSize == backupMetadata.PageSize,
+                sourceMetadata.UserVersion == backupMetadata.UserVersion,
+                sourceMetadata.ApplicationId == backupMetadata.ApplicationId);
+            return new SqliteOnlineBackupResult(
+                true,
+                fullDestinationPath,
+                new SqliteOnlineBackupMetadata(sourceMetadata, backupMetadata, preserved));
+        }
+        catch (Exception error)
+        {
+            TryDeleteSqliteBackupArtifact(fullDestinationPath);
+            TryDeleteSqliteBackupArtifact(fullDestinationPath + "-wal");
+            TryDeleteSqliteBackupArtifact(fullDestinationPath + "-shm");
+            throw WrapSqliteMalformedError(
+                WrapSqliteBusyError(error, "create a consistent SQLite online backup"),
+                "create a consistent SQLite online backup");
+        }
+    }
+
+    public async Task<SqliteOnlineBackupResult> CreateSqliteOnlineBackupAsync(
+        string codexHome,
+        string destinationPath,
+        int? busyTimeoutMs = null)
+    {
+        return await CreateSqliteOnlineBackupAsync(
+            new CodexStorageLayoutService().CreateDefault(codexHome),
+            destinationPath,
+            busyTimeoutMs);
+    }
+
+    internal static async Task<int> ConfigureSqliteWriteDurabilityAsync(
+        SqliteConnection connection)
+    {
+        await ExecuteNonQueryAsync(connection, "PRAGMA synchronous = FULL");
+        object? rawValue = await ExecuteScalarAsync(connection, "PRAGMA synchronous");
+        int synchronous = Convert.ToInt32(rawValue);
+        if (synchronous != 2)
+        {
+            throw new InvalidOperationException(
+                $"Unable to configure SQLite synchronous=FULL (reported {synchronous}).");
+        }
+        return synchronous;
+    }
+
+    private static async Task<SqliteFileMetadata> ReadSqliteConnectionMetadataAsync(
+        SqliteConnection connection)
+    {
+        string journalMode = Convert.ToString(
+            await ExecuteScalarAsync(connection, "PRAGMA journal_mode"))?.ToLowerInvariant() ?? "";
+        long pageSize = Convert.ToInt64(await ExecuteScalarAsync(connection, "PRAGMA page_size"));
+        long userVersion = Convert.ToInt64(await ExecuteScalarAsync(connection, "PRAGMA user_version"));
+        long applicationId = Convert.ToInt64(await ExecuteScalarAsync(connection, "PRAGMA application_id"));
+        return new SqliteFileMetadata(journalMode, pageSize, userVersion, applicationId);
+    }
+
+    private static async Task<SqliteFileMetadata> ReadStandaloneSqliteHeaderMetadataAsync(
+        string dbPath)
+    {
+        byte[] header = new byte[100];
+        await using FileStream stream = new(
+            dbPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            4096,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await stream.ReadExactlyAsync(header);
+        ReadOnlySpan<byte> magic = "SQLite format 3\0"u8;
+        if (!header.AsSpan(0, magic.Length).SequenceEqual(magic))
+        {
+            throw new InvalidOperationException(
+                "SQLite online backup did not produce a valid standalone database header.");
+        }
+        int rawPageSize = BinaryPrimitives.ReadUInt16BigEndian(header.AsSpan(16, 2));
+        string journalMode = header[18] == 2 && header[19] == 2 ? "wal" : "delete";
+        return new SqliteFileMetadata(
+            journalMode,
+            rawPageSize == 1 ? 65536 : rawPageSize,
+            BinaryPrimitives.ReadInt32BigEndian(header.AsSpan(60, 4)),
+            BinaryPrimitives.ReadInt32BigEndian(header.AsSpan(68, 4)));
+    }
+
+    private static async Task<object?> ExecuteScalarAsync(
+        SqliteConnection connection,
+        string commandText)
+    {
+        await using SqliteCommand command = connection.CreateCommand();
+        command.CommandText = commandText;
+        return await command.ExecuteScalarAsync();
+    }
+
+    private static void TryDeleteSqliteBackupArtifact(string filePath)
+    {
+        try
+        {
+            if (File.Exists(filePath))
+            {
+                File.Delete(filePath);
+            }
+        }
+        catch
+        {
+            // Cleanup must not hide the original backup failure.
         }
     }
 

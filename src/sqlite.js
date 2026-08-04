@@ -6,6 +6,7 @@ function normalizeImportDefault(moduleNamespace) {
 
 class BetterSqliteDatabase {
   constructor(Database, dbPath, options = {}) {
+    this.driver = "better-sqlite3";
     this.db = new Database(dbPath, {
       readonly: Boolean(options.readOnly)
     });
@@ -19,6 +20,34 @@ class BetterSqliteDatabase {
     return this.db.exec(sql);
   }
 
+  async backup(destinationPath, options = {}) {
+    return this.db.backup(destinationPath, options);
+  }
+
+  close() {
+    return this.db.close();
+  }
+}
+
+class NodeSqliteDatabase {
+  constructor(sqlite, dbPath, options = {}) {
+    this.driver = "node:sqlite";
+    this.sqlite = sqlite;
+    this.db = new sqlite.DatabaseSync(dbPath, options);
+  }
+
+  prepare(sql) {
+    return this.db.prepare(sql);
+  }
+
+  exec(sql) {
+    return this.db.exec(sql);
+  }
+
+  async backup(destinationPath, options = {}) {
+    return this.sqlite.backup(this.db, destinationPath, options);
+  }
+
   close() {
     return this.db.close();
   }
@@ -28,7 +57,7 @@ async function loadDatabaseFactory() {
   try {
     const sqlite = await import("node:sqlite");
     if (sqlite.DatabaseSync) {
-      return (dbPath, options) => new sqlite.DatabaseSync(dbPath, options);
+      return (dbPath, options) => new NodeSqliteDatabase(sqlite, dbPath, options);
     }
   } catch {
     // Older Node.js releases do not include node:sqlite.

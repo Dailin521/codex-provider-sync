@@ -2,6 +2,36 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
+const UNSUPPORTED_DIRECTORY_SYNC_CODES = new Set([
+  "EACCES",
+  "EBADF",
+  "EISDIR",
+  "EINVAL",
+  "ENOTSUP",
+  "EPERM"
+]);
+
+export async function syncDirectory(
+  directoryPath,
+  { fsImpl = fs, platform = process.platform } = {}
+) {
+  let handle;
+  try {
+    handle = await fsImpl.open(directoryPath, "r");
+    await handle.sync();
+  } catch (error) {
+    // Windows does not consistently allow directories to be opened and
+    // flushed through the Node fs API. The staged file itself is still
+    // flushed before rename; directory fsync remains mandatory wherever the
+    // host supports it.
+    if (platform !== "win32" || !UNSUPPORTED_DIRECTORY_SYNC_CODES.has(error?.code)) {
+      throw error;
+    }
+  } finally {
+    await handle?.close();
+  }
+}
+
 export async function writeFileAtomic(
   filePath,
   content,
@@ -34,9 +64,16 @@ export async function writeFileAtomic(
     }
     if (originalMode !== null) {
       await fs.chmod(tempPath, originalMode);
+      const modeHandle = await fs.open(tempPath, "r+");
+      try {
+        await modeHandle.sync();
+      } finally {
+        await modeHandle.close();
+      }
     }
     await faultInjector?.({ point: "before_atomic_replace", filePath: fullPath, tempPath });
     await fs.rename(tempPath, fullPath);
+    await syncDirectory(directory);
   } catch (error) {
     await fs.rm(tempPath, { force: true }).catch(() => {});
     throw error;
