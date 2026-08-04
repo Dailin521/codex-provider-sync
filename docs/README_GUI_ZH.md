@@ -79,7 +79,7 @@ Windows GUI 的状态、同步、切换、恢复和备份清理入口通过共�
 pwsh ./scripts/run-windows-gui-e2e.ps1
 ```
 
-它必须在可见、可交互的 Windows 桌面中运行。Release gate 的验收条件包括：发布后的真实 `CodexProviderSync.exe`、manifest 全入口/动作覆盖、真实控件与事件、原生对话框、状态与 busy 行为、独立文件/SQLite 差异、重启持久化，以及 GUI → Application 因果 trace。v0.4 的实现提交 `c5af7c3` 已在真实可见桌面通过：40/40 manifest 入口覆盖、53/53 必需场景通过、0 error、0 blocker；prune 证据还逐目录确认旧 managed backup 消失并校验 unmanaged sentinel 哈希未变。单元测试、隐藏窗口、mock 或直接调用 Application 都不能记作真实 GUI PASS，相关实现变更后必须重跑。
+它必须在可见、可交互的 Windows 桌面中运行。Release gate 的验收条件包括：发布后的真实 `CodexProviderSync.exe`、manifest 全入口/动作覆盖、真实控件与事件、原生对话框、状态与 busy 行为、独立文件/SQLite 差异、重启持久化，以及 GUI → Application 因果 trace。v0.4 的实现提交 `7545b5d` 已在真实可见桌面通过：40/40 manifest 入口覆盖、53/53 必需场景通过、0 error、0 blocker；prune 证据还逐目录确认旧 managed backup 消失并校验 unmanaged sentinel 哈希未变。单元测试、隐藏窗口、mock 或直接调用 Application 都不能记作真实 GUI PASS，相关实现变更后必须重跑。
 
 ## 更新与日志
 

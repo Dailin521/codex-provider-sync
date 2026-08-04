@@ -5,7 +5,7 @@
 >
 > The v0.4 source and Windows Release build contain an Automation executable,
 > protocol schema, GUI manifest, and isolated GUI bridge. Implementation commit
-> `c5af7c3` passed the visible Headful Windows release gate; v0.4 has not been
+> `7545b5d` passed the visible Headful Windows release gate; v0.4 has not been
 > tagged or published as a formal Release. Protocol `0.4` is a pre-1.0
 > compatibility boundary.
 
@@ -98,7 +98,7 @@ It publishes the Release GUI and Headful driver, creates an isolated fixture,
 launches the visible executable, traverses the manifest, and produces
 machine-readable evidence. Acceptance requires real controls and events,
 native dialogs, independent file/SQLite effects, state and busy behavior,
-restart persistence, and GUI-to-Application traces. Commit `c5af7c3` passed with
+restart persistence, and GUI-to-Application traces. Commit `7545b5d` passed with
 40/40 manifest entries, 53/53 required scenarios, zero errors/blockers, and a
 matching published-EXE SHA-256. Lower-level tests alone are not a PASS claim.
 

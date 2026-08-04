@@ -158,7 +158,7 @@ pwsh ./scripts/run-windows-gui-e2e.ps1
 ./scripts/publish-gui-macos.sh
 ```
 
-`test-wsl-unc-safety.sh` 需要从 WSL 运行，并调用 Windows `dotnet.exe` 验证真实 WSL ext4 SQLite 的安全阻断。`run-windows-gui-e2e.ps1` 必须在可见、可交互的 Windows 桌面中运行。v0.4 的实现提交 `c5af7c3` 已通过该 gate：40/40 manifest 入口覆盖、53/53 必需场景通过、0 error、0 blocker，且发布 EXE 哈希、真实控件事件、原生对话框、文件/SQLite 差异、重启持久化和 GUI → Application trace 均由证据门禁核验。后续若修改相关实现必须重新运行；隐藏、跳过或直接调用 Application 不能替代真实 GUI PASS。
+`test-wsl-unc-safety.sh` 需要从 WSL 运行，并调用 Windows `dotnet.exe` 验证真实 WSL ext4 SQLite 的安全阻断。`run-windows-gui-e2e.ps1` 必须在可见、可交互的 Windows 桌面中运行。v0.4 的实现提交 `7545b5d` 已通过该 gate：40/40 manifest 入口覆盖、53/53 必需场景通过、0 error、0 blocker，且发布 EXE 哈希、真实控件事件、原生对话框、文件/SQLite 差异、重启持久化和 GUI → Application trace 均由证据门禁核验。后续若修改相关实现必须重新运行；隐藏、跳过或直接调用 Application 不能替代真实 GUI PASS。
 
 ## License
 
