@@ -1,79 +1,116 @@
 # Automation Design Notes
 
-> Status: exploratory and non-normative.
+> Status: implemented for the v0.4 integration branch, experimental and
+> non-normative.
 >
-> These notes describe a possible 0.x direction. They do not define a shipped
-> API, protocol, executable, schema, or compatibility commitment.
+> The v0.4 source and Windows Release build contain an Automation executable,
+> protocol schema, GUI manifest, and isolated GUI bridge. Implementation commit
+> `c5af7c3` passed the visible Headful Windows release gate; v0.4 has not been
+> tagged or published as a formal Release. Protocol `0.4` is a pre-1.0
+> compatibility boundary.
 
 ## Motivation
 
-The Windows GUI currently combines presentation, application state,
-validation, request construction, and Core service orchestration in
-`MainForm`. Before adding an automation surface, the project needs a
-UI-independent seam that is exercised by the real GUI.
+Business scripting and GUI regression tests must exercise the same behavior as
+the real Windows application without duplicating Core workflows or exposing a
+production control port. The design therefore separates two automation
+surfaces:
 
-## Current Direction
+- Business Automation invokes shared, UI-independent Application use cases.
+- GUI Automation drives real WinForms controls and observes their real event
+  path into those use cases.
 
-- `CodexProviderSync.Core` remains the only owner of config, rollout, SQLite,
-  backup, restore, storage resolution, locking, and WSL safety behavior.
-- A UI-independent Application/controller layer owns migrated application
-  state, validation, action availability, and Core request construction.
+## Implemented Architecture
+
+- `CodexProviderSync.Core` remains authoritative for config, rollout, SQLite,
+  backup, restore, pruning, storage resolution, locking, transaction recovery,
+  and WSL safety behavior.
+- `CodexProviderSync.Application` exposes immutable use cases for
+  `describe`, `status`, `plan`, `sync`, `switch`, `restore`, and `prune`.
+- The production Windows GUI and `CodexProviderSync.Automation.exe` use the
+  same `IApplicationService` implementation.
 - WinForms remains responsible for rendering, native dialogs, confirmation,
-  accessibility, and other Windows-specific presentation.
-- Existing frontends migrate incrementally. Unmigrated behavior may remain in
-  the frontend until its own tested vertical slice is moved.
+  focus, shell launch, update UI, and other Windows-specific presentation.
+- The GUI bridge may only manipulate registered controls on the UI thread. It
+  may not call Application directly while claiming to cover a GUI action.
 
-## Phase 1
+## Business Automation Protocol
 
-Phase 1 introduces the Application/controller boundary and migrates one
-complete Windows GUI behavior slice through it.
+The Windows Release build contains:
 
-Requirements:
+- `CodexProviderSync.Automation.exe`
+- `automation-protocol-v0.4.schema.json`
 
-- preserve observable GUI behavior
-- reuse Core rather than reimplementing data operations
-- keep the Application project free of WinForms dependencies
-- add controller tests for migrated state, validation, and request mapping
-- keep existing Core, CLI, GUI, and packaging tests green
+Each invocation emits exactly one protocol `0.4` JSON response on stdout;
+diagnostics use stderr. Supported commands are `describe`, `status`, `plan`,
+`sync`, `switch`, `restore`, and `prune`.
 
-This phase does not ship an Automation executable.
+Every write command is dry-run by default. Mutation requires explicit
+`--apply`, a plan document containing the `data` object returned by `plan`, and
+its exact lowercase SHA-256 digest. Plans are expiry-bound, bind normalized
+inputs and target fingerprints, and are single-use through a durable ledger.
 
-## Possible Later Experiment
+## GUI Automation Surface
 
-After the controller has been exercised by the real GUI, a local automation
-host may be prototyped as an experimental 0.x interface. Its transport,
-messages, versioning, write opt-in, planning model, and packaging remain open
-questions and may change incompatibly during 0.x development.
+The versioned manifest is
+`desktop/CodexProviderSync.App/Automation/gui-automation-manifest.v0.4.json`.
+Runtime enumeration checks the manifest against real interactive controls and
+stable Automation IDs.
+
+The bridge supports `ui.describe`, `ui.snapshot`, `ui.get`, `ui.set`,
+`ui.invoke`, `ui.wait`, and `ui.shutdown`; launch and authentication belong to
+the external harness/bootstrap. `ui.set` and `ui.invoke` use real control APIs
+and WinForms events. A schema-2 causal trace records the Automation ID, GUI
+event, Application operation ID/kind/lifecycle, timestamps, and redacted
+values.
+
+The bridge is disabled during normal launches. An automation launch requires
+a protected descriptor beneath a sentinel-bearing disposable root, a random
+current-user-only named pipe, and a one-time token. The bridge permits one
+authenticated client, bounds messages and wait times, rejects replay, and
+confines all paths to the canonical isolated root. The external Headful driver
+operates real native dialogs while the bridge waits for the real GUI event
+path.
 
 ## Safety Invariants
 
-Any future automation path must:
+- Automation never reads, copies, logs, or modifies `auth.json` or credentials.
+- Tests use explicit disposable fixture homes and never infer the runner's real
+  Codex Home, SQLite Home, AppData, settings, logs, or backup roots.
+- Absolute path validation rejects escapes, symbolic links, and reparse-point
+  ancestors.
+- Writes remain backup-first and preserve Core transaction, rollback, crash
+  recovery, locking, and WSL UNC safety rules.
+- Partial results, rollback failures, recovery-required state, cancellation,
+  timeout, stale plans, and duplicate execution remain machine-distinct.
+- A hidden window, mock control, skipped scenario, or direct Application call
+  cannot be reported as a real GUI pass.
 
-- use the same Core storage-resolution and WSL safety rules
-- never read, write, expose, or manage `auth.json` or credentials
-- identify write targets clearly and retain the existing backup-first behavior
-- use temporary fixture homes in automated tests, never the runner's real
-  Codex home
-- report partial results such as locked rollout files without presenting them
-  as complete success
+## Release Verification Status
 
-## Deliberately Undecided
+The intended one-command gate is:
 
-The project currently makes no commitment to:
+```powershell
+pwsh ./scripts/run-windows-gui-e2e.ps1
+```
 
-- JSON Lines or any other transport
-- public method, field, enum, or error-code names
-- a `CodexProviderSync.Automation.exe` binary or published JSON schema
-- stable v1 compatibility
-- plan IDs, expiration rules, or a particular plan/execute protocol
-- stable control IDs, `ui.inspect`, `ui.capture`, or a UI probe
-- bundling multiple executables in the Windows release
+It publishes the Release GUI and Headful driver, creates an isolated fixture,
+launches the visible executable, traverses the manifest, and produces
+machine-readable evidence. Acceptance requires real controls and events,
+native dialogs, independent file/SQLite effects, state and busy behavior,
+restart persistence, and GUI-to-Application traces. Commit `c5af7c3` passed with
+40/40 manifest entries, 53/53 required scenarios, zero errors/blockers, and a
+matching published-EXE SHA-256. Lower-level tests alone are not a PASS claim.
 
-A UI probe, if needed, will be designed and reviewed separately from the
-Application/controller extraction.
+## Compatibility Boundary
 
-## Stabilization Criteria
+Protocol and manifest version `0.4` may change incompatibly before 1.0. The
+project does not promise a public network service, arbitrary reflection,
+arbitrary file access, GUI automation in normal mode, stable native-dialog
+internals, or macOS GUI automation. Full macOS Application migration is not a
+v0.4 Windows release gate, although cross-platform Core/Application builds
+remain compatibility checks.
 
-A stable public automation contract should be proposed only after an
-experimental 0.x host has been used against the shared controller, its safety
-model has been tested, and the required compatibility surface is understood.
+Stabilization beyond `0.4` requires exact-head schema and package validation,
+the complete Headful Windows gate, transaction/recovery evidence, independent
+review, and CI at the same final commit.

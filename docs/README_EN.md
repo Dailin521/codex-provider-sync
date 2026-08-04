@@ -92,6 +92,34 @@ codex-provider sync --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/you
 
 Node.js 24+ uses the built-in `node:sqlite` module. Older supported Node.js releases use the optional `better-sqlite3` dependency.
 
+### Business Automation API (experimental v0.4)
+
+The v0.4 Windows Release build also contains `CodexProviderSync.Automation.exe` and `automation-protocol-v0.4.schema.json`. This one-shot process interface uses the same Application use cases as the Windows GUI. Each invocation emits exactly one protocol `0.4` JSON document on stdout and sends diagnostics to stderr.
+
+| Command | Purpose |
+| --- | --- |
+| `describe` | Describe protocol capabilities and safety requirements |
+| `status` | Read status and diagnostics |
+| `plan --operation sync\|switch\|restore\|prune` | Create a plan for a selected write operation |
+| `sync` | Plan or explicitly apply synchronization |
+| `switch` | Plan or explicitly apply a Provider/model switch and synchronization |
+| `restore` | Plan or explicitly apply backup restoration |
+| `prune` | Plan or explicitly prune managed backups |
+
+Every write command is dry-run by default and returns a plan without modifying a target. Mutation requires `--apply`, a plan file containing only the `data` object from the `plan` response, and that object's exact lowercase SHA-256 `digest`:
+
+```powershell
+.\CodexProviderSync.Automation.exe describe
+.\CodexProviderSync.Automation.exe status --codex-home C:\isolated\.codex
+.\CodexProviderSync.Automation.exe sync --codex-home C:\isolated\.codex --provider openai
+$planResponse = .\CodexProviderSync.Automation.exe plan --operation sync --codex-home C:\isolated\.codex --provider openai | ConvertFrom-Json
+$planResponse.data | ConvertTo-Json -Depth 100 -Compress | Set-Content -LiteralPath C:\isolated\sync-plan.json -Encoding utf8NoBOM
+$planDigest = $planResponse.data.digest
+.\CodexProviderSync.Automation.exe sync --codex-home C:\isolated\.codex --provider openai --apply --plan C:\isolated\sync-plan.json --plan-digest $planDigest
+```
+
+Plans expire, bind normalized inputs and target state, and are single-use through a durable ledger. The default ledger is `<Codex Home>\tmp\provider-sync-automation-ledger`. Every path argument must be absolute and may not traverse a symbolic link or reparse point. Automation also rejects direct access to `auth.json`. The protocol remains experimental before 1.0; compatibility is not promised outside protocol family `0.4`.
+
 ## Safety and Limitations
 
 Before each `sync` or `switch`, the tool creates a backup under:
@@ -112,6 +140,8 @@ Before each `sync` or `switch`, the tool creates a backup under:
 
 - [Windows GUI guide](README_GUI_ZH.md)
 - [macOS GUI guide](README_MAC_GUI_EN.md)
+- [v0.4.0 Release Notes (Draft)](RELEASE_NOTES_V0.4.0.md)
+- [v0.4 Automation execution plan](V0.4_AUTOMATION_PLAN.md)
 - [中文说明](../README.md)
 - [AI / Agent guide](../AGENTS.md)
 - [Contributing guide](../CONTRIBUTING.md#english-quick-guide)
@@ -125,10 +155,11 @@ npm test
 dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj
 ./scripts/test-wsl-unc-safety.sh
 pwsh ./scripts/publish-gui.ps1
+pwsh ./scripts/run-windows-gui-e2e.ps1
 ./scripts/publish-gui-macos.sh
 ```
 
-Run `test-wsl-unc-safety.sh` from WSL. It invokes Windows `dotnet.exe` to verify the safety guard against a real SQLite database on WSL ext4.
+Run `test-wsl-unc-safety.sh` from WSL. It invokes Windows `dotnet.exe` to verify the safety guard against a real SQLite database on WSL ext4. Run `run-windows-gui-e2e.ps1` only on a visible, interactive Windows desktop. The v0.4 implementation commit `c5af7c3` passed this gate with 40/40 manifest entries covered, 53/53 required scenarios passed, and zero errors or blockers; the evidence gate also verified the published EXE hash, real control events, native dialogs, file/SQLite effects, restart persistence, and GUI-to-Application traces. Relevant later implementation changes require another run. Hidden, skipped, or direct-Application runs are not substitutes.
 
 ## License
 
