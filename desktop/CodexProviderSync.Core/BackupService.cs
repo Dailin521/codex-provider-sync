@@ -199,8 +199,7 @@ public sealed class BackupService
                 sessionManifest.Files.Select(static entry => entry.Path));
         }
 
-        List<(string SourcePath, string TargetPath)> databaseEntries = [];
-        List<string> sidecarsToRemove = [];
+        (string SourcePath, string TargetPath)? databaseRestorePlan = null;
         if (options.RestoreDatabase)
         {
             StateDbLocation? stateDb = storage.StateDbLocation ?? _sqliteStateService.DetectStateDb(storage);
@@ -255,22 +254,14 @@ public sealed class BackupService
                 {
                     throw new InvalidOperationException($"Backup declares a missing SQLite file: {sourcePath}");
                 }
-                databaseEntries.Add((sourcePath, targetPath));
-            }
-
-            HashSet<string> backedUpFiles = new(databaseFiles, StringComparer.Ordinal);
-            foreach (string baseFile in databaseFiles.Where(
-                static fileName => Path.GetFileName(fileName) == AppConstants.DbFileBasename))
-            {
-                string basePath = metadata.Version >= 2
-                    ? RestoreSqliteTargetPath(restoreRoot, baseFile)
-                    : RestoreDbTargetPath(restoreRoot, baseFile);
-                foreach (string suffix in new[] { "-shm", "-wal" })
+                if (Path.GetFileName(fileName) == AppConstants.DbFileBasename)
                 {
-                    if (!backedUpFiles.Contains(baseFile + suffix))
+                    if (databaseRestorePlan is not null)
                     {
-                        sidecarsToRemove.Add(basePath + suffix);
+                        throw new InvalidOperationException(
+                            "Backup must contain exactly one state_5.sqlite restore source.");
                     }
+                    databaseRestorePlan = (sourcePath, targetPath);
                 }
             }
         }
@@ -284,24 +275,11 @@ public sealed class BackupService
             await RestoreGlobalStateFilesAsync(normalizedBackupDir, codexHome);
         }
 
-        if (options.RestoreDatabase)
+        if (options.RestoreDatabase && databaseRestorePlan is { } restorePlan)
         {
-            foreach (string sidecarPath in sidecarsToRemove)
-            {
-                if (File.Exists(sidecarPath))
-                {
-                    File.Delete(sidecarPath);
-                }
-            }
-
-            foreach ((string sourcePath, string targetPath) in databaseEntries)
-            {
-                await AtomicFile.CopyAsync(
-                    sourcePath,
-                    targetPath,
-                    overwrite: true,
-                    faultInjector: AtomicWriteFaultInjector);
-            }
+            await _sqliteStateService.RestoreSqliteOnlineBackupAsync(
+                restorePlan.SourcePath,
+                restorePlan.TargetPath);
         }
 
         if (options.RestoreSessions && sessionManifest is not null)

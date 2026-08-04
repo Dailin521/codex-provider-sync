@@ -550,7 +550,9 @@ export async function createSqliteOnlineBackup(storageOrLocation, destinationPat
 
   let db;
   try {
-    db = await openDatabase(fullSourcePath);
+    // Read-only is deliberate: a database that disappears after discovery
+    // must fail here instead of being silently recreated as an empty file.
+    db = await openDatabase(fullSourcePath, { readOnly: true });
     setBusyTimeout(db, options.busyTimeoutMs);
     const sourceMetadata = readSqliteConnectionMetadata(db);
     const driver = db.driver ?? "unknown";
@@ -596,5 +598,61 @@ export async function createSqliteOnlineBackup(storageOrLocation, destinationPat
     );
   } finally {
     db?.close();
+  }
+}
+
+/**
+ * Restore a standalone SQLite snapshot through SQLite's online-backup API.
+ *
+ * The backup is the source and the live database is the destination. SQLite
+ * keeps a write transaction open on the destination for the operation and
+ * rolls it back if the backup does not finish. In particular, live WAL/SHM
+ * files must never be unlinked or copied by this path.
+ */
+export async function restoreSqliteOnlineBackup(sourcePath, destinationPath, options = {}) {
+  const fullSourcePath = path.resolve(sourcePath);
+  const fullDestinationPath = path.resolve(destinationPath);
+  const sourceIdentityPath = process.platform === "win32"
+    ? fullSourcePath.toLowerCase()
+    : fullSourcePath;
+  const destinationIdentityPath = process.platform === "win32"
+    ? fullDestinationPath.toLowerCase()
+    : fullDestinationPath;
+  if (sourceIdentityPath === destinationIdentityPath) {
+    throw new Error("SQLite online restore source must differ from the destination database.");
+  }
+
+  let source;
+  try {
+    const sourceStat = await fs.stat(fullSourcePath);
+    if (!sourceStat.isFile()) {
+      throw new Error(`SQLite restore source is not a regular file: ${fullSourcePath}`);
+    }
+
+    // Open and inspect the source before SQLite is allowed to touch the live
+    // destination. readOnly also closes the disappearance race without ever
+    // creating an empty source database.
+    source = await openDatabase(fullSourcePath, { readOnly: true });
+    setBusyTimeout(source, options.busyTimeoutMs);
+    readSqliteConnectionMetadata(source);
+
+    await fs.mkdir(path.dirname(fullDestinationPath), { recursive: true });
+    await source.backup(fullDestinationPath, options.backupOptions ?? {});
+
+    await syncDirectory(path.dirname(fullDestinationPath));
+    return {
+      sourcePath: fullSourcePath,
+      destinationPath: fullDestinationPath,
+      driver: source.driver ?? "unknown"
+    };
+  } catch (error) {
+    // Never delete or replace destination artifacts here. SQLite owns the
+    // destination transaction and rolls it back on an unfinished backup.
+    throw wrapSqliteMalformedError(
+      wrapSqliteBusyError(error, "restore a consistent SQLite online backup"),
+      "restore a consistent SQLite online backup"
+    );
+  } finally {
+    source?.close();
   }
 }

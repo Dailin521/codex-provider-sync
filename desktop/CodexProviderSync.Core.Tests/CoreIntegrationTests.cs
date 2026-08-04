@@ -708,7 +708,7 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
-    public async Task RestoreSqlite_AtomicReplacementFailurePreservesCurrentDatabaseBytes()
+    public async Task RestoreSqlite_OnlineBackupFailurePreservesCurrentWalDatabase()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
         await fixture.WriteConfigAsync("model_provider = \"openai\"");
@@ -723,24 +723,27 @@ public sealed class CoreIntegrationTests
             [],
             Path.Combine(fixture.CodexHome, "config.toml"));
         string stateDbPath = fixture.StateDbPath();
-        await using (SqliteConnection connection = fixture.OpenSqliteConnection())
+        await using SqliteConnection connection = fixture.OpenSqliteConnection();
+        await connection.OpenAsync();
+        await using (SqliteCommand wal = connection.CreateCommand())
         {
-            await connection.OpenAsync();
-            SqliteCommand update = connection.CreateCommand();
+            wal.CommandText = "PRAGMA journal_mode = WAL";
+            Assert.Equal("wal", Convert.ToString(await wal.ExecuteScalarAsync()));
+        }
+        await using (SqliteCommand update = connection.CreateCommand())
+        {
             update.CommandText = "UPDATE threads SET model_provider = 'apigather' WHERE id = 'thread-atomic-restore'";
             Assert.Equal(1, await update.ExecuteNonQueryAsync());
         }
-        byte[] currentBytes = await File.ReadAllBytesAsync(stateDbPath);
-        backups.AtomicWriteFaultInjector = (point, targetPath, _) =>
-            point == "before_atomic_replace"
-            && string.Equals(
-                Path.GetFullPath(targetPath),
-                Path.GetFullPath(stateDbPath),
-                StringComparison.OrdinalIgnoreCase)
-                ? Task.FromException(new IOException("injected SQLite restore replacement failure"))
-                : Task.CompletedTask;
+        Assert.True(new FileInfo(stateDbPath + "-wal").Length > 0);
+        string backupDbPath = Path.Combine(
+            backupDir,
+            "db",
+            "sqlite-home",
+            AppConstants.DbFileBasename);
+        await File.WriteAllTextAsync(backupDbPath, "not a sqlite database");
 
-        IOException error = await Assert.ThrowsAsync<IOException>(
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
             () => backups.RestoreBackupAsync(
                 backupDir,
                 fixture.CodexHome,
@@ -751,12 +754,9 @@ public sealed class CoreIntegrationTests
                     RestoreSessions = false
                 }));
 
-        Assert.Contains("injected SQLite restore", error.Message);
-        Assert.Equal(currentBytes, await File.ReadAllBytesAsync(stateDbPath));
-        Assert.Empty(Directory.EnumerateFiles(
-            Path.GetDirectoryName(stateDbPath)!,
-            "*.provider-sync.*.tmp",
-            SearchOption.TopDirectoryOnly));
+        Assert.Contains("malformed", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(stateDbPath + "-wal"));
+        Assert.Equal("apigather", await ReadProviderAsync(stateDbPath, "thread-atomic-restore"));
     }
 
     [Fact]

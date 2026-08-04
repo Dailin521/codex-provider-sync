@@ -14,7 +14,8 @@ import { restoreSessionChanges } from "./session-files.js";
 import {
   assertSqliteWritable,
   createSqliteOnlineBackup,
-  detectStateDb
+  detectStateDb,
+  restoreSqliteOnlineBackup
 } from "./sqlite-state.js";
 import {
   assertSqliteAccessSupported,
@@ -642,19 +643,11 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
       entries.push({ fileName, sourcePath, targetPath });
     }
 
-    const backedUpFiles = new Set(databaseFiles);
-    const sidecarsToRemove = [];
-    for (const baseFile of databaseFiles.filter((fileName) => path.basename(fileName) === DB_FILE_BASENAME)) {
-      const basePath = metadata.version >= 2
-        ? restoreSqliteTargetPath(restoreRoot, baseFile)
-        : restoreDbTargetPath(restoreRoot, baseFile);
-      for (const suffix of ["-shm", "-wal"]) {
-        if (!backedUpFiles.has(`${baseFile}${suffix}`)) {
-          sidecarsToRemove.push(`${basePath}${suffix}`);
-        }
-      }
+    const mainEntries = entries.filter(({ fileName }) => path.basename(fileName) === DB_FILE_BASENAME);
+    if (mainEntries.length !== 1) {
+      throw new Error("Backup must contain exactly one state_5.sqlite restore source.");
     }
-    databaseRestorePlan = { entries, sidecarsToRemove };
+    databaseRestorePlan = mainEntries[0];
   }
 
   const configBackupPath = path.join(backupDir, "config.toml");
@@ -668,12 +661,10 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
   }
 
   if (databaseRestorePlan) {
-    for (const sidecarPath of databaseRestorePlan.sidecarsToRemove) {
-      await removeIfPresent(sidecarPath);
-    }
-    for (const { sourcePath, targetPath } of databaseRestorePlan.entries) {
-      await copyFileAtomic(sourcePath, targetPath);
-    }
+    await restoreSqliteOnlineBackup(
+      databaseRestorePlan.sourcePath,
+      databaseRestorePlan.targetPath
+    );
   }
 
   if (restoreSessions) {

@@ -56,7 +56,7 @@ class NodeSqliteDatabase {
 async function loadDatabaseFactory() {
   try {
     const sqlite = await import("node:sqlite");
-    if (sqlite.DatabaseSync) {
+    if (sqlite.DatabaseSync && typeof sqlite.backup === "function") {
       return (dbPath, options) => new NodeSqliteDatabase(sqlite, dbPath, options);
     }
   } catch {

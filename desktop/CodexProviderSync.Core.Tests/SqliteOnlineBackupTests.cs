@@ -94,6 +94,32 @@ public sealed class SqliteOnlineBackupTests
     }
 
     [Fact]
+    public async Task OnlineBackup_DoesNotRecreateSourceDatabaseThatDisappeared()
+    {
+        await using Fixture fixture = Fixture.Create();
+        string backupPath = Path.Combine(fixture.Root, "backup", "state_5.sqlite");
+        await using (SqliteConnection source = Open(fixture.DbPath))
+        {
+            await source.OpenAsync();
+            await ExecuteAsync(source, "CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT)");
+        }
+        File.Delete(fixture.DbPath);
+        CodexStorageLayout boundStorage = fixture.Storage with
+        {
+            StateDbLocation = new StateDbLocation(
+                fixture.DbPath,
+                AppConstants.DbFileBasename,
+                "explicit")
+        };
+
+        await Assert.ThrowsAnyAsync<Exception>(
+            () => fixture.Service.CreateSqliteOnlineBackupAsync(boundStorage, backupPath));
+
+        Assert.False(File.Exists(fixture.DbPath));
+        Assert.False(File.Exists(backupPath));
+    }
+
+    [Fact]
     public async Task ManagedBackup_SnapshotsLiveWal_AndManifestsOnlyStandaloneMainDatabases()
     {
         await using Fixture fixture = Fixture.Create();
@@ -148,13 +174,73 @@ public sealed class SqliteOnlineBackupTests
             Assert.False(File.Exists(backupPath + "-shm"));
         }
 
-        await using SqliteConnection backup = Open(canonicalBackupPath, SqliteOpenMode.ReadOnly);
-        await backup.OpenAsync();
+        await using (SqliteConnection backup = Open(canonicalBackupPath, SqliteOpenMode.ReadOnly))
+        {
+            await backup.OpenAsync();
+            Assert.Equal(
+                "apigather",
+                Convert.ToString(await ScalarObjectAsync(
+                    backup,
+                    "SELECT model_provider FROM threads WHERE id = 'live-wal-row'")));
+        }
+
+        await ExecuteAsync(source, """
+            UPDATE threads
+            SET model_provider = 'live-after-backup'
+            WHERE id = 'live-wal-row';
+            INSERT INTO threads VALUES ('live-only-row', 'live-after-backup');
+            """);
+        Assert.True(new FileInfo(fixture.DbPath + "-wal").Length > 0);
+
+        await backups.RestoreBackupAsync(
+            backupDir,
+            fixture.Storage,
+            new RestoreBackupOptions
+            {
+                RestoreConfig = false,
+                RestoreDatabase = true,
+                RestoreSessions = false
+            });
         Assert.Equal(
             "apigather",
             Convert.ToString(await ScalarObjectAsync(
-                backup,
+                source,
                 "SELECT model_provider FROM threads WHERE id = 'live-wal-row'")));
+        Assert.Null(await ScalarObjectAsync(
+            source,
+            "SELECT model_provider FROM threads WHERE id = 'live-only-row'"));
+
+        await ExecuteAsync(source, """
+            UPDATE threads
+            SET model_provider = 'live-before-failed-restore'
+            WHERE id = 'live-wal-row';
+            INSERT INTO threads VALUES ('failed-restore-must-preserve', 'live-before-failed-restore');
+            """);
+        byte[] walBeforeFailure = await ReadSharedFileAsync(fixture.DbPath + "-wal");
+        await File.WriteAllTextAsync(canonicalBackupPath, "not a sqlite database");
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => backups.RestoreBackupAsync(
+                backupDir,
+                fixture.Storage,
+                new RestoreBackupOptions
+                {
+                    RestoreConfig = false,
+                    RestoreDatabase = true,
+                    RestoreSessions = false
+                }));
+        Assert.Contains("malformed", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(walBeforeFailure, await ReadSharedFileAsync(fixture.DbPath + "-wal"));
+        Assert.Equal(
+            "live-before-failed-restore",
+            Convert.ToString(await ScalarObjectAsync(
+                source,
+                "SELECT model_provider FROM threads WHERE id = 'live-wal-row'")));
+        Assert.Equal(
+            "live-before-failed-restore",
+            Convert.ToString(await ScalarObjectAsync(
+                source,
+                "SELECT model_provider FROM threads WHERE id = 'failed-restore-must-preserve'")));
     }
 
     private sealed class Fixture : IAsyncDisposable
@@ -227,5 +313,19 @@ public sealed class SqliteOnlineBackupTests
         await using SqliteCommand command = connection.CreateCommand();
         command.CommandText = sql;
         return await command.ExecuteScalarAsync();
+    }
+
+    private static async Task<byte[]> ReadSharedFileAsync(string filePath)
+    {
+        await using FileStream stream = new(
+            filePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete,
+            4096,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        using MemoryStream copy = new();
+        await stream.CopyToAsync(copy);
+        return copy.ToArray();
     }
 }

@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { createBackup } from "../src/backup.js";
+import { createBackup, restoreBackup } from "../src/backup.js";
 import { DB_FILE_BASENAME, SQLITE_DIR_BASENAME } from "../src/constants.js";
 import { openDatabase } from "../src/sqlite.js";
 import {
@@ -121,6 +121,26 @@ test("official SQLite online backup captures live WAL into one standalone main f
   }
 });
 
+test("online backup never recreates a source database that disappeared", async () => {
+  const fixture = await tempDatabase("provider-sync-sqlite-online-missing-source-");
+  const backupPath = path.join(fixture.root, "backup", "state_5.sqlite");
+  const source = await openDatabase(fixture.dbPath);
+  source.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT)");
+  source.close();
+  await fs.rm(fixture.dbPath);
+
+  try {
+    await assert.rejects(
+      () => createSqliteOnlineBackup(fixture.location, backupPath),
+      /unable to open database|does not exist|cannot open/i
+    );
+    await assert.rejects(fs.access(fixture.dbPath), { code: "ENOENT" });
+    await assert.rejects(fs.access(backupPath), { code: "ENOENT" });
+  } finally {
+    await fs.rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("managed backup snapshots live WAL and manifests only standalone main databases", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "provider-sync-managed-online-backup-"));
   const codexHome = path.join(root, ".codex");
@@ -175,6 +195,55 @@ test("managed backup snapshots live WAL and manifests only standalone main datab
     } finally {
       backup.close();
     }
+
+    source.prepare("UPDATE threads SET model_provider = ? WHERE id = ?")
+      .run("live-after-backup", "live-wal-row");
+    source.prepare("INSERT INTO threads VALUES (?, ?)")
+      .run("live-only-row", "live-after-backup");
+    assert.ok((await fs.stat(`${dbPath}-wal`)).size > 0);
+
+    await restoreBackup(backupDir, codexHome, {
+      restoreConfig: false,
+      restoreGlobalState: false,
+      restoreSessions: false
+    });
+    assert.equal(
+      source.prepare("SELECT model_provider FROM threads WHERE id = ?")
+        .get("live-wal-row").model_provider,
+      "apigather"
+    );
+    assert.equal(
+      source.prepare("SELECT model_provider FROM threads WHERE id = ?")
+        .get("live-only-row"),
+      undefined
+    );
+
+    source.prepare("UPDATE threads SET model_provider = ? WHERE id = ?")
+      .run("live-before-failed-restore", "live-wal-row");
+    source.prepare("INSERT INTO threads VALUES (?, ?)")
+      .run("failed-restore-must-preserve", "live-before-failed-restore");
+    const walBeforeFailure = await fs.readFile(`${dbPath}-wal`);
+    await fs.writeFile(canonicalBackupPath, "not a sqlite database", "utf8");
+
+    await assert.rejects(
+      () => restoreBackup(backupDir, codexHome, {
+        restoreConfig: false,
+        restoreGlobalState: false,
+        restoreSessions: false
+      }),
+      /malformed|not a database/i
+    );
+    assert.deepEqual(await fs.readFile(`${dbPath}-wal`), walBeforeFailure);
+    assert.equal(
+      source.prepare("SELECT model_provider FROM threads WHERE id = ?")
+        .get("live-wal-row").model_provider,
+      "live-before-failed-restore"
+    );
+    assert.equal(
+      source.prepare("SELECT model_provider FROM threads WHERE id = ?")
+        .get("failed-restore-must-preserve").model_provider,
+      "live-before-failed-restore"
+    );
   } finally {
     source.close();
     await fs.rm(root, { recursive: true, force: true });

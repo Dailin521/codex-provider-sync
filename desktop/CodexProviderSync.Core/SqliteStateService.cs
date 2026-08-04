@@ -493,7 +493,7 @@ public sealed class SqliteStateService
             SqliteFileMetadata sourceMetadata;
             await using (SqliteConnection source = OpenConnection(
                 fullSourcePath,
-                SqliteOpenMode.ReadWrite))
+                SqliteOpenMode.ReadOnly))
             {
                 await source.OpenAsync();
                 await SetBusyTimeoutAsync(source, busyTimeoutMs);
@@ -556,6 +556,70 @@ public sealed class SqliteStateService
             new CodexStorageLayoutService().CreateDefault(codexHome),
             destinationPath,
             busyTimeoutMs);
+    }
+
+    /// <summary>
+    /// Restores a SQLite snapshot into the live database via SQLite's online
+    /// backup API. SQLite owns the destination write transaction, so an
+    /// unfinished restore rolls back without unlinking live WAL/SHM files.
+    /// </summary>
+    public async Task RestoreSqliteOnlineBackupAsync(
+        string sourcePath,
+        string destinationPath,
+        int? busyTimeoutMs = null)
+    {
+        string fullSourcePath = Path.GetFullPath(sourcePath);
+        string fullDestinationPath = Path.GetFullPath(destinationPath);
+        StringComparison pathComparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        if (string.Equals(fullSourcePath, fullDestinationPath, pathComparison))
+        {
+            throw new InvalidOperationException(
+                "SQLite online restore source must differ from the destination database.");
+        }
+        if (!File.Exists(fullSourcePath))
+        {
+            throw new FileNotFoundException(
+                "SQLite restore source does not exist.",
+                fullSourcePath);
+        }
+
+        string? destinationDirectory = Path.GetDirectoryName(fullDestinationPath);
+        if (string.IsNullOrEmpty(destinationDirectory))
+        {
+            throw new InvalidOperationException("Cannot resolve SQLite online restore directory.");
+        }
+
+        try
+        {
+            // Open and inspect the source before allowing SQLite to touch the
+            // live destination. ReadOnly closes the disappearance race without
+            // ever creating an empty source database.
+            await using SqliteConnection source = OpenConnection(
+                fullSourcePath,
+                SqliteOpenMode.ReadOnly);
+            await source.OpenAsync();
+            await SetBusyTimeoutAsync(source, busyTimeoutMs);
+            _ = await ReadSqliteConnectionMetadataAsync(source);
+
+            Directory.CreateDirectory(destinationDirectory);
+            await using SqliteConnection destination = OpenConnection(
+                fullDestinationPath,
+                SqliteOpenMode.ReadWriteCreate);
+            await destination.OpenAsync();
+            await SetBusyTimeoutAsync(destination, busyTimeoutMs);
+            await ConfigureSqliteWriteDurabilityAsync(destination);
+            source.BackupDatabase(destination);
+        }
+        catch (Exception error)
+        {
+            // Never delete or replace destination artifacts here. SQLite owns
+            // the destination transaction and rolls it back on failure.
+            throw WrapSqliteMalformedError(
+                WrapSqliteBusyError(error, "restore a consistent SQLite online backup"),
+                "restore a consistent SQLite online backup");
+        }
     }
 
     internal static async Task<int> ConfigureSqliteWriteDurabilityAsync(
