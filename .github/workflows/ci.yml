@@ -37,9 +37,11 @@ jobs:
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: "10.0.x"
-      - run: dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj
-      - run: dotnet test desktop/CodexProviderSync.Application.Tests/CodexProviderSync.Application.Tests.csproj
-      - run: dotnet test desktop/CodexProviderSync.App.Tests/CodexProviderSync.App.Tests.csproj
+      - run: dotnet build CodexProviderSync.sln --configuration Release
+      - run: dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj --configuration Release --no-build
+      - run: dotnet test desktop/CodexProviderSync.Application.Tests/CodexProviderSync.Application.Tests.csproj --configuration Release --no-build
+      - run: dotnet test desktop/CodexProviderSync.Automation.Tests/CodexProviderSync.Automation.Tests.csproj --configuration Release --no-build
+      - run: dotnet test desktop/CodexProviderSync.App.Tests/CodexProviderSync.App.Tests.csproj --configuration Release --no-build
 
   desktop-macos:
     runs-on: macos-latest
@@ -52,6 +54,15 @@ jobs:
       - run: dotnet test desktop/CodexProviderSync.Application.Tests/CodexProviderSync.Application.Tests.csproj
       - run: dotnet build desktop/CodexProviderSync.Mac/CodexProviderSync.Mac.csproj --configuration Release
 
+  desktop-linux-lock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "10.0.x"
+      - run: dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj --filter FullyQualifiedName~LockServiceTests
+
   ci-gate:
     name: ci-gate
     if: ${{ always() }}
@@ -59,6 +70,7 @@ jobs:
       - test
       - desktop-test
       - desktop-macos
+      - desktop-linux-lock
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
@@ -66,10 +78,12 @@ jobs:
           NODE_TEST_RESULT: ${{ needs.test.result }}
           DESKTOP_TEST_RESULT: ${{ needs.desktop-test.result }}
           MACOS_TEST_RESULT: ${{ needs.desktop-macos.result }}
+          LINUX_LOCK_RESULT: ${{ needs.desktop-linux-lock.result }}
         run: |
           if [ "$NODE_TEST_RESULT" != "success" ] ||
              [ "$DESKTOP_TEST_RESULT" != "success" ] ||
-             [ "$MACOS_TEST_RESULT" != "success" ]; then
+             [ "$MACOS_TEST_RESULT" != "success" ] ||
+             [ "$LINUX_LOCK_RESULT" != "success" ]; then
             echo "One or more required CI jobs did not succeed."
             exit 1
           fi

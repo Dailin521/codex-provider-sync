@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>CodexProviderSync.Automation</AssemblyName>
+    <RootNamespace>CodexProviderSync.Automation</RootNamespace>
+    <Version>0.3.2</Version>
+    <AssemblyVersion>0.3.2.0</AssemblyVersion>
+    <FileVersion>0.3.2.0</FileVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CodexProviderSync.Application\CodexProviderSync.Application.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="automation-protocol-v0.4.schema.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <EmbeddedResource Include="automation-protocol-v0.4.schema.json">
+      <LogicalName>CodexProviderSync.Automation.automation-protocol-v0.4.schema.json</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+</Project>

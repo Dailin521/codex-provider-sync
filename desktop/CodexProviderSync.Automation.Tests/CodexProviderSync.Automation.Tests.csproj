@@ -5,6 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
   </PropertyGroup>
 
   <ItemGroup>
@@ -19,15 +20,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Compile Remove="ClaimHost\**\*.cs" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <ProjectReference Include="..\CodexProviderSync.Application\CodexProviderSync.Application.csproj" />
-    <ProjectReference
-      Include="ClaimHost\CodexProviderSync.PlanClaimHost.csproj"
-      ReferenceOutputAssembly="false"
-      AdditionalProperties="Configuration=$(Configuration)" />
+    <ProjectReference Include="..\CodexProviderSync.Automation\CodexProviderSync.Automation.csproj" />
   </ItemGroup>
 
 </Project>

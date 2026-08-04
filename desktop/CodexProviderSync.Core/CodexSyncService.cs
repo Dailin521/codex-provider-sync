@@ -133,29 +133,71 @@ public sealed class CodexSyncService
             model,
             explicitSqliteHome,
             switchPreparationFactory: null,
+            expectedSnapshot: null,
+            snapshotExpiresAtUtc: null,
             cancellationToken);
     }
 
-    private async Task<SyncResult> RunSyncCoreAsync(
-        string? explicitCodexHome,
+    public async Task<CoreWritePlanSnapshot> CreateSyncPlanSnapshotAsync(
+        string? explicitCodexHome = null,
+        string? provider = null,
+        int keepCount = AppConstants.DefaultBackupRetentionCount,
+        int? sqliteBusyTimeoutMs = null,
+        string? model = null,
+        string? explicitSqliteHome = null,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateAutomaticRetention(keepCount);
+        string codexHome = _codexHomeService.NormalizeCodexHome(explicitCodexHome);
+        await _codexHomeService.EnsureCodexHomeAsync(codexHome);
+        await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "plan-sync");
+        await FileTransactionJournal.AssertNoPendingAsync(codexHome);
+        SyncPreparation preparation = await PrepareSyncAsync(
+            codexHome,
+            provider,
+            sqliteBusyTimeoutMs,
+            model,
+            explicitSqliteHome,
+            switchPreparationFactory: null,
+            cancellationToken);
+        return await BuildSyncPlanSnapshotAsync(preparation, keepCount, cancellationToken);
+    }
+
+    public Task<SyncResult> RunSyncCheckedAsync(
+        CoreWritePlanSnapshot expectedSnapshot,
+        string? explicitCodexHome = null,
+        string? provider = null,
+        int keepCount = AppConstants.DefaultBackupRetentionCount,
+        int? sqliteBusyTimeoutMs = null,
+        string? model = null,
+        string? explicitSqliteHome = null,
+        DateTimeOffset? snapshotExpiresAtUtc = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(expectedSnapshot);
+        return RunSyncCoreAsync(
+            explicitCodexHome,
+            provider,
+            configBackupText: null,
+            keepCount,
+            sqliteBusyTimeoutMs,
+            model,
+            explicitSqliteHome,
+            switchPreparationFactory: null,
+            expectedSnapshot,
+            snapshotExpiresAtUtc,
+            cancellationToken);
+    }
+
+    private async Task<SyncPreparation> PrepareSyncAsync(
+        string codexHome,
         string? provider,
-        string? configBackupText,
-        int keepCount,
         int? sqliteBusyTimeoutMs,
         string? model,
         string? explicitSqliteHome,
         Func<string, SwitchPreparation>? switchPreparationFactory,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken)
     {
-        if (keepCount < 1)
-        {
-            throw new ArgumentOutOfRangeException(nameof(keepCount), keepCount, "keepCount must be 1 or greater for automatic cleanup.");
-        }
-
-        string codexHome = _codexHomeService.NormalizeCodexHome(explicitCodexHome);
-        await _codexHomeService.EnsureCodexHomeAsync(codexHome);
-        await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "sync");
-        await FileTransactionJournal.AssertNoPendingAsync(codexHome);
         cancellationToken.ThrowIfCancellationRequested();
         string configPath = _codexHomeService.ConfigPath(codexHome);
         string configText = await _configFileService.ReadConfigTextAsync(configPath);
@@ -180,6 +222,7 @@ public sealed class CodexSyncService
             targetModel = _configFileService.ReadRootModelFromConfigText(configText);
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         SessionChangeCollection sessionInfo = await _sessionRolloutService.CollectSessionChangesAsync(
             codexHome,
             targetProvider,
@@ -189,7 +232,6 @@ public sealed class CodexSyncService
         string? encryptedContentWarning = BuildEncryptedContentWarning(sessionInfo.EncryptedContentCounts, targetProvider);
         (IReadOnlyList<SessionChange> writableChanges, IReadOnlyList<SessionChange> lockedChanges) =
             await _sessionRolloutService.SplitLockedSessionChangesAsync(sessionInfo.Changes);
-
         List<string> skippedRolloutFiles = [.. sessionInfo.LockedPaths, .. lockedChanges.Select(static change => change.Path)];
         IReadOnlyList<string> skippedUnreadableRolloutFiles = sessionInfo.UnreadablePaths
             .Distinct(StringComparer.Ordinal)
@@ -197,6 +239,159 @@ public sealed class CodexSyncService
             .ToList();
 
         await _sqliteStateService.AssertSqliteWritableAsync(storage, sqliteBusyTimeoutMs);
+        cancellationToken.ThrowIfCancellationRequested();
+        return new SyncPreparation(
+            codexHome,
+            configPath,
+            configText,
+            switchPreparation,
+            storage,
+            current,
+            targetProvider,
+            targetModel,
+            sessionInfo,
+            workspaceCwdStats,
+            encryptedContentWarning,
+            writableChanges,
+            skippedRolloutFiles,
+            skippedUnreadableRolloutFiles);
+    }
+
+    private async Task<CoreWritePlanSnapshot> BuildSyncPlanSnapshotAsync(
+        SyncPreparation preparation,
+        int keepCount,
+        CancellationToken cancellationToken)
+    {
+        string operation = preparation.SwitchPreparation is null ? "sync" : "switch";
+        List<CoreWriteTargetSpec> targets =
+        [
+            new(preparation.ConfigPath, preparation.SwitchPreparation is null ? "read" : "replace"),
+            new(
+                Path.Combine(preparation.CodexHome, "sessions"),
+                "scan",
+                CoreWriteFingerprintMode.RecursiveInventory),
+            new(
+                Path.Combine(preparation.CodexHome, "archived_sessions"),
+                "scan",
+                CoreWriteFingerprintMode.RecursiveInventory),
+            new(_globalStateService.StatePath(preparation.CodexHome), "replace-if-present"),
+            new(_globalStateService.BackupPath(preparation.CodexHome), "replace-if-present"),
+            new(
+                _codexHomeService.BackupRoot(preparation.CodexHome),
+                $"create-and-prune-to-{keepCount}",
+                CoreWriteFingerprintMode.RecursiveInventory)
+        ];
+        targets.AddRange(preparation.WritableChanges.Select(
+            static change => new CoreWriteTargetSpec(change.Path, "replace")));
+        if (preparation.Storage.StateDbLocation is { } stateDb)
+        {
+            targets.Add(new CoreWriteTargetSpec(stateDb.Path, "update"));
+            targets.Add(new CoreWriteTargetSpec(stateDb.Path + "-wal", "update-if-present"));
+            targets.Add(new CoreWriteTargetSpec(stateDb.Path + "-shm", "update-if-present"));
+        }
+
+        List<CoreWritePlanWarning> warnings = [];
+        if (preparation.SkippedRolloutFiles.Count > 0)
+        {
+            warnings.Add(new CoreWritePlanWarning(
+                "locked_rollout_files",
+                $"{preparation.SkippedRolloutFiles.Count} rollout file(s) are locked and will be skipped."));
+        }
+        if (preparation.SkippedUnreadableRolloutFiles.Count > 0)
+        {
+            warnings.Add(new CoreWritePlanWarning(
+                "unreadable_rollout_files",
+                $"{preparation.SkippedUnreadableRolloutFiles.Count} rollout file(s) are unreadable and will be skipped."));
+        }
+        if (preparation.EncryptedContentWarning is not null)
+        {
+            warnings.Add(new CoreWritePlanWarning("encrypted_content", preparation.EncryptedContentWarning));
+        }
+        if (preparation.SwitchPreparation?.ModelSync.Warning is { } modelWarning)
+        {
+            warnings.Add(new CoreWritePlanWarning("model_sync", modelWarning));
+        }
+
+        string binding = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            operation,
+            preparation.CodexHome,
+            preparation.Storage.SqliteHome,
+            preparation.Storage.SqliteHomeSource,
+            preparation.TargetProvider,
+            preparation.TargetModel,
+            keepCount,
+            modelSync = preparation.SwitchPreparation?.ModelSync.Source
+        });
+        return await CoreWriteSnapshotBuilder.BuildAsync(
+            operation,
+            binding,
+            targets,
+            warnings: warnings,
+            cancellationToken: cancellationToken);
+    }
+
+    private static void ValidateAutomaticRetention(int keepCount)
+    {
+        if (keepCount < 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(keepCount),
+                keepCount,
+                "keepCount must be 1 or greater for automatic cleanup.");
+        }
+    }
+
+    private async Task<SyncResult> RunSyncCoreAsync(
+        string? explicitCodexHome,
+        string? provider,
+        string? configBackupText,
+        int keepCount,
+        int? sqliteBusyTimeoutMs,
+        string? model,
+        string? explicitSqliteHome,
+        Func<string, SwitchPreparation>? switchPreparationFactory,
+        CoreWritePlanSnapshot? expectedSnapshot,
+        DateTimeOffset? snapshotExpiresAtUtc,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateAutomaticRetention(keepCount);
+
+        string codexHome = _codexHomeService.NormalizeCodexHome(explicitCodexHome);
+        await _codexHomeService.EnsureCodexHomeAsync(codexHome);
+        await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "sync");
+        await FileTransactionJournal.AssertNoPendingAsync(codexHome);
+        SyncPreparation preparation = await PrepareSyncAsync(
+            codexHome,
+            provider,
+            sqliteBusyTimeoutMs,
+            model,
+            explicitSqliteHome,
+            switchPreparationFactory,
+            cancellationToken);
+        string configPath = preparation.ConfigPath;
+        string configText = preparation.ConfigText;
+        SwitchPreparation? switchPreparation = preparation.SwitchPreparation;
+        CodexStorageLayout storage = preparation.Storage;
+        CurrentProviderInfo current = preparation.Current;
+        string targetProvider = preparation.TargetProvider;
+        string? targetModel = preparation.TargetModel;
+        SessionChangeCollection sessionInfo = preparation.SessionInfo;
+        IReadOnlyList<ThreadCwdStat> workspaceCwdStats = preparation.WorkspaceCwdStats;
+        string? encryptedContentWarning = preparation.EncryptedContentWarning;
+        IReadOnlyList<SessionChange> writableChanges = preparation.WritableChanges;
+        List<string> skippedRolloutFiles = [.. preparation.SkippedRolloutFiles];
+        IReadOnlyList<string> skippedUnreadableRolloutFiles = preparation.SkippedUnreadableRolloutFiles;
+        if (expectedSnapshot is not null)
+        {
+            AssertSnapshotFresh(snapshotExpiresAtUtc);
+            CoreWritePlanSnapshot actualSnapshot = await BuildSyncPlanSnapshotAsync(
+                preparation,
+                keepCount,
+                cancellationToken);
+            CoreWriteSnapshotBuilder.AssertExactMatch(expectedSnapshot, actualSnapshot);
+            AssertSnapshotFresh(snapshotExpiresAtUtc);
+        }
         cancellationToken.ThrowIfCancellationRequested();
         if (FaultInjector is not null)
         {
@@ -671,34 +866,115 @@ public sealed class CodexSyncService
             sqliteBusyTimeoutMs: null,
             model: null,
             explicitSqliteHome,
-            switchPreparationFactory: originalConfigText =>
-            {
-                if (!_configFileService.ConfigDeclaresProvider(originalConfigText, provider))
-                {
-                    string configuredProviders = string.Join(", ", _configFileService.ListConfiguredProviderIds(originalConfigText));
-                    throw new InvalidOperationException(
-                        $"Provider \"{provider}\" is not available in config.toml. Configure it first or use one of: {configuredProviders}");
-                }
-
-                string nextConfigText = _configFileService.SetRootProviderInConfigText(originalConfigText, provider);
-                ModelSyncOutcome modelSync = ResolveModelSyncOutcome(
-                    originalConfigText,
-                    provider,
-                    model,
-                    keepRootModel);
-                if (modelSync.Applied)
-                {
-                    nextConfigText = _configFileService.SetRootModelInConfigText(nextConfigText, modelSync.Model!);
-                }
-
-                // Even when the switch keeps the existing root model, keep
-                // SQLite and rollout turn_context fields aligned with it.
-                string? modelForThreads = modelSync.Applied
-                    ? modelSync.Model
-                    : _configFileService.ReadRootModelFromConfigText(nextConfigText);
-                return new SwitchPreparation(provider, nextConfigText, modelForThreads, modelSync);
-            },
+            switchPreparationFactory: originalConfigText => CreateSwitchPreparation(
+                originalConfigText,
+                provider,
+                model,
+                keepRootModel),
+            expectedSnapshot: null,
+            snapshotExpiresAtUtc: null,
             cancellationToken);
+    }
+
+    public async Task<CoreWritePlanSnapshot> CreateSwitchPlanSnapshotAsync(
+        string? explicitCodexHome,
+        string provider,
+        int keepCount = AppConstants.DefaultBackupRetentionCount,
+        string? model = null,
+        bool keepRootModel = false,
+        string? explicitSqliteHome = null,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateSwitchProvider(provider);
+        ValidateAutomaticRetention(keepCount);
+        string codexHome = _codexHomeService.NormalizeCodexHome(explicitCodexHome);
+        await _codexHomeService.EnsureCodexHomeAsync(codexHome);
+        await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "plan-switch");
+        await FileTransactionJournal.AssertNoPendingAsync(codexHome);
+        SyncPreparation preparation = await PrepareSyncAsync(
+            codexHome,
+            provider: null,
+            sqliteBusyTimeoutMs: null,
+            model: null,
+            explicitSqliteHome,
+            originalConfigText => CreateSwitchPreparation(
+                originalConfigText,
+                provider,
+                model,
+                keepRootModel),
+            cancellationToken);
+        return await BuildSyncPlanSnapshotAsync(preparation, keepCount, cancellationToken);
+    }
+
+    public Task<SyncResult> RunSwitchCheckedAsync(
+        CoreWritePlanSnapshot expectedSnapshot,
+        string? explicitCodexHome,
+        string provider,
+        int keepCount = AppConstants.DefaultBackupRetentionCount,
+        string? model = null,
+        bool keepRootModel = false,
+        string? explicitSqliteHome = null,
+        DateTimeOffset? snapshotExpiresAtUtc = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(expectedSnapshot);
+        ValidateSwitchProvider(provider);
+        return RunSyncCoreAsync(
+            explicitCodexHome,
+            provider: null,
+            configBackupText: null,
+            keepCount,
+            sqliteBusyTimeoutMs: null,
+            model: null,
+            explicitSqliteHome,
+            originalConfigText => CreateSwitchPreparation(
+                originalConfigText,
+                provider,
+                model,
+                keepRootModel),
+            expectedSnapshot,
+            snapshotExpiresAtUtc,
+            cancellationToken);
+    }
+
+    private SwitchPreparation CreateSwitchPreparation(
+        string originalConfigText,
+        string provider,
+        string? model,
+        bool keepRootModel)
+    {
+        if (!_configFileService.ConfigDeclaresProvider(originalConfigText, provider))
+        {
+            string configuredProviders = string.Join(", ", _configFileService.ListConfiguredProviderIds(originalConfigText));
+            throw new InvalidOperationException(
+                $"Provider \"{provider}\" is not available in config.toml. Configure it first or use one of: {configuredProviders}");
+        }
+
+        string nextConfigText = _configFileService.SetRootProviderInConfigText(originalConfigText, provider);
+        ModelSyncOutcome modelSync = ResolveModelSyncOutcome(
+            originalConfigText,
+            provider,
+            model,
+            keepRootModel);
+        if (modelSync.Applied)
+        {
+            nextConfigText = _configFileService.SetRootModelInConfigText(nextConfigText, modelSync.Model!);
+        }
+
+        // Even when the switch keeps the existing root model, keep SQLite and
+        // rollout turn_context fields aligned with it.
+        string? modelForThreads = modelSync.Applied
+            ? modelSync.Model
+            : _configFileService.ReadRootModelFromConfigText(nextConfigText);
+        return new SwitchPreparation(provider, nextConfigText, modelForThreads, modelSync);
+    }
+
+    private static void ValidateSwitchProvider(string provider)
+    {
+        if (string.IsNullOrWhiteSpace(provider))
+        {
+            throw new InvalidOperationException("Missing provider id. Usage: codex-provider switch <provider-id>");
+        }
     }
 
     private ModelSyncOutcome ResolveModelSyncOutcome(
@@ -753,26 +1029,202 @@ public sealed class CodexSyncService
         RestoreBackupOptions options,
         string? explicitSqliteHome = null)
     {
+        return await RunRestoreCoreAsync(
+            expectedSnapshot: null,
+            explicitCodexHome,
+            backupDir,
+            options,
+            explicitSqliteHome,
+            snapshotExpiresAtUtc: null,
+            CancellationToken.None);
+    }
+
+    public async Task<CoreWritePlanSnapshot> CreateRestorePlanSnapshotAsync(
+        string? explicitCodexHome,
+        string backupDir,
+        RestoreBackupOptions options,
+        string? explicitSqliteHome = null,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateRestoreRequest(backupDir, options);
+        string codexHome = _codexHomeService.NormalizeCodexHome(explicitCodexHome);
+        await _codexHomeService.EnsureCodexHomeAsync(codexHome);
+        await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "plan-restore");
+        RestorePreparation preparation = await PrepareRestoreAsync(
+            codexHome,
+            backupDir,
+            options,
+            explicitSqliteHome,
+            cancellationToken);
+        return await BuildRestorePlanSnapshotAsync(preparation, cancellationToken);
+    }
+
+    public Task<RestoreResult> RunRestoreCheckedAsync(
+        CoreWritePlanSnapshot expectedSnapshot,
+        string? explicitCodexHome,
+        string backupDir,
+        RestoreBackupOptions options,
+        string? explicitSqliteHome = null,
+        DateTimeOffset? snapshotExpiresAtUtc = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(expectedSnapshot);
+        return RunRestoreCoreAsync(
+            expectedSnapshot,
+            explicitCodexHome,
+            backupDir,
+            options,
+            explicitSqliteHome,
+            snapshotExpiresAtUtc,
+            cancellationToken);
+    }
+
+    private async Task<RestoreResult> RunRestoreCoreAsync(
+        CoreWritePlanSnapshot? expectedSnapshot,
+        string? explicitCodexHome,
+        string backupDir,
+        RestoreBackupOptions options,
+        string? explicitSqliteHome,
+        DateTimeOffset? snapshotExpiresAtUtc,
+        CancellationToken cancellationToken)
+    {
+        ValidateRestoreRequest(backupDir, options);
+        string codexHome = _codexHomeService.NormalizeCodexHome(explicitCodexHome);
+        await _codexHomeService.EnsureCodexHomeAsync(codexHome);
+
+        await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "restore");
+        RestorePreparation preparation = await PrepareRestoreAsync(
+            codexHome,
+            backupDir,
+            options,
+            explicitSqliteHome,
+            cancellationToken);
+        if (expectedSnapshot is not null)
+        {
+            AssertSnapshotFresh(snapshotExpiresAtUtc);
+            CoreWritePlanSnapshot actualSnapshot = await BuildRestorePlanSnapshotAsync(
+                preparation,
+                cancellationToken);
+            CoreWriteSnapshotBuilder.AssertExactMatch(expectedSnapshot, actualSnapshot);
+            AssertSnapshotFresh(snapshotExpiresAtUtc);
+        }
+        // BackupService currently exposes an atomic restore operation rather
+        // than per-file cancellation. Honor cancellation until the mutation
+        // boundary, then let that authoritative operation finish and report
+        // its real result instead of returning a false cancelled outcome.
+        cancellationToken.ThrowIfCancellationRequested();
+        RestoreResult result = await _backupService.RestoreBackupAsync(
+            preparation.BackupDirectory,
+            preparation.Storage,
+            preparation.Options);
+        await FileTransactionJournal.MarkBackupRolledBackAsync(
+            preparation.BackupDirectory,
+            codexHome,
+            result.TargetProvider);
+        return result;
+    }
+
+    private async Task<RestorePreparation> PrepareRestoreAsync(
+        string codexHome,
+        string backupDir,
+        RestoreBackupOptions options,
+        string? explicitSqliteHome,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        string configPath = _codexHomeService.ConfigPath(codexHome);
+        string configText = await _configFileService.ReadConfigTextAsync(configPath);
+        CodexStorageLayout storage = await PrepareStorageAsync(codexHome, explicitSqliteHome, configText);
+        storage.EnsureSqliteAccessSupported("restore");
+        string normalizedBackupDir = Path.GetFullPath(backupDir);
+        IReadOnlyList<PendingTransactionInfo> pending = await FileTransactionJournal.FindPendingAsync(codexHome);
+        PendingTransactionInfo[] foreignPending = pending
+            .Where(transaction => !PathComparer.Equals(
+                Path.GetFullPath(transaction.BackupDir),
+                normalizedBackupDir))
+            .ToArray();
+        if (foreignPending.Length > 0)
+        {
+            string backups = string.Join(", ", foreignPending.Select(static item => item.BackupDir));
+            throw new RecoveryRequiredException(
+                "A different unfinished provider-sync transaction must be restored before this backup can be used. "
+                + $"Restore the bound backup first: {backups}",
+                foreignPending);
+        }
+        await EnsurePendingRecoveryCoverageAsync(normalizedBackupDir, codexHome, options);
+        cancellationToken.ThrowIfCancellationRequested();
+        return new RestorePreparation(
+            codexHome,
+            configPath,
+            normalizedBackupDir,
+            options,
+            storage);
+    }
+
+    private async Task<CoreWritePlanSnapshot> BuildRestorePlanSnapshotAsync(
+        RestorePreparation preparation,
+        CancellationToken cancellationToken)
+    {
+        List<CoreWriteTargetSpec> targets =
+        [
+            new(preparation.BackupDirectory, "read-restore-source"),
+            new(preparation.ConfigPath, preparation.Options.RestoreConfig ? "restore" : "read")
+        ];
+        if (preparation.Options.RestoreConfig)
+        {
+            targets.Add(new CoreWriteTargetSpec(
+                _globalStateService.StatePath(preparation.CodexHome),
+                "restore"));
+            targets.Add(new CoreWriteTargetSpec(
+                _globalStateService.BackupPath(preparation.CodexHome),
+                "restore"));
+        }
+        if (preparation.Options.RestoreSessions)
+        {
+            targets.Add(new CoreWriteTargetSpec(
+                Path.Combine(preparation.CodexHome, "sessions"),
+                "restore",
+                CoreWriteFingerprintMode.RecursiveInventory));
+            targets.Add(new CoreWriteTargetSpec(
+                Path.Combine(preparation.CodexHome, "archived_sessions"),
+                "restore",
+                CoreWriteFingerprintMode.RecursiveInventory));
+        }
+        if (preparation.Options.RestoreDatabase)
+        {
+            string databasePath = preparation.Storage.StateDbLocation?.Path
+                ?? Path.Combine(preparation.Storage.SqliteHome, AppConstants.DbFileBasename);
+            targets.Add(new CoreWriteTargetSpec(databasePath, "restore"));
+            targets.Add(new CoreWriteTargetSpec(databasePath + "-wal", "restore-if-present"));
+            targets.Add(new CoreWriteTargetSpec(databasePath + "-shm", "restore-if-present"));
+        }
+
+        string binding = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            operation = "restore",
+            preparation.CodexHome,
+            preparation.BackupDirectory,
+            preparation.Storage.SqliteHome,
+            preparation.Storage.SqliteHomeSource,
+            preparation.Options.RestoreConfig,
+            preparation.Options.RestoreDatabase,
+            preparation.Options.RestoreSessions,
+            preparation.Options.AllowSqliteHomeRelocation
+        });
+        return await CoreWriteSnapshotBuilder.BuildAsync(
+            "restore",
+            binding,
+            targets,
+            cancellationToken: cancellationToken);
+    }
+
+    private static void ValidateRestoreRequest(string backupDir, RestoreBackupOptions options)
+    {
         if (string.IsNullOrWhiteSpace(backupDir))
         {
             throw new InvalidOperationException("Missing backup path. Usage: codex-provider restore <backup-dir>");
         }
-
-        string codexHome = _codexHomeService.NormalizeCodexHome(explicitCodexHome);
-        await _codexHomeService.EnsureCodexHomeAsync(codexHome);
-        string configText = await _configFileService.ReadConfigTextAsync(_codexHomeService.ConfigPath(codexHome));
-        CodexStorageLayout storage = await PrepareStorageAsync(codexHome, explicitSqliteHome, configText);
-        storage.EnsureSqliteAccessSupported("restore");
-
-        await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "restore");
-        string normalizedBackupDir = Path.GetFullPath(backupDir);
-        await EnsurePendingRecoveryCoverageAsync(normalizedBackupDir, codexHome, options);
-        RestoreResult result = await _backupService.RestoreBackupAsync(normalizedBackupDir, storage, options);
-        await FileTransactionJournal.MarkBackupRolledBackAsync(
-            normalizedBackupDir,
-            codexHome,
-            result.TargetProvider);
-        return result;
+        ArgumentNullException.ThrowIfNull(options);
     }
 
     private async Task EnsurePendingRecoveryCoverageAsync(
@@ -831,15 +1283,103 @@ public sealed class CodexSyncService
         }
     }
 
-    public async Task<BackupPruneResult> RunPruneBackupsAsync(
+    public Task<BackupPruneResult> RunPruneBackupsAsync(
         string? explicitCodexHome = null,
         int keepCount = AppConstants.DefaultBackupRetentionCount)
     {
+        return RunPruneBackupsCoreAsync(
+            expectedSnapshot: null,
+            explicitCodexHome,
+            keepCount,
+            snapshotExpiresAtUtc: null,
+            CancellationToken.None);
+    }
+
+    public async Task<CoreWritePlanSnapshot> CreatePrunePlanSnapshotAsync(
+        string? explicitCodexHome = null,
+        int keepCount = AppConstants.DefaultBackupRetentionCount,
+        CancellationToken cancellationToken = default)
+    {
+        ValidatePruneRetention(keepCount);
+        string codexHome = _codexHomeService.NormalizeCodexHome(explicitCodexHome);
+        await _codexHomeService.EnsureCodexHomeAsync(codexHome);
+        await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "plan-prune-backups");
+        return await BuildPrunePlanSnapshotAsync(codexHome, keepCount, cancellationToken);
+    }
+
+    public Task<BackupPruneResult> RunPruneBackupsCheckedAsync(
+        CoreWritePlanSnapshot expectedSnapshot,
+        string? explicitCodexHome = null,
+        int keepCount = AppConstants.DefaultBackupRetentionCount,
+        DateTimeOffset? snapshotExpiresAtUtc = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(expectedSnapshot);
+        return RunPruneBackupsCoreAsync(
+            expectedSnapshot,
+            explicitCodexHome,
+            keepCount,
+            snapshotExpiresAtUtc,
+            cancellationToken);
+    }
+
+    private async Task<BackupPruneResult> RunPruneBackupsCoreAsync(
+        CoreWritePlanSnapshot? expectedSnapshot,
+        string? explicitCodexHome,
+        int keepCount,
+        DateTimeOffset? snapshotExpiresAtUtc,
+        CancellationToken cancellationToken)
+    {
+        ValidatePruneRetention(keepCount);
         string codexHome = _codexHomeService.NormalizeCodexHome(explicitCodexHome);
         await _codexHomeService.EnsureCodexHomeAsync(codexHome);
 
         await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "prune-backups");
+        if (expectedSnapshot is not null)
+        {
+            AssertSnapshotFresh(snapshotExpiresAtUtc);
+            CoreWritePlanSnapshot actualSnapshot = await BuildPrunePlanSnapshotAsync(
+                codexHome,
+                keepCount,
+                cancellationToken);
+            CoreWriteSnapshotBuilder.AssertExactMatch(expectedSnapshot, actualSnapshot);
+            AssertSnapshotFresh(snapshotExpiresAtUtc);
+        }
+        cancellationToken.ThrowIfCancellationRequested();
         return await _backupService.PruneBackupsAsync(codexHome, keepCount);
+    }
+
+    private Task<CoreWritePlanSnapshot> BuildPrunePlanSnapshotAsync(
+        string codexHome,
+        int keepCount,
+        CancellationToken cancellationToken)
+    {
+        string backupRoot = _codexHomeService.BackupRoot(codexHome);
+        string binding = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            operation = "prune",
+            codexHome,
+            keepCount
+        });
+        return CoreWriteSnapshotBuilder.BuildAsync(
+            "prune",
+            binding,
+            [new CoreWriteTargetSpec(
+                backupRoot,
+                $"prune-to-{keepCount}",
+                CoreWriteFingerprintMode.RecursiveInventory)],
+            cancellationToken: cancellationToken);
+    }
+
+    private static void ValidatePruneRetention(int keepCount)
+    {
+        if (keepCount < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(keepCount),
+                keepCount,
+                "keepCount must be 0 or greater.");
+        }
     }
 
     public Task<BackupStorageInfo> GetBackupStorageInfoAsync(string backupDir)
@@ -892,6 +1432,14 @@ public sealed class CodexSyncService
         }
     }
 
+    private static void AssertSnapshotFresh(DateTimeOffset? expiresAtUtc)
+    {
+        if (expiresAtUtc is not null && DateTimeOffset.UtcNow >= expiresAtUtc.Value)
+        {
+            throw new CoreWritePlanExpiredException();
+        }
+    }
+
     private static StringComparer PathComparer => OperatingSystem.IsWindows()
         ? StringComparer.OrdinalIgnoreCase
         : StringComparer.Ordinal;
@@ -901,4 +1449,27 @@ public sealed class CodexSyncService
         string NextConfigText,
         string? ThreadModel,
         ModelSyncOutcome ModelSync);
+
+    private sealed record SyncPreparation(
+        string CodexHome,
+        string ConfigPath,
+        string ConfigText,
+        SwitchPreparation? SwitchPreparation,
+        CodexStorageLayout Storage,
+        CurrentProviderInfo Current,
+        string TargetProvider,
+        string? TargetModel,
+        SessionChangeCollection SessionInfo,
+        IReadOnlyList<ThreadCwdStat> WorkspaceCwdStats,
+        string? EncryptedContentWarning,
+        IReadOnlyList<SessionChange> WritableChanges,
+        IReadOnlyList<string> SkippedRolloutFiles,
+        IReadOnlyList<string> SkippedUnreadableRolloutFiles);
+
+    private sealed record RestorePreparation(
+        string CodexHome,
+        string ConfigPath,
+        string BackupDirectory,
+        RestoreBackupOptions Options,
+        CodexStorageLayout Storage);
 }

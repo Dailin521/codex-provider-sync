@@ -1,4 +1,5 @@
 using CodexProviderSync.Core;
+using System.Text.Json.Serialization;
 
 namespace CodexProviderSync.Application;
 
@@ -85,6 +86,10 @@ public sealed record SyncProviderRequest(
     string ProviderId)
     : PreparedSyncRequest(CodexHome, SqliteHomeOverride, ProviderId);
 
+[JsonPolymorphic(TypeDiscriminatorPropertyName = "mode")]
+[JsonDerivedType(typeof(FollowProviderModelSelection), "followProvider")]
+[JsonDerivedType(typeof(KeepRootModelSelection), "keepRootModel")]
+[JsonDerivedType(typeof(CustomModelSelection), "custom")]
 public abstract record SwitchModelSelection;
 
 public sealed record FollowProviderModelSelection : SwitchModelSelection;
