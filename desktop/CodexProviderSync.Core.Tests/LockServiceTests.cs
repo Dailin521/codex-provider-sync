@@ -302,41 +302,149 @@ public sealed class LockServiceTests
     [Fact]
     public async Task AcquireLockAsync_TwoReclaimersCannotBothOwnStaleCanonicalGeneration()
     {
+        await AssertTwoReclaimersRoundAsync(iteration: 0);
+    }
+
+    [Fact]
+    public async Task AcquireLockAsync_TwoReclaimersStressLeavesNoLiveClaim()
+    {
+        for (int iteration = 1; iteration <= 50; iteration += 1)
+        {
+            await AssertTwoReclaimersRoundAsync(iteration);
+        }
+    }
+
+    [Fact]
+    public async Task AcquireLockAsync_RetriesTransientOwnedClaimCleanupFailure()
+    {
         string codexHome = CreateTempDirectory();
         string lockPath = AppConstants.LockPath(codexHome);
-        Directory.CreateDirectory(lockPath);
-        await WriteJsonAsync(Path.Combine(lockPath, "owner.json"), new
+        string claimsPath = lockPath + ".claims";
+        string liveInstanceId = Guid.NewGuid().ToString("D");
+        Directory.CreateDirectory(claimsPath);
+        await WriteVersionTwoOwnerAsync(
+            Path.Combine(claimsPath, liveInstanceId + ".json"),
+            liveInstanceId,
+            LockService.CurrentProcessStartedAtForTests());
+        int cleanupAttempts = 0;
+        LockService service = new((phase, _) =>
         {
-            processId = int.MaxValue,
-            processStartedAt = "2000-01-01T00:00:00Z",
-            label = "stale",
-            currentDirectory = codexHome
+            if (phase == "before-owned-claim-delete"
+                && Interlocked.Increment(ref cleanupAttempts) < 3)
+            {
+                throw new IOException("injected transient owned-claim cleanup failure");
+            }
+            return Task.CompletedTask;
         });
 
-        int published = 0;
-        TaskCompletionSource gate = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        Func<string, string, Task> hook = (phase, _) =>
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => service.AcquireLockAsync(codexHome, "cleanup-retry"));
+
+        Assert.True(LockService.IsOperationBusy(error));
+        Assert.Equal(3, cleanupAttempts);
+        Assert.False(Directory.Exists(lockPath));
+        Assert.Equal(
+            [liveInstanceId + ".json"],
+            Directory.EnumerateFiles(claimsPath, "*.json").Select(path => Path.GetFileName(path)!).ToArray());
+    }
+
+    [Fact]
+    public async Task AcquireLockAsync_AggregatesAcquisitionAndExhaustedOwnedClaimCleanupFailure()
+    {
+        string codexHome = CreateTempDirectory();
+        string lockPath = AppConstants.LockPath(codexHome);
+        string claimsPath = lockPath + ".claims";
+        string liveInstanceId = Guid.NewGuid().ToString("D");
+        Directory.CreateDirectory(claimsPath);
+        await WriteVersionTwoOwnerAsync(
+            Path.Combine(claimsPath, liveInstanceId + ".json"),
+            liveInstanceId,
+            LockService.CurrentProcessStartedAtForTests());
+        int cleanupAttempts = 0;
+        LockService service = new((phase, _) =>
         {
-            if (phase == "claim-published" && Interlocked.Increment(ref published) == 2)
+            if (phase == "before-owned-claim-delete")
             {
-                gate.TrySetResult();
+                int attempt = Interlocked.Increment(ref cleanupAttempts);
+                throw new IOException($"injected owned-claim cleanup failure {attempt}");
             }
-            return gate.Task;
-        };
+            return Task.CompletedTask;
+        });
 
-        Task<LockHandle?> first = TryAcquireAsync(new LockService(hook), codexHome);
-        Task<LockHandle?> second = TryAcquireAsync(new LockService(hook), codexHome);
-        LockHandle?[] acquired = await Task.WhenAll(first, second);
-        LockHandle[] winners = acquired.OfType<LockHandle>().ToArray();
-        Assert.True(winners.Length <= 1, "Two concurrent stale-lock reclaimers both acquired the canonical lock.");
+        AggregateException error = await Assert.ThrowsAsync<AggregateException>(
+            () => service.AcquireLockAsync(codexHome, "cleanup-exhausted"));
 
-        foreach (LockHandle winner in winners)
+        Assert.Equal(4, cleanupAttempts);
+        Assert.Contains("Lock already exists", error.Message);
+        Assert.Contains("after 4 attempts", error.Message);
+        Assert.False(LockService.IsOperationBusy(error));
+        Assert.Contains(
+            error.InnerExceptions,
+            LockService.IsOperationBusy);
+        Assert.Contains(
+            error.InnerExceptions,
+            inner => inner is IOException
+                && inner.ToString().Contains("injected owned-claim cleanup failure 4", StringComparison.Ordinal));
+        Assert.False(Directory.Exists(lockPath));
+        Assert.Equal(2, Directory.EnumerateFiles(claimsPath, "*.json").Count());
+    }
+
+    [Fact]
+    public async Task AcquireLockAsync_RevalidatesOwnedClaimIdentityBeforeCleanupRetry()
+    {
+        string codexHome = CreateTempDirectory();
+        string lockPath = AppConstants.LockPath(codexHome);
+        string claimsPath = lockPath + ".claims";
+        string liveInstanceId = Guid.NewGuid().ToString("D");
+        string replacementInstanceId = Guid.NewGuid().ToString("D");
+        Directory.CreateDirectory(claimsPath);
+        string liveClaimPath = Path.Combine(claimsPath, liveInstanceId + ".json");
+        await WriteVersionTwoOwnerAsync(
+            liveClaimPath,
+            liveInstanceId,
+            LockService.CurrentProcessStartedAtForTests());
+        int cleanupAttempts = 0;
+        LockService service = new(async (phase, instanceId) =>
         {
-            await winner.DisposeAsync();
-        }
+            if (phase == "before-owned-claim-delete")
+            {
+                Interlocked.Increment(ref cleanupAttempts);
+                string claimPath = Path.Combine(claimsPath, instanceId + ".json");
+                await WriteVersionTwoOwnerAsync(
+                    claimPath,
+                    replacementInstanceId,
+                    LockService.CurrentProcessStartedAtForTests());
+                throw new IOException("retry after replacing claim identity");
+            }
+        });
 
-        await using LockHandle retry = await new LockService().AcquireLockAsync(codexHome, "retry");
-        Assert.True(Directory.Exists(lockPath));
+        AggregateException error = await Assert.ThrowsAsync<AggregateException>(
+            () => service.AcquireLockAsync(codexHome, "cleanup-revalidation"));
+
+        Assert.Equal(1, cleanupAttempts);
+        Assert.Contains("Lock already exists", error.Message);
+        Assert.Contains(replacementInstanceId, error.Message);
+        Assert.False(LockService.IsOperationBusy(error));
+        Assert.Contains(error.InnerExceptions, LockService.IsOperationBusy);
+        string retainedClaim = Assert.Single(
+            Directory.EnumerateFiles(claimsPath, "*.json"),
+            path => !string.Equals(path, liveClaimPath, StringComparison.OrdinalIgnoreCase));
+        using JsonDocument owner = JsonDocument.Parse(await File.ReadAllTextAsync(retainedClaim));
+        Assert.Equal(replacementInstanceId, owner.RootElement.GetProperty("instanceId").GetString());
+    }
+
+    [Fact]
+    public async Task IdentityReadStream_AllowsConcurrentDelete()
+    {
+        string directory = CreateTempDirectory();
+        string identityPath = Path.Combine(directory, "owner.json");
+        await File.WriteAllTextAsync(identityPath, "{}");
+
+        await using FileStream identityRead = LockService.OpenIdentityReadStreamForTests(identityPath);
+        Assert.True(identityRead.CanRead);
+        File.Delete(identityPath);
+
+        Assert.False(File.Exists(identityPath));
     }
 
     [Fact]
@@ -584,6 +692,52 @@ public sealed class LockServiceTests
         {
             return null;
         }
+    }
+
+    private static async Task AssertTwoReclaimersRoundAsync(int iteration)
+    {
+        string codexHome = CreateTempDirectory();
+        string lockPath = AppConstants.LockPath(codexHome);
+        string claimsPath = lockPath + ".claims";
+        Directory.CreateDirectory(lockPath);
+        await WriteJsonAsync(Path.Combine(lockPath, "owner.json"), new
+        {
+            processId = int.MaxValue,
+            processStartedAt = "2000-01-01T00:00:00Z",
+            label = "stale",
+            currentDirectory = codexHome
+        });
+
+        int published = 0;
+        TaskCompletionSource gate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        Func<string, string, Task> hook = (phase, _) =>
+        {
+            if (phase == "claim-published" && Interlocked.Increment(ref published) == 2)
+            {
+                gate.TrySetResult();
+            }
+            return gate.Task;
+        };
+
+        Task<LockHandle?> first = TryAcquireAsync(new LockService(hook), codexHome);
+        Task<LockHandle?> second = TryAcquireAsync(new LockService(hook), codexHome);
+        LockHandle?[] acquired = await Task.WhenAll(first, second);
+        LockHandle[] winners = acquired.OfType<LockHandle>().ToArray();
+        Assert.True(
+            winners.Length <= 1,
+            $"Two concurrent stale-lock reclaimers both acquired the canonical lock in stress iteration {iteration}.");
+
+        foreach (LockHandle winner in winners)
+        {
+            await winner.DisposeAsync();
+        }
+
+        await using (LockHandle retry = await new LockService().AcquireLockAsync(codexHome, "retry"))
+        {
+            Assert.True(Directory.Exists(lockPath));
+        }
+        Assert.False(Directory.Exists(lockPath));
+        Assert.Empty(Directory.EnumerateFiles(claimsPath, "*.json"));
     }
 
     private static string CreateTempDirectory()

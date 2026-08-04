@@ -15,6 +15,8 @@ public sealed class LockService
     private const int Win32ErrorAccessDenied = 5;
     private const int DefaultLockCreateRetryCount = 3;
     private const int DefaultLockCreateRetryDelayMs = 75;
+    private const int DefaultOwnedClaimDeleteRetryCount = 3;
+    private const int DefaultOwnedClaimDeleteRetryDelayMs = 75;
     private const string BusyErrorDataKey = "codex-provider-sync/error-code";
     public const string OperationBusyErrorCode = "TARGET_BUSY";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
@@ -119,7 +121,7 @@ public sealed class LockService
             TryDeleteDirectory(candidatePath);
             return new LockHandle(canonicalPath, claimsPath, claimPath, owner.InstanceId);
         }
-        catch
+        catch (Exception acquisitionError)
         {
             TryDeleteDirectory(candidatePath);
             if (canonicalReserved && !ownerLinked)
@@ -131,7 +133,30 @@ public sealed class LockService
             }
             if (claimPublished && !ownerLinked)
             {
-                await TryDeleteOwnedClaimAsync(claimPath, owner.InstanceId);
+                OwnedClaimDeleteResult cleanup;
+                try
+                {
+                    cleanup = await DeleteOwnedClaimWithRetriesAsync(
+                        claimPath,
+                        owner.InstanceId,
+                        beforeDeleteAttemptAsync: _testHook is null
+                            ? null
+                            : () => _testHook("before-owned-claim-delete", owner.InstanceId));
+                }
+                catch (Exception cleanupError)
+                {
+                    throw new AggregateException(
+                        $"Lock acquisition failed and owned-claim cleanup threw unexpectedly: {acquisitionError.Message} Cleanup failure: {cleanupError.Message}",
+                        acquisitionError,
+                        cleanupError);
+                }
+                if (!cleanup.Succeeded)
+                {
+                    throw new AggregateException(
+                        $"Lock acquisition failed and owned-claim cleanup was incomplete: {acquisitionError.Message} Cleanup failure: {cleanup.Failure!.Message}",
+                        acquisitionError,
+                        cleanup.Failure!);
+                }
             }
             throw;
         }
@@ -359,7 +384,7 @@ public sealed class LockService
         string text;
         try
         {
-            text = await File.ReadAllTextAsync(ownerPath);
+            text = await ReadIdentityTextAsync(ownerPath);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
@@ -437,6 +462,34 @@ public sealed class LockService
         {
             return new OwnerReadResult(null, error.Message);
         }
+    }
+
+    private static async Task<string> ReadIdentityTextAsync(string path)
+    {
+        await using FileStream stream = OpenIdentityReadStream(path);
+        using StreamReader reader = new(
+            stream,
+            Encoding.UTF8,
+            detectEncodingFromByteOrderMarks: true,
+            bufferSize: 4096,
+            leaveOpen: true);
+        return await reader.ReadToEndAsync();
+    }
+
+    private static FileStream OpenIdentityReadStream(string path)
+    {
+        return new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read | FileShare.Delete,
+            bufferSize: 4096,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+    }
+
+    internal static FileStream OpenIdentityReadStreamForTests(string path)
+    {
+        return OpenIdentityReadStream(path);
     }
 
     private static bool IsOwnerLive(LockOwnerSnapshot owner)
@@ -544,27 +597,72 @@ public sealed class LockService
         return string.Equals(left.RawText, right.RawText, StringComparison.Ordinal);
     }
 
+    private static async Task<OwnedClaimDeleteResult> DeleteOwnedClaimWithRetriesAsync(
+        string claimPath,
+        string instanceId,
+        int retryCount = DefaultOwnedClaimDeleteRetryCount,
+        int retryDelayMs = DefaultOwnedClaimDeleteRetryDelayMs,
+        Func<int, Task>? delayAsync = null,
+        Func<Task>? beforeDeleteAttemptAsync = null)
+    {
+        delayAsync ??= static delay => Task.Delay(delay);
+        Exception? lastFailure = null;
+
+        for (int attempt = 0; attempt <= retryCount; attempt += 1)
+        {
+            try
+            {
+                if (TryGetPathAttributes(claimPath) is null)
+                {
+                    return OwnedClaimDeleteResult.Success;
+                }
+
+                OwnerReadResult read = await ReadOwnerAsync(claimPath, requireVersionTwo: true);
+                if (!read.Valid)
+                {
+                    throw new IOException(
+                        $"Unable to verify owned claim {claimPath}: {read.Error ?? "unknown owner-read failure"}.");
+                }
+
+                if (!string.Equals(read.Owner!.InstanceId, instanceId, StringComparison.OrdinalIgnoreCase))
+                {
+                    return OwnedClaimDeleteResult.Failed(new InvalidOperationException(
+                        $"Refusing to delete claim {claimPath}: expected instanceId {instanceId}, but found {read.Owner.InstanceId ?? "<missing>"}."));
+                }
+
+                if (beforeDeleteAttemptAsync is not null)
+                {
+                    await beforeDeleteAttemptAsync();
+                }
+                File.Delete(claimPath);
+                return OwnedClaimDeleteResult.Success;
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                lastFailure = error;
+            }
+            catch (Exception error)
+            {
+                return OwnedClaimDeleteResult.Failed(new IOException(
+                    $"Unable to delete owned claim {claimPath} for instanceId {instanceId}.",
+                    error));
+            }
+
+            if (attempt < retryCount)
+            {
+                await delayAsync(retryDelayMs);
+            }
+        }
+
+        int attempts = retryCount + 1;
+        return OwnedClaimDeleteResult.Failed(new IOException(
+            $"Unable to delete owned claim {claimPath} for instanceId {instanceId} after {attempts} attempts. Last failure: {lastFailure?.Message ?? "unknown cleanup failure"}",
+            lastFailure));
+    }
+
     private static async Task<bool> TryDeleteOwnedClaimAsync(string claimPath, string instanceId)
     {
-        if (!File.Exists(claimPath))
-        {
-            return true;
-        }
-        OwnerReadResult read = await ReadOwnerAsync(claimPath, requireVersionTwo: true);
-        if (!read.Valid
-            || !string.Equals(read.Owner!.InstanceId, instanceId, StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-        try
-        {
-            File.Delete(claimPath);
-            return true;
-        }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-        {
-            return false;
-        }
+        return (await DeleteOwnedClaimWithRetriesAsync(claimPath, instanceId)).Succeeded;
     }
 
     internal static async ValueTask ReleaseAsync(
@@ -783,7 +881,7 @@ public sealed class LockService
         try
         {
             return string.Equals(
-                await File.ReadAllTextAsync(markerPath),
+                await ReadIdentityTextAsync(markerPath),
                 instanceId,
                 StringComparison.Ordinal);
         }
@@ -1064,6 +1162,13 @@ public sealed class LockService
     private sealed record OwnerReadResult(LockOwnerSnapshot? Owner, string? Error)
     {
         public bool Valid => Owner is not null;
+    }
+
+    private sealed record OwnedClaimDeleteResult(bool Succeeded, Exception? Failure)
+    {
+        internal static OwnedClaimDeleteResult Success { get; } = new(true, null);
+
+        internal static OwnedClaimDeleteResult Failed(Exception failure) => new(false, failure);
     }
 }
 
