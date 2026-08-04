@@ -1,9 +1,8 @@
-# v0.4.0 Release Notes (Draft)
+# v0.4.0 Release Notes
 
-> This document describes the current v0.4 integration branch. v0.4.0 has not
-> been tagged or published. All v0.4 engineering gates are complete on the
-> integration branch; creating a tag or formal Release remains a separate
-> maintainer action.
+> Release tags are created only after exact-head CI, visible Windows GUI E2E,
+> and fresh review gates pass. The tag workflow reruns the release suite and
+> publishes checksum-protected Windows assets.
 
 ## Highlights
 
@@ -39,6 +38,13 @@ only once through a durable ledger. Automation accepts absolute paths only,
 rejects symbolic-link/reparse-point traversal, and never reads or modifies
 `auth.json`.
 
+SQLite Home relocation requires all of `--sqlite-home`,
+`--allow-sqlite-home-relocation`, and `--no-config`. Sync and switch plans expose
+the exact automatic-prune deletion set and checked cleanup revalidates both the
+set and recursive fingerprints before deletion. Exit code `5` is reserved for
+failures with explicit complete-rollback evidence; pre-apply validation uses
+`2`, and an applying failure without rollback evidence fails closed with `10`.
+
 ## GUI Automation Safety
 
 Normal GUI launches do not create an Automation listener. Test launches require
@@ -72,18 +78,17 @@ actions, real events and dialogs, independent file/SQLite differences, state
 and busy behavior, restart persistence, and GUI-to-Application traces. Mock,
 hidden, skipped, or direct-Application runs do not count.
 
-Implementation commit `7545b5d` passed this gate on a visible interactive
+Implementation commit `28c4dd4` passed this gate on a visible interactive
 Windows desktop. Machine-readable evidence recorded 40/40 manifest entries,
-53/53 required Headful scenarios, zero errors, zero blockers, a matching
-published-EXE SHA-256, real native dialogs, independent sync/switch/restore/
-prune effects, physical prune deletion with an unchanged unmanaged sentinel,
-restart persistence, and linked GUI-to-Application operation/lifecycle traces.
+53/53 required Headful scenarios, 17 real dialogs, zero errors, zero blockers,
+a matching published-EXE SHA-256, independent sync/switch/restore/prune effects,
+physical prune deletion with an unchanged unmanaged sentinel, restart
+persistence, and linked GUI-to-Application operation/lifecycle traces.
 
-At `7545b5d`, the complete Node suite passed 183/183, the .NET Core suite passed
-182 tests with one expected environment-gated WSL test skipped, the remaining
-.NET suites and package/version checks passed, independent final-diff review
-found no unresolved P0/P1/P2, and exact-head GitHub CI run `30887305572` passed
-all eight jobs. The material SQLite plan-fingerprint reliability decision
-received the single policy-authorized independent Claude challenge; ordinary
-final-diff review remained local under the current policy. No formal tag or
-Release was created by this integration work.
+At `28c4dd4`, the complete Node suite passed 183/183; the .NET Core suite passed
+188 tests with one expected environment-gated WSL test skipped; Application,
+Automation, WinForms, and GUI contract suites passed 49/49, 27/27, 66/66, and
+36/36. The Release solution built with zero warnings and errors, and independent
+stable-diff review found no P0/P1/P2. Material reliability decisions received
+the single policy-authorized independent Claude challenge; ordinary final-diff
+review remained local under the current policy.
