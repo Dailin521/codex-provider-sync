@@ -40,6 +40,7 @@ test("runSync rolls back the first rollout when a later target fails (#69)", asy
   ]);
   const firstBefore = await fs.readFile(firstPath, "utf8");
   const secondBefore = await fs.readFile(secondPath, "utf8");
+  let sqliteBackupRestoreAttempts = 0;
 
   let error;
   try {
@@ -49,6 +50,9 @@ test("runSync rolls back the first rollout when a later target fails (#69)", asy
       faultInjector: ({ point, targetIndex }) => {
         if (point === "before_rollout_apply" && targetIndex === 2) {
           throw new Error("injected second-target failure");
+        }
+        if (point === "before_sqlite_rollback") {
+          sqliteBackupRestoreAttempts += 1;
         }
       }
     });
@@ -71,6 +75,7 @@ test("runSync rolls back the first rollout when a later target fails (#69)", asy
     db.close();
   }
   assert.deepEqual(await findPendingTransactions(codexHome), []);
+  assert.equal(sqliteBackupRestoreAttempts, 0, "a pre-COMMIT failure must use SQLite ROLLBACK, not backup restore");
 });
 
 test("runSync restores global-state primary when backup write fails (#69)", async () => {
@@ -139,6 +144,53 @@ test("failure after SQLite commit restores rollout and database", async () => {
   assert.ok(error.completedTargets.includes(path.resolve(stateDbPath(codexHome))));
   assert.equal(await fs.readFile(sessionPath, "utf8"), before);
   assert.equal(await readProvider(codexHome, "thread-after-sqlite"), "apigather");
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("unknown SQLite COMMIT acknowledgement restores switch config, rollout, and database", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  const originalConfig = `model_provider = "openai"\nmodel = "gpt-5.4-mini"\n\n[model_providers.apigather]\nmodel = "apigather-prod"\nbase_url = "https://example.com"\n`;
+  const configPath = path.join(codexHome, "config.toml");
+  await fs.writeFile(configPath, originalConfig, "utf8");
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-commit-unknown.jsonl");
+  await writeRollout(sessionPath, "thread-commit-unknown", "openai");
+  await writeStateDb(codexHome, [{ id: "thread-commit-unknown", model_provider: "openai" }]);
+  const rolloutBefore = await fs.readFile(sessionPath, "utf8");
+  let providerObservedAfterCommit = null;
+  let error;
+
+  try {
+    await runSwitch({
+      codexHome,
+      provider: "apigather",
+      async faultInjector({ point }) {
+        if (point === "after_sqlite_commit_before_ack") {
+          providerObservedAfterCommit = await readProvider(codexHome, "thread-commit-unknown");
+          throw new Error("injected lost SQLite COMMIT acknowledgement");
+        }
+      }
+    });
+    assert.fail("runSwitch should fail when SQLite COMMIT acknowledgement is unknown");
+  } catch (caught) {
+    error = caught;
+  }
+
+  assert.equal(providerObservedAfterCommit, "apigather", "the injected failure must occur after the real COMMIT");
+  assert.equal(error.name, "SyncTransactionError");
+  assert.equal(error.rollbackStatus, "complete");
+  assert.equal(error.recoveryRequired, false);
+  assert.match(error.originalError.message, /lost SQLite COMMIT acknowledgement/);
+  assert.equal(await fs.readFile(configPath, "utf8"), originalConfig);
+  assert.equal(await fs.readFile(sessionPath, "utf8"), rolloutBefore);
+  assert.equal(await readProvider(codexHome, "thread-commit-unknown"), "openai");
+
+  const journal = await readTransactionJournal(path.join(error.backupDir, "transaction-journal.jsonl"));
+  assert.equal(journal.state, "rolledBack");
+  assert.equal(journal.terminal, true);
+  assert.equal(journal.invalidTail, false);
+  assert.equal(journal.events.some((event) => event.state === "recoveryRequired"), false);
+  assert.equal(journal.events.some((event) => event.kind === "sqlite" && event.state === "applied"), false);
+  assert.deepEqual(journal.events.slice(-2).map((event) => event.state), ["rollingBack", "rolledBack"]);
   assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
@@ -373,8 +425,8 @@ test("SQLite rollback failure preserves recovery evidence and manual restore rec
       codexHome,
       provider: "openai",
       faultInjector: ({ point }) => {
-        if (point === "after_sqlite_commit") {
-          throw new Error("injected post-SQLite failure");
+        if (point === "after_sqlite_commit_before_ack") {
+          throw new Error("injected lost SQLite COMMIT acknowledgement");
         }
         if (point === "before_sqlite_rollback") {
           throw new Error("injected SQLite rollback failure");
@@ -394,6 +446,10 @@ test("SQLite rollback failure preserves recovery evidence and manual restore rec
   assert.equal(await fs.readFile(sessionPath, "utf8"), before);
   assert.equal(await readProvider(codexHome, "thread-sqlite-rollback"), "openai");
   assert.equal((await findPendingTransactions(codexHome)).length, 1);
+  const pendingJournal = await readTransactionJournal(path.join(error.backupDir, "transaction-journal.jsonl"));
+  assert.equal(pendingJournal.state, "recoveryRequired");
+  assert.equal(pendingJournal.terminal, false);
+  assert.equal(pendingJournal.events.some((event) => event.state === "rolledBack"), false);
 
   await runRestore({ backupDir: error.backupDir, codexHome });
   assert.equal(await fs.readFile(sessionPath, "utf8"), before);

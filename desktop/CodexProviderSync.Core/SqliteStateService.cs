@@ -310,7 +310,9 @@ public sealed class SqliteStateService
         Func<(int UpdatedRows, int ProviderRowsUpdated, int ModelRowsUpdated, int UserEventRowsUpdated, int CwdRowsUpdated, bool DatabasePresent), Task>? afterUpdate = null,
         int? busyTimeoutMs = null,
         IReadOnlyCollection<string>? userEventThreadIds = null,
-        IReadOnlyDictionary<string, string>? threadCwdsById = null)
+        IReadOnlyDictionary<string, string>? threadCwdsById = null,
+        Action<(int UpdatedRows, int ProviderRowsUpdated, int ModelRowsUpdated, int UserEventRowsUpdated, int CwdRowsUpdated, bool DatabasePresent)>? onCommitAttempt = null,
+        Func<Task>? afterCommitBeforeAcknowledgement = null)
     {
         return await UpdateSqliteProviderAsync(
             new CodexStorageLayoutService().CreateDefault(codexHome),
@@ -319,7 +321,9 @@ public sealed class SqliteStateService
             afterUpdate,
             busyTimeoutMs,
             userEventThreadIds,
-            threadCwdsById);
+            threadCwdsById,
+            onCommitAttempt,
+            afterCommitBeforeAcknowledgement);
     }
 
     public async Task<(int UpdatedRows, int ProviderRowsUpdated, int ModelRowsUpdated, int UserEventRowsUpdated, int CwdRowsUpdated, bool DatabasePresent)> UpdateSqliteProviderAsync(
@@ -329,7 +333,9 @@ public sealed class SqliteStateService
         Func<(int UpdatedRows, int ProviderRowsUpdated, int ModelRowsUpdated, int UserEventRowsUpdated, int CwdRowsUpdated, bool DatabasePresent), Task>? afterUpdate = null,
         int? busyTimeoutMs = null,
         IReadOnlyCollection<string>? userEventThreadIds = null,
-        IReadOnlyDictionary<string, string>? threadCwdsById = null)
+        IReadOnlyDictionary<string, string>? threadCwdsById = null,
+        Action<(int UpdatedRows, int ProviderRowsUpdated, int ModelRowsUpdated, int UserEventRowsUpdated, int CwdRowsUpdated, bool DatabasePresent)>? onCommitAttempt = null,
+        Func<Task>? afterCommitBeforeAcknowledgement = null)
     {
         string? dbPath = ExistingStateDbPath(storage);
         if (dbPath is null)
@@ -428,9 +434,22 @@ public sealed class SqliteStateService
                 await afterUpdate((updatedRows, providerRowsUpdated, modelRowsUpdated, userEventRowsUpdated, cwdRowsUpdated, true));
             }
 
+            (int UpdatedRows, int ProviderRowsUpdated, int ModelRowsUpdated, int UserEventRowsUpdated, int CwdRowsUpdated, bool DatabasePresent) result =
+                (updatedRows, providerRowsUpdated, modelRowsUpdated, userEventRowsUpdated, cwdRowsUpdated, true);
+
+            // Once COMMIT is attempted, an exception no longer proves that
+            // SQLite stayed unchanged: the database may be durable even when
+            // the caller never receives confirmation. Tell the coordinator
+            // immediately before the attempt so it can conservatively restore
+            // the bound backup on any acknowledgement failure.
+            onCommitAttempt?.Invoke(result);
             await ExecuteNonQueryAsync(connection, "COMMIT");
             transactionOpen = false;
-            return (updatedRows, providerRowsUpdated, modelRowsUpdated, userEventRowsUpdated, cwdRowsUpdated, true);
+            if (afterCommitBeforeAcknowledgement is not null)
+            {
+                await afterCommitBeforeAcknowledgement();
+            }
+            return result;
         }
         catch (Exception error)
         {

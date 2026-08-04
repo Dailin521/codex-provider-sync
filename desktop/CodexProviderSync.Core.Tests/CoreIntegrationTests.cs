@@ -125,6 +125,62 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
+    public async Task SqliteCommitAcknowledgementFailure_RestoresConfigRolloutAndDatabase()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync(
+            "model_provider = \"openai\"\n"
+            + "model = \"gpt-5.4-mini\"\n\n"
+            + "[model_providers.apigather]\n"
+            + "model = \"apigather-prod\"\n"
+            + "base_url = \"https://example.com\"\n");
+        string configPath = Path.Combine(fixture.CodexHome, "config.toml");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-commit-ack-unknown.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-commit-ack-unknown", "openai");
+        await fixture.WriteStateDbAsync([("thread-commit-ack-unknown", "openai", false)]);
+        string configBefore = await File.ReadAllTextAsync(configPath);
+        string rolloutBefore = await File.ReadAllTextAsync(sessionPath);
+        bool durableSqliteMutationObserved = false;
+
+        CodexSyncService service = new();
+        service.FaultInjector = async (point, _, _) =>
+        {
+            if (point != "after_sqlite_commit_before_ack")
+            {
+                return;
+            }
+
+            durableSqliteMutationObserved = string.Equals(
+                "apigather",
+                await ReadProviderAsync(fixture.StateDbPath(), "thread-commit-ack-unknown"),
+                StringComparison.Ordinal);
+            throw new IOException("injected lost SQLite commit acknowledgement");
+        };
+
+        SyncTransactionException error = await Assert.ThrowsAsync<SyncTransactionException>(
+            () => service.RunSwitchAsync(fixture.CodexHome, "apigather"));
+
+        Assert.True(durableSqliteMutationObserved);
+        Assert.Contains("injected lost SQLite commit acknowledgement", error.OriginalError.Message);
+        Assert.Equal("complete", error.RollbackStatus);
+        Assert.False(error.RecoveryRequired);
+        Assert.Equal(configBefore, await File.ReadAllTextAsync(configPath));
+        Assert.Equal(rolloutBefore, await File.ReadAllTextAsync(sessionPath));
+        Assert.Equal(
+            "openai",
+            await ReadProviderAsync(fixture.StateDbPath(), "thread-commit-ack-unknown"));
+
+        string journalPath = Path.Combine(error.BackupDirectory, FileTransactionJournal.FileName);
+        PendingTransactionInfo journal = await FileTransactionJournal.ReadInfoAsync(journalPath);
+        Assert.True(journal.Terminal);
+        Assert.False(journal.InvalidTail);
+        Assert.Equal("rolledBack", journal.State);
+        Assert.Contains(journal.AffectedTargets, target =>
+            target.Kind == "sqlite" && target.State == "applying");
+        Assert.Empty(await FileTransactionJournal.FindPendingAsync(fixture.CodexHome));
+    }
+
+    [Fact]
     public async Task CancellationAfterSqliteCommit_RestoresRolloutAndDatabase()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
@@ -499,6 +555,7 @@ public sealed class CoreIntegrationTests
         await fixture.WriteRolloutAsync(sessionPath, "thread-sqlite-not-committed", "apigather");
         await fixture.WriteStateDbAsync([("thread-sqlite-not-committed", "apigather", false)]);
         bool concurrentMarkerWritten = false;
+        bool sqliteCommitAttemptObserved = false;
         CodexSyncService service = new();
         service.FaultInjector = async (point, _, _) =>
         {
@@ -518,6 +575,10 @@ public sealed class CoreIntegrationTests
                 await command.ExecuteNonQueryAsync();
                 concurrentMarkerWritten = true;
             }
+            if (point == "after_sqlite_commit_before_ack")
+            {
+                sqliteCommitAttemptObserved = true;
+            }
         };
 
         SyncTransactionException error = await Assert.ThrowsAsync<SyncTransactionException>(
@@ -525,6 +586,7 @@ public sealed class CoreIntegrationTests
 
         Assert.False(error.RecoveryRequired);
         Assert.True(concurrentMarkerWritten);
+        Assert.False(sqliteCommitAttemptObserved);
         Assert.Equal("apigather", await ReadProviderAsync(fixture.StateDbPath(), "thread-sqlite-not-committed"));
         Assert.Equal("external", await ReadProviderAsync(fixture.StateDbPath(), "concurrent-marker"));
     }

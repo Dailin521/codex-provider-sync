@@ -444,19 +444,7 @@ export async function updateSqliteProvider(storageOrLocation, targetProvider, af
     }
     const providerUpdatedRows = providerResult.changes ?? 0;
     const updatedRows = providerUpdatedRows + modelUpdatedRows + userEventUpdatedRows + cwdUpdatedRows;
-    if (afterUpdate) {
-      await afterUpdate({
-        updatedRows,
-        providerRowsUpdated: providerUpdatedRows,
-        modelRowsUpdated: modelUpdatedRows,
-        userEventRowsUpdated: userEventUpdatedRows,
-        cwdRowsUpdated: cwdUpdatedRows,
-        databasePresent: true
-      });
-    }
-    db.exec("COMMIT");
-    transactionOpen = false;
-    return {
+    const result = {
       updatedRows,
       providerRowsUpdated: providerUpdatedRows,
       modelRowsUpdated: modelUpdatedRows,
@@ -464,6 +452,17 @@ export async function updateSqliteProvider(storageOrLocation, targetProvider, af
       cwdRowsUpdated: cwdUpdatedRows,
       databasePresent: true
     };
+    if (afterUpdate) {
+      await afterUpdate(result);
+    }
+    // Record the boundary before COMMIT. A COMMIT exception cannot prove the
+    // transaction was not made durable, so the coordinator must compensate
+    // from its bound backup whenever this attempt covered actual mutations.
+    options.onCommitAttempt?.(result);
+    db.exec("COMMIT");
+    transactionOpen = false;
+    await options.afterCommit?.(result);
+    return result;
   } catch (error) {
     if (transactionOpen) {
       try {

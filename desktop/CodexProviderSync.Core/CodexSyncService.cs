@@ -411,6 +411,7 @@ public sealed class CodexSyncService
             effectiveConfigBackupText);
         List<SessionChange> appliedSessionChanges = [];
         bool sqliteMutationCommitted = false;
+        bool sqliteCommitAttempted = false;
         string globalStatePath = _globalStateService.StatePath(codexHome);
         string globalStateBackupPath = _globalStateService.BackupPath(codexHome);
         string[] potentialTargets = writableChanges.Select(static change => Path.GetFullPath(change.Path))
@@ -545,7 +546,21 @@ public sealed class CodexSyncService
                 },
                 sqliteBusyTimeoutMs,
                 sessionInfo.UserEventThreadIds,
-                sessionInfo.ThreadCwdsById);
+                sessionInfo.ThreadCwdsById,
+                result =>
+                {
+                    sqliteCommitAttempted = result.DatabasePresent && result.UpdatedRows > 0;
+                },
+                async () =>
+                {
+                    if (FaultInjector is not null)
+                    {
+                        await FaultInjector(
+                            "after_sqlite_commit_before_ack",
+                            sqliteTargetPath ?? storage.SqliteHome,
+                            1);
+                    }
+                });
             sqliteMutationCommitted = databasePresent && updatedRows > 0;
             if (sqliteMutationCommitted)
             {
@@ -630,6 +645,7 @@ public sealed class CodexSyncService
             }
 
             List<string> restoreFailures = [];
+            bool sqliteRollbackNeeded = sqliteMutationCommitted || sqliteCommitAttempted;
             IReadOnlyList<TransactionTargetInfo> affectedTargets;
             try
             {
@@ -644,7 +660,7 @@ public sealed class CodexSyncService
                     switchPreparation is not null ? configPath : null,
                     File.Exists(globalStatePath) ? globalStatePath : null,
                     File.Exists(globalStateBackupPath) ? globalStateBackupPath : null,
-                    sqliteMutationCommitted ? storage.StateDbLocation?.Path : null);
+                    sqliteRollbackNeeded ? storage.StateDbLocation?.Path : null);
             }
             try
             {
@@ -656,7 +672,7 @@ public sealed class CodexSyncService
             }
             restoreFailures.AddRange(await RollBackTargetsAsync(
                 affectedTargets
-                    .Where(target => target.Kind != "sqlite" || sqliteMutationCommitted)
+                    .Where(target => target.Kind != "sqlite" || sqliteRollbackNeeded)
                     .ToArray(),
                 backupDir,
                 codexHome,

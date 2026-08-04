@@ -506,6 +506,7 @@ async function runSyncCore({
     let sessionRestoreNeeded = false;
     let appliedSessionChanges = [];
     let sqliteMutationCommitted = false;
+    let sqliteCommitAttempted = false;
     let configMutationAttempted = false;
     const completedTargets = [];
     const completedTargetKeys = new Set();
@@ -598,7 +599,19 @@ async function runSyncCore({
           });
           throwIfAborted(signal);
         },
-        { busyTimeoutMs: sqliteBusyTimeoutMs, userEventThreadIds, threadCwdById, targetModel: model }
+        {
+          busyTimeoutMs: sqliteBusyTimeoutMs,
+          userEventThreadIds,
+          threadCwdById,
+          targetModel: model,
+          onCommitAttempt(result) {
+            sqliteCommitAttempted = result.databasePresent && result.updatedRows > 0;
+          },
+          afterCommit: () => faultInjector?.({
+            point: "after_sqlite_commit_before_ack",
+            path: sqliteTarget
+          })
+        }
       );
       sqliteMutationCommitted = sqliteResult.databasePresent && sqliteResult.updatedRows > 0;
       if (sqliteMutationCommitted) {
@@ -754,7 +767,8 @@ async function runSyncCore({
           restoreFailures.push(`config: ${restoreError.message}`);
         }
       }
-      if (sqliteMutationCommitted && backupDir) {
+      const sqliteRestoreRequired = sqliteMutationCommitted || sqliteCommitAttempted;
+      if (sqliteRestoreRequired && backupDir) {
         try {
           const sqliteTarget = storage.stateDbLocation?.path ?? storage.sqliteHome;
           await faultInjector?.({ point: "before_sqlite_rollback", path: sqliteTarget });
@@ -790,7 +804,7 @@ async function runSyncCore({
           ...startedRolloutTargets,
           ...startedGlobalStateTargets,
           ...startedConfigTargets,
-          ...(sqliteMutationCommitted && sqliteTarget ? [sqliteTarget] : [])
+          ...(sqliteRestoreRequired && sqliteTarget ? [sqliteTarget] : [])
         ]);
         throw new SyncTransactionError(
           error,
