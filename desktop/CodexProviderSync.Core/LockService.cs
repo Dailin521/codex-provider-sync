@@ -10,9 +10,13 @@ public sealed class LockService
 {
     private const int ProtocolVersion = 2;
     private const int Win32ErrorAlreadyExists = 183;
+    private const int Win32ErrorFileExists = 80;
+    private const int UnixErrorAlreadyExists = 17;
     private const int Win32ErrorAccessDenied = 5;
     private const int DefaultLockCreateRetryCount = 3;
     private const int DefaultLockCreateRetryDelayMs = 75;
+    private const string BusyErrorDataKey = "codex-provider-sync/error-code";
+    public const string OperationBusyErrorCode = "TARGET_BUSY";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = true
@@ -51,11 +55,15 @@ public sealed class LockService
         string claimsPath = canonicalPath + ".claims";
         Directory.CreateDirectory(parentPath);
         Directory.CreateDirectory(claimsPath);
+        SetOwnerOnlyDirectoryMode(claimsPath);
 
         LockOwner owner = CreateCurrentOwner(label);
         string claimPath = Path.Combine(claimsPath, owner.InstanceId + ".json");
         string candidatePath = $"{canonicalPath}.candidate.{owner.ProcessId}.{owner.InstanceId}";
+        string reservationMarkerPath = ReservationMarkerPath(canonicalPath, owner.InstanceId);
         bool claimPublished = false;
+        bool canonicalReserved = false;
+        bool ownerLinked = false;
 
         try
         {
@@ -75,25 +83,53 @@ public sealed class LockService
             await AssertSoleLiveClaimAsync(canonicalPath, claimsPath, claimPath, owner);
 
             Directory.CreateDirectory(candidatePath);
+            SetOwnerOnlyDirectoryMode(candidatePath);
             await AtomicFile.WriteAllTextAsync(
                 Path.Combine(candidatePath, "owner.json"),
                 JsonSerializer.Serialize(owner, JsonOptions));
 
-            try
+            await CreateLockDirectoryAsync(canonicalPath);
+            canonicalReserved = true;
+            await WriteReservationMarkerAsync(reservationMarkerPath, owner.InstanceId);
+            if (_testHook is not null)
             {
-                Directory.Move(candidatePath, canonicalPath);
-            }
-            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-            {
-                throw LockAlreadyExists(canonicalPath, "another owner published the canonical lock first");
+                await _testHook("canonical-reserved", owner.InstanceId);
             }
 
+            try
+            {
+                CreateHardLinkNoReplace(
+                    Path.Combine(candidatePath, "owner.json"),
+                    Path.Combine(canonicalPath, "owner.json"));
+            }
+            catch (IOException error) when (IsAlreadyExistsError(error))
+            {
+                throw LockAlreadyExists(
+                    canonicalPath,
+                    "another owner populated the canonical reservation before owner.json could be published");
+            }
+            ownerLinked = true;
+            if (!await ReservationMarkerMatchesAsync(reservationMarkerPath, owner.InstanceId))
+            {
+                throw LockAlreadyExists(
+                    canonicalPath,
+                    "the canonical reservation changed identity while owner.json was being published");
+            }
+
+            TryDeleteDirectory(candidatePath);
             return new LockHandle(canonicalPath, claimsPath, claimPath, owner.InstanceId);
         }
         catch
         {
             TryDeleteDirectory(candidatePath);
-            if (claimPublished)
+            if (canonicalReserved && !ownerLinked)
+            {
+                if (await TryDeleteOwnedReservationMarkerAsync(reservationMarkerPath, owner.InstanceId))
+                {
+                    TryDeleteEmptyDirectory(canonicalPath);
+                }
+            }
+            if (claimPublished && !ownerLinked)
             {
                 await TryDeleteOwnedClaimAsync(claimPath, owner.InstanceId);
             }
@@ -250,13 +286,18 @@ public sealed class LockService
 
     private async Task ReclaimCanonicalIfStaleAsync(string canonicalPath)
     {
-        if (!Directory.Exists(canonicalPath))
+        FileAttributes? attributes = TryGetPathAttributes(canonicalPath);
+        if (attributes is null)
         {
-            if (File.Exists(canonicalPath))
-            {
-                throw LockAlreadyExists(canonicalPath, "the canonical lock path is not a directory");
-            }
             return;
+        }
+        if ((attributes.Value & FileAttributes.ReparsePoint) != 0)
+        {
+            throw LockAlreadyExists(canonicalPath, "the canonical lock path is a symbolic link or reparse point");
+        }
+        if ((attributes.Value & FileAttributes.Directory) == 0)
+        {
+            throw LockAlreadyExists(canonicalPath, "the canonical lock path is not a directory");
         }
 
         string ownerPath = Path.Combine(canonicalPath, "owner.json");
@@ -293,7 +334,10 @@ public sealed class LockService
             requireVersionTwo: false);
         if (!moved.Valid || !SameOwnerGeneration(moved.Owner!, read.Owner!))
         {
-            bool restored = TryRestoreDirectory(quarantinePath, canonicalPath);
+            bool restored = await TryRestoreQuarantinedOwnerAsync(
+                quarantinePath,
+                canonicalPath,
+                moved.Owner?.InstanceId);
             throw LockAlreadyExists(
                 canonicalPath,
                 restored
@@ -529,7 +573,8 @@ public sealed class LockService
         string claimPath,
         string instanceId)
     {
-        if (!Directory.Exists(canonicalPath))
+        FileAttributes? canonicalAttributes = TryGetPathAttributes(canonicalPath);
+        if (canonicalAttributes is null)
         {
             if (!await TryDeleteOwnedClaimAsync(claimPath, instanceId))
             {
@@ -537,6 +582,16 @@ public sealed class LockService
                     $"Refusing to delete claim {claimPath} because its owner identity changed.");
             }
             return;
+        }
+        if ((canonicalAttributes.Value & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidOperationException(
+                $"Refusing to release lock {canonicalPath} because the canonical path is a symbolic link or reparse point.");
+        }
+        if ((canonicalAttributes.Value & FileAttributes.Directory) == 0)
+        {
+            throw new InvalidOperationException(
+                $"Refusing to release lock {canonicalPath} because the canonical path is not a directory.");
         }
 
         OwnerReadResult current = await ReadOwnerAsync(
@@ -548,6 +603,13 @@ public sealed class LockService
             await TryDeleteOwnedClaimAsync(claimPath, instanceId);
             throw new InvalidOperationException(
                 $"Refusing to release lock {canonicalPath} because its owner identity changed.");
+        }
+        if (!await ReservationMarkerMatchesAsync(
+                ReservationMarkerPath(canonicalPath, instanceId),
+                instanceId))
+        {
+            throw new InvalidOperationException(
+                $"Refusing to release lock {canonicalPath} because its reservation identity changed.");
         }
 
         string releasePath = $"{canonicalPath}.release.{Environment.ProcessId}.{Guid.NewGuid():N}";
@@ -571,7 +633,10 @@ public sealed class LockService
         if (!moved.Valid
             || !string.Equals(moved.Owner!.InstanceId, instanceId, StringComparison.OrdinalIgnoreCase))
         {
-            bool restored = TryRestoreDirectory(releasePath, canonicalPath);
+            bool restored = await TryRestoreQuarantinedOwnerAsync(
+                releasePath,
+                canonicalPath,
+                moved.Owner?.InstanceId);
             await TryDeleteOwnedClaimAsync(claimPath, instanceId);
             throw new InvalidOperationException(
                 restored
@@ -589,10 +654,21 @@ public sealed class LockService
         _ = claimsPath; // The sibling claims directory intentionally persists.
     }
 
+    public static bool IsOperationBusy(Exception error)
+    {
+        return error is InvalidOperationException
+            && string.Equals(
+                error.Data[BusyErrorDataKey] as string,
+                OperationBusyErrorCode,
+                StringComparison.Ordinal);
+    }
+
     private static InvalidOperationException LockAlreadyExists(string lockPath, string reason)
     {
-        return new InvalidOperationException(
+        InvalidOperationException error = new(
             $"Lock already exists at {lockPath}: {reason}. Close Codex/App and retry; do not remove it unless the recorded owner is known to be gone.");
+        error.Data[BusyErrorDataKey] = OperationBusyErrorCode;
+        return error;
     }
 
     private static int? TryReadInt(JsonElement root, string name)
@@ -664,19 +740,154 @@ public sealed class LockService
             TimeSpan.Zero);
     }
 
-    private static bool TryRestoreDirectory(string source, string destination)
+    private static string ReservationMarkerPath(string canonicalPath, string instanceId)
+    {
+        return Path.Combine(canonicalPath, $".reservation.{instanceId}");
+    }
+
+    private static void SetOwnerOnlyDirectoryMode(string path)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(
+                path,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    private static async Task WriteReservationMarkerAsync(string markerPath, string instanceId)
+    {
+        byte[] bytes = Encoding.UTF8.GetBytes(instanceId);
+        await using FileStream stream = new(
+            markerPath,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.None,
+            4096,
+            FileOptions.Asynchronous | FileOptions.WriteThrough);
+        await stream.WriteAsync(bytes);
+        await stream.FlushAsync();
+        stream.Flush(flushToDisk: true);
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(
+                markerPath,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+    }
+
+    private static async Task<bool> ReservationMarkerMatchesAsync(
+        string markerPath,
+        string instanceId)
     {
         try
         {
-            if (Directory.Exists(destination) || File.Exists(destination))
+            return string.Equals(
+                await File.ReadAllTextAsync(markerPath),
+                instanceId,
+                StringComparison.Ordinal);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static async Task<bool> TryDeleteOwnedReservationMarkerAsync(
+        string markerPath,
+        string instanceId)
+    {
+        if (!await ReservationMarkerMatchesAsync(markerPath, instanceId))
+        {
+            return false;
+        }
+        TryDeleteFile(markerPath);
+        return !File.Exists(markerPath);
+    }
+
+    private static FileAttributes? TryGetPathAttributes(string path)
+    {
+        try
+        {
+            return File.GetAttributes(path);
+        }
+        catch (Exception error) when (error is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return null;
+        }
+    }
+
+    private static void CreateHardLinkNoReplace(string existingPath, string newPath)
+    {
+        int result;
+        if (OperatingSystem.IsWindows())
+        {
+            result = CreateHardLinkWindows(newPath, existingPath, IntPtr.Zero)
+                ? 0
+                : Marshal.GetLastWin32Error();
+        }
+        else
+        {
+            result = LinkUnix(existingPath, newPath) == 0
+                ? 0
+                : Marshal.GetLastWin32Error();
+        }
+        if (result != 0)
+        {
+            throw new IOException(
+                $"Unable to publish lock owner at {newPath}. OS error: {result}",
+                new System.ComponentModel.Win32Exception(result));
+        }
+    }
+
+    private static bool IsAlreadyExistsError(IOException error)
+    {
+        return error.InnerException is System.ComponentModel.Win32Exception native
+            && native.NativeErrorCode is UnixErrorAlreadyExists
+                or Win32ErrorFileExists
+                or Win32ErrorAlreadyExists;
+    }
+
+    private static async Task<bool> TryRestoreQuarantinedOwnerAsync(
+        string source,
+        string destination,
+        string? instanceId)
+    {
+        string restorationToken = "restore-" + Guid.NewGuid().ToString("N");
+        string restorationMarker = ReservationMarkerPath(destination, restorationToken);
+        try
+        {
+            await CreateLockDirectoryAsync(destination, retryCount: 0);
+            await WriteReservationMarkerAsync(restorationMarker, restorationToken);
+            CreateHardLinkNoReplace(
+                Path.Combine(source, "owner.json"),
+                Path.Combine(destination, "owner.json"));
+
+            if (!string.IsNullOrWhiteSpace(instanceId))
+            {
+                string sourceMarker = ReservationMarkerPath(source, instanceId);
+                if (File.Exists(sourceMarker))
+                {
+                    CreateHardLinkNoReplace(
+                        sourceMarker,
+                        ReservationMarkerPath(destination, instanceId));
+                }
+            }
+            if (!await TryDeleteOwnedReservationMarkerAsync(restorationMarker, restorationToken))
             {
                 return false;
             }
-            Directory.Move(source, destination);
             return true;
         }
         catch
         {
+            // Never rename source over destination here: POSIX rename can
+            // replace a concurrently-created empty directory. Keep source for
+            // diagnosis and remove only a reservation that stayed empty.
+            if (await TryDeleteOwnedReservationMarkerAsync(restorationMarker, restorationToken))
+            {
+                TryDeleteEmptyDirectory(destination);
+            }
             return false;
         }
     }
@@ -724,6 +935,21 @@ public sealed class LockService
         catch
         {
             // Best effort cleanup must not hide the ownership decision.
+        }
+    }
+
+    private static void TryDeleteEmptyDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, recursive: false);
+            }
+        }
+        catch
+        {
+            // A foreign population is retained fail-closed.
         }
     }
 
@@ -801,8 +1027,17 @@ public sealed class LockService
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern bool CreateDirectory(string lpPathName, IntPtr lpSecurityAttributes);
 
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "CreateHardLinkW")]
+    private static extern bool CreateHardLinkWindows(
+        string lpFileName,
+        string lpExistingFileName,
+        IntPtr lpSecurityAttributes);
+
     [DllImport("libc", SetLastError = true, EntryPoint = "mkdir")]
     private static extern int Mkdir(string pathname, uint mode);
+
+    [DllImport("libc", SetLastError = true, EntryPoint = "link")]
+    private static extern int LinkUnix(string oldpath, string newpath);
 
     private sealed class LockOwner
     {

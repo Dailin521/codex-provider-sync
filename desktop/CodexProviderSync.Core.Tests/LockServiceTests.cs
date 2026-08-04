@@ -34,6 +34,9 @@ public sealed class LockServiceTests
 
             using JsonDocument claim = JsonDocument.Parse(await File.ReadAllTextAsync(claimPath));
             Assert.Equal(handle.InstanceId, claim.RootElement.GetProperty("instanceId").GetString());
+            string reservationMarker = Assert.Single(
+                Directory.EnumerateFiles(lockPath, ".reservation.*", SearchOption.TopDirectoryOnly));
+            Assert.Equal(handle.InstanceId, await File.ReadAllTextAsync(reservationMarker));
         }
         finally
         {
@@ -58,6 +61,97 @@ public sealed class LockServiceTests
         }
 
         Assert.False(Directory.Exists(lockPath));
+    }
+
+    [Fact]
+    public async Task AcquirePathLockAsync_RejectsCanonicalFileWithBusyDiagnostic()
+    {
+        string root = CreateTempDirectory();
+        string lockPath = Path.Combine(root, "resource-locks", "sqlite-home.lock");
+        Directory.CreateDirectory(Path.GetDirectoryName(lockPath)!);
+        await File.WriteAllTextAsync(lockPath, "foreign");
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => new LockService().AcquirePathLockAsync(lockPath, "sqlite"));
+
+        Assert.Contains("not a directory", error.Message);
+        Assert.True(LockService.IsOperationBusy(error));
+        Assert.Equal("foreign", await File.ReadAllTextAsync(lockPath));
+        Assert.Empty(Directory.EnumerateFiles(lockPath + ".claims", "*.json"));
+    }
+
+    [Fact]
+    public async Task AcquirePathLockAsync_RejectsCanonicalSymbolicLinkWithoutFollowingIt_OnUnix()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        string root = CreateTempDirectory();
+        string lockPath = Path.Combine(root, "resource-locks", "sqlite-home.lock");
+        string targetPath = Path.Combine(root, "foreign-target");
+        Directory.CreateDirectory(Path.GetDirectoryName(lockPath)!);
+        Directory.CreateDirectory(targetPath);
+        Directory.CreateSymbolicLink(lockPath, targetPath);
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => new LockService().AcquirePathLockAsync(lockPath, "sqlite"));
+
+        Assert.Contains("symbolic link or reparse point", error.Message);
+        Assert.True(LockService.IsOperationBusy(error));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(targetPath));
+        Assert.Empty(Directory.EnumerateFiles(lockPath + ".claims", "*.json"));
+    }
+
+    [Fact]
+    public async Task AcquireLockAsync_HardLinkFailurePreservesForeignPopulationAndReleasesClaim()
+    {
+        string codexHome = CreateTempDirectory();
+        string lockPath = AppConstants.LockPath(codexHome);
+        LockService service = new(async (phase, _) =>
+        {
+            if (phase != "canonical-reserved")
+            {
+                return;
+            }
+            await File.WriteAllTextAsync(Path.Combine(lockPath, "owner.json"), "foreign-owner");
+            await File.WriteAllTextAsync(Path.Combine(lockPath, "foreign.txt"), "keep");
+        });
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => service.AcquireLockAsync(codexHome, "injected"));
+
+        Assert.True(LockService.IsOperationBusy(error));
+        Assert.Equal("foreign-owner", await File.ReadAllTextAsync(Path.Combine(lockPath, "owner.json")));
+        Assert.Equal("keep", await File.ReadAllTextAsync(Path.Combine(lockPath, "foreign.txt")));
+        Assert.Empty(Directory.EnumerateFiles(lockPath + ".claims", "*.json"));
+    }
+
+    [Fact]
+    public async Task AcquireLockAsync_ReservationAbaRetainsUncertainClaimAndForeignDirectory()
+    {
+        string codexHome = CreateTempDirectory();
+        string lockPath = AppConstants.LockPath(codexHome);
+        string displacedPath = lockPath + ".displaced";
+        LockService service = new(async (phase, _) =>
+        {
+            if (phase != "canonical-reserved")
+            {
+                return;
+            }
+            Directory.Move(lockPath, displacedPath);
+            Directory.CreateDirectory(lockPath);
+            await File.WriteAllTextAsync(Path.Combine(lockPath, "foreign.txt"), "keep");
+        });
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => service.AcquireLockAsync(codexHome, "aba"));
+
+        Assert.Contains("reservation changed identity", error.Message);
+        Assert.True(LockService.IsOperationBusy(error));
+        Assert.Equal("keep", await File.ReadAllTextAsync(Path.Combine(lockPath, "foreign.txt")));
+        Assert.Single(Directory.EnumerateFiles(lockPath + ".claims", "*.json"));
+        Assert.True(Directory.Exists(displacedPath));
     }
 
     [Fact]
@@ -269,6 +363,28 @@ public sealed class LockServiceTests
     }
 
     [Fact]
+    public async Task DisposeAsync_DoesNotDeleteReplacementDirectoryThatReusesOwnerFile()
+    {
+        string codexHome = CreateTempDirectory();
+        string lockPath = AppConstants.LockPath(codexHome);
+        LockHandle original = await new LockService().AcquireLockAsync(codexHome, "original");
+        string originalPath = lockPath + ".original";
+        Directory.Move(lockPath, originalPath);
+        Directory.CreateDirectory(lockPath);
+        File.Copy(
+            Path.Combine(originalPath, "owner.json"),
+            Path.Combine(lockPath, "owner.json"));
+        await File.WriteAllTextAsync(Path.Combine(lockPath, "foreign.txt"), "keep");
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => original.DisposeAsync().AsTask());
+
+        Assert.Contains("reservation identity changed", error.Message);
+        Assert.Equal("keep", await File.ReadAllTextAsync(Path.Combine(lockPath, "foreign.txt")));
+        Assert.Single(Directory.EnumerateFiles(lockPath + ".claims", "*.json"));
+    }
+
+    [Fact]
     public async Task AcquireLockAsync_StaleReclaimAbaRestoresAndPreservesReplacementOwner()
     {
         string codexHome = CreateTempDirectory();
@@ -304,6 +420,9 @@ public sealed class LockServiceTests
             await File.ReadAllTextAsync(Path.Combine(lockPath, "owner.json")));
         Assert.Equal(replacementInstanceId, owner.RootElement.GetProperty("instanceId").GetString());
         Assert.True(Directory.Exists(releasedOldPath));
+        Assert.Contains(
+            Directory.EnumerateDirectories(Path.GetDirectoryName(lockPath)!),
+            path => Path.GetFileName(path).Contains(".stale.", StringComparison.Ordinal));
         Assert.Empty(Directory.EnumerateFiles(lockPath + ".claims", "*.json"));
     }
 
@@ -435,6 +554,10 @@ public sealed class LockServiceTests
                 tryCreateDirectory: _ => 183));
 
         Assert.Contains("Lock already exists", error.Message);
+        Assert.True(LockService.IsOperationBusy(error));
+        Assert.Equal(
+            LockService.OperationBusyErrorCode,
+            error.Data["codex-provider-sync/error-code"]);
     }
 
     [Fact]

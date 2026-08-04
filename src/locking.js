@@ -10,6 +10,7 @@ import { syncDirectory } from "./atomic-file.js";
 const execFileAsync = promisify(execFile);
 const DEFAULT_LOCK_CREATE_RETRY_COUNT = 3;
 const DEFAULT_LOCK_CREATE_RETRY_DELAY_MS = 75;
+const DEFAULT_STALE_RECLAIM_ATTEMPT_LIMIT = 8;
 
 function isTransientLockCreateError(error) {
   return error?.code === "EPERM" || error?.code === "EACCES";
@@ -233,7 +234,77 @@ async function readLockOwner(ownerPath, fsImpl) {
   };
 }
 
-async function quarantineStaleLock(lockDir, expectedOwner, fsImpl) {
+function directoryIdentity(stats) {
+  return `${String(stats.dev)}:${String(stats.ino)}`;
+}
+
+function sameDirectoryIdentity(left, right) {
+  return left !== null && right !== null && left === right;
+}
+
+async function lstatOrNull(targetPath, fsImpl) {
+  try {
+    return await fsImpl.lstat(targetPath, { bigint: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function inspectCanonicalDirectory(lockDir, fsImpl) {
+  const stats = await lstatOrNull(lockDir, fsImpl);
+  if (!stats) {
+    return null;
+  }
+  if (stats.isSymbolicLink()) {
+    throw lockExistsError(lockDir, "The canonical lock path is a symbolic link and is retained fail-closed.");
+  }
+  if (!stats.isDirectory()) {
+    throw lockExistsError(lockDir, "The canonical lock path is not a directory and is retained fail-closed.");
+  }
+  return directoryIdentity(stats);
+}
+
+async function restoreQuarantinedOwner(
+  sourceDir,
+  lockDir,
+  fsImpl,
+  syncDirectoryImpl,
+  platform
+) {
+  const parentDir = path.dirname(lockDir);
+  let reservationIdentity = null;
+  try {
+    await fsImpl.mkdir(lockDir, { mode: 0o700 });
+    reservationIdentity = await inspectCanonicalDirectory(lockDir, fsImpl);
+    await fsImpl.link(
+      path.join(sourceDir, "owner.json"),
+      path.join(lockDir, "owner.json")
+    );
+    const publishedIdentity = await inspectCanonicalDirectory(lockDir, fsImpl);
+    if (!sameDirectoryIdentity(reservationIdentity, publishedIdentity)) {
+      return false;
+    }
+    await syncDirectoryImpl(lockDir, { fsImpl, platform });
+    await syncDirectoryImpl(parentDir, { fsImpl, platform });
+    return true;
+  } catch {
+    // The quarantined generation remains available for diagnosis. Never use
+    // rename here: POSIX rename may replace a concurrently-created empty dir.
+    return false;
+  }
+}
+
+async function quarantineStaleLock(
+  lockDir,
+  expectedOwner,
+  expectedDirectoryIdentity,
+  fsImpl,
+  syncDirectoryImpl,
+  platform
+) {
   const quarantinePath = `${lockDir}.stale.${Date.now()}.${randomUUID()}`;
   try {
     await fsImpl.rename(lockDir, quarantinePath);
@@ -248,39 +319,37 @@ async function quarantineStaleLock(lockDir, expectedOwner, fsImpl) {
   try {
     quarantinedOwner = await readLockOwner(path.join(quarantinePath, "owner.json"), fsImpl);
   } catch (error) {
-    await fsImpl.rename(quarantinePath, lockDir).catch(() => {});
+    await restoreQuarantinedOwner(
+      quarantinePath,
+      lockDir,
+      fsImpl,
+      syncDirectoryImpl,
+      platform
+    );
     throw error;
   }
-  if (!ownerMatchesExpected(quarantinedOwner, expectedOwner)) {
-    let restored = false;
-    try {
-      await fsImpl.rename(quarantinePath, lockDir);
-      restored = true;
-    } catch {
-      // Preserve the moved lock for diagnosis if another contender occupied
-      // the canonical path before it could be restored.
-    }
+  const quarantinedStats = await lstatOrNull(quarantinePath, fsImpl);
+  const quarantinedIdentity = quarantinedStats?.isDirectory()
+    ? directoryIdentity(quarantinedStats)
+    : null;
+  if (!ownerMatchesExpected(quarantinedOwner, expectedOwner)
+      || !sameDirectoryIdentity(quarantinedIdentity, expectedDirectoryIdentity)) {
+    const restored = await restoreQuarantinedOwner(
+      quarantinePath,
+      lockDir,
+      fsImpl,
+      syncDirectoryImpl,
+      platform
+    );
     throw lockExistsError(
       lockDir,
       restored
-        ? "The owner changed during stale-lock reclamation, so the newer lock was restored."
+        ? "The lock generation changed during stale-lock reclamation, so its owner was restored without replacing another directory."
         : `The owner changed during stale-lock reclamation; its lock is preserved at ${quarantinePath}.`
     );
   }
   await fsImpl.rm(quarantinePath, { recursive: true, force: true });
   return true;
-}
-
-async function pathExists(targetPath, fsImpl) {
-  try {
-    await fsImpl.stat(targetPath);
-    return true;
-  } catch (error) {
-    if (error?.code === "ENOENT") {
-      return false;
-    }
-    throw error;
-  }
 }
 
 async function createCandidateDirectory(candidateDir, fsImpl, retryCount, retryDelayMs, sleepImpl) {
@@ -305,24 +374,33 @@ async function removeOwnedCanonical(
   fsImpl,
   syncDirectoryImpl,
   platform,
+  expectedDirectoryIdentity,
   suffix = "release"
 ) {
   const parentDir = path.dirname(lockDir);
   const removalPath = `${lockDir}.${suffix}.${process.pid}.${randomUUID()}`;
+  const currentDirectoryIdentity = await inspectCanonicalDirectory(lockDir, fsImpl);
+  if (!sameDirectoryIdentity(currentDirectoryIdentity, expectedDirectoryIdentity)) {
+    throw new Error(`Refusing to remove lock ${lockDir} because its directory identity changed.`);
+  }
   await fsImpl.rename(lockDir, removalPath);
   const currentOwner = await readLockOwner(path.join(removalPath, "owner.json"), fsImpl);
-  if (!ownerMatchesExpected(currentOwner, owner)) {
-    let restored = false;
-    try {
-      await fsImpl.rename(removalPath, lockDir);
-      restored = true;
-    } catch {
-      // Keep the moved generation for diagnosis when the canonical name was
-      // concurrently occupied by an older runtime.
-    }
+  const removalStats = await lstatOrNull(removalPath, fsImpl);
+  const removalIdentity = removalStats?.isDirectory()
+    ? directoryIdentity(removalStats)
+    : null;
+  if (!ownerMatchesExpected(currentOwner, owner)
+      || !sameDirectoryIdentity(removalIdentity, expectedDirectoryIdentity)) {
+    const restored = await restoreQuarantinedOwner(
+      removalPath,
+      lockDir,
+      fsImpl,
+      syncDirectoryImpl,
+      platform
+    );
     throw new Error(
       restored
-        ? `Refusing to remove lock ${lockDir} because its owner identity changed.`
+        ? `Refusing to remove lock ${lockDir} because its generation changed; its owner was restored safely.`
         : `Refusing to remove lock ${lockDir}; the changed owner is preserved at ${removalPath}.`
     );
   }
@@ -449,6 +527,7 @@ export async function acquirePathLock(lockPath, label = "codex-provider-sync", o
     fsImpl = fs,
     retryCount = DEFAULT_LOCK_CREATE_RETRY_COUNT,
     retryDelayMs = DEFAULT_LOCK_CREATE_RETRY_DELAY_MS,
+    staleReclaimAttemptLimit = DEFAULT_STALE_RECLAIM_ATTEMPT_LIMIT,
     sleepImpl = sleep,
     getProcessIdentity = getProcessStartMarker,
     getProcessStartedAtIdentity = getProcessStartedAt,
@@ -458,6 +537,9 @@ export async function acquirePathLock(lockPath, label = "codex-provider-sync", o
     platform = process.platform
   } = options;
   const lockDir = path.resolve(lockPath);
+  if (!Number.isInteger(staleReclaimAttemptLimit) || staleReclaimAttemptLimit < 0) {
+    throw new TypeError("staleReclaimAttemptLimit must be a non-negative integer.");
+  }
   const ownerPath = path.join(lockDir, "owner.json");
   const parentDir = path.dirname(lockDir);
   const claimsDir = `${lockDir}.claims`;
@@ -491,6 +573,8 @@ export async function acquirePathLock(lockPath, label = "codex-provider-sync", o
   };
   let published = false;
   let canonicalReserved = false;
+  let ownerLinked = false;
+  let canonicalDirectoryIdentity = null;
   let claimPath = null;
   try {
     claimPath = await publishClaim(
@@ -529,6 +613,7 @@ export async function acquirePathLock(lockPath, label = "codex-provider-sync", o
     await onCandidateReady?.({ candidateDir, lockDir, ownerPath: candidateOwnerPath, owner });
 
     let attempts = 0;
+    let staleReclaimAttempts = 0;
     while (true) {
       try {
         // Directory rename is not an exclusive publish on POSIX: it may replace
@@ -536,7 +621,16 @@ export async function acquirePathLock(lockPath, label = "codex-provider-sync", o
         // then publish the already-durable owner inode with a no-replace link.
         await fsImpl.mkdir(lockDir, { mode: 0o700 });
         canonicalReserved = true;
+        canonicalDirectoryIdentity = await inspectCanonicalDirectory(lockDir, fsImpl);
         await fsImpl.link(candidateOwnerPath, ownerPath);
+        ownerLinked = true;
+        const publishedDirectoryIdentity = await inspectCanonicalDirectory(lockDir, fsImpl);
+        if (!sameDirectoryIdentity(canonicalDirectoryIdentity, publishedDirectoryIdentity)) {
+          throw lockExistsError(
+            lockDir,
+            "The canonical reservation changed identity while owner.json was being published; the live claim is retained because publication is uncertain."
+          );
+        }
         published = true;
         await syncDirectoryImpl(lockDir, { fsImpl, platform });
         await syncDirectoryImpl(parentDir, { fsImpl, platform });
@@ -546,8 +640,8 @@ export async function acquirePathLock(lockPath, label = "codex-provider-sync", o
         if (canonicalReserved) {
           throw error;
         }
-        const canonicalExists = await pathExists(lockDir, fsImpl);
-        if (canonicalExists) {
+        const existingDirectoryIdentity = await inspectCanonicalDirectory(lockDir, fsImpl);
+        if (existingDirectoryIdentity !== null) {
           const existingOwner = await readLockOwner(ownerPath, fsImpl);
           let live;
           try {
@@ -562,8 +656,22 @@ export async function acquirePathLock(lockPath, label = "codex-provider-sync", o
           if (live) {
             throw lockExistsError(lockDir, `PID ${existingOwner.pid} is still the verified owner.`);
           }
+          if (staleReclaimAttempts >= staleReclaimAttemptLimit) {
+            throw lockExistsError(
+              lockDir,
+              `Stale-lock reclamation exceeded the bounded limit of ${staleReclaimAttemptLimit} attempts.`
+            );
+          }
+          staleReclaimAttempts += 1;
           await onBeforeStaleReclaim?.({ lockDir, existingOwner, owner });
-          if (await quarantineStaleLock(lockDir, existingOwner, fsImpl)) {
+          if (await quarantineStaleLock(
+            lockDir,
+            existingOwner,
+            existingDirectoryIdentity,
+            fsImpl,
+            syncDirectoryImpl,
+            platform
+          )) {
             await syncDirectoryImpl(parentDir, { fsImpl, platform });
           }
           continue;
@@ -586,16 +694,24 @@ export async function acquirePathLock(lockPath, label = "codex-provider-sync", o
           fsImpl,
           syncDirectoryImpl,
           platform,
+          canonicalDirectoryIdentity,
           "acquire-failed"
         );
         canonicalCleanupSafe = true;
       } catch (cleanupError) {
         cleanupFailures.push(cleanupError);
       }
-    } else if (canonicalReserved) {
+    } else if (canonicalReserved && !ownerLinked) {
       try {
         // rmdir is intentionally non-recursive: if another runtime populated
-        // the reserved directory, preserve it and retain our claim fail-closed.
+        // the reserved directory, preserve it. Since link never succeeded, our
+        // independent claim can still be released safely below.
+        const cleanupDirectoryIdentity = await inspectCanonicalDirectory(lockDir, fsImpl);
+        if (!sameDirectoryIdentity(cleanupDirectoryIdentity, canonicalDirectoryIdentity)) {
+          throw new Error(
+            `Refusing to remove empty reservation ${lockDir} because its directory identity changed.`
+          );
+        }
         await fsImpl.rmdir(lockDir);
         await syncDirectoryImpl(parentDir, { fsImpl, platform });
         canonicalCleanupSafe = true;
@@ -608,7 +724,7 @@ export async function acquirePathLock(lockPath, label = "codex-provider-sync", o
     } catch (cleanupError) {
       cleanupFailures.push(cleanupError);
     }
-    if (claimPath && canonicalCleanupSafe) {
+    if (claimPath && (canonicalCleanupSafe || !ownerLinked)) {
       try {
         await removeOwnedClaim(claimPath, owner, fsImpl, syncDirectoryImpl, platform);
       } catch (cleanupError) {
@@ -630,7 +746,14 @@ export async function acquirePathLock(lockPath, label = "codex-provider-sync", o
     if (released) {
       return;
     }
-    await removeOwnedCanonical(lockDir, owner, fsImpl, syncDirectoryImpl, platform);
+    await removeOwnedCanonical(
+      lockDir,
+      owner,
+      fsImpl,
+      syncDirectoryImpl,
+      platform,
+      canonicalDirectoryIdentity
+    );
     await removeOwnedClaim(claimPath, owner, fsImpl, syncDirectoryImpl, platform);
     released = true;
   };

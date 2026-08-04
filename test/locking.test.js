@@ -135,6 +135,93 @@ test("owner publication failure removes its empty canonical reservation and clai
   );
 });
 
+test("link failure preserves foreign reservation contents but releases its own claim", async (t) => {
+  const codexHome = await makeLockHome(t);
+  const lockDir = path.join(codexHome, "tmp", DEFAULT_LOCK_NAME);
+  const fsImpl = new Proxy(fs, {
+    get(target, property) {
+      if (property === "link") {
+        return async () => {
+          await fs.writeFile(path.join(lockDir, "foreign.txt"), "keep", "utf8");
+          const error = new Error("injected link failure after foreign population");
+          error.code = "EIO";
+          throw error;
+        };
+      }
+      const value = target[property];
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
+
+  await assert.rejects(
+    acquireLock(codexHome, "sync", lockOptions({ fsImpl })),
+    /link failure after foreign population/
+  );
+  assert.equal(await fs.readFile(path.join(lockDir, "foreign.txt"), "utf8"), "keep");
+  assert.deepEqual(await fs.readdir(`${lockDir}.claims`), []);
+});
+
+test("reservation ABA is detected by directory identity and retains an uncertain claim", async (t) => {
+  const codexHome = await makeLockHome(t);
+  const lockDir = path.join(codexHome, "tmp", DEFAULT_LOCK_NAME);
+  const displacedReservation = `${lockDir}.displaced`;
+  let swapped = false;
+  const fsImpl = new Proxy(fs, {
+    get(target, property) {
+      if (property === "link") {
+        return async (source, destination) => {
+          if (!swapped && path.resolve(destination) === path.resolve(path.join(lockDir, "owner.json"))) {
+            swapped = true;
+            await fs.rename(lockDir, displacedReservation);
+            await fs.mkdir(lockDir);
+            await fs.writeFile(path.join(lockDir, "foreign.txt"), "keep", "utf8");
+          }
+          return target.link(source, destination);
+        };
+      }
+      const value = target[property];
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
+
+  await assert.rejects(
+    acquireLock(codexHome, "sync", lockOptions({ fsImpl })),
+    /reservation changed identity/
+  );
+  assert.equal(await fs.readFile(path.join(lockDir, "foreign.txt"), "utf8"), "keep");
+  assert.equal((await fs.readdir(`${lockDir}.claims`)).length, 1);
+  assert.equal((await fs.lstat(displacedReservation)).isDirectory(), true);
+});
+
+test("link failure does not remove a swapped empty reservation and still releases its claim", async (t) => {
+  const codexHome = await makeLockHome(t);
+  const lockDir = path.join(codexHome, "tmp", DEFAULT_LOCK_NAME);
+  const displacedReservation = `${lockDir}.displaced-link-failure`;
+  const fsImpl = new Proxy(fs, {
+    get(target, property) {
+      if (property === "link") {
+        return async () => {
+          await fs.rename(lockDir, displacedReservation);
+          await fs.mkdir(lockDir);
+          const error = new Error("injected link failure after reservation swap");
+          error.code = "EIO";
+          throw error;
+        };
+      }
+      const value = target[property];
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
+
+  await assert.rejects(
+    acquireLock(codexHome, "sync", lockOptions({ fsImpl })),
+    /cleanup was incomplete/
+  );
+  assert.equal((await fs.lstat(lockDir)).isDirectory(), true);
+  assert.equal((await fs.lstat(displacedReservation)).isDirectory(), true);
+  assert.deepEqual(await fs.readdir(`${lockDir}.claims`), []);
+});
+
 test("acquirePathLock supports an arbitrary future SQLite resource path", async (t) => {
   const root = await makeLockHome(t);
   const lockPath = path.join(root, "resource-locks", "state-db.lock");
@@ -144,6 +231,45 @@ test("acquirePathLock supports an arbitrary future SQLite resource path", async 
   assert.deepEqual(await fs.readdir(`${lockPath}.claims`), [`${owner.instanceId}.json`]);
   await release();
   await assert.rejects(fs.access(lockPath), { code: "ENOENT" });
+});
+
+test("acquirePathLock rejects a canonical file with an explicit diagnostic", async (t) => {
+  const root = await makeLockHome(t);
+  const lockPath = path.join(root, "resource-locks", "state-db.lock");
+  await fs.mkdir(path.dirname(lockPath), { recursive: true });
+  await fs.writeFile(lockPath, "foreign", "utf8");
+
+  await assert.rejects(
+    acquirePathLock(lockPath, "sqlite-resource", lockOptions()),
+    /canonical lock path is not a directory/
+  );
+  assert.equal(await fs.readFile(lockPath, "utf8"), "foreign");
+  assert.deepEqual(await fs.readdir(`${lockPath}.claims`), []);
+});
+
+test("acquirePathLock rejects a canonical symlink without following it", async (t) => {
+  const root = await makeLockHome(t);
+  const lockPath = path.join(root, "resource-locks", "state-db.lock");
+  const targetPath = path.join(root, "foreign-target");
+  await fs.mkdir(path.dirname(lockPath), { recursive: true });
+  await fs.mkdir(targetPath);
+  try {
+    await fs.symlink(targetPath, lockPath, process.platform === "win32" ? "junction" : "dir");
+  } catch (error) {
+    if (error?.code === "EPERM") {
+      t.skip("The test account cannot create a directory symlink/junction.");
+      return;
+    }
+    throw error;
+  }
+
+  await assert.rejects(
+    acquirePathLock(lockPath, "sqlite-resource", lockOptions()),
+    /canonical lock path is a symbolic link/
+  );
+  assert.equal((await fs.lstat(lockPath)).isSymbolicLink(), true);
+  assert.deepEqual(await fs.readdir(targetPath), []);
+  assert.deepEqual(await fs.readdir(`${lockPath}.claims`), []);
 });
 
 test("acquireLock reads a live legacy .NET owner fail-closed", async (t) => {
@@ -293,6 +419,109 @@ test("a unique live claim serializes stale reclaimers and prevents ABA", async (
   releaseReclaimer();
   const release = await first;
   await release();
+});
+
+test("stale canonical reclamation is bounded under continuous replacement", async (t) => {
+  const codexHome = await makeLockHome(t);
+  const lockDir = await writeCanonicalOwner(codexHome, {
+    processId: 2_000_000_000,
+    startedAt: "2020-01-01T00:00:00.000Z",
+    label: "stale-0",
+    currentDirectory: codexHome
+  });
+  let replacements = 0;
+  const fsImpl = new Proxy(fs, {
+    get(target, property) {
+      if (property === "rename") {
+        return async (source, destination) => {
+          await target.rename(source, destination);
+          if (path.resolve(source) === path.resolve(lockDir)
+              && path.basename(destination).includes(".stale.")) {
+            replacements += 1;
+            await fs.mkdir(lockDir);
+            await fs.writeFile(path.join(lockDir, "owner.json"), JSON.stringify({
+              processId: 2_000_000_000,
+              startedAt: "2020-01-01T00:00:00.000Z",
+              label: `stale-${replacements}`,
+              currentDirectory: codexHome
+            }), "utf8");
+          }
+        };
+      }
+      const value = target[property];
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
+
+  await assert.rejects(
+    acquireLock(codexHome, "bounded", lockOptions({
+      fsImpl,
+      staleReclaimAttemptLimit: 2
+    })),
+    /bounded limit of 2 attempts/
+  );
+  assert.equal(replacements, 2);
+  assert.equal(JSON.parse(await fs.readFile(path.join(lockDir, "owner.json"), "utf8")).label, "stale-2");
+  assert.deepEqual(await fs.readdir(`${lockDir}.claims`), []);
+});
+
+test("stale reclaim restores a changed owner without rename-overwrite", async (t) => {
+  const codexHome = await makeLockHome(t);
+  const lockDir = await writeCanonicalOwner(codexHome, {
+    processId: 2_000_000_000,
+    startedAt: "2020-01-01T00:00:00.000Z",
+    label: "stale",
+    currentDirectory: codexHome
+  });
+  const releasedOldPath = `${lockDir}.released-old`;
+  const replacementOwner = {
+    protocolVersion: 2,
+    runtime: "dotnet",
+    pid: process.pid,
+    processId: process.pid,
+    processStartedAt: TEST_STARTED_AT,
+    instanceId: "replacement-generation",
+    startedAt: TEST_STARTED_AT,
+    label: "replacement",
+    cwd: codexHome
+  };
+
+  await assert.rejects(
+    acquireLock(codexHome, "aba-contender", lockOptions({
+      async onBeforeStaleReclaim() {
+        await fs.rename(lockDir, releasedOldPath);
+        await fs.mkdir(lockDir);
+        await fs.writeFile(
+          path.join(lockDir, "owner.json"),
+          JSON.stringify(replacementOwner),
+          "utf8"
+        );
+      }
+    })),
+    /restored without replacing another directory/
+  );
+  assert.deepEqual(
+    JSON.parse(await fs.readFile(path.join(lockDir, "owner.json"), "utf8")),
+    replacementOwner
+  );
+  assert.equal((await fs.lstat(releasedOldPath)).isDirectory(), true);
+  assert.ok((await fs.readdir(path.dirname(lockDir))).some((name) => name.includes(".stale.")));
+  assert.deepEqual(await fs.readdir(`${lockDir}.claims`), []);
+});
+
+test("release refuses a replacement directory that reuses the same owner inode", async (t) => {
+  const codexHome = await makeLockHome(t);
+  const lockDir = path.join(codexHome, "tmp", DEFAULT_LOCK_NAME);
+  const release = await acquireLock(codexHome, "original", lockOptions());
+  const originalPath = `${lockDir}.original`;
+  await fs.rename(lockDir, originalPath);
+  await fs.mkdir(lockDir);
+  await fs.link(path.join(originalPath, "owner.json"), path.join(lockDir, "owner.json"));
+  await fs.writeFile(path.join(lockDir, "foreign.txt"), "keep", "utf8");
+
+  await assert.rejects(release(), /directory identity changed/);
+  assert.equal(await fs.readFile(path.join(lockDir, "foreign.txt"), "utf8"), "keep");
+  assert.equal((await fs.readdir(`${lockDir}.claims`)).length, 1);
 });
 
 test("failed acquisition cleanup preserves a canonical generation replaced by an older runtime", async (t) => {
