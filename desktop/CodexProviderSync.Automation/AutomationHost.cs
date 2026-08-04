@@ -278,6 +278,10 @@ public sealed class AutomationHost
         {
             return AutomationExitCodes.ValidationOrUsage;
         }
+        if (outcome.Errors.Any(static error => error.RecoveryRequired))
+        {
+            return AutomationExitCodes.RecoveryRequired;
+        }
         if (outcome.Errors.Any(static error => error.Code is
             "invalid_normalized_intent" or
             "invalid_plan_preview" or
@@ -296,7 +300,7 @@ public sealed class AutomationHost
                 AutomationExitCodes.Success,
             ApplicationOperationLifecycle.Cancelled => AutomationExitCodes.CancelledOrTimedOut,
             ApplicationOperationLifecycle.RecoveryRequired => AutomationExitCodes.RecoveryRequired,
-            ApplicationOperationLifecycle.Failed => AutomationExitCodes.RolledBackFailure,
+            ApplicationOperationLifecycle.Failed => ExitCodeForFailedOutcome(outcome),
             ApplicationOperationLifecycle.Rejected when outcome.Errors.Any(static error =>
                 error.Code is "operation_busy" or "target_busy") => AutomationExitCodes.Busy,
             ApplicationOperationLifecycle.Rejected when outcome.Errors.Any(static error =>
@@ -304,6 +308,25 @@ public sealed class AutomationHost
             ApplicationOperationLifecycle.Rejected => AutomationExitCodes.ValidationOrUsage,
             _ => AutomationExitCodes.InternalProtocolFailure
         };
+    }
+
+    private static int ExitCodeForFailedOutcome<T>(ApplicationOutcome<T> outcome)
+        where T : class
+    {
+        if (outcome.Errors.Any(static error => string.Equals(
+                error.RollbackStatus,
+                "complete",
+                StringComparison.Ordinal)))
+        {
+            return AutomationExitCodes.RolledBackFailure;
+        }
+
+        // A failure before the mutation boundary is a validation/usage failure.
+        // Once Applying has started, unknown rollback state must fail closed.
+        return outcome.Timeline.Any(static entry =>
+            entry.Lifecycle == ApplicationOperationLifecycle.Applying)
+            ? AutomationExitCodes.InternalProtocolFailure
+            : AutomationExitCodes.ValidationOrUsage;
     }
 
     private static string ResultKindFor<T>(ApplicationOutcome<T> outcome, int exitCode)

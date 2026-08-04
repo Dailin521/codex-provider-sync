@@ -100,6 +100,27 @@ public sealed class AutomationProcessAndSchemaTests
     }
 
     [Fact]
+    public async Task Process_UndeclaredSwitchProviderIsUsageFailureWithoutWrites()
+    {
+        using TemporaryDirectory temporary = new();
+        await File.WriteAllTextAsync(
+            Path.Combine(temporary.Path, "config.toml"),
+            "model_provider = \"openai\"\n");
+
+        ProcessResult result = await RunProcessAsync(
+            "plan", "--operation", "switch",
+            "--codex-home", temporary.Path,
+            "--provider", "missing-provider",
+            "--ledger-root", Path.Combine(temporary.Path, "ledger"));
+
+        Assert.Equal(AutomationExitCodes.ValidationOrUsage, result.ExitCode);
+        using JsonDocument json = JsonDocument.Parse(result.StdOut);
+        Assert.Equal("failed", json.RootElement.GetProperty("lifecycle").GetString());
+        Assert.Equal("operation_failed", json.RootElement.GetProperty("errors")[0].GetProperty("code").GetString());
+        Assert.False(Directory.Exists(Path.Combine(temporary.Path, "backups_state", "provider-sync")));
+    }
+
+    [Fact]
     public async Task Process_ExplicitApplyExecutesExactPlanOnceAcrossProcessBoundaries()
     {
         using TemporaryDirectory temporary = new();

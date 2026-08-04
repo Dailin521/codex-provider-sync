@@ -58,6 +58,217 @@ public sealed class CoreWritePlanningTests
     }
 
     [Fact]
+    public async Task SyncAndSwitchPlans_ListExactAutomaticDeletionTargets()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string rolloutPath = fixture.RolloutPath("sessions", "rollout-auto-prune-plan.jsonl");
+        await fixture.WriteRolloutAsync(rolloutPath, "thread-auto-prune-plan", "relay");
+        await fixture.WriteStateDbAsync([("thread-auto-prune-plan", "relay", false)]);
+        await fixture.WriteBackupAsync("20260801T000000000Z");
+        await fixture.WriteBackupAsync("20260802T000000000Z");
+        string futureManaged = fixture.BackupPath("99991231T235959999Z");
+        await fixture.WriteBackupAsync("99991231T235959999Z");
+        string unmanaged = fixture.BackupPath("manual-sentinel");
+        Directory.CreateDirectory(unmanaged);
+        await File.WriteAllTextAsync(Path.Combine(unmanaged, "keep.txt"), "sentinel");
+
+        CodexSyncService service = new();
+        CoreWritePlanSnapshot syncPlan = await service.CreateSyncPlanSnapshotAsync(
+            fixture.CodexHome,
+            provider: "openai",
+            keepCount: 1);
+        CoreWritePlanSnapshot switchPlan = await service.CreateSwitchPlanSnapshotAsync(
+            fixture.CodexHome,
+            "apigather",
+            keepCount: 1);
+
+        string[] expected =
+        [
+            fixture.BackupPath("20260801T000000000Z"),
+            fixture.BackupPath("20260802T000000000Z"),
+            futureManaged
+        ];
+        AssertAutomaticDeletionTargets(syncPlan, expected);
+        AssertAutomaticDeletionTargets(switchPlan, expected);
+        Assert.True(Directory.Exists(unmanaged));
+    }
+
+    [Fact]
+    public async Task CheckedSync_AutomaticPruneDeletesOnlyPlannedTargetsAndPreservesNewBackup()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string rolloutPath = fixture.RolloutPath("sessions", "rollout-auto-prune-apply.jsonl");
+        await fixture.WriteRolloutAsync(rolloutPath, "thread-auto-prune-apply", "relay");
+        await fixture.WriteStateDbAsync([("thread-auto-prune-apply", "relay", false)]);
+        await fixture.WriteBackupAsync("20260801T000000000Z");
+        await fixture.WriteBackupAsync("20260802T000000000Z");
+        await fixture.WriteBackupAsync("99991231T235959999Z");
+        string unmanaged = fixture.BackupPath("manual-sentinel");
+        Directory.CreateDirectory(unmanaged);
+        await File.WriteAllTextAsync(Path.Combine(unmanaged, "keep.txt"), "sentinel");
+
+        CodexSyncService service = new();
+        CoreWritePlanSnapshot plan = await service.CreateSyncPlanSnapshotAsync(
+            fixture.CodexHome,
+            provider: "openai",
+            keepCount: 1);
+        string[] plannedDeletes = plan.AutoPruneDeletionTargets.Select(static target => target.Path).ToArray();
+
+        SyncResult result = await service.RunSyncCheckedAsync(
+            plan,
+            fixture.CodexHome,
+            provider: "openai",
+            keepCount: 1);
+
+        Assert.NotNull(result.AutoPruneResult);
+        Assert.Equal(plannedDeletes.Length, result.AutoPruneResult!.DeletedCount);
+        Assert.All(plannedDeletes, path => Assert.False(Directory.Exists(path)));
+        Assert.True(Directory.Exists(result.BackupDir));
+        Assert.True(Directory.Exists(unmanaged));
+    }
+
+    [Fact]
+    public async Task CheckedSync_AutomaticPruneWithKeepTwoPreservesFutureDatedAndNewBackups()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string rolloutPath = fixture.RolloutPath("sessions", "rollout-auto-prune-keep-two.jsonl");
+        await fixture.WriteRolloutAsync(rolloutPath, "thread-auto-prune-keep-two", "relay");
+        await fixture.WriteStateDbAsync([("thread-auto-prune-keep-two", "relay", false)]);
+        string oldOne = fixture.BackupPath("20260801T000000000Z");
+        string oldTwo = fixture.BackupPath("20260802T000000000Z");
+        string future = fixture.BackupPath("99991231T235959999Z");
+        await fixture.WriteBackupAsync("20260801T000000000Z");
+        await fixture.WriteBackupAsync("20260802T000000000Z");
+        await fixture.WriteBackupAsync("99991231T235959999Z");
+
+        CodexSyncService service = new();
+        CoreWritePlanSnapshot plan = await service.CreateSyncPlanSnapshotAsync(
+            fixture.CodexHome,
+            provider: "openai",
+            keepCount: 2);
+        SyncResult result = await service.RunSyncCheckedAsync(
+            plan,
+            fixture.CodexHome,
+            provider: "openai",
+            keepCount: 2);
+
+        AssertAutomaticDeletionTargets(plan, [oldOne, oldTwo]);
+        Assert.False(Directory.Exists(oldOne));
+        Assert.False(Directory.Exists(oldTwo));
+        Assert.True(Directory.Exists(future));
+        Assert.True(Directory.Exists(result.BackupDir));
+        Assert.Equal(2, Directory.EnumerateDirectories(fixture.BackupRoot())
+            .Count(directory => File.Exists(Path.Combine(directory, "metadata.json"))));
+    }
+
+    [Fact]
+    public async Task CheckedSync_AutomaticPruneSkipsWholeBatchWhenPlannedBackupFingerprintChangesAfterCommit()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string rolloutPath = fixture.RolloutPath("sessions", "rollout-auto-prune-fingerprint-drift.jsonl");
+        await fixture.WriteRolloutAsync(rolloutPath, "thread-auto-prune-fingerprint-drift", "relay");
+        await fixture.WriteStateDbAsync([("thread-auto-prune-fingerprint-drift", "relay", false)]);
+        await fixture.WriteBackupAsync("20260801T000000000Z", ("note.txt", "original"));
+        await fixture.WriteBackupAsync("20260802T000000000Z");
+
+        CodexSyncService service = new();
+        CoreWritePlanSnapshot plan = await service.CreateSyncPlanSnapshotAsync(
+            fixture.CodexHome,
+            provider: "openai",
+            keepCount: 1);
+        string changedBackup = plan.AutoPruneDeletionTargets[0].Path;
+        service.FaultInjector = async (point, _, _) =>
+        {
+            if (point == "after_transaction_commit")
+            {
+                await File.AppendAllTextAsync(Path.Combine(changedBackup, "note.txt"), "-changed");
+            }
+        };
+
+        SyncResult result = await service.RunSyncCheckedAsync(
+            plan,
+            fixture.CodexHome,
+            provider: "openai",
+            keepCount: 1);
+
+        Assert.Null(result.AutoPruneResult);
+        Assert.False(string.IsNullOrWhiteSpace(result.AutoPruneWarning));
+        Assert.All(plan.AutoPruneDeletionTargets, target => Assert.True(Directory.Exists(target.Path)));
+        Assert.True(Directory.Exists(result.BackupDir));
+    }
+
+    [Fact]
+    public async Task CheckedSync_AutomaticPruneSkipsWholeBatchWhenCandidateSetChangesAfterCommit()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string rolloutPath = fixture.RolloutPath("sessions", "rollout-auto-prune-candidate-drift.jsonl");
+        await fixture.WriteRolloutAsync(rolloutPath, "thread-auto-prune-candidate-drift", "relay");
+        await fixture.WriteStateDbAsync([("thread-auto-prune-candidate-drift", "relay", false)]);
+        await fixture.WriteBackupAsync("20260801T000000000Z");
+        await fixture.WriteBackupAsync("20260802T000000000Z");
+
+        CodexSyncService service = new();
+        CoreWritePlanSnapshot plan = await service.CreateSyncPlanSnapshotAsync(
+            fixture.CodexHome,
+            provider: "openai",
+            keepCount: 1);
+        string addedBackup = fixture.BackupPath("20260803T000000000Z");
+        service.FaultInjector = async (point, _, _) =>
+        {
+            if (point == "after_transaction_commit")
+            {
+                await fixture.WriteBackupAsync("20260803T000000000Z");
+            }
+        };
+
+        SyncResult result = await service.RunSyncCheckedAsync(
+            plan,
+            fixture.CodexHome,
+            provider: "openai",
+            keepCount: 1);
+
+        Assert.Null(result.AutoPruneResult);
+        Assert.False(string.IsNullOrWhiteSpace(result.AutoPruneWarning));
+        Assert.True(Directory.Exists(addedBackup));
+        Assert.All(plan.AutoPruneDeletionTargets, target => Assert.True(Directory.Exists(target.Path)));
+    }
+
+    [Fact]
+    public async Task CheckedSync_RejectsAutomaticPruneInventoryDriftBeforeMutation()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string rolloutPath = fixture.RolloutPath("sessions", "rollout-auto-prune-drift.jsonl");
+        await fixture.WriteRolloutAsync(rolloutPath, "thread-auto-prune-drift", "relay");
+        await fixture.WriteStateDbAsync([("thread-auto-prune-drift", "relay", false)]);
+        await fixture.WriteBackupAsync("20260801T000000000Z");
+        await fixture.WriteBackupAsync("20260802T000000000Z");
+
+        CodexSyncService service = new();
+        CoreWritePlanSnapshot plan = await service.CreateSyncPlanSnapshotAsync(
+            fixture.CodexHome,
+            provider: "openai",
+            keepCount: 1);
+        await fixture.WriteBackupAsync("20260803T000000000Z");
+        string before = await File.ReadAllTextAsync(rolloutPath);
+
+        await Assert.ThrowsAsync<CoreWritePlanStaleException>(() =>
+            service.RunSyncCheckedAsync(
+                plan,
+                fixture.CodexHome,
+                provider: "openai",
+                keepCount: 1));
+
+        Assert.Equal(before, await File.ReadAllTextAsync(rolloutPath));
+        Assert.Equal(3, Directory.EnumerateDirectories(fixture.BackupRoot()).Count());
+    }
+
+    [Fact]
     public async Task CheckedPrune_RejectsBackupInventoryDriftBeforeDeletion()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
@@ -388,5 +599,19 @@ public sealed class CoreWritePlanningTests
             FileOptions.Asynchronous | FileOptions.SequentialScan);
         byte[] digest = await SHA256.HashDataAsync(stream);
         return Convert.ToHexString(digest);
+    }
+
+    private static void AssertAutomaticDeletionTargets(
+        CoreWritePlanSnapshot plan,
+        IReadOnlyList<string> expectedPaths)
+    {
+        Assert.Equal(
+            expectedPaths.Order(StringComparer.Ordinal),
+            plan.AutoPruneDeletionTargets.Select(static target => target.Path).Order(StringComparer.Ordinal));
+        Assert.All(plan.AutoPruneDeletionTargets, target =>
+        {
+            Assert.Equal("delete", target.Action);
+            Assert.StartsWith("sha256:", target.Fingerprint, StringComparison.Ordinal);
+        });
     }
 }

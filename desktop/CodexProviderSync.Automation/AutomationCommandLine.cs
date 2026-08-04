@@ -180,6 +180,15 @@ public static class AutomationCommandLine
         IReadOnlySet<string> flags)
     {
         int keep = ParsePositiveInteger(values.GetValueOrDefault("--keep") ?? AppConstants.DefaultBackupRetentionCount.ToString(CultureInfo.InvariantCulture), "--keep");
+        if (command == AutomationCommand.Restore
+            && flags.Contains("--allow-sqlite-home-relocation")
+            && (sqliteHome is null || !flags.Contains("--no-config")))
+        {
+            throw new AutomationUsageException(
+                "sqlite_home_relocation_requires_explicit_target_and_no_config",
+                "--allow-sqlite-home-relocation requires both --sqlite-home and --no-config.");
+        }
+
         return command switch
         {
             AutomationCommand.Sync => new SyncIntent(

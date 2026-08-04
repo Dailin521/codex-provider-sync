@@ -504,11 +504,63 @@ public sealed class BackupService
             throw new ArgumentOutOfRangeException(nameof(keepCount), keepCount, "keepCount must be 0 or greater.");
         }
 
+        return await PruneBackupsCoreAsync(codexHome, keepCount, reserveNewBackupSlot: false, null, null);
+    }
+
+    /// <summary>
+    /// Lists the managed backups that automatic sync/switch cleanup will delete.
+    /// The new backup has not been created while planning, so reserve its keep
+    /// slot explicitly instead of deriving it from timestamp-like directory names.
+    /// </summary>
+    public Task<IReadOnlyList<string>> GetAutomaticPruneDeletionCandidatesAsync(
+        string codexHome,
+        int keepCount)
+    {
+        if (keepCount < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(keepCount), keepCount, "keepCount must be 1 or greater for automatic cleanup.");
+        }
+
+        return GetPruneDeletionCandidatesAsync(codexHome, keepCount, reserveNewBackupSlot: true, null);
+    }
+
+    public Task<BackupPruneResult> PruneAutomaticBackupsAsync(
+        string codexHome,
+        int keepCount,
+        string backupDirectory,
+        IReadOnlyList<CoreWritePlanTarget>? allowedDeletionTargets = null)
+    {
+        if (keepCount < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(keepCount), keepCount, "keepCount must be 1 or greater for automatic cleanup.");
+        }
+        ArgumentException.ThrowIfNullOrWhiteSpace(backupDirectory);
+
+        return PruneBackupsCoreAsync(
+            codexHome,
+            keepCount,
+            reserveNewBackupSlot: true,
+            backupDirectory,
+            allowedDeletionTargets);
+    }
+
+    private async Task<BackupPruneResult> PruneBackupsCoreAsync(
+        string codexHome,
+        int keepCount,
+        bool reserveNewBackupSlot,
+        string? preservedBackupDirectory,
+        IReadOnlyList<CoreWritePlanTarget>? allowedDeletionTargets)
+    {
         string backupRoot = AppConstants.DefaultBackupRoot(codexHome);
-        IReadOnlyList<PendingTransactionInfo> pending = await FileTransactionJournal.FindPendingAsync(codexHome);
-        HashSet<string> protectedBackups = new(
-            pending.Select(static transaction => Path.GetFullPath(transaction.BackupDir)),
-            StringComparer.Ordinal);
+        IReadOnlyList<string> candidates = await GetPruneDeletionCandidatesAsync(
+            codexHome,
+            keepCount,
+            reserveNewBackupSlot,
+            preservedBackupDirectory);
+        if (allowedDeletionTargets is not null)
+        {
+            await AssertAutomaticPrunePlanMatchesAsync(candidates, allowedDeletionTargets);
+        }
         return await Task.Run(() =>
         {
             if (!Directory.Exists(backupRoot))
@@ -523,10 +575,8 @@ public sealed class BackupService
             }
 
             List<DirectoryInfo> entries = GetManagedBackupDirectories(backupRoot);
-
             List<DirectoryInfo> toDelete = entries
-                .Skip(keepCount)
-                .Where(entry => !protectedBackups.Contains(Path.GetFullPath(entry.FullName)))
+                .Where(entry => candidates.Contains(Path.GetFullPath(entry.FullName), PathComparer))
                 .ToList();
             long freedBytes = 0;
             foreach (DirectoryInfo entry in toDelete)
@@ -542,6 +592,72 @@ public sealed class BackupService
                 RemainingCount = entries.Count - toDelete.Count,
                 FreedBytes = freedBytes
             };
+        });
+    }
+
+    private static async Task AssertAutomaticPrunePlanMatchesAsync(
+        IReadOnlyList<string> candidates,
+        IReadOnlyList<CoreWritePlanTarget> allowedDeletionTargets)
+    {
+        HashSet<string> candidatePaths = new(candidates.Select(Path.GetFullPath), PathComparer);
+        HashSet<string> allowedPaths = new(
+            allowedDeletionTargets.Select(static target => Path.GetFullPath(target.Path)),
+            PathComparer);
+        if (!candidatePaths.SetEquals(allowedPaths))
+        {
+            throw new AutomaticPrunePlanStaleException(
+                "Automatic backup cleanup was skipped because its deletion candidates no longer match the checked plan.");
+        }
+
+        CoreWritePlanSnapshot actual = await CoreWriteSnapshotBuilder.BuildAsync(
+            "automatic-prune",
+            "checked-cleanup",
+            candidates.Select(static path => new CoreWriteTargetSpec(
+                path,
+                "delete",
+                CoreWriteFingerprintMode.RecursiveInventory)));
+        CoreWritePlanTarget[] expected = allowedDeletionTargets
+            .Select(static target => target with { Path = Path.GetFullPath(target.Path) })
+            .OrderBy(static target => target.Path, StringComparer.Ordinal)
+            .ThenBy(static target => target.Action, StringComparer.Ordinal)
+            .ThenBy(static target => target.Fingerprint, StringComparer.Ordinal)
+            .ToArray();
+        if (!actual.Targets.SequenceEqual(expected))
+        {
+            throw new AutomaticPrunePlanStaleException(
+                "Automatic backup cleanup was skipped because a planned backup changed after the checked plan was created.");
+        }
+    }
+
+    private static async Task<IReadOnlyList<string>> GetPruneDeletionCandidatesAsync(
+        string codexHome,
+        int keepCount,
+        bool reserveNewBackupSlot,
+        string? preservedBackupDirectory)
+    {
+        string backupRoot = AppConstants.DefaultBackupRoot(codexHome);
+        IReadOnlyList<PendingTransactionInfo> pending = await FileTransactionJournal.FindPendingAsync(codexHome);
+        HashSet<string> protectedBackups = new(
+            pending.Select(static transaction => Path.GetFullPath(transaction.BackupDir)),
+            PathComparer);
+        string? preserved = string.IsNullOrWhiteSpace(preservedBackupDirectory)
+            ? null
+            : Path.GetFullPath(preservedBackupDirectory);
+
+        return await Task.Run<IReadOnlyList<string>>(() =>
+        {
+            if (!Directory.Exists(backupRoot))
+            {
+                return [];
+            }
+
+            int existingKeepSlots = Math.Max(0, keepCount - (reserveNewBackupSlot ? 1 : 0));
+            return GetManagedBackupDirectories(backupRoot)
+                .Where(entry => preserved is null || !PathComparer.Equals(Path.GetFullPath(entry.FullName), preserved))
+                .Skip(existingKeepSlots)
+                .Where(entry => !protectedBackups.Contains(Path.GetFullPath(entry.FullName)))
+                .Select(static entry => Path.GetFullPath(entry.FullName))
+                .ToArray();
         });
     }
 
@@ -816,6 +932,8 @@ public sealed class BackupService
             .OrderByDescending(static entry => entry.Name, StringComparer.Ordinal)
             .ToList();
     }
+
+    private sealed class AutomaticPrunePlanStaleException(string message) : InvalidOperationException(message);
 
     private static bool IsManagedBackupDirectory(string backupDirectoryPath)
     {

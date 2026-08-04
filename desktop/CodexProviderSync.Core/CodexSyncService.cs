@@ -328,10 +328,16 @@ public sealed class CodexSyncService
             keepCount,
             modelSync = preparation.SwitchPreparation?.ModelSync.Source
         });
+        IReadOnlyList<string> automaticDeletionCandidates = await _backupService
+            .GetAutomaticPruneDeletionCandidatesAsync(preparation.CodexHome, keepCount);
         return await CoreWriteSnapshotBuilder.BuildAsync(
             operation,
             binding,
             targets,
+            automaticDeletionCandidates.Select(static path => new CoreWriteTargetSpec(
+                path,
+                "delete",
+                CoreWriteFingerprintMode.RecursiveInventory)),
             warnings: warnings,
             cancellationToken: cancellationToken);
     }
@@ -387,6 +393,7 @@ public sealed class CodexSyncService
         IReadOnlyList<SessionChange> writableChanges = preparation.WritableChanges;
         List<string> skippedRolloutFiles = [.. preparation.SkippedRolloutFiles];
         IReadOnlyList<string> skippedUnreadableRolloutFiles = preparation.SkippedUnreadableRolloutFiles;
+        IReadOnlyList<CoreWritePlanTarget>? checkedAutoPruneDeletionTargets = null;
         if (expectedSnapshot is not null)
         {
             AssertSnapshotFresh(snapshotExpiresAtUtc);
@@ -396,6 +403,7 @@ public sealed class CodexSyncService
                 cancellationToken);
             CoreWriteSnapshotBuilder.AssertExactMatch(expectedSnapshot, actualSnapshot);
             AssertSnapshotFresh(snapshotExpiresAtUtc);
+            checkedAutoPruneDeletionTargets = expectedSnapshot.AutoPruneDeletionTargets;
         }
         cancellationToken.ThrowIfCancellationRequested();
         if (FaultInjector is not null)
@@ -601,7 +609,11 @@ public sealed class CodexSyncService
             string? autoPruneWarning = null;
             try
             {
-                autoPruneResult = await _backupService.PruneBackupsAsync(codexHome, keepCount);
+                autoPruneResult = await _backupService.PruneAutomaticBackupsAsync(
+                    codexHome,
+                    keepCount,
+                    backupDir,
+                    checkedAutoPruneDeletionTargets);
             }
             catch (Exception error)
             {

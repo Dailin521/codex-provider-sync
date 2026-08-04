@@ -37,6 +37,7 @@ public sealed class AutomationCommandLineTests
     {
         using TemporaryDirectory temporary = new();
         string backup = Directory.CreateDirectory(Path.Combine(temporary.Path, "backup")).FullName;
+        string sqliteHome = Directory.CreateDirectory(Path.Combine(temporary.Path, "sqlite")).FullName;
         string homeWithDots = Path.Combine(temporary.Path, "child", "..", "home");
         Directory.CreateDirectory(Path.GetFullPath(homeWithDots));
         AutomationParseResult change = AutomationCommandLine.Parse(
@@ -47,7 +48,8 @@ public sealed class AutomationCommandLineTests
         AutomationParseResult restore = AutomationCommandLine.Parse(
         [
             "plan", "--operation", "restore", "--codex-home", temporary.Path,
-            "--backup", backup, "--no-config", "--allow-sqlite-home-relocation"
+            "--backup", backup, "--sqlite-home", sqliteHome,
+            "--no-config", "--allow-sqlite-home-relocation"
         ]);
 
         SwitchIntent switchIntent = Assert.IsType<SwitchIntent>(change.Invocation!.Intent);
@@ -60,6 +62,34 @@ public sealed class AutomationCommandLineTests
         Assert.True(restoreIntent.RestoreDatabase);
         Assert.True(restoreIntent.RestoreSessions);
         Assert.True(restoreIntent.AllowSqliteHomeRelocation);
+    }
+
+    [Theory]
+    [InlineData("restore")]
+    [InlineData("plan")]
+    public void SqliteHomeRelocation_RequiresExplicitSqliteHomeAndNoConfig(string command)
+    {
+        using TemporaryDirectory temporary = new();
+        string backup = Directory.CreateDirectory(Path.Combine(temporary.Path, "backup")).FullName;
+        string sqliteHome = Directory.CreateDirectory(Path.Combine(temporary.Path, "sqlite")).FullName;
+
+        List<string> missingSqlite = command == "plan"
+            ? ["plan", "--operation", "restore", "--codex-home", temporary.Path, "--backup", backup, "--no-config", "--allow-sqlite-home-relocation"]
+            : ["restore", "--codex-home", temporary.Path, "--backup", backup, "--no-config", "--allow-sqlite-home-relocation"];
+        List<string> restoresConfig = command == "plan"
+            ? ["plan", "--operation", "restore", "--codex-home", temporary.Path, "--backup", backup, "--sqlite-home", sqliteHome, "--allow-sqlite-home-relocation"]
+            : ["restore", "--codex-home", temporary.Path, "--backup", backup, "--sqlite-home", sqliteHome, "--allow-sqlite-home-relocation"];
+
+        AutomationParseResult withoutSqlite = AutomationCommandLine.Parse(missingSqlite);
+        AutomationParseResult withConfigRestore = AutomationCommandLine.Parse(restoresConfig);
+
+        Assert.Equal(AutomationExitCodes.ValidationOrUsage, withoutSqlite.Error!.ExitCode);
+        Assert.Equal(
+            "sqlite_home_relocation_requires_explicit_target_and_no_config",
+            Assert.Single(withoutSqlite.Error.Errors).Code);
+        Assert.Equal(
+            "sqlite_home_relocation_requires_explicit_target_and_no_config",
+            Assert.Single(withConfigRestore.Error!.Errors).Code);
     }
 
     [Fact]

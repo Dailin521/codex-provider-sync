@@ -235,6 +235,52 @@ public sealed class AutomationHostTests
         Assert.Equal("recovery", recovery.Response.Result);
     }
 
+    [Fact]
+    public async Task FailedBeforeApplying_UsesValidationExitCode()
+    {
+        using TemporaryDirectory temporary = new();
+        TestFactory factory = new();
+        factory.Write.PlanHandler = (_, _, _) => throw new ApplicationPortException(
+            "provider_missing",
+            "The selected provider is not configured.");
+
+        AutomationRunResult result = await new AutomationHost(factory).RunAsync(
+        [
+            "switch", "--codex-home", temporary.Path, "--provider", "missing",
+            "--ledger-root", Path.Combine(temporary.Path, "ledger")
+        ]);
+
+        Assert.Equal(AutomationExitCodes.ValidationOrUsage, result.ExitCode);
+        Assert.Equal("failed", result.Response.Lifecycle);
+        Assert.DoesNotContain(result.Response.Timeline, static entry =>
+            entry.Lifecycle == ApplicationOperationLifecycle.Applying);
+        Assert.Equal(0, factory.Write.ExecuteCalls);
+    }
+
+    [Fact]
+    public async Task FailedAfterApplyingWithoutCompleteRollback_FailsClosed()
+    {
+        using TemporaryDirectory temporary = new();
+        string ledger = Path.Combine(temporary.Path, "ledger");
+        string planPath = Path.Combine(temporary.Path, "plan.json");
+        TestFactory factory = new();
+        ApplicationOperationPlan plan = await CreateSyncPlanAsync(factory, temporary.Path, ledger, planPath);
+        factory.Write.SyncHandler = (_, _, _, _) => throw new ApplicationPortException(
+            "operation_failed",
+            "The mutation outcome is unknown.");
+
+        AutomationRunResult result = await ApplySyncAsync(
+            factory,
+            temporary.Path,
+            ledger,
+            planPath,
+            plan.Digest);
+
+        Assert.Equal(AutomationExitCodes.InternalProtocolFailure, result.ExitCode);
+        Assert.Contains(result.Response.Timeline, static entry =>
+            entry.Lifecycle == ApplicationOperationLifecycle.Applying);
+    }
+
     private static async Task<ApplicationOperationPlan> CreateSyncPlanAsync(
         TestFactory factory,
         string home,
