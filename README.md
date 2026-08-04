@@ -90,6 +90,34 @@ codex-provider sync --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/you
 
 `status` 会显示 effective SQLite Home 和来源。显式路径缺少 `state_5.sqlite` 时，状态查询只报告诊断，`sync`、`switch` 和数据库恢复不会偷偷回退到其它位置。默认布局中的数据库被删除时，`restore` 可以根据备份 metadata 在原默认位置重建数据库。
 
+### Business Automation API（v0.4 实验性）
+
+v0.4 Windows Release 构建同时包含 `CodexProviderSync.Automation.exe` 和 `automation-protocol-v0.4.schema.json`。这个一次性进程接口与 Windows GUI 共用同一套 Application 用例；每次调用只在 stdout 输出一份协议 `0.4` JSON，诊断信息写入 stderr。
+
+| 命令 | 用途 |
+| --- | --- |
+| `describe` | 描述协议能力和安全要求 |
+| `status` | 读取状态和诊断 |
+| `plan --operation sync\|switch\|restore\|prune` | 为指定写操作创建计划 |
+| `sync` | 规划或显式执行同步 |
+| `switch` | 规划或显式执行 Provider/model 切换与同步 |
+| `restore` | 规划或显式执行备份恢复 |
+| `prune` | 规划或显式清理托管备份 |
+
+所有写命令默认都是 dry-run，只返回计划，不会修改目标。实际写入必须同时提供 `--apply`、只包含 `plan` 响应中 `data` 对象的计划文件，以及该对象的精确小写 SHA-256 `digest`：
+
+```powershell
+.\CodexProviderSync.Automation.exe describe
+.\CodexProviderSync.Automation.exe status --codex-home C:\isolated\.codex
+.\CodexProviderSync.Automation.exe sync --codex-home C:\isolated\.codex --provider openai
+$planResponse = .\CodexProviderSync.Automation.exe plan --operation sync --codex-home C:\isolated\.codex --provider openai | ConvertFrom-Json
+$planResponse.data | ConvertTo-Json -Depth 100 -Compress | Set-Content -LiteralPath C:\isolated\sync-plan.json -Encoding utf8NoBOM
+$planDigest = $planResponse.data.digest
+.\CodexProviderSync.Automation.exe sync --codex-home C:\isolated\.codex --provider openai --apply --plan C:\isolated\sync-plan.json --plan-digest $planDigest
+```
+
+计划有有效期、绑定规范化输入和目标状态，并由持久化 ledger 保证只能使用一次；默认 ledger 位于 `<Codex Home>\tmp\provider-sync-automation-ledger`。所有路径参数必须是绝对路径，不能穿过符号链接或 reparse point，Automation 也拒绝直接指向或访问 `auth.json`。协议仍处于 pre-1.0 实验阶段，`0.4` 之外不承诺兼容。
+
 ## 安全与限制
 
 每次 `sync` / `switch` 前都会备份到：
@@ -111,6 +139,8 @@ codex-provider sync --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/you
 
 - [Windows GUI 说明](docs/README_GUI_ZH.md)
 - macOS GUI 说明：[中文](docs/README_MAC_GUI_ZH.md) · [English](docs/README_MAC_GUI_EN.md)
+- [v0.4.0 Release Notes（Draft）](docs/RELEASE_NOTES_V0.4.0.md)
+- [v0.4 Automation 执行计划](docs/V0.4_AUTOMATION_PLAN.md)
 - [English documentation](docs/README_EN.md)
 - [AI / Agent 操作指南](AGENTS.md)
 - [贡献指南](CONTRIBUTING.md)
@@ -124,10 +154,11 @@ npm test
 dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj
 ./scripts/test-wsl-unc-safety.sh
 pwsh ./scripts/publish-gui.ps1
+pwsh ./scripts/run-windows-gui-e2e.ps1
 ./scripts/publish-gui-macos.sh
 ```
 
-`test-wsl-unc-safety.sh` 需要从 WSL 运行，并调用 Windows `dotnet.exe` 验证真实 WSL ext4 SQLite 的安全阻断。
+`test-wsl-unc-safety.sh` 需要从 WSL 运行，并调用 Windows `dotnet.exe` 验证真实 WSL ext4 SQLite 的安全阻断。`run-windows-gui-e2e.ps1` 必须在可见、可交互的 Windows 桌面中运行。v0.4 的实现提交 `7545b5d` 已通过该 gate：40/40 manifest 入口覆盖、53/53 必需场景通过、0 error、0 blocker，且发布 EXE 哈希、真实控件事件、原生对话框、文件/SQLite 差异、重启持久化和 GUI → Application trace 均由证据门禁核验。后续若修改相关实现必须重新运行；隐藏、跳过或直接调用 Application 不能替代真实 GUI PASS。
 
 ## License
 

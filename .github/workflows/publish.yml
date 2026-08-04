@@ -44,10 +44,15 @@ jobs:
 
       - run: npm ci
       - run: npm test
-      - run: dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj
-      - run: dotnet test desktop/CodexProviderSync.App.Tests/CodexProviderSync.App.Tests.csproj
+      - run: dotnet build CodexProviderSync.sln --configuration Release
+      - run: dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj --configuration Release --no-build
+      - run: dotnet test desktop/CodexProviderSync.Application.Tests/CodexProviderSync.Application.Tests.csproj --configuration Release --no-build
+      - run: dotnet test desktop/CodexProviderSync.Automation.Tests/CodexProviderSync.Automation.Tests.csproj --configuration Release --no-build
+      - run: dotnet test desktop/CodexProviderSync.App.Tests/CodexProviderSync.App.Tests.csproj --configuration Release --no-build
+      - name: Run GUI E2E contract tests (not headful)
+        run: dotnet test desktop/CodexProviderSync.GuiE2E.Tests/CodexProviderSync.GuiE2E.Tests.csproj --configuration Release --no-build
 
-      - name: Build Windows GUI
+      - name: Build Windows GUI and Business Automation API
         shell: pwsh
         run: ./scripts/publish-gui.ps1 -Output artifacts/win-x64
 

@@ -11,6 +11,8 @@ public sealed class SessionRolloutService
     private const string StatusOnlyProvider = "__status_only__";
     private const int ScanBufferSize = 1024 * 1024;
 
+    internal Func<string, SessionChange, Task>? ApplyFaultInjector { get; set; }
+
     public async Task<SessionChangeCollection> CollectSessionChangesAsync(
         string codexHome,
         string targetProvider,
@@ -35,7 +37,9 @@ public sealed class SessionRolloutService
                 continue;
             }
 
-            foreach (string rolloutPath in Directory.EnumerateFiles(rootDir, "rollout-*.jsonl", SearchOption.AllDirectories))
+            foreach (string rolloutPath in Directory
+                .EnumerateFiles(rootDir, "rollout-*.jsonl", SearchOption.AllDirectories)
+                .Order(StringComparer.Ordinal))
             {
                 FirstLineRecord record;
                 try
@@ -97,13 +101,19 @@ public sealed class SessionRolloutService
 
                 bool providerChanged = !string.Equals(targetProvider, StatusOnlyProvider, StringComparison.Ordinal)
                     && !string.Equals(currentProvider, targetProvider, StringComparison.Ordinal);
+                IReadOnlyList<TurnContextModelBackup> currentModelBackups = [];
                 IReadOnlyList<string> currentModels = [];
                 bool modelChanged = false;
                 if (!string.IsNullOrEmpty(targetModel))
                 {
                     try
                     {
-                        currentModels = await ReadTurnContextModelsAsync(rolloutPath, record);
+                        currentModelBackups = await ReadTurnContextModelBackupsAsync(rolloutPath, record);
+                        currentModels = currentModelBackups
+                            .SelectMany(static backup => backup.OriginalModels.Count > 0
+                                ? backup.OriginalModels
+                                : [backup.OriginalModel])
+                            .ToArray();
                         modelChanged = currentModels.Any(model => !string.Equals(model, targetModel, StringComparison.Ordinal));
                     }
                     catch (Exception error) when (skipLockedReads && IsRolloutFileBusyError(error))
@@ -137,7 +147,8 @@ public sealed class SessionRolloutService
                         OriginalLastWriteTimeUtcTicks = snapshot.LastWriteTimeUtcTicks,
                         OriginalProvider = currentProvider,
                         UpdatedFirstLine = providerChanged ? root!.ToJsonString() : record.FirstLine,
-                        ModelOnlyChange = !providerChanged && modelChanged
+                        ModelOnlyChange = !providerChanged && modelChanged,
+                        OriginalTurnContextModels = currentModelBackups
                     });
                 }
             }
@@ -165,7 +176,10 @@ public sealed class SessionRolloutService
 
     public async Task<SessionApplyResult> ApplySessionChangesAsync(
         IEnumerable<SessionChange> changes,
-        string? targetModel = null)
+        string? targetModel = null,
+        Func<SessionChange, Task>? onBeforeApply = null,
+        Func<SessionChange, Task>? onApplied = null,
+        Func<SessionChange, Task>? onSkipped = null)
     {
         int appliedCount = 0;
         List<string> appliedPaths = [];
@@ -173,10 +187,18 @@ public sealed class SessionRolloutService
 
         foreach (SessionChange change in changes)
         {
+            if (onBeforeApply is not null)
+            {
+                await onBeforeApply(change);
+            }
             bool providerApplied = change.ModelOnlyChange || await TryRewriteCollectedSessionChangeAsync(change);
             if (!providerApplied)
             {
                 skippedPaths.Add(change.Path);
+                if (onSkipped is not null)
+                {
+                    await onSkipped(change);
+                }
                 continue;
             }
 
@@ -185,6 +207,10 @@ public sealed class SessionRolloutService
             {
                 if (!string.IsNullOrEmpty(targetModel))
                 {
+                    if (ApplyFaultInjector is not null)
+                    {
+                        await ApplyFaultInjector("after-provider-before-model", change);
+                    }
                     modelResult = await TryRewriteRolloutModelFieldAsync(change, targetModel);
                     change.OriginalTurnContextModels = modelResult.OriginalModels;
                 }
@@ -204,12 +230,20 @@ public sealed class SessionRolloutService
             if (change.ModelOnlyChange && modelResult.ReplacedLines == 0)
             {
                 skippedPaths.Add(change.Path);
+                if (onSkipped is not null)
+                {
+                    await onSkipped(change);
+                }
                 continue;
             }
 
             TryRestoreLastWriteTimeUtc(change.Path, change.OriginalLastWriteTimeUtcTicks);
             appliedCount += 1;
             appliedPaths.Add(change.Path);
+            if (onApplied is not null)
+            {
+                await onApplied(change);
+            }
         }
 
         appliedPaths.Sort(StringComparer.Ordinal);
@@ -280,22 +314,14 @@ public sealed class SessionRolloutService
                     entry.OriginalTurnContextModels,
                     entry.OriginalSeparator);
             }
-            TryRestoreLastWriteTimeUtc(entry.Path, entry.OriginalLastWriteTimeUtcTicks);
+            TryRestoreLastWriteTimeUtc(entry.Path, entry.ResolveOriginalLastWriteTimeUtcTicks());
         }
     }
 
     internal Task RestoreSessionChangesAsync(IEnumerable<SessionChange> changes)
     {
         return RestoreSessionChangesAsync(
-            changes.Select(static change => new SessionBackupManifestEntry
-            {
-                Path = change.Path,
-                OriginalFirstLine = change.OriginalFirstLine,
-                OriginalSeparator = change.OriginalSeparator,
-                OriginalLastWriteTimeUtcTicks = change.OriginalLastWriteTimeUtcTicks,
-                ModelOnlyChange = change.ModelOnlyChange,
-                OriginalTurnContextModels = [.. change.OriginalTurnContextModels]
-            }));
+            changes.Select(SessionBackupManifestEntry.FromChange));
     }
 
     private static bool TryParseSessionMetaRecord(
@@ -473,11 +499,11 @@ public sealed class SessionRolloutService
         "\"model\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    private static async Task<IReadOnlyList<string>> ReadTurnContextModelsAsync(
+    private static async Task<IReadOnlyList<TurnContextModelBackup>> ReadTurnContextModelBackupsAsync(
         string rolloutPath,
         FirstLineRecord record)
     {
-        List<string> models = [];
+        List<TurnContextModelBackup> backups = [];
         try
         {
             await using FileStream stream = new(
@@ -487,22 +513,25 @@ public sealed class SessionRolloutService
                 FileShare.ReadWrite | FileShare.Delete);
             stream.Seek(record.Offset, SeekOrigin.Begin);
             using StreamReader reader = new(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, bufferSize: 4096, leaveOpen: true);
+            int lineIndex = 1;
             string? line;
             while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) is not null)
             {
                 if (!TurnContextTypeRegex.IsMatch(line))
                 {
+                    lineIndex += 1;
                     continue;
                 }
 
+                List<string> originals = [];
                 foreach (Match match in TurnContextModelFieldRegex.Matches(line))
                 {
                     try
                     {
                         string? model = JsonSerializer.Deserialize<string>($"\"{match.Groups[1].Value}\"");
-                        if (!string.IsNullOrEmpty(model))
+                        if (model is not null)
                         {
-                            models.Add(model);
+                            originals.Add(model);
                         }
                     }
                     catch (JsonException)
@@ -510,8 +539,18 @@ public sealed class SessionRolloutService
                         // Leave malformed model literals untouched.
                     }
                 }
+                if (originals.Count > 0)
+                {
+                    backups.Add(new TurnContextModelBackup
+                    {
+                        LineIndex = lineIndex,
+                        OriginalModel = originals[0],
+                        OriginalModels = originals
+                    });
+                }
+                lineIndex += 1;
             }
-            return models;
+            return backups;
         }
         catch (Exception error) when (IsRolloutFileBusyError(error))
         {
@@ -550,6 +589,7 @@ public sealed class SessionRolloutService
             sourceStream.Seek(0, SeekOrigin.Begin);
             string separator = change.OriginalSeparator == "\r\n" ? "\r\n" : "\n";
             List<TurnContextModelBackup> originalModels = [];
+            List<TurnContextModelBackup> observedModels = [];
             int replacements = 0;
 
             using (StreamReader reader = new(
@@ -583,6 +623,15 @@ public sealed class SessionRolloutService
                             OriginalModels = lineResult.OriginalModels
                         });
                     }
+                    if (lineResult.OriginalModels.Count > 0)
+                    {
+                        observedModels.Add(new TurnContextModelBackup
+                        {
+                            LineIndex = lineIndex,
+                            OriginalModel = lineResult.OriginalModels[0],
+                            OriginalModels = lineResult.OriginalModels
+                        });
+                    }
                     if (!firstLine)
                     {
                         await writer.WriteAsync(separator);
@@ -597,15 +646,20 @@ public sealed class SessionRolloutService
                 }
             }
 
+            if (!ModelSnapshotsMatch(change.OriginalTurnContextModels, observedModels))
+            {
+                File.Delete(tempPath);
+                throw new InvalidOperationException(
+                    $"Rollout file changed after it was scanned; refusing to rewrite newly appended turn_context records: {change.Path}");
+            }
+
             if (replacements == 0)
             {
                 File.Delete(tempPath);
                 return ModelRewriteResult.Empty;
             }
 
-            await OverwriteOpenFileFromTempAsync(sourceStream, tempPath);
-
-            File.Delete(tempPath);
+            await AtomicFile.ReplaceOpenFileFromTempAsync(sourceStream, tempPath);
             return new ModelRewriteResult(replacements, originalModels);
         }
         catch (Exception error)
@@ -620,6 +674,33 @@ public sealed class SessionRolloutService
             }
             throw WrapRolloutFileBusyError(error, change.Path, "rewrite model field");
         }
+    }
+
+    private static bool ModelSnapshotsMatch(
+        IReadOnlyList<TurnContextModelBackup> expected,
+        IReadOnlyList<TurnContextModelBackup> observed)
+    {
+        if (expected.Count != observed.Count)
+        {
+            return false;
+        }
+        for (int index = 0; index < expected.Count; index += 1)
+        {
+            TurnContextModelBackup left = expected[index];
+            TurnContextModelBackup right = observed[index];
+            IReadOnlyList<string> leftModels = left.OriginalModels.Count > 0
+                ? left.OriginalModels
+                : [left.OriginalModel];
+            IReadOnlyList<string> rightModels = right.OriginalModels.Count > 0
+                ? right.OriginalModels
+                : [right.OriginalModel];
+            if (left.LineIndex != right.LineIndex
+                || !leftModels.SequenceEqual(rightModels, StringComparer.Ordinal))
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static ModelLineRewrite RewriteTurnContextModelInLine(string line, string newModel)
@@ -732,8 +813,7 @@ public sealed class SessionRolloutService
                 return;
             }
 
-            await OverwriteOpenFileFromTempAsync(sourceStream, tempPath);
-            File.Delete(tempPath);
+            await AtomicFile.ReplaceOpenFileFromTempAsync(sourceStream, tempPath);
         }
         catch (Exception error)
         {
@@ -786,69 +866,6 @@ public sealed class SessionRolloutService
         return bytesRead == 1 && tail[0] == (byte)'\n';
     }
 
-    private static async Task OverwriteOpenFileFromTempAsync(
-        FileStream destination,
-        string tempPath)
-    {
-        string rollbackPath = $"{tempPath}.rollback";
-        try
-        {
-            destination.Seek(0, SeekOrigin.Begin);
-            await using (FileStream rollbackWriter = new(
-                rollbackPath,
-                FileMode.CreateNew,
-                FileAccess.Write,
-                FileShare.None,
-                64 * 1024,
-                FileOptions.Asynchronous | FileOptions.SequentialScan))
-            {
-                await destination.CopyToAsync(rollbackWriter);
-                await rollbackWriter.FlushAsync();
-            }
-
-            try
-            {
-                await using FileStream tempReader = new(
-                    tempPath,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.Read,
-                    64 * 1024,
-                    FileOptions.Asynchronous | FileOptions.SequentialScan);
-                destination.SetLength(0);
-                destination.Seek(0, SeekOrigin.Begin);
-                await tempReader.CopyToAsync(destination);
-                await destination.FlushAsync();
-            }
-            catch
-            {
-                await using FileStream rollbackReader = new(
-                    rollbackPath,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.Read,
-                    64 * 1024,
-                    FileOptions.Asynchronous | FileOptions.SequentialScan);
-                destination.SetLength(0);
-                destination.Seek(0, SeekOrigin.Begin);
-                await rollbackReader.CopyToAsync(destination);
-                await destination.FlushAsync();
-                throw;
-            }
-        }
-        finally
-        {
-            try
-            {
-                File.Delete(rollbackPath);
-            }
-            catch
-            {
-                // The original exception, if any, is more useful than cleanup failure.
-            }
-        }
-    }
-
     private static async Task RewriteFirstLineAsync(
         FileStream sourceStream,
         string filePath,
@@ -884,21 +901,7 @@ public sealed class SessionRolloutService
                 }
             }
 
-            await using (FileStream tempReader = new(
-                tempPath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                64 * 1024,
-                FileOptions.Asynchronous | FileOptions.SequentialScan))
-            {
-                sourceStream.SetLength(0);
-                sourceStream.Seek(0, SeekOrigin.Begin);
-                await tempReader.CopyToAsync(sourceStream);
-                await sourceStream.FlushAsync();
-            }
-
-            File.Delete(tempPath);
+            await AtomicFile.ReplaceOpenFileFromTempAsync(sourceStream, tempPath);
         }
         catch
         {

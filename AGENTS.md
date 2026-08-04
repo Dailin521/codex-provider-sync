@@ -17,6 +17,22 @@ The tool works by updating both:
 - rollout metadata under `~/.codex/sessions` and `~/.codex/archived_sessions`
 - SQLite thread metadata in the resolved Codex state database
 
+## Architecture Direction
+
+`docs/AUTOMATION_DESIGN_NOTES.md` records the experimental 0.x direction.
+It is not a public compatibility contract. No Automation executable, stable
+JSONL protocol, or UI probe is currently shipped.
+
+For Windows GUI work:
+
+- move UI-independent state, validation, and Core request construction into the
+  Application/controller layer incrementally
+- keep Core authoritative for config, rollout, SQLite, backup, restore, and
+  storage-safety behavior
+- keep WinForms handlers focused on presentation and platform interaction
+- preserve observable behavior and add controller tests for each migrated slice
+- prefer controller tests over adding new reflection-based MainForm business tests
+
 Resolve SQLite Home in this order: explicit CLI/GUI override, root `sqlite_home` in `config.toml`, `CODEX_SQLITE_HOME`, then `<codex-home>/sqlite`. Only the default layout may fall back to `<codex-home>/state_5.sqlite`. Never fall back when an explicit/config/environment SQLite Home is missing.
 
 On Windows, `\\wsl.localhost\...` and `\\wsl$\...` SQLite Homes are diagnostic-only. SQLite operations for these paths run inside WSL and use the corresponding Linux path.

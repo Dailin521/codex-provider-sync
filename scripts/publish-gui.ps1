@@ -6,9 +6,22 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+$repoRoot = [System.IO.Path]::GetFullPath((Resolve-Path (Join-Path $PSScriptRoot "..")).Path)
 $project = Join-Path $repoRoot "desktop\CodexProviderSync.App\CodexProviderSync.App.csproj"
-$outputDir = Join-Path $repoRoot $Output
+$automationProject = Join-Path $repoRoot "desktop\CodexProviderSync.Automation\CodexProviderSync.Automation.csproj"
+$outputDir = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $Output))
+$automationOutputDir = [System.IO.Path]::GetFullPath("$outputDir-automation")
+
+function Assert-WorkspaceOutputPath([string]$Candidate, [string]$Label) {
+    $prefix = $repoRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+    if ($Candidate.Equals($repoRoot, [System.StringComparison]::OrdinalIgnoreCase) `
+        -or -not $Candidate.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Label must stay inside the repository workspace: $Candidate"
+    }
+}
+
+Assert-WorkspaceOutputPath $outputDir "Publish output"
+Assert-WorkspaceOutputPath $automationOutputDir "Automation staging output"
 
 if (Test-Path $outputDir) {
     try {
@@ -17,6 +30,10 @@ if (Test-Path $outputDir) {
     catch {
         throw "Unable to clean publish output '$outputDir'. Close CodexProviderSync.exe if it is still running, or pass -Output to publish into a different directory."
     }
+}
+
+if (Test-Path $automationOutputDir) {
+    Remove-Item -Recurse -Force $automationOutputDir
 }
 
 dotnet publish $project `
@@ -31,7 +48,37 @@ dotnet publish $project `
     /p:DebugSymbols=false
 
 if ($LASTEXITCODE -ne 0) {
-    throw "dotnet publish failed with exit code $LASTEXITCODE"
+    throw "GUI dotnet publish failed with exit code $LASTEXITCODE"
 }
 
-Write-Host "GUI build published to $outputDir"
+try {
+    dotnet publish $automationProject `
+        --runtime $Runtime `
+        -c $Configuration `
+        --self-contained true `
+        -o $automationOutputDir `
+        /p:PublishSingleFile=true `
+        /p:IncludeNativeLibrariesForSelfExtract=true `
+        /p:EnableCompressionInSingleFile=true `
+        /p:DebugType=None `
+        /p:DebugSymbols=false
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Business Automation API dotnet publish failed with exit code $LASTEXITCODE"
+    }
+
+    $automationExecutable = Join-Path $automationOutputDir "CodexProviderSync.Automation.exe"
+    $automationSchema = Join-Path $automationOutputDir "automation-protocol-v0.4.schema.json"
+    if (-not (Test-Path -LiteralPath $automationExecutable) -or -not (Test-Path -LiteralPath $automationSchema)) {
+        throw "Business Automation API publish output is incomplete."
+    }
+    Copy-Item -LiteralPath $automationExecutable -Destination $outputDir -Force
+    Copy-Item -LiteralPath $automationSchema -Destination $outputDir -Force
+}
+finally {
+    if (Test-Path -LiteralPath $automationOutputDir) {
+        Remove-Item -Recurse -Force -LiteralPath $automationOutputDir
+    }
+}
+
+Write-Host "Windows GUI and Business Automation API published to $outputDir"

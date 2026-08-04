@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { writeFileAtomic } from "./atomic-file.js";
 
 import { DEFAULT_PROVIDER } from "./constants.js";
 
@@ -219,5 +220,5 @@ export function setRootModelInConfigText(configText, model) {
 }
 
 export async function writeConfigText(configPath, configText) {
-  await fs.writeFile(configPath, configText, "utf8");
+  await writeFileAtomic(configPath, configText, "utf8");
 }

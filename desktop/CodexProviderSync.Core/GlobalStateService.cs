@@ -102,7 +102,9 @@ public sealed class GlobalStateService
 
     public async Task<WorkspaceRootSyncResult> SyncWorkspaceRootsAsync(
         CodexStorageLayout storage,
-        IReadOnlyList<ThreadCwdStat>? cwdStats = null)
+        IReadOnlyList<ThreadCwdStat>? cwdStats = null,
+        Func<string, Task>? onBeforeWrite = null,
+        Func<string, Task>? onApplied = null)
     {
         string codexHome = storage.CodexHome;
         string statePath = StatePath(codexHome);
@@ -177,8 +179,25 @@ public sealed class GlobalStateService
         if (updated)
         {
             string json = state.ToJsonString(JsonOptions()) + Environment.NewLine;
-            await File.WriteAllTextAsync(statePath, json);
-            await File.WriteAllTextAsync(BackupPath(codexHome), json);
+            if (onBeforeWrite is not null)
+            {
+                await onBeforeWrite(statePath);
+            }
+            await AtomicFile.WriteAllTextAsync(statePath, json);
+            if (onApplied is not null)
+            {
+                await onApplied(statePath);
+            }
+            string backupPath = BackupPath(codexHome);
+            if (onBeforeWrite is not null)
+            {
+                await onBeforeWrite(backupPath);
+            }
+            await AtomicFile.WriteAllTextAsync(backupPath, json);
+            if (onApplied is not null)
+            {
+                await onApplied(backupPath);
+            }
         }
 
         return new WorkspaceRootSyncResult
