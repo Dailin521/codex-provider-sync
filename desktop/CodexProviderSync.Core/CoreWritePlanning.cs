@@ -42,7 +42,11 @@ public sealed class CoreWritePlanExpiredException : InvalidOperationException
 internal enum CoreWriteFingerprintMode
 {
     Content,
-    RecursiveInventory
+    RecursiveInventory,
+    // SQLite file timestamps and WAL-index/SHM state can change on a read-only
+    // open. Bind checked writes to durable main/WAL bytes instead.
+    SqliteMainContent,
+    SqliteWalContent
 }
 
 internal sealed record CoreWriteTargetSpec(
@@ -52,7 +56,7 @@ internal sealed record CoreWriteTargetSpec(
 
 internal static class CoreWriteSnapshotBuilder
 {
-    private const string FormatVersion = "core-write-snapshot-v1";
+    private const string FormatVersion = "core-write-snapshot-v2";
 
     public static async Task<CoreWritePlanSnapshot> BuildAsync(
         string operation,
@@ -166,6 +170,10 @@ internal static class CoreWriteSnapshotBuilder
         cancellationToken.ThrowIfCancellationRequested();
         if (!File.Exists(fullPath) && !Directory.Exists(fullPath))
         {
+            if (mode == CoreWriteFingerprintMode.SqliteWalContent)
+            {
+                return FingerprintEmptySqliteWal(fullPath);
+            }
             return Sha256($"missing\n{fullPath}");
         }
 
@@ -177,9 +185,19 @@ internal static class CoreWriteSnapshotBuilder
         }
         return (attributes & FileAttributes.Directory) != 0
             ? await FingerprintDirectoryAsync(fullPath, mode, cancellationToken)
-            : mode == CoreWriteFingerprintMode.RecursiveInventory
-                ? FingerprintFileInventory(fullPath, attributes)
-                : await FingerprintFileAsync(fullPath, cancellationToken);
+            : mode switch
+            {
+                CoreWriteFingerprintMode.RecursiveInventory => FingerprintFileInventory(fullPath, attributes),
+                CoreWriteFingerprintMode.SqliteMainContent => await FingerprintSqliteFileAsync(
+                    fullPath,
+                    normalizeEmptyWal: false,
+                    cancellationToken),
+                CoreWriteFingerprintMode.SqliteWalContent => await FingerprintSqliteFileAsync(
+                    fullPath,
+                    normalizeEmptyWal: true,
+                    cancellationToken),
+                _ => await FingerprintFileAsync(fullPath, cancellationToken)
+            };
     }
 
     private static async Task<string> FingerprintDirectoryAsync(
@@ -257,6 +275,49 @@ internal static class CoreWriteSnapshotBuilder
         {
             return Sha256($"missing\n{filePath}");
         }
+    }
+
+    private static async Task<string> FingerprintSqliteFileAsync(
+        string filePath,
+        bool normalizeEmptyWal,
+        CancellationToken cancellationToken)
+    {
+        FileInfo before = new(filePath);
+        long beforeLength = before.Length;
+        try
+        {
+            await using FileStream stream = new(
+                filePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete,
+                64 * 1024,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            byte[] digest = await SHA256.HashDataAsync(stream, cancellationToken);
+            FileInfo after = new(filePath);
+            if (!after.Exists || after.Length != beforeLength)
+            {
+                throw new CoreWritePlanStaleException();
+            }
+
+            if (normalizeEmptyWal && beforeLength == 0)
+            {
+                return FingerprintEmptySqliteWal(filePath);
+            }
+
+            return $"sqlite-sha256:{Convert.ToHexString(digest).ToLowerInvariant()}:{beforeLength}";
+        }
+        catch (FileNotFoundException)
+        {
+            return normalizeEmptyWal
+                ? FingerprintEmptySqliteWal(filePath)
+                : Sha256($"missing\n{filePath}");
+        }
+    }
+
+    private static string FingerprintEmptySqliteWal(string filePath)
+    {
+        return Sha256($"sqlite-wal-empty\n{filePath}");
     }
 
     private static string Sha256(string value)

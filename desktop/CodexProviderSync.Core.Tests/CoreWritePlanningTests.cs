@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using Microsoft.Data.Sqlite;
+
 namespace CodexProviderSync.Core.Tests;
 
 public sealed class CoreWritePlanningTests
@@ -192,5 +195,198 @@ public sealed class CoreWritePlanningTests
 
         Assert.Contains(foreignBackup, error.PendingBackupDirectories);
         Assert.Equal(before, await File.ReadAllTextAsync(rolloutPath));
+    }
+
+    [Fact]
+    public async Task SqliteCheckedPlans_TrackMainAndWalButExcludeVolatileShm()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string rolloutPath = fixture.RolloutPath("sessions", "rollout-sqlite-plan-targets.jsonl");
+        await fixture.WriteRolloutAsync(rolloutPath, "thread-sqlite-plan-targets", "relay");
+        await fixture.WriteStateDbAsync([("thread-sqlite-plan-targets", "relay", false)]);
+
+        string databasePath = Path.GetFullPath(fixture.StateDbPath());
+        CodexSyncService service = new();
+        CoreWritePlanSnapshot syncPlan = await service.CreateSyncPlanSnapshotAsync(
+            fixture.CodexHome,
+            provider: "openai");
+
+        Assert.Contains(syncPlan.Targets, target => target.Path == databasePath);
+        Assert.Contains(syncPlan.Targets, target => target.Path == databasePath + "-wal");
+        Assert.DoesNotContain(syncPlan.Targets, target => target.Path == databasePath + "-shm");
+
+        SyncResult sync = await service.RunSyncAsync(fixture.CodexHome, provider: "openai");
+        CoreWritePlanSnapshot restorePlan = await service.CreateRestorePlanSnapshotAsync(
+            fixture.CodexHome,
+            sync.BackupDir,
+            new RestoreBackupOptions());
+
+        Assert.Contains(restorePlan.Targets, target => target.Path == databasePath);
+        Assert.Contains(restorePlan.Targets, target => target.Path == databasePath + "-wal");
+        Assert.DoesNotContain(restorePlan.Targets, target => target.Path == databasePath + "-shm");
+    }
+
+    [Fact]
+    public async Task CheckedRestore_AllowsSqliteMetadataAndShmChurnFromReadOnlyStatus()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string rolloutPath = fixture.RolloutPath("sessions", "rollout-restore-shm-churn.jsonl");
+        await fixture.WriteRolloutAsync(rolloutPath, "thread-restore-shm-churn", "relay");
+        await fixture.WriteStateDbAsync([("thread-restore-shm-churn", "relay", false)]);
+
+        CodexSyncService service = new();
+        SyncResult sync = await service.RunSyncAsync(fixture.CodexHome, provider: "openai");
+        await using SqliteConnection keeper = fixture.OpenSqliteConnection();
+        await keeper.OpenAsync();
+        await EnableWalAsync(keeper);
+        await SetProviderAsync(keeper, "live-before-restore");
+
+        string databasePath = fixture.StateDbPath();
+        string walPath = databasePath + "-wal";
+        string shmPath = databasePath + "-shm";
+        Assert.True(File.Exists(walPath));
+        Assert.True(File.Exists(shmPath));
+        CoreWritePlanSnapshot plan = await service.CreateRestorePlanSnapshotAsync(
+            fixture.CodexHome,
+            sync.BackupDir,
+            new RestoreBackupOptions());
+        string mainBefore = await DigestFileAsync(databasePath);
+        string walBefore = await DigestFileAsync(walPath);
+
+        _ = await service.GetStatusAsync(fixture.CodexHome);
+        Assert.Equal(mainBefore, await DigestFileAsync(databasePath));
+        Assert.Equal(walBefore, await DigestFileAsync(walPath));
+
+        // File timestamps are not logical SQLite state. Force deterministic
+        // metadata-only drift on the durable main file and the derived SHM
+        // coordination file; neither main nor WAL content changes here.
+        DateTime mainWriteTime = File.GetLastWriteTimeUtc(databasePath);
+        File.SetLastWriteTimeUtc(databasePath, mainWriteTime.AddSeconds(2));
+        DateTime shmWriteTime = File.GetLastWriteTimeUtc(shmPath);
+        File.SetLastWriteTimeUtc(shmPath, shmWriteTime.AddSeconds(2));
+        Assert.Equal(mainBefore, await DigestFileAsync(databasePath));
+        Assert.Equal(walBefore, await DigestFileAsync(walPath));
+
+        RestoreResult result = await service.RunRestoreCheckedAsync(
+            plan,
+            fixture.CodexHome,
+            sync.BackupDir,
+            new RestoreBackupOptions());
+
+        Assert.Equal(sync.BackupDir, result.BackupDir);
+        Assert.Equal("relay", await ReadProviderAsync(keeper));
+    }
+
+    [Fact]
+    public async Task SqliteWalFingerprint_TreatsMissingAndZeroLengthAsEquivalent()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        string walPath = Path.Combine(fixture.Root, "sqlite", AppConstants.DbFileBasename + "-wal");
+        CoreWriteTargetSpec walTarget = new(
+            walPath,
+            "update-if-present",
+            CoreWriteFingerprintMode.SqliteWalContent);
+
+        CoreWritePlanSnapshot missing = await CoreWriteSnapshotBuilder.BuildAsync(
+            "sync",
+            "sqlite-wal-normalization",
+            [walTarget]);
+        Directory.CreateDirectory(Path.GetDirectoryName(walPath)!);
+        await File.WriteAllBytesAsync(walPath, []);
+        CoreWritePlanSnapshot empty = await CoreWriteSnapshotBuilder.BuildAsync(
+            "sync",
+            "sqlite-wal-normalization",
+            [walTarget]);
+
+        CoreWriteSnapshotBuilder.AssertExactMatch(missing, empty);
+        Assert.Equal(
+            Assert.Single(missing.Targets).Fingerprint,
+            Assert.Single(empty.Targets).Fingerprint);
+
+        File.Delete(walPath);
+        CoreWritePlanSnapshot missingAgain = await CoreWriteSnapshotBuilder.BuildAsync(
+            "sync",
+            "sqlite-wal-normalization",
+            [walTarget]);
+        CoreWriteSnapshotBuilder.AssertExactMatch(empty, missingAgain);
+    }
+
+    [Fact]
+    public async Task CheckedRestore_RejectsCommittedWalDriftBeforeMutation()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string rolloutPath = fixture.RolloutPath("sessions", "rollout-restore-wal-drift.jsonl");
+        await fixture.WriteRolloutAsync(rolloutPath, "thread-restore-wal-drift", "relay");
+        await fixture.WriteStateDbAsync([("thread-restore-wal-drift", "relay", false)]);
+
+        CodexSyncService service = new();
+        SyncResult sync = await service.RunSyncAsync(fixture.CodexHome, provider: "openai");
+        await using SqliteConnection keeper = fixture.OpenSqliteConnection();
+        await keeper.OpenAsync();
+        await EnableWalAsync(keeper);
+        await SetProviderAsync(keeper, "live-before-plan");
+
+        string databasePath = fixture.StateDbPath();
+        string walPath = databasePath + "-wal";
+        CoreWritePlanSnapshot plan = await service.CreateRestorePlanSnapshotAsync(
+            fixture.CodexHome,
+            sync.BackupDir,
+            new RestoreBackupOptions());
+        string mainBefore = await DigestFileAsync(databasePath);
+        string walBefore = await DigestFileAsync(walPath);
+
+        await SetProviderAsync(keeper, "committed-after-plan");
+
+        Assert.Equal(mainBefore, await DigestFileAsync(databasePath));
+        Assert.NotEqual(walBefore, await DigestFileAsync(walPath));
+        await Assert.ThrowsAsync<CoreWritePlanStaleException>(() =>
+            service.RunRestoreCheckedAsync(
+                plan,
+                fixture.CodexHome,
+                sync.BackupDir,
+                new RestoreBackupOptions()));
+        Assert.Equal("committed-after-plan", await ReadProviderAsync(keeper));
+    }
+
+    private static async Task EnableWalAsync(SqliteConnection connection)
+    {
+        await using SqliteCommand journalMode = connection.CreateCommand();
+        journalMode.CommandText = "PRAGMA journal_mode = WAL";
+        Assert.Equal("wal", Convert.ToString(await journalMode.ExecuteScalarAsync()));
+
+        await using SqliteCommand autoCheckpoint = connection.CreateCommand();
+        autoCheckpoint.CommandText = "PRAGMA wal_autocheckpoint = 0";
+        await autoCheckpoint.ExecuteNonQueryAsync();
+    }
+
+    private static async Task SetProviderAsync(SqliteConnection connection, string provider)
+    {
+        await using SqliteCommand command = connection.CreateCommand();
+        command.CommandText = "UPDATE threads SET model_provider = $provider";
+        command.Parameters.AddWithValue("$provider", provider);
+        Assert.Equal(1, await command.ExecuteNonQueryAsync());
+    }
+
+    private static async Task<string> ReadProviderAsync(SqliteConnection connection)
+    {
+        await using SqliteCommand command = connection.CreateCommand();
+        command.CommandText = "SELECT model_provider FROM threads LIMIT 1";
+        return Convert.ToString(await command.ExecuteScalarAsync())!;
+    }
+
+    private static async Task<string> DigestFileAsync(string path)
+    {
+        await using FileStream stream = new(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete,
+            64 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        byte[] digest = await SHA256.HashDataAsync(stream);
+        return Convert.ToHexString(digest);
     }
 }

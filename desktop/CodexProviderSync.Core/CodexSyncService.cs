@@ -285,9 +285,14 @@ public sealed class CodexSyncService
             static change => new CoreWriteTargetSpec(change.Path, "replace")));
         if (preparation.Storage.StateDbLocation is { } stateDb)
         {
-            targets.Add(new CoreWriteTargetSpec(stateDb.Path, "update"));
-            targets.Add(new CoreWriteTargetSpec(stateDb.Path + "-wal", "update-if-present"));
-            targets.Add(new CoreWriteTargetSpec(stateDb.Path + "-shm", "update-if-present"));
+            targets.Add(new CoreWriteTargetSpec(
+                stateDb.Path,
+                "update",
+                CoreWriteFingerprintMode.SqliteMainContent));
+            targets.Add(new CoreWriteTargetSpec(
+                stateDb.Path + "-wal",
+                "update-if-present",
+                CoreWriteFingerprintMode.SqliteWalContent));
         }
 
         List<CoreWritePlanWarning> warnings = [];
@@ -1194,9 +1199,14 @@ public sealed class CodexSyncService
         {
             string databasePath = preparation.Storage.StateDbLocation?.Path
                 ?? Path.Combine(preparation.Storage.SqliteHome, AppConstants.DbFileBasename);
-            targets.Add(new CoreWriteTargetSpec(databasePath, "restore"));
-            targets.Add(new CoreWriteTargetSpec(databasePath + "-wal", "restore-if-present"));
-            targets.Add(new CoreWriteTargetSpec(databasePath + "-shm", "restore-if-present"));
+            targets.Add(new CoreWriteTargetSpec(
+                databasePath,
+                "restore",
+                CoreWriteFingerprintMode.SqliteMainContent));
+            targets.Add(new CoreWriteTargetSpec(
+                databasePath + "-wal",
+                "restore-if-present",
+                CoreWriteFingerprintMode.SqliteWalContent));
         }
 
         string binding = System.Text.Json.JsonSerializer.Serialize(new
