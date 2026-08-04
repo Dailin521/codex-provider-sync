@@ -5,6 +5,16 @@
     <ProjectReference Include="..\CodexProviderSync.Core\CodexProviderSync.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="Automation\gui-automation-manifest.v0.4.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <EmbeddedResource Include="Automation\gui-automation-manifest.v0.4.json">
+      <LogicalName>CodexProviderSync.App.Automation.gui-automation-manifest.v0.4.json</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>

@@ -1,6 +1,5 @@
 using System.Globalization;
 using System.Text;
-using CodexProviderSync.Core;
 
 namespace CodexProviderSync.App;
 
@@ -26,7 +25,7 @@ internal sealed class ExecutionLogService
         }
 
         LogDirectory = string.IsNullOrWhiteSpace(logDirectory)
-            ? Path.Combine(AppConstants.SettingsDirectory(), "logs")
+            ? new SystemAppPathProvider().LogDirectory
             : Path.GetFullPath(logDirectory);
         _clock = clock ?? (() => DateTimeOffset.Now);
         _retentionDays = retentionDays;

@@ -1,6 +1,7 @@
-using System.Diagnostics;
+using CodexProviderSync.App.Automation;
 using CodexProviderSync.Application;
 using CodexProviderSync.Core;
+using System.Text.Json;
 
 namespace CodexProviderSync.App;
 
@@ -13,6 +14,8 @@ public sealed class MainForm : Form
     private readonly SettingsService _settingsService;
     private readonly UpdateService _updateService;
     private readonly ExecutionLogService _executionLogService;
+    private readonly IAppPathProvider _paths;
+    private readonly IAppPlatformBoundary _platformBoundary;
     private readonly Func<DateOnly> _localDate;
 
     private readonly ComboBox _codexHomeCombo = new() { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDown };
@@ -131,7 +134,15 @@ public sealed class MainForm : Form
     private bool _renderingControllerState;
     private string? _sqliteOverrideCodexHome;
 
-    public MainForm() : this(new ExecutionLogService())
+    public MainForm() : this(new SystemAppPathProvider())
+    {
+    }
+
+    private MainForm(IAppPathProvider paths) : this(
+        new ExecutionLogService(paths.LogDirectory),
+        new SettingsService(paths.SettingsPath),
+        paths: paths,
+        platformBoundary: new SystemAppPlatformBoundary(paths))
     {
     }
 
@@ -139,10 +150,14 @@ public sealed class MainForm : Form
         ExecutionLogService executionLogService,
         SettingsService? settingsService = null,
         UpdateService? updateService = null,
-        Func<DateOnly>? localDate = null)
+        Func<DateOnly>? localDate = null,
+        IAppPathProvider? paths = null,
+        IAppPlatformBoundary? platformBoundary = null)
     {
+        _paths = paths ?? new SystemAppPathProvider();
+        _platformBoundary = platformBoundary ?? new SystemAppPlatformBoundary(_paths);
         _executionLogService = executionLogService;
-        _settingsService = settingsService ?? new SettingsService();
+        _settingsService = settingsService ?? new SettingsService(_paths.SettingsPath);
         _updateService = updateService ?? new UpdateService();
         _localDate = localDate ?? (() => DateOnly.FromDateTime(DateTime.Now));
         _appController = new AppController(new CoreApplicationAdapter(
@@ -150,6 +165,7 @@ public sealed class MainForm : Form
             _settingsService,
             new CodexHomeService()));
         Text = "Codex Provider Sync";
+        ConfigureAutomationIdentities();
         MinimumSize = new Size(1180, 760);
         StartPosition = FormStartPosition.CenterScreen;
 
@@ -171,11 +187,49 @@ public sealed class MainForm : Form
         WireEvents();
     }
 
+    private void ConfigureAutomationIdentities()
+    {
+        GuiAutomationCatalog.Register(this, GuiAutomationCatalog.Ids.MainWindow);
+        GuiAutomationCatalog.Register(_codexHomeCombo, GuiAutomationCatalog.Ids.CodexHome);
+        GuiAutomationCatalog.Register(_browseButton, GuiAutomationCatalog.Ids.BrowseCodexHome);
+        GuiAutomationCatalog.Register(_refreshButton, GuiAutomationCatalog.Ids.RefreshStatus);
+        GuiAutomationCatalog.Register(_sqliteHomeText, GuiAutomationCatalog.Ids.SqliteHome);
+        GuiAutomationCatalog.Register(_browseSqliteHomeButton, GuiAutomationCatalog.Ids.BrowseSqliteHome);
+        GuiAutomationCatalog.Register(_statusBox, GuiAutomationCatalog.Ids.StatusOutput);
+        GuiAutomationCatalog.Register(_providerList, GuiAutomationCatalog.Ids.ProviderList);
+        GuiAutomationCatalog.Register(_manualProviderText, GuiAutomationCatalog.Ids.ManualProviderId);
+        GuiAutomationCatalog.Register(_addProviderButton, GuiAutomationCatalog.Ids.AddManualProvider);
+        GuiAutomationCatalog.Register(_removeProviderButton, GuiAutomationCatalog.Ids.RemoveManualProvider);
+        GuiAutomationCatalog.Register(_selectedProviderValue, GuiAutomationCatalog.Ids.SelectedProvider);
+        GuiAutomationCatalog.Register(_updateConfigCheck, GuiAutomationCatalog.Ids.UpdateConfig);
+        GuiAutomationCatalog.Register(_modelAutoRadio, GuiAutomationCatalog.Ids.FollowProviderModel);
+        GuiAutomationCatalog.Register(_modelKeepRadio, GuiAutomationCatalog.Ids.KeepCurrentModel);
+        GuiAutomationCatalog.Register(_modelCustomRadio, GuiAutomationCatalog.Ids.CustomModelMode);
+        GuiAutomationCatalog.Register(_modelCustomText, GuiAutomationCatalog.Ids.CustomModel);
+        GuiAutomationCatalog.Register(_restoreConfigCheck, GuiAutomationCatalog.Ids.RestoreConfig);
+        GuiAutomationCatalog.Register(_restoreDatabaseCheck, GuiAutomationCatalog.Ids.RestoreDatabase);
+        GuiAutomationCatalog.Register(_restoreSessionsCheck, GuiAutomationCatalog.Ids.RestoreSessions);
+        GuiAutomationCatalog.Register(_backupRetentionInput, GuiAutomationCatalog.Ids.BackupRetention);
+        GuiAutomationCatalog.Register(_executeButton, GuiAutomationCatalog.Ids.Execute);
+        GuiAutomationCatalog.Register(_restoreButton, GuiAutomationCatalog.Ids.Restore);
+        GuiAutomationCatalog.Register(_openBackupButton, GuiAutomationCatalog.Ids.OpenBackupDirectory);
+        GuiAutomationCatalog.Register(_pruneBackupsButton, GuiAutomationCatalog.Ids.PruneBackups);
+        GuiAutomationCatalog.Register(_checkUpdateButton, GuiAutomationCatalog.Ids.CheckUpdates);
+        GuiAutomationCatalog.Register(_openLogButton, GuiAutomationCatalog.Ids.OpenLogDirectory);
+        GuiAutomationCatalog.Register(_busyLabel, GuiAutomationCatalog.Ids.OperationState);
+        GuiAutomationCatalog.Register(_warningLine1, GuiAutomationCatalog.Ids.CloseCodexWarningPrimary);
+        GuiAutomationCatalog.Register(_warningLine2, GuiAutomationCatalog.Ids.CloseCodexWarningSecondary);
+        GuiAutomationCatalog.Register(_logBox, GuiAutomationCatalog.Ids.LogOutput);
+    }
+
     protected override async void OnLoad(EventArgs e)
     {
         base.OnLoad(e);
         await LoadStateAsync();
-        _ = CheckForUpdatesAsync(UpdateCheckTrigger.Automatic);
+        if (_platformBoundary.UpdatesEnabled)
+        {
+            _ = CheckForUpdatesAsync(UpdateCheckTrigger.Automatic);
+        }
     }
 
     /// <summary>
@@ -637,7 +691,7 @@ public sealed class MainForm : Form
         _settings = await _settingsService.LoadAsync();
         ApplyWindowBounds(_settings.WindowBounds);
         ReloadRecentHomes();
-        _codexHomeCombo.Text = _settings.LastCodexHome ?? AppConstants.DefaultCodexHome();
+        _codexHomeCombo.Text = _settings.LastCodexHome ?? _paths.DefaultCodexHome;
         LoadSqliteHomeOverride(CurrentCodexHome());
         _backupRetentionInput.Value = Math.Max(_backupRetentionInput.Minimum, Math.Min(_backupRetentionInput.Maximum, _settings.BackupRetentionCount));
         AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 已加载设置: {_settingsService.SettingsPath}");
@@ -659,20 +713,15 @@ public sealed class MainForm : Form
 
     private async Task BrowseCodexHomeAsync()
     {
-        using FolderBrowserDialog dialog = new()
-        {
-            Description = "选择 .codex 目录",
-            UseDescriptionForTitle = true,
-            InitialDirectory = Directory.Exists(CurrentCodexHome()) ? CurrentCodexHome() : AppConstants.DefaultCodexHome(),
-            ShowNewFolderButton = false
-        };
-
-        if (dialog.ShowDialog(this) != DialogResult.OK)
+        string? selectedPath = _platformBoundary.PickFolder(this, new FolderPickerRequest(
+            "选择 .codex 目录",
+            Directory.Exists(CurrentCodexHome()) ? CurrentCodexHome() : _paths.DefaultCodexHome));
+        if (selectedPath is null)
         {
             return;
         }
 
-        _codexHomeCombo.Text = dialog.SelectedPath;
+        _codexHomeCombo.Text = selectedPath;
         await PersistHomeSelectionAsync();
         await RefreshStatusAsync();
     }
@@ -694,23 +743,19 @@ public sealed class MainForm : Form
     private async Task BrowseSqliteHomeAsync()
     {
         (_, string? sqliteHome) = CaptureStorageSelection();
-        using FolderBrowserDialog dialog = new()
-        {
-            Description = "选择包含 state_5.sqlite 的目录",
-            UseDescriptionForTitle = true,
-            InitialDirectory = Directory.Exists(sqliteHome)
+        string? selectedPath = _platformBoundary.PickFolder(this, new FolderPickerRequest(
+            "选择包含 state_5.sqlite 的目录",
+            Directory.Exists(sqliteHome)
                 ? sqliteHome!
-                : CurrentCodexHome(),
-            ShowNewFolderButton = false
-        };
-        if (dialog.ShowDialog(this) != DialogResult.OK)
+                : CurrentCodexHome()));
+        if (selectedPath is null)
         {
             return;
         }
 
         (string codexHome, _) = CaptureStorageSelection();
-        _sqliteHomeText.Text = dialog.SelectedPath;
-        await PersistSqliteHomeOverrideAsync((codexHome, dialog.SelectedPath));
+        _sqliteHomeText.Text = selectedPath;
+        await PersistSqliteHomeOverrideAsync((codexHome, selectedPath));
         await RefreshStatusAsync();
     }
 
@@ -730,7 +775,9 @@ public sealed class MainForm : Form
     private void LoadSqliteHomeOverride(string codexHome)
     {
         _sqliteOverrideCodexHome = Path.GetFullPath(codexHome);
-        _sqliteHomeText.Text = _settingsService.GetSqliteHomeOverride(_settings, codexHome) ?? string.Empty;
+        _sqliteHomeText.Text = _settingsService.GetSqliteHomeOverride(_settings, codexHome)
+            ?? _paths.RequiredSqliteHomeOverride
+            ?? string.Empty;
     }
 
     private async Task PersistBackupRetentionAsync()
@@ -828,6 +875,10 @@ public sealed class MainForm : Form
 
         await RunBusyAsync("执行中...", async () =>
         {
+            EnsureAutomationMutationBoundary(
+                request.CodexHome,
+                request.SqliteHomeOverride,
+                selectedBackupPath: null);
             await PersistSqliteHomeOverrideAsync((request.CodexHome, request.SqliteHomeOverride));
             SyncResult result;
             if (request is SwitchProviderRequest switchRequest)
@@ -878,15 +929,10 @@ public sealed class MainForm : Form
             ? _settings.LastBackupDirectory!
             : backupRoot;
 
-        using FolderBrowserDialog dialog = new()
-        {
-            Description = "选择要恢复的备份目录",
-            UseDescriptionForTitle = true,
-            InitialDirectory = initialBackupDir,
-            ShowNewFolderButton = false
-        };
-
-        if (dialog.ShowDialog(this) != DialogResult.OK)
+        string? selectedBackupPath = _platformBoundary.PickFolder(this, new FolderPickerRequest(
+            "选择要恢复的备份目录",
+            initialBackupDir));
+        if (selectedBackupPath is null)
         {
             return;
         }
@@ -906,7 +952,7 @@ public sealed class MainForm : Form
 
         DialogResult confirm = MessageBox.Show(
             this,
-            $"确认恢复以下备份？{Environment.NewLine}{Environment.NewLine}{dialog.SelectedPath}{Environment.NewLine}{Environment.NewLine}将覆盖当前的: {restoreTargets}。",
+            $"确认恢复以下备份？{Environment.NewLine}{Environment.NewLine}{selectedBackupPath}{Environment.NewLine}{Environment.NewLine}将覆盖当前的: {restoreTargets}。",
             Text,
             MessageBoxButtons.OKCancel,
             MessageBoxIcon.Warning);
@@ -923,10 +969,12 @@ public sealed class MainForm : Form
         bool allowSqliteHomeRelocation = false;
         try
         {
+            EnsureAutomationMutationBoundary(codexHome, sqliteHome, selectedBackupPath);
             if (_restoreDatabaseCheck.Checked)
             {
-                BackupStorageInfo backupStorage = await _syncService.GetBackupStorageInfoAsync(dialog.SelectedPath);
+                BackupStorageInfo backupStorage = await _syncService.GetBackupStorageInfoAsync(selectedBackupPath);
                 StatusSnapshot targetStatus = await _syncService.GetStatusAsync(codexHome, sqliteHome);
+                ValidateAutomationStatusSnapshot(targetStatus);
                 if (backupStorage.Version >= 2
                     && !string.IsNullOrWhiteSpace(backupStorage.SqliteHome)
                     && !PathsEqual(backupStorage.SqliteHome, targetStatus.StateDbLocation is null
@@ -972,9 +1020,10 @@ public sealed class MainForm : Form
 
         await RunBusyAsync("恢复中...", async () =>
         {
+            EnsureAutomationMutationBoundary(codexHome, sqliteHome, selectedBackupPath);
             RestoreResult result = await Task.Run(async () => await _syncService.RunRestoreAsync(
                 codexHome,
-                dialog.SelectedPath,
+                selectedBackupPath,
                 new RestoreBackupOptions
                 {
                     RestoreConfig = _restoreConfigCheck.Checked,
@@ -983,7 +1032,7 @@ public sealed class MainForm : Form
                     AllowSqliteHomeRelocation = allowSqliteHomeRelocation
                 },
                 sqliteHome));
-            _settings = _settingsService.UpdateState(_settings, SelectedProvider(), dialog.SelectedPath, CaptureWindowBounds(), CurrentBackupRetentionCount());
+            _settings = _settingsService.UpdateState(_settings, SelectedProvider(), selectedBackupPath, CaptureWindowBounds(), CurrentBackupRetentionCount());
             await _settingsService.SaveAsync(_settings);
             AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 恢复完成");
             AppendLog(TextFormatter.FormatRestoreResult(result, TextFormatter.ChineseSimplified));
@@ -995,12 +1044,9 @@ public sealed class MainForm : Form
     private void OpenBackupFolder()
     {
         string path = _currentStatus?.BackupRoot ?? AppConstants.DefaultBackupRoot(CurrentCodexHome());
+        EnsureAutomationPath(path, GuiAutomationCatalog.Ids.OpenBackupDirectory);
         Directory.CreateDirectory(path);
-        Process.Start(new ProcessStartInfo
-        {
-            FileName = path,
-            UseShellExecute = true
-        });
+        _platformBoundary.OpenPath(path);
     }
 
     private void OpenLogFolder()
@@ -1008,11 +1054,7 @@ public sealed class MainForm : Form
         try
         {
             Directory.CreateDirectory(_executionLogService.LogDirectory);
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = _executionLogService.LogDirectory,
-                UseShellExecute = true
-            });
+            _platformBoundary.OpenPath(_executionLogService.LogDirectory);
             AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 已打开日志目录: {_executionLogService.LogDirectory}");
         }
         catch (Exception error)
@@ -1032,6 +1074,7 @@ public sealed class MainForm : Form
 
         await RunBusyAsync("正在清理备份...", async () =>
         {
+            EnsureAutomationMutationBoundary(codexHome, sqliteHome, selectedBackupPath: null);
             BackupPruneResult result = await Task.Run(async () => await _syncService.RunPruneBackupsAsync(codexHome, CurrentBackupRetentionCount()));
             AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 旧备份清理完成");
             AppendLog(TextFormatter.FormatBackupPruneResult(result, TextFormatter.ChineseSimplified));
@@ -1042,6 +1085,11 @@ public sealed class MainForm : Form
 
     private async Task CheckForUpdatesAsync(UpdateCheckTrigger trigger)
     {
+        if (!_platformBoundary.UpdatesEnabled)
+        {
+            AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] GUI automation mode blocks update checks and process launches");
+            return;
+        }
         bool automatic = trigger == UpdateCheckTrigger.Automatic;
         DateOnly today = _localDate();
         if (automatic && !UpdateCheckPolicy.ShouldRunAutomaticCheck(_settings, today))
@@ -1187,13 +1235,11 @@ public sealed class MainForm : Form
 
         try
         {
-            string updateDirectory = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "codex-provider-sync",
-                "updates");
-            DownloadedUpdate downloadedUpdate = await _updateService.DownloadWindowsExeAsync(update.LatestRelease, updateDirectory);
+            DownloadedUpdate downloadedUpdate = await _updateService.DownloadWindowsExeAsync(
+                update.LatestRelease,
+                _paths.UpdateDownloadDirectory);
             string targetExe = Environment.ProcessPath ?? throw new InvalidOperationException("无法确定当前程序文件路径。");
-            UpdateApplier.Start(downloadedUpdate.Path, targetExe, downloadedUpdate.Sha256);
+            _platformBoundary.StartUpdate(downloadedUpdate.Path, targetExe, downloadedUpdate.Sha256);
             AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 已下载并校验 {update.LatestRelease.TagName}，正在重启完成更新。");
             BeginInvoke(Close);
         }
@@ -1231,7 +1277,7 @@ public sealed class MainForm : Form
         _codexHomeCombo.Items.Clear();
         foreach (string home in _settings.RecentCodexHomes)
         {
-            _codexHomeCombo.Items.Add(home);
+            _codexHomeCombo.Items.Add(GuiAutomationCatalog.RecentCodexHome(home));
         }
         _codexHomeCombo.EndUpdate();
         if (!string.IsNullOrWhiteSpace(currentText))
@@ -1253,6 +1299,7 @@ public sealed class MainForm : Form
                 {
                     Tag = option.Id
                 };
+                GuiAutomationCatalog.RegisterProviderRow(item, option.Id);
                 item.SubItems.Add(TextFormatter.FormatProviderSources(new ProviderOption
                 {
                     Id = option.Id,
@@ -1311,13 +1358,131 @@ public sealed class MainForm : Form
     private string CurrentCodexHome()
     {
         string text = _codexHomeCombo.Text.Trim();
-        return string.IsNullOrWhiteSpace(text) ? AppConstants.DefaultCodexHome() : text;
+        string path = string.IsNullOrWhiteSpace(text) ? _paths.DefaultCodexHome : text;
+        EnsureAutomationPath(path, GuiAutomationCatalog.Ids.CodexHome);
+        return path;
     }
 
     private string? CurrentSqliteHomeOverride()
     {
         string text = _sqliteHomeText.Text.Trim();
-        return string.IsNullOrWhiteSpace(text) ? null : text;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return _paths.RequiredSqliteHomeOverride;
+        }
+        EnsureAutomationPath(text, GuiAutomationCatalog.Ids.SqliteHome);
+        return text;
+    }
+
+    internal void ValidateAutomationValue(string automationId, JsonElement value)
+    {
+        if (!_paths.IsAutomation
+            || automationId is not (GuiAutomationCatalog.Ids.CodexHome or GuiAutomationCatalog.Ids.SqliteHome))
+        {
+            return;
+        }
+        string? path = value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+        if (automationId == GuiAutomationCatalog.Ids.SqliteHome && string.IsNullOrWhiteSpace(path))
+        {
+            return;
+        }
+        EnsureAutomationPath(path ?? string.Empty, automationId);
+    }
+
+    private void EnsureAutomationPath(string path, string automationId)
+    {
+        if (!_paths.IsAutomation)
+        {
+            return;
+        }
+
+        bool contained;
+        try
+        {
+            contained = !string.IsNullOrWhiteSpace(path) && _paths.Contains(path);
+        }
+        catch (Exception error) when (error is IOException
+            or UnauthorizedAccessException
+            or ArgumentException
+            or NotSupportedException)
+        {
+            throw new InvalidOperationException(
+                $"{automationId} could not be proven to remain inside the GUI automation isolation root.",
+                error);
+        }
+
+        if (!contained)
+        {
+            throw new InvalidOperationException(
+                $"{automationId} must remain inside the GUI automation isolation root.");
+        }
+    }
+
+    internal void ValidateAutomationStatusSnapshot(StatusSnapshot status)
+    {
+        ArgumentNullException.ThrowIfNull(status);
+        if (!_paths.IsAutomation)
+        {
+            return;
+        }
+
+        EnsureAutomationPath(status.CodexHome, "status.codexHome");
+        EnsureAutomationPath(status.SqliteHome, "status.sqliteHome");
+        EnsureAutomationPath(status.BackupRoot, "status.backupRoot");
+        if (status.StateDbLocation is { } stateDb)
+        {
+            EnsureAutomationPath(stateDb.Path, "status.stateDb");
+        }
+        foreach (string candidate in status.CheckedStateDbPaths)
+        {
+            EnsureAutomationPath(candidate, "status.checkedStateDb");
+        }
+        foreach (string rolloutPath in status.LockedRolloutFiles)
+        {
+            EnsureAutomationPath(rolloutPath, "status.lockedRollout");
+        }
+        foreach (string rolloutPath in status.UnreadableRolloutFiles)
+        {
+            EnsureAutomationPath(rolloutPath, "status.unreadableRollout");
+        }
+        foreach (TransactionRecoveryInfo pending in status.PendingTransactions)
+        {
+            EnsureAutomationPath(pending.BackupDirectory, "status.pendingBackup");
+            EnsureAutomationPath(pending.JournalPath, "status.pendingJournal");
+        }
+    }
+
+    internal void EnsureAutomationMutationBoundary(
+        string codexHome,
+        string? sqliteHome,
+        string? selectedBackupPath)
+    {
+        if (!_paths.IsAutomation)
+        {
+            return;
+        }
+
+        EnsureAutomationPath(codexHome, "mutation.codexHome");
+        string requiredSqliteHome = sqliteHome
+            ?? _paths.RequiredSqliteHomeOverride
+            ?? throw new InvalidOperationException(
+                "GUI automation mutations require an explicit isolated SQLite Home.");
+        EnsureAutomationPath(requiredSqliteHome, "mutation.sqliteHome");
+        if (selectedBackupPath is not null)
+        {
+            EnsureAutomationPath(selectedBackupPath, "mutation.backup");
+        }
+
+        StatusSnapshot status = _currentStatus
+            ?? throw new InvalidOperationException(
+                "GUI automation mutations require a successfully validated status refresh.");
+        ValidateAutomationStatusSnapshot(status);
+        if (!PathsEqual(status.CodexHome, codexHome)
+            || !PathsEqual(status.SqliteHome, requiredSqliteHome))
+        {
+            throw new InvalidOperationException(
+                "GUI automation storage inputs changed after the validated status refresh.");
+        }
     }
 
     internal (string CodexHome, string? SqliteHome) CaptureStorageSelection()
@@ -1373,6 +1538,7 @@ public sealed class MainForm : Form
             throw new InvalidOperationException(snapshot.ErrorMessage ?? "Unable to refresh application state.");
         }
 
+        ValidateAutomationStatusSnapshot(snapshot.Status);
         _currentStatus = snapshot.Status;
         _settings = await _settingsService.LoadAsync();
         _settings = _settingsService.UpdateState(
