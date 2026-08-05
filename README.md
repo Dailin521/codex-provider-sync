@@ -2,132 +2,176 @@
 
 # codex-provider-sync
 
-### 切换 Provider 后，让 Codex 历史会话重新可见
+### Keep Codex history visible after switching Providers
 
 [![CI](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Dailin521/codex-provider-sync)](https://github.com/Dailin521/codex-provider-sync/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-[下载 Windows GUI](https://github.com/Dailin521/codex-provider-sync/releases/latest) · 中文 · [English](docs/README_EN.md)
+[中文](docs/README_ZH.md) · [日本語](docs/README_JA.md) · [한국어](docs/README_KO.md) · [Web UI guide](docs/README_WEB_UI_ZH.md)
 
 </div>
 
-## 什么时候需要它
+## What it is
 
-Codex 切换 `model_provider` 后，旧会话可能从 Desktop 或 `/resume` 中消失。会话通常没有丢失，而是 rollout、SQLite 和项目可见性 metadata 仍指向原 Provider。
+`codex-provider-sync` is a local metadata-consistency tool for Codex. After changing the root `model_provider`, older sessions may still be on disk while rollout files, the SQLite thread index, or project metadata still points to the previous Provider. Codex can then hide those sessions from its list, project view, or `/resume`.
 
-适合使用本工具：
+The primary interface is a browser-based Web UI running on localhost. It reuses the same Node.js core service as the CLI and does not reimplement synchronization in the browser.
 
-- 在官方订阅（内部 Provider 为 `openai`）和自定义中转之间切换。
-- 多个配置必须使用不同的 `model_provider`，切换后旧会话不可见。
-- rollout 与 SQLite 中的 Provider 或 model 信息不一致。
-- 希望在配置或 SQLite/WAL 变化后自动重新同步。
+The tool does not sign you in, manage `auth.json`, switch accounts, or modify message bodies.
 
-如果所有中转都能稳定复用同一个 `model_provider`，并且历史会话始终可见，那么统一 Provider ID 是更简单的方案，不需要额外同步。本工具主要用于无法统一 Provider ID，或需要在官方订阅与自定义 Provider 之间切换的场景。
+## Quick start: Web UI
 
-本工具不负责登录、认证或切换账号；请先用原有方式完成 Provider 切换，再执行同步。
+Requires Node.js 16 or newer.
 
-## 它会处理什么
+From the repository:
 
-- 同步 `~/.codex/sessions` 和 `~/.codex/archived_sessions` 中的 rollout metadata。
-- 同步 Codex SQLite 线程记录，并支持 SQLite 与 `Codex Home` 分开存放。
-- 修复项目可见性相关路径信息，并在需要时同步相关 model metadata。
-- 每次同步前自动备份，支持恢复和清理旧备份。
-- 大型 rollout 文件在满足条件时原地更新，否则自动使用完整安全重写。
-- CLI `watch` 可监听 `config.toml`、SQLite 及 WAL 变化并自动同步。
+```bash
+npm install
+npm run web:build
+npm run web:start
+```
 
-## 快速使用
-
-### Windows GUI
-
-普通 Windows 用户建议直接从 [Releases](https://github.com/Dailin521/codex-provider-sync/releases/latest) 下载并解压：
-
-1. 打开 `CodexProviderSync.exe`
-2. 点击“刷新”
-3. 选择目标 Provider
-4. 点击“立即同步”
-
-GUI 会保留备份并显示同步结果。每天首次启动会在后台检查一次稳定版更新，网络查询最多等待 10 秒；也可以随时手动检查。执行日志保存在 `%AppData%\codex-provider-sync\logs`。
-
-Windows GUI 支持为每个 Codex Home 单独指定 Windows 文件系统中的 SQLite Home。`\\wsl.localhost\...` 和 `\\wsl$\...` 一类 WSL UNC 路径仅用于安全诊断；GUI 会显示诊断信息并禁用同步和恢复。Windows Codex Home + WSL SQLite Home 场景应在 WSL 内运行 CLI。
-
-项目目前未做 Windows 代码签名，从浏览器下载后可能出现 SmartScreen 提示。请从本项目 Release 下载，并按需核对同版本 SHA-256。
-
-Windows 完整说明见 [README_GUI_ZH.md](docs/README_GUI_ZH.md)。macOS 用户可自行构建 Avalonia 桌面版，分别参见 [中文说明](docs/README_MAC_GUI_ZH.md)和[英文说明](docs/README_MAC_GUI_EN.md)。
-
-### CLI
-
-CLI 支持 Node.js `16+`：
+Or install the CLI globally:
 
 ```bash
 npm install -g git+https://github.com/Dailin521/codex-provider-sync.git
-codex-provider status
-codex-provider sync
+codex-provider web
 ```
 
-常用命令：
+The default address is:
 
-| 命令 | 用途 |
-| --- | --- |
-| `codex-provider status` | 检查当前 Provider、rollout、SQLite 和项目可见性 |
-| `codex-provider sync` | 将历史会话同步到当前 Provider，不修改登录状态 |
-| `codex-provider switch <provider-id>` | 修改根级 `model_provider` 后执行同步 |
-| `codex-provider restore <backup-dir>` | 从指定备份恢复 |
-| `codex-provider prune-backups --keep 5` | 只保留最近 5 份托管备份 |
-| `codex-provider watch` | 监听配置、SQLite 和 WAL 变化并自动同步 |
-| `codex-provider watch --once` | 第一次变化并成功同步后退出 |
+```text
+http://127.0.0.1:8791
+```
 
-`switch` 支持 `--model <NAME>` 显式设置根级 model，或使用 `--keep-root-model` 只切换 Provider。所有主要命令都支持 `--codex-home <PATH>` 和 `--sqlite-home <PATH>`。
+Options:
 
-SQLite Home 按以下顺序解析：命令行 override → `config.toml` 根级 `sqlite_home` → `CODEX_SQLITE_HOME` → `<Codex Home>/sqlite`。只有最后一种默认布局会继续检查旧路径 `<Codex Home>/state_5.sqlite`；一旦显式指定 SQLite Home，就不会回退到 Codex Home 中的旧数据库。
+```bash
+codex-provider web --no-open   # do not open a browser automatically
+codex-provider web --port 8792 # use another localhost port
+```
 
-例如 Codex App 使用 Windows 配置、app-server 与 SQLite 位于 WSL 时，可在 WSL CLI 中直接传入：
+The server binds only to `127.0.0.1`. Each process gets a random API session token, validates the request Origin, and serializes write operations (`sync`, `switch`, `restore`, and `prune`).
+
+## Web UI features
+
+### Overview
+
+- Current root Provider and model.
+- Rollout distribution under `sessions` and `archived_sessions`.
+- SQLite `threads` distribution.
+- Rollout/SQLite alignment status.
+- Project visibility diagnostics: CWD matches, ranks, and the first-page 50-session limit.
+- Warnings for locked rollouts, `encrypted_content`, SQLite repairs, malformed databases, and WSL UNC safety boundaries.
+
+### Chat history
+
+The Chat History page reads rollout JSONL files read-only and never changes local data.
+
+- Browse sessions and open user/agent messages.
+- Search titles, project paths, Providers, and message text.
+- Filter by Provider, project, and active/archived state.
+- Server-side pagination, 50 sessions per page by default.
+- Session details show the most recent 200 readable messages.
+- Safe, restricted Markdown rendering with code-block support.
+- Raw JSONL, tokens, tool-call arguments, and `encrypted_content` are not returned to the browser.
+
+### Sync and switch
+
+- **Sync metadata only**: use the current root Provider without changing `config.toml`.
+- **Switch Provider and sync**: update the root `model_provider`, then synchronize history.
+- Model policy: follow the Provider section, keep the current root model, or set a custom model.
+- An explicit confirmation dialog reminds you to close Codex CLI, Codex App, and app-server first.
+
+### Backups and restore
+
+- Create a metadata v2 backup before every `sync` or `switch`.
+- Keep the newest five managed backups by default.
+- Restore `config.toml`, SQLite, and rollout metadata independently.
+- Show source and target when SQLite Homes differ.
+- Require an extra confirmation for SQLite Home relocation and prevent unsafe config/database combinations.
+
+## CLI for automation and WSL
+
+The CLI and Web UI call the same `src/service.js` core logic.
+
+```bash
+codex-provider status
+codex-provider sync
+codex-provider sync --keep 5
+codex-provider sync --provider openai
+codex-provider switch apigather
+codex-provider switch apigather --model "MiniMax-M3"
+codex-provider switch apigather --keep-root-model
+codex-provider prune-backups --keep 5
+codex-provider restore C:\Users\you\.codex\backups_state\provider-sync\20260319T042708906Z
+codex-provider watch
+codex-provider watch --once
+```
+
+All main commands accept `--codex-home <PATH>` and `--sqlite-home <PATH>`. For a Windows Codex Home with app-server and SQLite in WSL, run the CLI inside WSL:
 
 ```bash
 codex-provider status --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/you/.codex/sqlite
 codex-provider sync --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/you/.codex/sqlite
 ```
 
-`status` 会显示 effective SQLite Home 和来源。显式路径缺少 `state_5.sqlite` 时，状态查询只报告诊断，`sync`、`switch` 和数据库恢复不会偷偷回退到其它位置。默认布局中的数据库被删除时，`restore` 可以根据备份 metadata 在原默认位置重建数据库。
+## Storage and SQLite resolution
 
-## 安全与限制
+SQLite Home precedence is:
 
-每次 `sync` / `switch` 前都会备份到：
+1. CLI or GUI override.
+2. Root-level `sqlite_home` in `config.toml`.
+3. `CODEX_SQLITE_HOME`.
+4. `<Codex Home>/sqlite`.
+
+Only the default layout may check the legacy `<Codex Home>/state_5.sqlite`. An explicit, configured, or environment-provided SQLite Home never falls back to another database.
+
+## Safety and limitations
+
+Before each `sync` or `switch`, a backup is created under:
 
 ```text
 ~/.codex/backups_state/provider-sync/<timestamp>
 ```
 
-- 不修改消息历史、会话标题、认证信息、`auth.json` 或 `updated_at`。
-- 不在多台设备之间复制配置或会话文件；它只修复当前 Codex Home 的 metadata。
-- SQLite 被占用时，需要先关闭 Codex、Codex App 和 app-server 后重试。
-- Windows 进程检测到 WSL UNC SQLite Home 时会立即显示专用安全诊断并停止操作。后续操作应进入对应 WSL 发行版，并使用 `/home/...` 形式的 Linux 路径运行 CLI。
-- 新备份使用 metadata v2 记录独立 SQLite Home；恢复到其它 SQLite Home 默认拒绝。CLI 需要同时传入 `--sqlite-home`、`--allow-sqlite-home-relocation` 和 `--no-config`，避免恢复后的 `config.toml` 重新指向原 SQLite Home。
-- 活跃会话锁住 rollout 文件时，工具会跳过该文件并继续处理其它会话；结束活跃会话后可再次同步。
-- 含 `encrypted_content` 的会话跨 Provider/account 后，可能只能恢复列表可见性，继续对话或 compact 仍可能报 `invalid_encrypted_content`。
-- Codex Desktop 首屏目前只显示最近 50 条会话。若 `/resume` 可见但项目侧仍不显示，请查看状态中的 `first page` / `ranks` 诊断；本工具不会修改时间戳来绕过此限制。
+- Messages, titles, authentication, `auth.json`, and `updated_at` are not modified.
+- The tool repairs metadata only within the selected Codex Home; it does not copy sessions between devices.
+- If SQLite is locked, close Codex CLI, Codex App, and app-server and retry.
+- Locked live rollout files are skipped and can be synchronized after the active session ends.
+- Sessions containing `encrypted_content` may become visible but still fail to continue or compact across Providers/accounts.
+- Windows processes cannot safely operate on SQLite through `\\wsl.localhost\...` or `\\wsl$\...`; use the corresponding Linux path inside WSL.
 
-## 文档
+## Desktop GUI status
 
-- [Windows GUI 说明](docs/README_GUI_ZH.md)
-- macOS GUI 说明：[中文](docs/README_MAC_GUI_ZH.md) · [English](docs/README_MAC_GUI_EN.md)
-- [English documentation](docs/README_EN.md)
-- [AI / Agent 操作指南](AGENTS.md)
-- [贡献指南](CONTRIBUTING.md)
+The Desktop GUI is deprecated and is no longer the recommended or primary interface. Existing Windows/macOS builds remain available for compatibility, but new features—especially Chat History—are implemented in the Web UI first.
 
-## 开发
+Legacy GUI references:
+
+- [Windows GUI guide](docs/README_GUI_ZH.md)
+- [macOS GUI guide](docs/README_MAC_GUI_EN.md)
+
+## Documentation
+
+- [中文说明](docs/README_ZH.md)
+- [日本語](docs/README_JA.md)
+- [한국어](docs/README_KO.md)
+- [Web UI guide](docs/README_WEB_UI_ZH.md)
+- [Working principle](docs/WORKING_PRINCIPLE_ZH.md)
+- [AI / Agent guide](AGENTS.md)
+- [Contributing guide](CONTRIBUTING.md)
+
+## Development and tests
 
 ```bash
 git clone https://github.com/Dailin521/codex-provider-sync.git
 cd codex-provider-sync
+npm install
+npm run web:build
 npm test
-dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj
-./scripts/test-wsl-unc-safety.sh
-pwsh ./scripts/publish-gui.ps1
-./scripts/publish-gui-macos.sh
+git diff --check
 ```
-
-`test-wsl-unc-safety.sh` 需要从 WSL 运行，并调用 Windows `dotnet.exe` 验证真实 WSL ext4 SQLite 的安全阻断。
 
 ## License
 

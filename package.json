@@ -7,13 +7,17 @@
     "README.md",
     "AGENTS.md",
     "docs",
-    "src"
+    "src",
+    "web/dist"
   ],
   "bin": {
     "codex-provider": "./src/cli.js"
   },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "web:build": "vite build --config web/vite.config.js",
+    "web:start": "node src/cli.js web",
+    "prepare": "npm run web:build"
   },
   "engines": {
     "node": ">=16.0.0"
@@ -27,5 +31,13 @@
   "license": "MIT",
   "optionalDependencies": {
     "better-sqlite3": "8.7.0"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^4.5.14"
   }
 }

@@ -230,6 +230,25 @@ export async function getBackupSummary(codexHome) {
   };
 }
 
+export async function listBackups(codexHome) {
+  const backupRoot = defaultBackupRoot(codexHome);
+  const backupDirs = await listManagedBackupDirectories(backupRoot);
+  const backups = [];
+
+  for (const entry of backupDirs) {
+    const metadataPath = path.join(entry.fullPath, "metadata.json");
+    const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
+    backups.push({
+      id: entry.name,
+      path: entry.fullPath,
+      sizeBytes: await getDirectorySize(entry.fullPath),
+      metadata
+    });
+  }
+
+  return { backupRoot, backups };
+}
+
 export async function pruneBackups(codexHome, keepCount = DEFAULT_BACKUP_RETENTION_COUNT) {
   if (!Number.isInteger(keepCount) || keepCount < 0) {
     throw new Error(`Invalid keep count: ${keepCount}. Expected a non-negative integer.`);
