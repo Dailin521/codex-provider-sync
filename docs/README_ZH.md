@@ -139,6 +139,17 @@ npm test
 git diff --check
 ```
 
+### 发布 npm package
+
+登录 npm 后，可以使用仓库自带的跨平台发布脚本：
+
+```bash
+npm run publish:npm -- --dry-run
+npm run publish:npm -- --otp 123456
+```
+
+脚本会依次检查 npm 登录、构建 Web UI、运行测试、预览包内容，然后发布当前版本。也可以使用 `NPM_OTP=123456 npm run publish:npm` 传入一次性验证码；OTP 不会写入仓库文件。
+
 ## License
 
 MIT

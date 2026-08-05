@@ -1,6 +1,6 @@
 {
   "name": "codex-provider-sync",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Synchronize Codex session provider metadata across rollout files and SQLite state.",
   "type": "module",
   "files": [
@@ -12,12 +12,13 @@
     "web/dist"
   ],
   "bin": {
-    "codex-provider": "./src/cli.js"
+    "codex-provider": "src/cli.js"
   },
   "scripts": {
     "test": "node --test",
     "web:build": "vite build --config web/vite.config.js",
     "web:start": "node src/cli.js web",
+    "publish:npm": "node scripts/publish-npm.js",
     "prepare": "npm run web:build"
   },
   "engines": {

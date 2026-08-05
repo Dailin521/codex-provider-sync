@@ -19,7 +19,7 @@
 The primary interface is a browser-based Web UI running on localhost. It reuses the same Node.js core service as the CLI and does not reimplement synchronization in the browser.
 
 The tool does not sign you in, manage `auth.json`, switch accounts, or modify message bodies.
-
+![alt text](images/README/2026-08-05T03:53:48.708Z.png)
 ## Quick start: Web UI
 
 Requires Node.js 16 or newer.
@@ -174,6 +174,15 @@ npm run web:build
 npm test
 git diff --check
 ```
+
+To publish the npm package after authenticating with npm:
+
+```bash
+npm run publish:npm -- --dry-run
+npm run publish:npm -- --otp 123456
+```
+
+The publish script checks the npm login, rebuilds the Web UI, runs tests, previews the package contents, and then publishes the current version. Use `NPM_OTP=123456 npm run publish:npm` when preferred. The OTP is never written to repository files.
 
 ## License
 
