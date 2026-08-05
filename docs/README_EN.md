@@ -29,6 +29,12 @@ If all of your relays can reliably reuse one `model_provider` ID and history rem
 
 The tool does not sign in, manage accounts, or switch authentication. Switch Provider using your normal workflow first, then synchronize history.
 
+## Relationship to Provider Switchers
+
+Provider managers, including cc-switch, primarily switch accounts, API keys, `auth.json`, or `config.toml`; some also provide their own history handling. codex-provider-sync deliberately leaves authentication alone and focuses on post-switch visibility metadata, rollout files, SQLite state, managed backups, and restoration.
+
+If your current switcher already keeps all history visible, you do not need to run another synchronization. This project remains useful when several switching workflows have split existing history, rollout and SQLite need to be reconciled together, SQLite Home is separate from Codex Home, or backup-backed transactional repair is required.
+
 ## What It Updates
 
 - Rollout metadata under `~/.codex/sessions` and `~/.codex/archived_sessions`.
@@ -44,7 +50,13 @@ The tool does not sign in, manage accounts, or switch authentication. Switch Pro
 
 The Desktop GUI is deprecated and is not the recommended interface. Use the local Web UI described in the root README instead.
 
-For normal Windows use, download and extract `CodexProviderSync.exe` from [Releases](https://github.com/Dailin521/codex-provider-sync/releases/latest):
+For normal Windows use, download the standalone GUI from [Releases](https://github.com/Dailin521/codex-provider-sync/releases/latest):
+
+| Use case | Release asset | Update method |
+| --- | --- | --- |
+| Windows GUI only | `CodexProviderSync.exe` | Built-in updates supported |
+| Scripts, CI, or AI agents | `codex-provider-sync-v<version>-automation-win-x64.zip` | Manual update |
+| GUI and Automation together | `codex-provider-sync-v<version>-win-x64.zip` | Manual update |
 
 1. Open `CodexProviderSync.exe`.
 2. Click `刷新` (Refresh).
@@ -96,6 +108,34 @@ codex-provider sync --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/you
 
 Node.js 24+ uses the built-in `node:sqlite` module. Older supported Node.js releases use the optional `better-sqlite3` dependency.
 
+### Automation API (experimental v0.4)
+
+Releases provide a separate Windows Automation package containing `CodexProviderSync.Automation.exe`, `automation-protocol-v0.4.schema.json`, and a Chinese quick start. The complete Windows package contains the same files. This one-shot process interface uses the same Application use cases as the Windows GUI. Each invocation emits exactly one protocol `0.4` JSON document on stdout and sends diagnostics to stderr. Normal desktop users do not need the Automation package.
+
+| Command | Purpose |
+| --- | --- |
+| `describe` | Describe protocol capabilities and safety requirements |
+| `status` | Read status and diagnostics |
+| `plan --operation sync\|switch\|restore\|prune` | Create a plan for a selected write operation |
+| `sync` | Plan or explicitly apply synchronization |
+| `switch` | Plan or explicitly apply a Provider/model switch and synchronization |
+| `restore` | Plan or explicitly apply backup restoration |
+| `prune` | Plan or explicitly prune managed backups |
+
+Every write command is dry-run by default and returns a plan without modifying a target. Mutation requires `--apply`, a plan file containing only the `data` object from the `plan` response, and that object's exact lowercase SHA-256 `digest`:
+
+```powershell
+.\CodexProviderSync.Automation.exe describe
+.\CodexProviderSync.Automation.exe status --codex-home C:\isolated\.codex
+.\CodexProviderSync.Automation.exe sync --codex-home C:\isolated\.codex --provider openai
+$planResponse = .\CodexProviderSync.Automation.exe plan --operation sync --codex-home C:\isolated\.codex --provider openai | ConvertFrom-Json
+$planResponse.data | ConvertTo-Json -Depth 100 -Compress | Set-Content -LiteralPath C:\isolated\sync-plan.json -Encoding utf8NoBOM
+$planDigest = $planResponse.data.digest
+.\CodexProviderSync.Automation.exe sync --codex-home C:\isolated\.codex --provider openai --apply --plan C:\isolated\sync-plan.json --plan-digest $planDigest
+```
+
+Plans expire, bind normalized inputs and target state, and are single-use through a durable ledger. The default ledger is `<Codex Home>\tmp\provider-sync-automation-ledger`. Every path argument must be absolute and may not traverse a symbolic link or reparse point. Automation also rejects direct access to `auth.json`. The protocol remains experimental before 1.0; compatibility is not promised outside protocol family `0.4`.
+
 ## Safety and Limitations
 
 Before each `sync` or `switch`, the tool creates a backup under:
@@ -116,6 +156,11 @@ Before each `sync` or `switch`, the tool creates a backup under:
 
 - [Windows GUI guide](README_GUI_ZH.md)
 - [macOS GUI guide](README_MAC_GUI_EN.md)
+- [v0.4.0 Chinese release announcement](release-notes/v0.4.0-zh.md)
+- [v0.4.0 technical release notes](RELEASE_NOTES_V0.4.0.md)
+- [Changelog](../CHANGELOG.md)
+- [Chinese Automation quick start](AUTOMATION_QUICKSTART_ZH.md)
+- [v0.4 Automation execution plan](V0.4_AUTOMATION_PLAN.md)
 - [中文说明](../README.md)
 - [AI / Agent guide](../AGENTS.md)
 - [Contributing guide](../CONTRIBUTING.md#english-quick-guide)
@@ -129,10 +174,11 @@ npm test
 dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj
 ./scripts/test-wsl-unc-safety.sh
 pwsh ./scripts/publish-gui.ps1
+pwsh ./scripts/run-windows-gui-e2e.ps1
 ./scripts/publish-gui-macos.sh
 ```
 
-Run `test-wsl-unc-safety.sh` from WSL. It invokes Windows `dotnet.exe` to verify the safety guard against a real SQLite database on WSL ext4.
+Run `test-wsl-unc-safety.sh` from WSL. It invokes Windows `dotnet.exe` to verify the safety guard against a real SQLite database on WSL ext4. Run `run-windows-gui-e2e.ps1` only on a visible, interactive Windows desktop. The v0.4 implementation commit `7545b5d` passed this gate with 40/40 manifest entries covered, 53/53 required scenarios passed, and zero errors or blockers; the evidence gate also verified the published EXE hash, real control events, native dialogs, file/SQLite effects, restart persistence, and GUI-to-Application traces. Relevant later implementation changes require another run. Hidden, skipped, or direct-Application runs are not substitutes.
 
 ## License
 

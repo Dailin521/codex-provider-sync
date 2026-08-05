@@ -19,7 +19,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Remove="CrashHost\**\*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\CodexProviderSync.Core\CodexProviderSync.Core.csproj" />
+    <ProjectReference Include="CrashHost\CodexProviderSync.CrashHost.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
 </Project>

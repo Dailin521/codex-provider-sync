@@ -106,6 +106,18 @@ PR 中请特别说明：
 - 自动化测试、真实手测和未执行项目。
 - GUI 变化的前后截图。
 
+## 准备发布
+
+发布 tag 前需要：
+
+1. 将 [中文发布说明模板](docs/release-notes/TEMPLATE-zh.md) 复制为 `docs/release-notes/v<版本>-zh.md`。
+2. 填写文件顶部的 `release-title`、面向用户的升级结果、下载、升级说明、安全边界、验证结果和实际贡献者。
+3. 更新 `CHANGELOG.md`，并确认 `package.json`、`package-lock.json` 和所有发布项目版本一致。
+4. 运行 `node scripts/read-release-metadata.js --tag v<版本>` 和 `node scripts/verify-release-version.js --tag v<版本>`。
+5. 运行完整测试和发布构建，再创建指向 `main` 中已验证提交的 tag。
+
+发布工作流会读取与 tag 同名的中文发布说明，并生成单文件 GUI、独立 Automation ZIP、Windows 完整包和对应 SHA-256。缺少发布说明、标题与 tag 不匹配，或遗漏固定的下载、安全和限制声明时会直接停止。
+
 ## English quick guide
 
 - Small fixes, tests, and documentation updates can be submitted directly as a PR. Please open an Issue before starting a large feature, behavior change, or refactor.

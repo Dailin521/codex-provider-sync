@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { writeFileAtomic } from "./atomic-file.js";
 
 import {
   GLOBAL_STATE_BACKUP_FILE_BASENAME,
@@ -436,8 +437,12 @@ export async function syncWorkspaceRoots(storageOrCodexHome, options = {}) {
   const backupMissing = await fs.access(backupPath).then(() => false).catch(() => true);
   const updated = savedRootsChanged || projectOrderChanged || activeRootsChanged || labelsChanged || openTargetsChanged || backupMissing;
   if (updated) {
-    await fs.writeFile(filePath, nextText, "utf8");
-    await fs.writeFile(backupPath, nextText, "utf8");
+    await options.onBeforeWrite?.(filePath);
+    await writeFileAtomic(filePath, nextText, "utf8");
+    await options.onApplied?.(filePath);
+    await options.onBeforeWrite?.(backupPath);
+    await writeFileAtomic(backupPath, nextText, "utf8");
+    await options.onApplied?.(backupPath);
   }
 
   return {

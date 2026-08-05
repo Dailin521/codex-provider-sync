@@ -1,5 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace CodexProviderSync.Core;
 
@@ -33,7 +36,14 @@ public sealed class StatusSnapshot
     public IReadOnlyList<ProjectThreadVisibility> ProjectThreadVisibility { get; init; } = [];
     public required string BackupRoot { get; init; }
     public required BackupSummary BackupSummary { get; init; }
+    public IReadOnlyList<TransactionRecoveryInfo> PendingTransactions { get; init; } = [];
 }
+
+public sealed record TransactionRecoveryInfo(
+    string? OperationId,
+    string State,
+    string BackupDirectory,
+    string JournalPath);
 
 public sealed record StateDbLocation(string Path, string RelativePath, string Source);
 
@@ -268,6 +278,9 @@ internal sealed class BackupMetadataFile
     public required List<string> DbFiles { get; init; }
     public List<string> SqliteDbFiles { get; init; } = [];
     public int ChangedSessionFiles { get; init; }
+    public Dictionary<string, bool>? GlobalStateFiles { get; init; }
+    public bool? GlobalStateFilePresent { get; init; }
+    public bool? GlobalStateBackupFilePresent { get; init; }
 }
 
 internal sealed class SessionBackupManifest
@@ -285,9 +298,113 @@ internal sealed class SessionBackupManifestEntry
     public required string Path { get; init; }
     public required string OriginalFirstLine { get; init; }
     public required string OriginalSeparator { get; init; }
+    public string? OriginalLastWriteTimeUtc { get; init; }
+    public double? OriginalMtimeMs { get; init; }
+    [JsonConverter(typeof(NullableInt64DecimalStringJsonConverter))]
     public long? OriginalLastWriteTimeUtcTicks { get; init; }
     public bool ModelOnlyChange { get; init; }
     public List<TurnContextModelBackup> OriginalTurnContextModels { get; init; } = [];
+
+    internal long? ResolveOriginalLastWriteTimeUtcTicks()
+    {
+        long? isoTicks = null;
+        if (!string.IsNullOrWhiteSpace(OriginalLastWriteTimeUtc))
+        {
+            if (!DateTimeOffset.TryParseExact(
+                    OriginalLastWriteTimeUtc,
+                    "yyyy-MM-dd'T'HH:mm:ss.fff'Z'",
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                    out DateTimeOffset parsed))
+            {
+                throw new InvalidOperationException(
+                    $"Session backup has invalid originalLastWriteTimeUtc for {Path}.");
+            }
+            isoTicks = parsed.UtcTicks;
+        }
+
+        long? mtimeTicks = null;
+        if (OriginalMtimeMs is double mtimeMs)
+        {
+            if (!double.IsFinite(mtimeMs))
+            {
+                throw new InvalidOperationException(
+                    $"Session backup has non-finite originalMtimeMs for {Path}.");
+            }
+            double truncated = Math.Truncate(mtimeMs);
+            if (truncated < DateTimeOffset.MinValue.ToUnixTimeMilliseconds()
+                || truncated > DateTimeOffset.MaxValue.ToUnixTimeMilliseconds())
+            {
+                throw new InvalidOperationException(
+                    $"Session backup originalMtimeMs is out of range for {Path}.");
+            }
+            mtimeTicks = DateTimeOffset.FromUnixTimeMilliseconds(checked((long)truncated)).UtcTicks;
+        }
+
+        long? ticksAtMillisecond = OriginalLastWriteTimeUtcTicks is long ticks
+            ? ticks - (ticks % TimeSpan.TicksPerMillisecond)
+            : null;
+        long? expected = isoTicks ?? mtimeTicks ?? ticksAtMillisecond;
+        if ((isoTicks is not null && isoTicks != expected)
+            || (mtimeTicks is not null && mtimeTicks != expected)
+            || (ticksAtMillisecond is not null && ticksAtMillisecond != expected))
+        {
+            throw new InvalidOperationException(
+                $"Session backup timestamp fields disagree for {Path}.");
+        }
+        return OriginalLastWriteTimeUtcTicks ?? expected;
+    }
+
+    internal static SessionBackupManifestEntry FromChange(SessionChange change)
+    {
+        DateTimeOffset original = new(
+            new DateTime(change.OriginalLastWriteTimeUtcTicks, DateTimeKind.Utc));
+        long unixMilliseconds = original.ToUnixTimeMilliseconds();
+        return new SessionBackupManifestEntry
+        {
+            Path = change.Path,
+            OriginalFirstLine = change.OriginalFirstLine,
+            OriginalSeparator = change.OriginalSeparator,
+            OriginalLastWriteTimeUtc = original.ToString(
+                "yyyy-MM-dd'T'HH:mm:ss.fff'Z'",
+                CultureInfo.InvariantCulture),
+            OriginalMtimeMs = unixMilliseconds,
+            OriginalLastWriteTimeUtcTicks = change.OriginalLastWriteTimeUtcTicks,
+            ModelOnlyChange = change.ModelOnlyChange,
+            OriginalTurnContextModels = [.. change.OriginalTurnContextModels]
+        };
+    }
+}
+
+internal sealed class NullableInt64DecimalStringJsonConverter : JsonConverter<long?>
+{
+    public override long? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.Null)
+        {
+            return null;
+        }
+        if (reader.TokenType == JsonTokenType.String
+            && long.TryParse(reader.GetString(), NumberStyles.None, CultureInfo.InvariantCulture, out long textValue))
+        {
+            return textValue;
+        }
+        if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt64(out long numericValue))
+        {
+            return numericValue;
+        }
+        throw new JsonException("Expected a decimal string or Int64 JSON number.");
+    }
+
+    public override void Write(Utf8JsonWriter writer, long? value, JsonSerializerOptions options)
+    {
+        if (value is null)
+        {
+            writer.WriteNullValue();
+            return;
+        }
+        writer.WriteStringValue(value.Value.ToString(CultureInfo.InvariantCulture));
+    }
 }
 
 public sealed class WorkspaceRootSyncResult
@@ -296,6 +413,46 @@ public sealed class WorkspaceRootSyncResult
     public required bool Updated { get; init; }
     public required int UpdatedWorkspaceRoots { get; init; }
     public required int SavedWorkspaceRootCount { get; init; }
+}
+
+public sealed class SyncTransactionException : InvalidOperationException
+{
+    public SyncTransactionException(
+        Exception originalError,
+        IReadOnlyList<string> rollbackErrors,
+        string backupDirectory,
+        IReadOnlyList<string> completedTargets,
+        IReadOnlyList<string> uncompletedTargets,
+        string rollbackStatus = "incomplete",
+        bool recoveryRequired = true)
+        : base(
+            recoveryRequired
+                ? $"Failed to restore state after sync error. Original error: {originalError.Message}. Restore error: {string.Join("; ", rollbackErrors)}"
+                : $"Provider sync failed and all observed changes were rolled back. Original error: {originalError.Message}",
+            originalError)
+    {
+        OriginalError = originalError;
+        RollbackErrors = rollbackErrors;
+        BackupDirectory = backupDirectory;
+        CompletedTargets = completedTargets;
+        UncompletedTargets = uncompletedTargets;
+        RollbackStatus = rollbackStatus;
+        RecoveryRequired = recoveryRequired;
+    }
+
+    public string Code => RecoveryRequired ? "RECOVERY_REQUIRED" : "SYNC_FAILED_ROLLED_BACK";
+    public Exception OriginalError { get; }
+    public IReadOnlyList<string> RollbackErrors { get; }
+    public string BackupDirectory { get; }
+    public IReadOnlyList<string> CompletedTargets { get; }
+    public IReadOnlyList<string> UncompletedTargets { get; }
+    public string RollbackStatus { get; }
+    public bool RecoveryRequired { get; }
+    public bool WasCanceled => OriginalError is OperationCanceledException;
+    public string RecoveryInstructions =>
+        RecoveryRequired
+            ? $"Restore the managed backup at {BackupDirectory}, inspect the pending transaction journal, then retry."
+            : "No manual recovery is required. Inspect the original error, correct its cause, and retry.";
 }
 
 public sealed class ThreadCwdStat

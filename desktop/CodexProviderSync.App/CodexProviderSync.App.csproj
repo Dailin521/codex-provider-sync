@@ -1,7 +1,18 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <ProjectReference Include="..\CodexProviderSync.Application\CodexProviderSync.Application.csproj" />
     <ProjectReference Include="..\CodexProviderSync.Core\CodexProviderSync.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Automation\gui-automation-manifest.v0.4.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <EmbeddedResource Include="Automation\gui-automation-manifest.v0.4.json">
+      <LogicalName>CodexProviderSync.App.Automation.gui-automation-manifest.v0.4.json</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 
   <PropertyGroup>
@@ -13,9 +24,9 @@
     <AssemblyName>CodexProviderSync</AssemblyName>
     <Product>Codex Provider Sync</Product>
     <Company>Dailin521</Company>
-    <Version>0.3.2</Version>
-    <AssemblyVersion>0.3.2.0</AssemblyVersion>
-    <FileVersion>0.3.2.0</FileVersion>
+    <Version>0.4.0</Version>
+    <AssemblyVersion>0.4.0.0</AssemblyVersion>
+    <FileVersion>0.4.0.0</FileVersion>
   </PropertyGroup>
 
 </Project>

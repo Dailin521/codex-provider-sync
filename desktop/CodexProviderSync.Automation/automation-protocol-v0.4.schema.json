@@ -1,0 +1,403 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dailin521/codex-provider-sync/schemas/automation-protocol-v0.4.schema.json",
+  "title": "Codex Provider Sync Automation protocol 0.4",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/response"
+    },
+    {
+      "$ref": "#/$defs/operationPlan"
+    }
+  ],
+  "$defs": {
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocolVersion",
+        "result",
+        "exitCode",
+        "command",
+        "lifecycle",
+        "warnings",
+        "errors",
+        "timeline"
+      ],
+      "properties": {
+        "protocolVersion": {
+          "const": "0.4"
+        },
+        "result": {
+          "enum": ["success", "warning", "failure", "rollback", "recovery"]
+        },
+        "exitCode": {
+          "enum": [0, 2, 3, 4, 5, 6, 7, 10]
+        },
+        "command": {
+          "type": "string"
+        },
+        "operationId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "lifecycle": {
+          "enum": [
+            "accepted",
+            "validating",
+            "planning",
+            "readyToApply",
+            "applying",
+            "succeeded",
+            "failed",
+            "cancelled",
+            "timedOut",
+            "rejected",
+            "recoveryRequired"
+          ]
+        },
+        "data": {},
+        "warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/warning"
+          }
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/error"
+          }
+        },
+        "timeline": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/lifecycleEvent"
+          }
+        }
+      }
+    },
+    "operationPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocolVersion",
+        "planId",
+        "createdByOperationId",
+        "createdAtUtc",
+        "expiresAtUtc",
+        "intent",
+        "stateFingerprint",
+        "executionToken",
+        "targets",
+        "autoPruneDeletionTargets",
+        "warnings",
+        "digest"
+      ],
+      "properties": {
+        "protocolVersion": {
+          "const": "0.4"
+        },
+        "planId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+        },
+        "createdByOperationId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "createdAtUtc": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expiresAtUtc": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "intent": {
+          "$ref": "#/$defs/writeIntent"
+        },
+        "stateFingerprint": {
+          "type": "string",
+          "minLength": 1
+        },
+        "executionToken": {
+          "type": "string",
+          "minLength": 1
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/planTarget"
+          }
+        },
+        "autoPruneDeletionTargets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/planTarget"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/warning"
+          }
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "writeIntent": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/syncIntent"
+        },
+        {
+          "$ref": "#/$defs/switchIntent"
+        },
+        {
+          "$ref": "#/$defs/restoreIntent"
+        },
+        {
+          "$ref": "#/$defs/pruneIntent"
+        }
+      ]
+    },
+    "syncIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "codexHome", "providerId", "backupRetentionCount"],
+      "properties": {
+        "kind": {
+          "const": "sync"
+        },
+        "codexHome": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "sqliteHomeOverride": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "providerId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "backupRetentionCount": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "switchIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "codexHome", "providerId", "modelSelection", "backupRetentionCount"],
+      "properties": {
+        "kind": {
+          "const": "switch"
+        },
+        "codexHome": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "sqliteHomeOverride": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "providerId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "modelSelection": {
+          "$ref": "#/$defs/modelSelection"
+        },
+        "backupRetentionCount": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "restoreIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "codexHome",
+        "backupDirectory",
+        "restoreConfig",
+        "restoreDatabase",
+        "restoreSessions",
+        "allowSqliteHomeRelocation"
+      ],
+      "properties": {
+        "kind": {
+          "const": "restore"
+        },
+        "codexHome": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "sqliteHomeOverride": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "backupDirectory": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "restoreConfig": {
+          "type": "boolean"
+        },
+        "restoreDatabase": {
+          "type": "boolean"
+        },
+        "restoreSessions": {
+          "type": "boolean"
+        },
+        "allowSqliteHomeRelocation": {
+          "type": "boolean"
+        }
+      }
+    },
+    "pruneIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "codexHome", "backupRetentionCount"],
+      "properties": {
+        "kind": {
+          "const": "prune"
+        },
+        "codexHome": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "sqliteHomeOverride": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "backupRetentionCount": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "modelSelection": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": {
+            "mode": {
+              "const": "followProvider"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": {
+            "mode": {
+              "const": "keepRootModel"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "model"],
+          "properties": {
+            "mode": {
+              "const": "custom"
+            },
+            "model": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      ]
+    },
+    "planTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "action", "fingerprint"],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "action": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fingerprint": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "absolutePath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "warning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "recoveryRequired"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "recoveryRequired": {
+          "type": "boolean"
+        },
+        "rollbackStatus": {
+          "type": "string"
+        },
+        "evidencePath": {
+          "type": "string"
+        }
+      }
+    },
+    "lifecycleEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lifecycle", "timestampUtc"],
+      "properties": {
+        "lifecycle": {
+          "enum": [
+            "accepted",
+            "validating",
+            "planning",
+            "readyToApply",
+            "applying",
+            "succeeded",
+            "failed",
+            "cancelled",
+            "rejected",
+            "recoveryRequired"
+          ]
+        },
+        "timestampUtc": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  }
+}

@@ -60,7 +60,7 @@ public sealed partial class ConfigFileService
 
     public async Task WriteConfigTextAsync(string configPath, string configText)
     {
-        await File.WriteAllTextAsync(configPath, configText);
+        await AtomicFile.WriteAllTextAsync(configPath, configText);
     }
 
     public CurrentProviderInfo ReadCurrentProviderFromConfigText(string configText)

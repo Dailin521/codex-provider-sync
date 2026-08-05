@@ -7,6 +7,7 @@ import path from "node:path";
 
 import {
   createBackup,
+  getBackupRecoveryCoverage,
   getBackupSummary,
   pruneBackups,
   restoreBackup,
@@ -17,8 +18,1164 @@ import { DB_FILE_BASENAME, DEFAULT_BACKUP_RETENTION_COUNT, SQLITE_DIR_BASENAME }
 import { getUnsupportedNodeVersionMessage } from "../src/node-version.js";
 import { applySessionChanges, collectSessionChanges } from "../src/session-files.js";
 import { openDatabase } from "../src/sqlite.js";
+import {
+  TransactionJournal,
+  findPendingTransactions,
+  readTransactionJournal
+} from "../src/transaction-journal.js";
+import { syncDirectory, writeFileAtomic } from "../src/atomic-file.js";
 
 delete process.env.CODEX_SQLITE_HOME;
+
+test("runSync rolls back the first rollout when a later target fails (#69)", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const firstPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");
+  const secondPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-b.jsonl");
+  await writeRollout(firstPath, "thread-a", "apigather");
+  await writeRollout(secondPath, "thread-b", "apigather");
+  await writeStateDb(codexHome, [
+    { id: "thread-a", model_provider: "apigather" },
+    { id: "thread-b", model_provider: "apigather" }
+  ]);
+  const firstBefore = await fs.readFile(firstPath, "utf8");
+  const secondBefore = await fs.readFile(secondPath, "utf8");
+  let sqliteBackupRestoreAttempts = 0;
+
+  let error;
+  try {
+    await runSync({
+      codexHome,
+      provider: "openai",
+      faultInjector: ({ point, targetIndex }) => {
+        if (point === "before_rollout_apply" && targetIndex === 2) {
+          throw new Error("injected second-target failure");
+        }
+        if (point === "before_sqlite_rollback") {
+          sqliteBackupRestoreAttempts += 1;
+        }
+      }
+    });
+    assert.fail("runSync should fail before applying the second target");
+  } catch (caught) {
+    error = caught;
+  }
+
+  assert.match(error.originalError.message, /injected second-target failure/);
+  assert.deepEqual(error.completedTargets, [path.resolve(firstPath)]);
+  assert.deepEqual(error.uncompletedTargets, []);
+
+  assert.equal(await fs.readFile(firstPath, "utf8"), firstBefore);
+  assert.equal(await fs.readFile(secondPath, "utf8"), secondBefore);
+  const db = await openDatabase(stateDbPath(codexHome));
+  try {
+    const providers = db.prepare("SELECT model_provider FROM threads ORDER BY id").all();
+    assert.deepEqual(providers.map((row) => row.model_provider), ["apigather", "apigather"]);
+  } finally {
+    db.close();
+  }
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+  assert.equal(sqliteBackupRestoreAttempts, 0, "a pre-COMMIT failure must use SQLite ROLLBACK, not backup restore");
+});
+
+test("runSync restores global-state primary when backup write fails (#69)", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const originalState = {
+    "electron-saved-workspace-roots": ["\\\\?\\D:\\Workspace\\sample"],
+    "project-order": ["\\\\?\\D:\\Workspace\\sample"],
+    "active-workspace-roots": ["\\\\?\\D:\\Workspace\\sample"]
+  };
+  await writeGlobalState(codexHome, originalState);
+  await writeStateDb(codexHome, [
+    { id: "thread-global", model_provider: "openai", cwd: "\\\\?\\D:\\Workspace\\sample" }
+  ]);
+  const primaryPath = path.join(codexHome, ".codex-global-state.json");
+  const backupPath = path.join(codexHome, ".codex-global-state.json.bak");
+  const primaryBefore = await fs.readFile(primaryPath, "utf8");
+  const backupBefore = await fs.readFile(backupPath, "utf8");
+
+  await assert.rejects(
+    runSync({
+      codexHome,
+      faultInjector: ({ point, path: appliedPath }) => {
+        if (point === "after_global_state_apply" && appliedPath === primaryPath) {
+          throw new Error("injected global-state backup failure");
+        }
+      }
+    }),
+    /injected global-state backup failure/
+  );
+
+  assert.equal(await fs.readFile(primaryPath, "utf8"), primaryBefore);
+  assert.equal(await fs.readFile(backupPath, "utf8"), backupBefore);
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("failure after SQLite commit restores rollout and database", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-after-sqlite.jsonl");
+  await writeRollout(sessionPath, "thread-after-sqlite", "apigather");
+  await writeStateDb(codexHome, [{ id: "thread-after-sqlite", model_provider: "apigather" }]);
+  const before = await fs.readFile(sessionPath, "utf8");
+
+  let error;
+  try {
+    await runSync({
+      codexHome,
+      provider: "openai",
+      faultInjector: ({ point }) => {
+        if (point === "after_sqlite_commit") {
+          throw new Error("injected post-SQLite failure");
+        }
+      }
+    });
+    assert.fail("runSync should fail after the committed SQLite update");
+  } catch (caught) {
+    error = caught;
+  }
+
+  assert.equal(error.name, "SyncTransactionError");
+  assert.equal(error.code, "SYNC_FAILED_ROLLED_BACK");
+  assert.equal(error.rollbackStatus, "complete");
+  assert.equal(error.recoveryRequired, false);
+  assert.ok(error.completedTargets.includes(path.resolve(sessionPath)));
+  assert.ok(error.completedTargets.includes(path.resolve(stateDbPath(codexHome))));
+  assert.equal(await fs.readFile(sessionPath, "utf8"), before);
+  assert.equal(await readProvider(codexHome, "thread-after-sqlite"), "apigather");
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("unknown SQLite COMMIT acknowledgement restores switch config, rollout, and database", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  const originalConfig = `model_provider = "openai"\nmodel = "gpt-5.4-mini"\n\n[model_providers.apigather]\nmodel = "apigather-prod"\nbase_url = "https://example.com"\n`;
+  const configPath = path.join(codexHome, "config.toml");
+  await fs.writeFile(configPath, originalConfig, "utf8");
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-commit-unknown.jsonl");
+  await writeRollout(sessionPath, "thread-commit-unknown", "openai");
+  await writeStateDb(codexHome, [{ id: "thread-commit-unknown", model_provider: "openai" }]);
+  const rolloutBefore = await fs.readFile(sessionPath, "utf8");
+  let providerObservedAfterCommit = null;
+  let error;
+
+  try {
+    await runSwitch({
+      codexHome,
+      provider: "apigather",
+      async faultInjector({ point }) {
+        if (point === "after_sqlite_commit_before_ack") {
+          providerObservedAfterCommit = await readProvider(codexHome, "thread-commit-unknown");
+          throw new Error("injected lost SQLite COMMIT acknowledgement");
+        }
+      }
+    });
+    assert.fail("runSwitch should fail when SQLite COMMIT acknowledgement is unknown");
+  } catch (caught) {
+    error = caught;
+  }
+
+  assert.equal(providerObservedAfterCommit, "apigather", "the injected failure must occur after the real COMMIT");
+  assert.equal(error.name, "SyncTransactionError");
+  assert.equal(error.rollbackStatus, "complete");
+  assert.equal(error.recoveryRequired, false);
+  assert.match(error.originalError.message, /lost SQLite COMMIT acknowledgement/);
+  assert.equal(await fs.readFile(configPath, "utf8"), originalConfig);
+  assert.equal(await fs.readFile(sessionPath, "utf8"), rolloutBefore);
+  assert.equal(await readProvider(codexHome, "thread-commit-unknown"), "openai");
+
+  const journal = await readTransactionJournal(path.join(error.backupDir, "transaction-journal.jsonl"));
+  assert.equal(journal.state, "rolledBack");
+  assert.equal(journal.terminal, true);
+  assert.equal(journal.invalidTail, false);
+  assert.equal(journal.events.some((event) => event.state === "recoveryRequired"), false);
+  assert.equal(journal.events.some((event) => event.kind === "sqlite" && event.state === "applied"), false);
+  assert.deepEqual(journal.events.slice(-2).map((event) => event.state), ["rollingBack", "rolledBack"]);
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("cancellation after SQLite commit restores rollout and database", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-cancel-after-sqlite.jsonl");
+  await writeRollout(sessionPath, "thread-cancel-after-sqlite", "apigather");
+  await writeStateDb(codexHome, [{ id: "thread-cancel-after-sqlite", model_provider: "apigather" }]);
+  const before = await fs.readFile(sessionPath, "utf8");
+  const controller = new AbortController();
+
+  let error;
+  try {
+    await runSync({
+      codexHome,
+      provider: "openai",
+      signal: controller.signal,
+      faultInjector: ({ point }) => {
+        if (point === "after_sqlite_commit") {
+          controller.abort();
+        }
+      }
+    });
+    assert.fail("runSync should observe cancellation before transaction commit");
+  } catch (caught) {
+    error = caught;
+  }
+
+  assert.equal(error.name, "SyncTransactionError");
+  assert.equal(error.originalError.name, "AbortError");
+  assert.equal(error.rollbackStatus, "complete");
+  assert.equal(error.recoveryRequired, false);
+  assert.equal(await fs.readFile(sessionPath, "utf8"), before);
+  assert.equal(await readProvider(codexHome, "thread-cancel-after-sqlite"), "apigather");
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("cancellation after transaction commit does not roll back committed state", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-cancel-after-commit.jsonl");
+  await writeRollout(sessionPath, "thread-cancel-after-commit", "apigather");
+  await writeStateDb(codexHome, [{ id: "thread-cancel-after-commit", model_provider: "apigather" }]);
+  const controller = new AbortController();
+
+  const result = await runSync({
+    codexHome,
+    provider: "openai",
+    signal: controller.signal,
+    faultInjector: ({ point }) => {
+      if (point === "after_transaction_commit") {
+        controller.abort();
+      }
+    }
+  });
+
+  assert.equal(result.changedSessionFiles, 1);
+  assert.equal(await readProvider(codexHome, "thread-cancel-after-commit"), "openai");
+  assert.match(await fs.readFile(sessionPath, "utf8"), /"model_provider":"openai"/);
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("a lost acknowledgement after a durable journal commit is reconciled as success", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-commit-ack.jsonl");
+  await writeRollout(sessionPath, "thread-commit-ack", "apigather");
+  await writeStateDb(codexHome, [{ id: "thread-commit-ack", model_provider: "apigather" }]);
+
+  const result = await runSync({
+    codexHome,
+    faultInjector: ({ point }) => {
+      if (point === "after_transaction_journal_commit_before_ack") {
+        throw new Error("injected lost commit acknowledgement");
+      }
+    }
+  });
+
+  assert.equal(result.changedSessionFiles, 1);
+  assert.equal(await readProvider(codexHome, "thread-commit-ack"), "openai");
+  assert.match(await fs.readFile(sessionPath, "utf8"), /"model_provider":"openai"/);
+  const journal = await readTransactionJournal(path.join(result.backupDir, "transaction-journal.jsonl"));
+  assert.equal(journal.state, "committed");
+  assert.equal(journal.terminal, true);
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("commit acknowledgement reconciliation rejects a terminal from another operation", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-foreign-commit.jsonl");
+  await writeRollout(sessionPath, "thread-foreign-commit", "apigather");
+  await writeStateDb(codexHome, [{ id: "thread-foreign-commit", model_provider: "apigather" }]);
+  let backupDir = null;
+
+  await assert.rejects(
+    runSync({
+      codexHome,
+      onProgress(event) {
+        if (event.stage === "create_backup" && event.status === "complete") {
+          backupDir = event.backupDir;
+        }
+      },
+      async faultInjector({ point }) {
+        if (point !== "after_transaction_journal_commit_before_ack") {
+          return;
+        }
+        const journalPath = path.join(backupDir, "transaction-journal.jsonl");
+        const events = (await fs.readFile(journalPath, "utf8"))
+          .trim()
+          .split("\n")
+          .map((line) => ({ ...JSON.parse(line), operationId: "foreign-operation-id" }));
+        await fs.writeFile(journalPath, `${events.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
+        throw new Error("injected lost commit acknowledgement");
+      }
+    }),
+    /injected lost commit acknowledgement/
+  );
+
+  const journal = await readTransactionJournal(path.join(backupDir, "transaction-journal.jsonl"));
+  assert.equal(journal.terminal, true);
+  assert.equal(journal.state, "committed");
+  assert.equal(journal.operationId, "foreign-operation-id");
+});
+
+test("an exception after the committed terminal never triggers rollback", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-post-commit-error.jsonl");
+  await writeRollout(sessionPath, "thread-post-commit-error", "apigather");
+  let backupDir = null;
+
+  await assert.rejects(
+    runSync({
+      codexHome,
+      onProgress(event) {
+        if (event.stage === "create_backup" && event.status === "complete") {
+          backupDir = event.backupDir;
+        }
+      },
+      faultInjector: ({ point }) => {
+        if (point === "after_transaction_commit") {
+          throw new Error("injected post-commit observer failure");
+        }
+      }
+    }),
+    /post-commit observer failure/
+  );
+
+  assert.match(await fs.readFile(sessionPath, "utf8"), /"model_provider":"openai"/);
+  const journal = await readTransactionJournal(path.join(backupDir, "transaction-journal.jsonl"));
+  assert.equal(journal.state, "committed");
+  assert.equal(journal.terminal, true);
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("progress observer failures before and after commit are non-fatal", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-progress-failure.jsonl");
+  await writeRollout(sessionPath, "thread-progress-failure", "apigather");
+  await writeStateDb(codexHome, [{ id: "thread-progress-failure", model_provider: "apigather" }]);
+  const observedFailures = [];
+
+  const result = await runSync({
+    codexHome,
+    onProgress(event) {
+      if ((event.stage === "update_sqlite" && event.status === "complete")
+          || (event.stage === "clean_backups" && event.status === "start")) {
+        observedFailures.push(`${event.stage}:${event.status}`);
+        throw new Error("injected progress observer failure");
+      }
+    }
+  });
+
+  assert.deepEqual(observedFailures, ["update_sqlite:complete", "clean_backups:start"]);
+  assert.match(await fs.readFile(sessionPath, "utf8"), /"model_provider":"openai"/);
+  assert.equal(await readProvider(codexHome, "thread-progress-failure"), "openai");
+  const journal = await readTransactionJournal(path.join(result.backupDir, "transaction-journal.jsonl"));
+  assert.equal(journal.state, "committed");
+  assert.equal(journal.terminal, true);
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("failure before transaction commit rolls back before pruning old backups", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-before-commit-failure.jsonl");
+  await writeRollout(sessionPath, "thread-before-commit", "apigather");
+  await writeStateDb(codexHome, [{ id: "thread-before-commit", model_provider: "apigather" }]);
+  const before = await fs.readFile(sessionPath, "utf8");
+  const oldBackupDir = path.join(backupRoot(codexHome), "20260319T000000000Z");
+  await writeBackup(codexHome, "20260319T000000000Z", [["note.txt", "must-survive"]]);
+
+  let error;
+  try {
+    await runSync({
+      codexHome,
+      provider: "openai",
+      keepCount: 1,
+      faultInjector: ({ point }) => {
+        if (point === "before_transaction_commit") {
+          throw new Error("injected transaction-commit failure");
+        }
+      }
+    });
+    assert.fail("runSync should fail before committing the transaction");
+  } catch (caught) {
+    error = caught;
+  }
+
+  assert.equal(error.name, "SyncTransactionError");
+  assert.equal(error.rollbackStatus, "complete");
+  assert.equal(await fs.readFile(sessionPath, "utf8"), before);
+  assert.equal(await readProvider(codexHome, "thread-before-commit"), "apigather");
+  await fs.access(oldBackupDir);
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("SQLite rollback failure preserves recovery evidence and manual restore recovers", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-sqlite-rollback-failure.jsonl");
+  await writeRollout(sessionPath, "thread-sqlite-rollback", "apigather");
+  await writeStateDb(codexHome, [{ id: "thread-sqlite-rollback", model_provider: "apigather" }]);
+  const before = await fs.readFile(sessionPath, "utf8");
+
+  let error;
+  try {
+    await runSync({
+      codexHome,
+      provider: "openai",
+      faultInjector: ({ point }) => {
+        if (point === "after_sqlite_commit_before_ack") {
+          throw new Error("injected lost SQLite COMMIT acknowledgement");
+        }
+        if (point === "before_sqlite_rollback") {
+          throw new Error("injected SQLite rollback failure");
+        }
+      }
+    });
+    assert.fail("runSync should require recovery when SQLite compensation fails");
+  } catch (caught) {
+    error = caught;
+  }
+
+  assert.equal(error.name, "SyncTransactionError");
+  assert.equal(error.code, "RECOVERY_REQUIRED");
+  assert.equal(error.rollbackStatus, "incomplete");
+  assert.equal(error.recoveryRequired, true);
+  assert.ok(error.rollbackErrors.some((value) => value.includes("injected SQLite rollback failure")));
+  assert.equal(await fs.readFile(sessionPath, "utf8"), before);
+  assert.equal(await readProvider(codexHome, "thread-sqlite-rollback"), "openai");
+  assert.equal((await findPendingTransactions(codexHome)).length, 1);
+  const pendingJournal = await readTransactionJournal(path.join(error.backupDir, "transaction-journal.jsonl"));
+  assert.equal(pendingJournal.state, "recoveryRequired");
+  assert.equal(pendingJournal.terminal, false);
+  assert.equal(pendingJournal.events.some((event) => event.state === "rolledBack"), false);
+
+  await runRestore({ backupDir: error.backupDir, codexHome });
+  assert.equal(await fs.readFile(sessionPath, "utf8"), before);
+  assert.equal(await readProvider(codexHome, "thread-sqlite-rollback"), "apigather");
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("unfinished journal blocks writes until the bound backup is restored", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  await writeStateDb(codexHome, [{ id: "thread-recovery", model_provider: "openai" }]);
+  const configPath = path.join(codexHome, "config.toml");
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: [],
+    configPath
+  });
+  await TransactionJournal.create(backupDir, {
+    codexHome,
+    targetProvider: "openai",
+    potentialTargets: [configPath]
+  });
+
+  const status = await getStatus({ codexHome });
+  assert.equal(status.pendingTransactions.length, 1);
+  assert.match(renderStatus(status), /Recovery required:[\s\S]*Run restore/);
+  await assert.rejects(
+    runSync({ codexHome }),
+    (error) => error?.code === "RECOVERY_REQUIRED" && error.pendingTransactions.length === 1
+  );
+
+  await runRestore({ backupDir, codexHome });
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+  const result = await runSync({ codexHome });
+  assert.equal(result.targetProvider, "openai");
+});
+
+test("crash recovery restores actually mutated rollout and database from a pending journal", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-crash-recovery.jsonl");
+  await writeRollout(sessionPath, "thread-crash-recovery", "apigather");
+  await writeStateDb(codexHome, [{ id: "thread-crash-recovery", model_provider: "apigather" }]);
+  const before = await fs.readFile(sessionPath, "utf8");
+  const { changes } = await collectSessionChanges(codexHome, "openai");
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: changes,
+    configPath: path.join(codexHome, "config.toml")
+  });
+  const journal = await TransactionJournal.create(backupDir, {
+    codexHome,
+    targetProvider: "openai",
+    potentialTargets: [sessionPath, stateDbPath(codexHome)]
+  });
+
+  await journal.applying("rollout", sessionPath);
+  await applySessionChanges(changes);
+  await journal.applied("rollout", sessionPath);
+  await journal.applying("sqlite", stateDbPath(codexHome));
+  const db = await openDatabase(stateDbPath(codexHome));
+  try {
+    db.prepare("UPDATE threads SET model_provider = ? WHERE id = ?")
+      .run("openai", "thread-crash-recovery");
+  } finally {
+    db.close();
+  }
+  await journal.applied("sqlite", stateDbPath(codexHome));
+
+  assert.notEqual(await fs.readFile(sessionPath, "utf8"), before);
+  assert.equal(await readProvider(codexHome, "thread-crash-recovery"), "openai");
+  assert.equal((await getStatus({ codexHome })).pendingTransactions.length, 1);
+  await assert.rejects(
+    runSync({ codexHome }),
+    (error) => error?.code === "RECOVERY_REQUIRED"
+  );
+
+  await runRestore({ backupDir, codexHome });
+  assert.equal(await fs.readFile(sessionPath, "utf8"), before);
+  assert.equal(await readProvider(codexHome, "thread-crash-recovery"), "apigather");
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("rollback failure preserves both errors and manual recovery evidence", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-rollback-failure.jsonl");
+  await writeRollout(sessionPath, "thread-rollback", "apigather");
+  await writeStateDb(codexHome, [{ id: "thread-rollback", model_provider: "apigather" }]);
+
+  let error;
+  try {
+    await runSync({
+      codexHome,
+      faultInjector: ({ point }) => {
+        if (point === "after_rollout_apply") {
+          throw new Error("injected original failure");
+        }
+        if (point === "before_rollout_rollback") {
+          throw new Error("injected rollback failure");
+        }
+      }
+    });
+    assert.fail("runSync should fail when rollback is injected to fail");
+  } catch (caught) {
+    error = caught;
+  }
+
+  assert.equal(error.name, "SyncTransactionError");
+  assert.equal(error.code, "RECOVERY_REQUIRED");
+  assert.match(error.originalError.message, /injected original failure/);
+  assert.ok(error.rollbackErrors.some((value) => value.includes("injected rollback failure")));
+  assert.equal(error.rollbackStatus, "incomplete");
+  assert.equal(error.recoveryRequired, true);
+  assert.equal((await findPendingTransactions(codexHome)).length, 1);
+
+  await runRestore({ backupDir: error.backupDir, codexHome });
+  const firstLine = (await fs.readFile(sessionPath, "utf8")).split("\n")[0];
+  assert.equal(JSON.parse(firstLine).payload.model_provider, "apigather");
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("cancellation after the first target rolls back disk and SQLite with structured evidence", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const firstPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-cancel-a.jsonl");
+  const secondPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-cancel-b.jsonl");
+  await writeRollout(firstPath, "thread-cancel-a", "apigather");
+  await writeRollout(secondPath, "thread-cancel-b", "apigather");
+  await writeStateDb(codexHome, [
+    { id: "thread-cancel-a", model_provider: "apigather" },
+    { id: "thread-cancel-b", model_provider: "apigather" }
+  ]);
+  const before = await Promise.all([fs.readFile(firstPath, "utf8"), fs.readFile(secondPath, "utf8")]);
+  const controller = new AbortController();
+
+  let error;
+  try {
+    await runSync({
+      codexHome,
+      provider: "openai",
+      signal: controller.signal,
+      faultInjector: ({ point, appliedCount }) => {
+        if (point === "after_rollout_apply" && appliedCount === 1) {
+          controller.abort();
+        }
+      }
+    });
+    assert.fail("runSync should observe cancellation at the next target checkpoint");
+  } catch (caught) {
+    error = caught;
+  }
+
+  assert.equal(error.name, "SyncTransactionError");
+  assert.equal(error.code, "SYNC_FAILED_ROLLED_BACK");
+  assert.equal(error.originalError.name, "AbortError");
+  assert.equal(error.rollbackStatus, "complete");
+  assert.equal(error.recoveryRequired, false);
+  assert.ok(error.completedTargets.includes(path.resolve(firstPath)));
+  assert.equal(await fs.readFile(firstPath, "utf8"), before[0]);
+  assert.equal(await fs.readFile(secondPath, "utf8"), before[1]);
+  const db = await openDatabase(stateDbPath(codexHome));
+  try {
+    const providers = db.prepare("SELECT model_provider FROM threads ORDER BY id").all();
+    assert.deepEqual(providers.map((row) => row.model_provider), ["apigather", "apigather"]);
+  } finally {
+    db.close();
+  }
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("cancellation after the only rollout is observed before SQLite commit", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-cancel-only.jsonl");
+  await writeRollout(sessionPath, "thread-cancel-only", "apigather");
+  await writeStateDb(codexHome, [{ id: "thread-cancel-only", model_provider: "apigather" }]);
+  const before = await fs.readFile(sessionPath, "utf8");
+  const controller = new AbortController();
+
+  let error;
+  try {
+    await runSync({
+      codexHome,
+      provider: "openai",
+      signal: controller.signal,
+      faultInjector: ({ point, appliedCount }) => {
+        if (point === "after_rollout_apply" && appliedCount === 1) {
+          controller.abort();
+        }
+      }
+    });
+    assert.fail("runSync should observe cancellation before committing SQLite");
+  } catch (caught) {
+    error = caught;
+  }
+
+  assert.equal(error.name, "SyncTransactionError");
+  assert.equal(error.originalError.name, "AbortError");
+  assert.equal(error.rollbackStatus, "complete");
+  assert.equal(error.recoveryRequired, false);
+  assert.equal(await fs.readFile(sessionPath, "utf8"), before);
+  assert.equal(await readProvider(codexHome, "thread-cancel-only"), "apigather");
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("concurrent sync is rejected by the operation lock without competing mutation", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-concurrent.jsonl");
+  await writeRollout(sessionPath, "thread-concurrent", "apigather");
+  await writeStateDb(codexHome, [{ id: "thread-concurrent", model_provider: "apigather" }]);
+  let releaseFirstOperation;
+  const holdFirstOperation = new Promise((resolve) => {
+    releaseFirstOperation = resolve;
+  });
+  let firstMutationObserved;
+  const firstMutation = new Promise((resolve) => {
+    firstMutationObserved = resolve;
+  });
+  const firstSync = runSync({
+    codexHome,
+    provider: "openai",
+    faultInjector: async ({ point, appliedCount }) => {
+      if (point === "after_rollout_apply" && appliedCount === 1) {
+        firstMutationObserved();
+        await holdFirstOperation;
+      }
+    }
+  });
+  await firstMutation;
+
+  try {
+    await assert.rejects(
+      runSync({ codexHome, provider: "openai" }),
+      /Lock already exists/
+    );
+  } finally {
+    releaseFirstOperation();
+  }
+
+  const result = await firstSync;
+  assert.equal(result.changedSessionFiles, 1);
+  assert.equal(await readProvider(codexHome, "thread-concurrent"), "openai");
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("repeated sync is idempotent for rollout and SQLite state", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-idempotent.jsonl");
+  await writeRollout(sessionPath, "thread-idempotent", "apigather");
+  await writeStateDb(codexHome, [{ id: "thread-idempotent", model_provider: "apigather" }]);
+
+  const first = await runSync({ codexHome, provider: "openai" });
+  const afterFirst = await fs.readFile(sessionPath, "utf8");
+  const second = await runSync({ codexHome, provider: "openai" });
+
+  assert.equal(first.changedSessionFiles, 1);
+  assert.equal(first.sqliteProviderRowsUpdated, 1);
+  assert.equal(second.changedSessionFiles, 0);
+  assert.equal(second.sqliteProviderRowsUpdated, 0);
+  assert.equal(second.sqliteRowsUpdated, 0);
+  assert.equal(await fs.readFile(sessionPath, "utf8"), afterFirst);
+  assert.equal(await readProvider(codexHome, "thread-idempotent"), "openai");
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("failure after model mutation but before journal applied restores full rollout bytes", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "gpt-new"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "06", "09", "rollout-model-window.jsonl");
+  await writeRolloutWithTurnContext(sessionPath, {
+    id: "thread-model-window",
+    provider: "apigather",
+    model: "gpt-old"
+  });
+  const before = await fs.readFile(sessionPath);
+
+  let error;
+  try {
+    await runSync({
+      codexHome,
+      provider: "openai",
+      model: "gpt-new",
+      faultInjector: ({ point, mutation }) => {
+        if (point === "after_rollout_mutation_before_applied" && mutation?.stage === "model") {
+          throw new Error("injected after-model-before-applied failure");
+        }
+      }
+    });
+    assert.fail("runSync should fail after the model rename");
+  } catch (caught) {
+    error = caught;
+  }
+
+  assert.equal(error.code, "SYNC_FAILED_ROLLED_BACK");
+  assert.ok(error.completedTargets.includes(path.resolve(sessionPath)));
+  assert.deepEqual(await fs.readFile(sessionPath), before);
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("immutable full manifest restores a later applying target after abrupt exit", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const firstPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-crash-full-a.jsonl");
+  const secondPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-crash-full-b.jsonl");
+  await writeRollout(firstPath, "thread-crash-full-a", "apigather");
+  await writeRollout(secondPath, "thread-crash-full-b", "apigather");
+  const before = await Promise.all([fs.readFile(firstPath), fs.readFile(secondPath)]);
+
+  const childScript = `
+    import path from "node:path";
+    import { runSync } from "./src/service.js";
+    const codexHome = ${JSON.stringify(codexHome)};
+    const secondPath = ${JSON.stringify(secondPath)};
+    await runSync({
+      codexHome,
+      provider: "openai",
+      faultInjector: ({ point, path: targetPath, mutation }) => {
+        if (point === "after_rollout_mutation_before_applied"
+            && mutation?.stage === "firstLine"
+            && path.resolve(targetPath) === path.resolve(secondPath)) {
+          process.exit(23);
+        }
+      }
+    });
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", childScript], {
+    cwd: path.resolve(".")
+  });
+  const exitCode = await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", resolve);
+  });
+  assert.equal(exitCode, 23);
+  assert.notDeepEqual(await fs.readFile(secondPath), before[1]);
+
+  const status = await getStatus({ codexHome });
+  assert.equal(status.pendingTransactions.length, 1);
+  await assert.rejects(runSync({ codexHome }), (caught) => caught?.code === "RECOVERY_REQUIRED");
+  const [backupDir] = await fs.readdir(backupRoot(codexHome));
+  const fullBackupDir = path.join(backupRoot(codexHome), backupDir);
+  const manifest = JSON.parse(await fs.readFile(path.join(fullBackupDir, "session-meta-backup.json"), "utf8"));
+  assert.equal(manifest.files.length, 2);
+
+  await runRestore({
+    codexHome,
+    backupDir: fullBackupDir,
+    restoreConfig: false,
+    restoreDatabase: false
+  });
+  assert.deepEqual(await fs.readFile(firstPath), before[0]);
+  assert.deepEqual(await fs.readFile(secondPath), before[1]);
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("foreign operationId and missing-final-newline journals stay pending until explicit restore", async (t) => {
+  for (const corruption of ["foreign-operation", "missing-final-newline", "commit-after-recovery-required"]) {
+    await t.test(corruption, async () => {
+      const { codexHome } = await makeTempCodexHome();
+      await writeConfig(codexHome, 'model_provider = "openai"');
+      const configPath = path.join(codexHome, "config.toml");
+      const backupDir = await createBackup({
+        codexHome,
+        targetProvider: "openai",
+        sessionChanges: [],
+        configPath
+      });
+      const journal = await TransactionJournal.create(backupDir, {
+        codexHome,
+        targetProvider: "openai",
+        potentialTargets: [configPath]
+      });
+      if (corruption === "foreign-operation") {
+        await fs.appendFile(journal.filePath, `${JSON.stringify({
+          protocolVersion: 1,
+          operationId: "foreign-operation-id",
+          sequence: 2,
+          state: "committed",
+          recordedAt: new Date().toISOString()
+        })}\n`, "utf8");
+      } else if (corruption === "missing-final-newline") {
+        const text = await fs.readFile(journal.filePath, "utf8");
+        await fs.writeFile(journal.filePath, text.replace(/\n$/, ""), "utf8");
+      } else {
+        await journal.recoveryRequired(new Error("original"), ["rollback"]);
+        await fs.appendFile(journal.filePath, `${JSON.stringify({
+          protocolVersion: 1,
+          operationId: journal.operationId,
+          sequence: 3,
+          state: "committed",
+          recordedAt: new Date().toISOString()
+        })}\n`, "utf8");
+      }
+
+      const corrupted = await readTransactionJournal(journal.filePath);
+      assert.equal(corrupted.invalidTail, true);
+      assert.equal(corrupted.terminal, false);
+      assert.equal((await findPendingTransactions(codexHome)).length, 1);
+
+      await runRestore({
+        codexHome,
+        backupDir,
+        restoreDatabase: false,
+        restoreSessions: false
+      });
+      const repaired = await readTransactionJournal(journal.filePath);
+      assert.equal(repaired.invalidTail, false);
+      assert.equal(repaired.state, "rolledBack");
+      assert.equal(repaired.terminal, true);
+      assert.deepEqual(await findPendingTransactions(codexHome), []);
+      assert.ok((await fs.readdir(backupDir)).some((name) => name.startsWith("transaction-journal.jsonl.invalid.")));
+    });
+  }
+});
+
+test("journal rejects a target outside prepared potentialTargets", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const configPath = path.join(codexHome, "config.toml");
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: [],
+    configPath
+  });
+  const journal = await TransactionJournal.create(backupDir, {
+    codexHome,
+    targetProvider: "openai",
+    potentialTargets: [configPath]
+  });
+  await fs.appendFile(journal.filePath, `${JSON.stringify({
+    protocolVersion: 1,
+    operationId: journal.operationId,
+    sequence: 2,
+    state: "applying",
+    kind: "config",
+    targetPath: path.join(codexHome, "outside.toml"),
+    recordedAt: new Date().toISOString()
+  })}\n`, "utf8");
+
+  const parsed = await readTransactionJournal(journal.filePath);
+  assert.equal(parsed.invalidTail, true);
+  assert.match(parsed.validationError, /potentialTargets/);
+});
+
+test("journal rejects forged rolledBack and duplicate journal creation", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const configPath = path.join(codexHome, "config.toml");
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: [],
+    configPath
+  });
+  const journal = await TransactionJournal.create(backupDir, {
+    codexHome,
+    targetProvider: "openai",
+    potentialTargets: [configPath]
+  });
+  await assert.rejects(
+    TransactionJournal.create(backupDir, {
+      codexHome,
+      targetProvider: "openai",
+      potentialTargets: [configPath]
+    }),
+    (error) => error?.code === "EEXIST"
+  );
+  await fs.appendFile(journal.filePath, `${JSON.stringify({
+    protocolVersion: 1,
+    operationId: journal.operationId,
+    sequence: 2,
+    state: "rolledBack",
+    recordedAt: new Date().toISOString()
+  })}\n`, "utf8");
+  const parsed = await readTransactionJournal(journal.filePath);
+  assert.equal(parsed.invalidTail, true);
+  assert.match(parsed.validationError, /without first entering rollback/);
+});
+
+test("partial restore cannot clear a pending SQLite transaction", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  await writeStateDb(codexHome, [{ id: "thread-partial-restore", model_provider: "apigather" }]);
+  const dbPath = stateDbPath(codexHome);
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: [],
+    configPath: path.join(codexHome, "config.toml")
+  });
+  const journal = await TransactionJournal.create(backupDir, {
+    codexHome,
+    targetProvider: "openai",
+    potentialTargets: [dbPath]
+  });
+  await journal.applying("sqlite", dbPath);
+  const db = await openDatabase(dbPath);
+  try {
+    db.prepare("UPDATE threads SET model_provider = 'openai'").run();
+  } finally {
+    db.close();
+  }
+  await journal.applied("sqlite", dbPath);
+
+  await assert.rejects(
+    runRestore({
+      codexHome,
+      backupDir,
+      restoreConfig: false,
+      restoreDatabase: false,
+      restoreSessions: false
+    }),
+    (error) => error?.code === "RECOVERY_REQUIRED"
+      && error.missingRestoreKinds.includes("SQLite database")
+  );
+  assert.equal(await readProvider(codexHome, "thread-partial-restore"), "openai");
+  assert.equal((await findPendingTransactions(codexHome)).length, 1);
+
+  await runRestore({
+    codexHome,
+    backupDir,
+    restoreConfig: false,
+    restoreDatabase: true,
+    restoreSessions: false
+  });
+  assert.equal(await readProvider(codexHome, "thread-partial-restore"), "apigather");
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("pruning protects the journal directory instead of trusting recorded backupDir", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const configPath = path.join(codexHome, "config.toml");
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: [],
+    configPath
+  });
+  const journal = await TransactionJournal.create(backupDir, {
+    codexHome,
+    targetProvider: "openai",
+    potentialTargets: [configPath]
+  });
+  const [prepared] = (await fs.readFile(journal.filePath, "utf8")).trim().split("\n").map(JSON.parse);
+  prepared.backupDir = path.join(codexHome, "unrelated-backup");
+  await fs.writeFile(journal.filePath, `${JSON.stringify(prepared)}\n`, "utf8");
+
+  await pruneBackups(codexHome, 0);
+  await fs.access(backupDir);
+  assert.equal((await findPendingTransactions(codexHome)).length, 1);
+});
+
+test("rollback removes a global-state backup that did not exist before the operation", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const statePath = path.join(codexHome, ".codex-global-state.json");
+  const stateBackupPath = `${statePath}.bak`;
+  const original = `${JSON.stringify({
+    "electron-saved-workspace-roots": ["C:\\AITemp"],
+    "project-order": ["C:\\AITemp"],
+    "active-workspace-roots": ["C:\\AITemp"]
+  }, null, 2)}\n`;
+  await fs.writeFile(statePath, original, "utf8");
+
+  await assert.rejects(
+    runSync({
+      codexHome,
+      faultInjector: ({ point, path: targetPath }) => {
+        if (point === "after_global_state_apply" && targetPath === stateBackupPath) {
+          throw new Error("injected after global-state backup creation");
+        }
+      }
+    }),
+    /after global-state backup creation/
+  );
+
+  assert.equal(await fs.readFile(statePath, "utf8"), original);
+  await assert.rejects(fs.access(stateBackupPath), (error) => error?.code === "ENOENT");
+});
+
+test("switch preserves structured original and config rollback failures inside the operation lock", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  const originalConfig = `model_provider = "openai"\n\n[model_providers.apigather]\nbase_url = "https://example.com"\n`;
+  const configPath = path.join(codexHome, "config.toml");
+  await fs.writeFile(configPath, originalConfig, "utf8");
+
+  let error;
+  try {
+    await runSwitch({
+      codexHome,
+      provider: "apigather",
+      faultInjector: ({ point }) => {
+        if (point === "after_config_mutation_before_applied") {
+          throw new Error("injected switch failure");
+        }
+        if (point === "before_config_rollback") {
+          throw new Error("injected config rollback failure");
+        }
+      }
+    });
+    assert.fail("switch should require recovery");
+  } catch (caught) {
+    error = caught;
+  }
+
+  assert.equal(error.code, "RECOVERY_REQUIRED");
+  assert.match(error.originalError.message, /injected switch failure/);
+  assert.ok(error.rollbackErrors.some((message) => message.includes("injected config rollback failure")));
+  assert.match(await fs.readFile(configPath, "utf8"), /^model_provider = "apigather"/m);
+  assert.equal((await findPendingTransactions(codexHome)).length, 1);
+
+  await runRestore({
+    codexHome,
+    backupDir: error.backupDir,
+    restoreDatabase: false,
+    restoreSessions: false
+  });
+  assert.equal(await fs.readFile(configPath, "utf8"), originalConfig);
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("backup failure occurs before journal or target mutation", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-backup-failure.jsonl");
+  await writeRollout(sessionPath, "thread-backup-failure", "apigather");
+  await writeStateDb(codexHome, [{ id: "thread-backup-failure", model_provider: "apigather" }]);
+  const before = await fs.readFile(sessionPath, "utf8");
+
+  await assert.rejects(
+    runSync({
+      codexHome,
+      faultInjector: ({ point }) => {
+        if (point === "before_backup") {
+          throw new Error("injected backup creation failure");
+        }
+      }
+    }),
+    /injected backup creation failure/
+  );
+
+  assert.equal(await fs.readFile(sessionPath, "utf8"), before);
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+  await assert.rejects(fs.access(backupRoot(codexHome)));
+});
+
+test("atomic replacement failure preserves the original file and removes staging", async () => {
+  if (process.platform !== "win32") {
+    return;
+  }
+  const { root } = await makeTempCodexHome();
+  const targetPath = path.join(root, "atomic-target.txt");
+  await fs.writeFile(targetPath, "before", "utf8");
+  const lockProcess = await lockRolloutFile(targetPath);
+  try {
+    await assert.rejects(() => writeFileAtomic(targetPath, "after"));
+  } finally {
+    lockProcess.kill();
+    await new Promise((resolve) => lockProcess.once("exit", resolve));
+  }
+  assert.equal(await fs.readFile(targetPath, "utf8"), "before");
+  const staging = (await fs.readdir(root)).filter((name) => name.includes(".provider-sync.") && name.endsWith(".tmp"));
+  assert.deepEqual(staging, []);
+});
+
+test("backup, atomic rollout rewrite, and restore preserve restrictive file modes", async () => {
+  if (process.platform === "win32") {
+    return;
+  }
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const configPath = path.join(codexHome, "config.toml");
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-mode.jsonl");
+  await writeRollout(sessionPath, "thread-mode", "apigather");
+  await fs.chmod(configPath, 0o600);
+  await fs.chmod(sessionPath, 0o600);
+  const { changes } = await collectSessionChanges(codexHome, "openai");
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: changes,
+    configPath
+  });
+  assert.equal((await fs.stat(path.join(backupDir, "config.toml"))).mode & 0o777, 0o600);
+  assert.equal((await fs.stat(path.join(backupDir, "session-meta-backup.json"))).mode & 0o777, 0o600);
+
+  await applySessionChanges(changes);
+  await updateSessionBackupManifest(backupDir, changes);
+  assert.equal((await fs.stat(sessionPath)).mode & 0o777, 0o600);
+  await restoreBackup(backupDir, codexHome, {
+    restoreConfig: true,
+    restoreDatabase: false,
+    restoreSessions: true
+  });
+  assert.equal((await fs.stat(configPath)).mode & 0o777, 0o600);
+  assert.equal((await fs.stat(sessionPath)).mode & 0o777, 0o600);
+});
+
+for (const faultPoint of ["before_stage_write", "before_atomic_replace"]) {
+  test(`atomic writer ${faultPoint} failure preserves the original and removes staging`, async () => {
+    const { root } = await makeTempCodexHome();
+    const targetPath = path.join(root, `atomic-${faultPoint}.txt`);
+    await fs.writeFile(targetPath, "before", "utf8");
+
+    await assert.rejects(
+      () => writeFileAtomic(targetPath, "after", "utf8", {
+        faultInjector: ({ point }) => {
+          if (point === faultPoint) {
+            throw new Error(`injected ${faultPoint}`);
+          }
+        }
+      }),
+      new RegExp(`injected ${faultPoint}`)
+    );
+
+    assert.equal(await fs.readFile(targetPath, "utf8"), "before");
+    const staging = (await fs.readdir(root)).filter((name) => name.includes(".provider-sync.") && name.endsWith(".tmp"));
+    assert.deepEqual(staging, []);
+  });
+}
 
 async function makeTempCodexHome() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-provider-sync-"));
@@ -169,6 +1326,16 @@ async function writeStateDbAt(dbPath, rows) {
 
 async function writeStateDb(codexHome, rows) {
   await writeStateDbAt(stateDbPath(codexHome), rows);
+}
+
+async function readProvider(codexHome, threadId) {
+  const db = await openDatabase(stateDbPath(codexHome));
+  try {
+    return db.prepare("SELECT model_provider FROM threads WHERE id = ?")
+      .get(threadId).model_provider;
+  } finally {
+    db.close();
+  }
 }
 
 async function writeLegacyStateDb(codexHome, rows) {
@@ -1886,7 +3053,7 @@ test("applySessionChanges preserves large UTF-8 session metadata", async () => {
   assert.match(rollout, /"large_blob":"数据块数据块/);
 });
 
-test("applySessionChanges replaces equal-length provider IDs in place", async () => {
+test("applySessionChanges atomically replaces equal-length provider IDs", async () => {
   const { codexHome } = await makeTempCodexHome();
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-in-place.jsonl");
   await writeRollout(sessionPath, "thread-in-place", "openai");
@@ -1902,22 +3069,17 @@ test("applySessionChanges replaces equal-length provider IDs in place", async ()
   const originalTime = new Date("2026-01-02T03:04:05.000Z");
   await fs.utimes(sessionPath, originalTime, originalTime);
 
-  const before = await fs.stat(sessionPath);
   const { changes } = await collectSessionChanges(codexHome, "prov_a");
   const result = await applySessionChanges(changes);
   const after = await fs.stat(sessionPath);
   const rollout = await fs.readFile(sessionPath, "utf8");
 
   assert.equal(result.appliedChanges, 1);
-  assert.equal(result.inPlaceChanges, 1);
-  if (process.platform !== "win32") {
-    assert.equal(after.ino, before.ino);
-  }
+  assert.equal(result.inPlaceChanges, 0);
   assert.equal(Math.round(after.mtimeMs), originalTime.getTime());
-  assert.equal(
-    rollout,
-    original.replace('"model_provider" : "openai"', '"model_provider" : "prov_a"')
-  );
+  const firstNewline = rollout.indexOf("\n");
+  assert.equal(JSON.parse(rollout.slice(0, firstNewline)).payload.model_provider, "prov_a");
+  assert.equal(rollout.slice(firstNewline + 1), original.slice(original.indexOf("\n") + 1));
 });
 
 test("applySessionChanges falls back when equal-length provider IDs have different JSON byte lengths", async () => {
@@ -2107,6 +3269,120 @@ test("restoreBackup only restores rollout files that were actually applied", asy
   assert.match(rollout, /"model_provider":"manual"/);
 });
 
+test("restoreBackup rejects escaped and non-rollout session manifest targets", async () => {
+  const { root, codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const configPath = path.join(codexHome, "config.toml");
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-safe.jsonl");
+  await writeRollout(sessionPath, "thread-safe", "apigather");
+  const { changes } = await collectSessionChanges(codexHome, "openai");
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: changes,
+    configPath
+  });
+  const manifestPath = path.join(backupDir, "session-meta-backup.json");
+  const originalManifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+
+  const escapedPath = path.join(root, "rollout-escaped.jsonl");
+  await fs.writeFile(escapedPath, "outside", "utf8");
+  const escapedManifest = JSON.parse(JSON.stringify(originalManifest));
+  escapedManifest.files[0].path = escapedPath;
+  await fs.writeFile(manifestPath, JSON.stringify(escapedManifest), "utf8");
+  await assert.rejects(
+    restoreBackup(backupDir, codexHome, {
+      restoreConfig: false,
+      restoreDatabase: false,
+      restoreSessions: true
+    }),
+    /outside the allowed rollout roots/
+  );
+
+  const nonRolloutPath = path.join(codexHome, "sessions", "2026", "03", "19", "arbitrary.jsonl");
+  await fs.writeFile(nonRolloutPath, "inside but not a rollout", "utf8");
+  const nonRolloutManifest = JSON.parse(JSON.stringify(originalManifest));
+  nonRolloutManifest.files[0].path = nonRolloutPath;
+  await fs.writeFile(manifestPath, JSON.stringify(nonRolloutManifest), "utf8");
+  await assert.rejects(
+    restoreBackup(backupDir, codexHome, {
+      restoreConfig: false,
+      restoreDatabase: false,
+      restoreSessions: true
+    }),
+    /outside the allowed rollout roots/
+  );
+});
+
+test("Windows restore attempts every rollout even when one target is locked", async () => {
+  if (process.platform !== "win32") {
+    return;
+  }
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const lockedPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-restore-locked.jsonl");
+  const restorablePath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-restore-restorable.jsonl");
+  await writeRollout(lockedPath, "thread-restore-locked", "apigather");
+  await writeRollout(restorablePath, "thread-restore-restorable", "apigather");
+  const { changes } = await collectSessionChanges(codexHome, "openai");
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: changes,
+    configPath: path.join(codexHome, "config.toml")
+  });
+  await applySessionChanges(changes);
+  await updateSessionBackupManifest(backupDir, changes);
+  const lockProcess = await lockRolloutFile(lockedPath);
+  try {
+    await assert.rejects(
+      restoreBackup(backupDir, codexHome, {
+        restoreConfig: false,
+        restoreDatabase: false,
+        restoreSessions: true
+      }),
+      (error) => error instanceof AggregateError
+        && error.failures.some((failure) => failure.path === lockedPath)
+    );
+    assert.match(await fs.readFile(restorablePath, "utf8"), /"model_provider":"apigather"/);
+  } finally {
+    lockProcess.kill();
+    await new Promise((resolve) => lockProcess.once("exit", resolve));
+  }
+
+  assert.match(await fs.readFile(lockedPath, "utf8"), /"model_provider":"openai"/);
+
+  await restoreBackup(backupDir, codexHome, {
+    restoreConfig: false,
+    restoreDatabase: false,
+    restoreSessions: true
+  });
+  assert.match(await fs.readFile(lockedPath, "utf8"), /"model_provider":"apigather"/);
+});
+
+test("restore fails when global-state presence metadata points to a missing backup copy", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  await writeGlobalState(codexHome, { "project-order": ["C:\\AITemp"] });
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: [],
+    configPath: path.join(codexHome, "config.toml")
+  });
+  await fs.rm(path.join(backupDir, ".codex-global-state.json.bak"));
+
+  await assert.rejects(
+    restoreBackup(backupDir, codexHome, {
+      restoreConfig: false,
+      restoreGlobalState: true,
+      restoreDatabase: false,
+      restoreSessions: false
+    }),
+    /was present, but its backup copy is missing/
+  );
+});
+
 test("restoreBackup can skip config, database, and sessions", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
@@ -2215,6 +3491,25 @@ test("pruneBackups ignores directories without managed backup metadata", async (
   await fs.access(junkDirectory);
 });
 
+test("pruneBackups never deletes a backup referenced by an unfinished transaction", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  const pendingDir = path.join(backupRoot(codexHome), "20260319T000000000Z");
+  await writeBackup(codexHome, "20260319T000000000Z", [["note.txt", "pending"]]);
+  await writeBackup(codexHome, "20260320T000000000Z", [["note.txt", "terminal"]]);
+  await TransactionJournal.create(pendingDir, {
+    codexHome,
+    targetProvider: "openai",
+    potentialTargets: []
+  });
+
+  const result = await pruneBackups(codexHome, 0);
+
+  assert.equal(result.deletedCount, 1);
+  assert.equal(result.remainingCount, 1);
+  await fs.access(pendingDir);
+  await assert.rejects(fs.access(path.join(backupRoot(codexHome), "20260320T000000000Z")));
+});
+
 test("runSync auto-prunes backups to the default retention count", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
@@ -2298,4 +3593,301 @@ test("cli sync prints stage progress and backup timing", async () => {
   assert.match(result.stdout, /\[6\/6\] Cleaning backups\.\.\./);
   assert.match(result.stdout, /Backup created in .*: .+/);
   assert.match(result.stdout, /Backup creation time: /);
+});
+
+test("syncDirectory only downgrades known unsupported flush errors on Windows", async () => {
+  const permissionError = Object.assign(new Error("directory flush denied"), { code: "EPERM" });
+  const unsupportedFs = {
+    async open() {
+      throw permissionError;
+    }
+  };
+  await assert.rejects(
+    syncDirectory("/tmp/provider-sync-dir", { fsImpl: unsupportedFs, platform: "linux" }),
+    /directory flush denied/
+  );
+  await syncDirectory("C:\\provider-sync-dir", { fsImpl: unsupportedFs, platform: "win32" });
+
+  const ioError = Object.assign(new Error("directory flush I/O failure"), { code: "EIO" });
+  await assert.rejects(
+    syncDirectory("C:\\provider-sync-dir", {
+      fsImpl: { async open() { throw ioError; } },
+      platform: "win32"
+    }),
+    /I\/O failure/
+  );
+});
+
+test("runRestore rejects all-disabled recovery when the first journal record is corrupt", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const configPath = path.join(codexHome, "config.toml");
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-corrupt-first.jsonl");
+  await writeRollout(sessionPath, "thread-corrupt-first", "apigather");
+  await writeStateDb(codexHome, [{ id: "thread-corrupt-first", model_provider: "apigather" }]);
+  const { changes } = await collectSessionChanges(codexHome, "openai");
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: changes,
+    configPath
+  });
+  const journal = await TransactionJournal.create(backupDir, {
+    codexHome,
+    targetProvider: "openai",
+    potentialTargets: [configPath, sessionPath, stateDbPath(codexHome)]
+  });
+  await fs.writeFile(journal.filePath, "{corrupt first record\n", "utf8");
+
+  await assert.rejects(
+    runRestore({
+      backupDir,
+      codexHome,
+      restoreConfig: false,
+      restoreDatabase: false,
+      restoreSessions: false
+    }),
+    (error) => {
+      assert.equal(error.code, "RECOVERY_REQUIRED");
+      assert.deepEqual(
+        new Set(error.missingRestoreKinds),
+        new Set(["rollout sessions", "SQLite database", "config.toml", "global state"])
+      );
+      return true;
+    }
+  );
+  assert.equal((await findPendingTransactions(codexHome)).length, 1);
+  assert.equal((await readTransactionJournal(journal.filePath)).terminal, false);
+});
+
+test("one explicit restore repairs an empty crash-window journal", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const configPath = path.join(codexHome, "config.toml");
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: [],
+    configPath
+  });
+  const journalPath = path.join(backupDir, "transaction-journal.jsonl");
+  await fs.writeFile(journalPath, "", "utf8");
+
+  await runRestore({
+    backupDir,
+    codexHome,
+    restoreConfig: true,
+    restoreDatabase: false,
+    restoreSessions: false
+  });
+
+  const repaired = await readTransactionJournal(journalPath);
+  assert.equal(repaired.invalidTail, false);
+  assert.equal(repaired.terminal, true);
+  assert.equal(repaired.state, "rolledBack");
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("an all-false global-state presence map remains conservative recovery coverage", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const configPath = path.join(codexHome, "config.toml");
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: [],
+    configPath
+  });
+  const metadata = JSON.parse(await fs.readFile(path.join(backupDir, "metadata.json"), "utf8"));
+  assert.deepEqual(metadata.globalStateFiles, {
+    ".codex-global-state.json": false,
+    ".codex-global-state.json.bak": false
+  });
+  assert.equal((await getBackupRecoveryCoverage(backupDir, codexHome)).globalState, true);
+  await fs.writeFile(path.join(backupDir, "transaction-journal.jsonl"), "", "utf8");
+
+  await assert.rejects(
+    runRestore({
+      backupDir,
+      codexHome,
+      restoreConfig: false,
+      restoreDatabase: false,
+      restoreSessions: false
+    }),
+    (error) => {
+      assert.equal(error.code, "RECOVERY_REQUIRED");
+      assert.ok(error.missingRestoreKinds.includes("global state"));
+      return true;
+    }
+  );
+});
+
+test("invalid journal tail with no validated target restores the full session manifest", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const configPath = path.join(codexHome, "config.toml");
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-tail-coverage.jsonl");
+  await writeRollout(sessionPath, "thread-tail-coverage", "apigather");
+  const original = await fs.readFile(sessionPath, "utf8");
+  const { changes } = await collectSessionChanges(codexHome, "openai");
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: changes,
+    configPath
+  });
+  const journal = await TransactionJournal.create(backupDir, {
+    codexHome,
+    targetProvider: "openai",
+    potentialTargets: [sessionPath]
+  });
+  await writeRollout(sessionPath, "thread-tail-coverage", "openai");
+  await fs.appendFile(journal.filePath, "{torn target record", "utf8");
+
+  await runRestore({
+    backupDir,
+    codexHome,
+    restoreConfig: true,
+    restoreDatabase: false,
+    restoreSessions: true
+  });
+
+  assert.equal(await fs.readFile(sessionPath, "utf8"), original);
+  const repaired = await readTransactionJournal(journal.filePath);
+  assert.equal(repaired.state, "rolledBack");
+  assert.equal(repaired.terminal, true);
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("automatic rollback does not report success unless the rolledBack terminal re-reads valid", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-terminal-verify.jsonl");
+  await writeRollout(sessionPath, "thread-terminal-verify", "apigather");
+  await writeStateDb(codexHome, [{ id: "thread-terminal-verify", model_provider: "apigather" }]);
+  const before = await fs.readFile(sessionPath, "utf8");
+  let backupDir = null;
+
+  await assert.rejects(
+    runSync({
+      codexHome,
+      onProgress(event) {
+        if (event.stage === "create_backup" && event.status === "complete") {
+          backupDir = event.backupDir;
+        }
+      },
+      async faultInjector({ point }) {
+        if (point === "after_rollout_apply") {
+          throw new Error("injected post-apply failure");
+        }
+        if (point === "before_rollout_rollback") {
+          await fs.appendFile(
+            path.join(backupDir, "transaction-journal.jsonl"),
+            `${JSON.stringify({ protocolVersion: 1, operationId: "foreign", sequence: 999, state: "rollingBack" })}\n`,
+            "utf8"
+          );
+        }
+      }
+    }),
+    (error) => {
+      assert.equal(error.code, "RECOVERY_REQUIRED");
+      assert.equal(error.rollbackStatus, "incomplete");
+      assert.match(error.rollbackErrors.join("; "), /valid rolledBack terminal state/);
+      return true;
+    }
+  );
+
+  assert.equal(await fs.readFile(sessionPath, "utf8"), before);
+  assert.equal((await findPendingTransactions(codexHome)).length, 1);
+  await runRestore({ backupDir, codexHome });
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("a lost rolledBack acknowledgement never appends recoveryRequired", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-rollback-ack.jsonl");
+  await writeRollout(sessionPath, "thread-rollback-ack", "apigather");
+  await writeStateDb(codexHome, [{ id: "thread-rollback-ack", model_provider: "apigather" }]);
+  const before = await fs.readFile(sessionPath, "utf8");
+  let caught = null;
+
+  try {
+    await runSync({
+      codexHome,
+      faultInjector({ point }) {
+        if (point === "after_rollout_apply") {
+          throw new Error("injected forward failure");
+        }
+        if (point === "after_transaction_journal_rollback_before_ack") {
+          throw new Error("injected lost rollback acknowledgement");
+        }
+      }
+    });
+  } catch (error) {
+    caught = error;
+  }
+
+  assert.equal(caught?.rollbackStatus, "complete");
+  assert.equal(caught?.recoveryRequired, false);
+  assert.match(caught?.originalError?.message ?? "", /injected forward failure/);
+  assert.equal(await fs.readFile(sessionPath, "utf8"), before);
+  const journal = await readTransactionJournal(path.join(caught.backupDir, "transaction-journal.jsonl"));
+  assert.equal(journal.terminal, true);
+  assert.equal(journal.state, "rolledBack");
+  assert.equal(journal.operationId, journal.events[0].operationId);
+  assert.equal(journal.events.some((event) => event.state === "recoveryRequired"), false);
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("a turn_context appended after first-line mutation remains byte-original on rollback", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "target-model"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-concurrent-model.jsonl");
+  await writeRolloutWithTurnContext(sessionPath, {
+    id: "thread-concurrent-model",
+    provider: "apigather",
+    model: "source-model"
+  });
+  await writeStateDb(codexHome, [{ id: "thread-concurrent-model", model_provider: "apigather" }]);
+  const appended = JSON.stringify({
+    timestamp: "2026-06-09T11:16:03.880Z",
+    type: "turn_context",
+    payload: {
+      turn_id: "concurrent-turn",
+      model: "concurrent-source-model",
+      collaboration_mode: {
+        mode: "default",
+        settings: { model: "concurrent-source-model", reasoning_effort: "xhigh" }
+      }
+    }
+  });
+  let appendedOnce = false;
+
+  await assert.rejects(
+    runSync({
+      codexHome,
+      model: "target-model",
+      async faultInjector({ point, mutation }) {
+        if (point === "after_rollout_mutation_before_applied"
+            && mutation?.stage === "firstLine"
+            && !appendedOnce) {
+          appendedOnce = true;
+          await fs.appendFile(sessionPath, `${appended}\n`, "utf8");
+        }
+      }
+    }),
+    (error) => {
+      assert.equal(error.code, "SYNC_FAILED_ROLLED_BACK");
+      assert.match(error.originalError.message, /model snapshot changed before rewrite/);
+      return true;
+    }
+  );
+
+  const restored = await fs.readFile(sessionPath, "utf8");
+  assert.match(restored.split(/\r?\n/)[0], /"model_provider":"apigather"/);
+  assert.ok(restored.includes('"model":"source-model"'));
+  assert.ok(restored.includes('"model":"concurrent-source-model"'));
+  assert.ok(!restored.includes('"model":"target-model"'));
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
 });

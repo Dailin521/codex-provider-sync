@@ -6,9 +6,12 @@ namespace CodexProviderSync.App;
 internal static class UpdateApplier
 {
     private const string ApplyArgument = "--apply-update";
-    private const string UpdaterDirectoryName = "codex-provider-sync-updater";
 
-    public static bool TryRun(string[] args) => TryRun(args, new ExecutionLogService());
+    public static bool TryRun(string[] args)
+    {
+        IAppPathProvider paths = new SystemAppPathProvider();
+        return TryRun(args, new ExecutionLogService(paths.LogDirectory));
+    }
 
     internal static bool TryRun(string[] args, ExecutionLogService executionLogService)
     {
@@ -49,8 +52,17 @@ internal static class UpdateApplier
 
     public static void Start(string downloadedExePath, string targetExePath, string expectedSha256)
     {
-        CleanupStaleUpdaterDirectories();
-        string updaterRoot = UpdaterRoot();
+        IAppPathProvider paths = new SystemAppPathProvider();
+        Start(downloadedExePath, targetExePath, expectedSha256, paths.UpdaterRoot);
+    }
+
+    internal static void Start(
+        string downloadedExePath,
+        string targetExePath,
+        string expectedSha256,
+        string updaterRoot)
+    {
+        CleanupStaleUpdaterDirectories(updaterRoot);
         string updaterDirectory = Path.Combine(updaterRoot, Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(updaterDirectory);
         string updaterPath = Path.Combine(updaterDirectory, "CodexProviderSync.Updater.exe");
@@ -76,7 +88,11 @@ internal static class UpdateApplier
 
     public static void CleanupStaleUpdaterDirectories()
     {
-        string root = UpdaterRoot();
+        CleanupStaleUpdaterDirectories(new SystemAppPathProvider().UpdaterRoot);
+    }
+
+    internal static void CleanupStaleUpdaterDirectories(string root)
+    {
         string? currentDirectory = Environment.ProcessPath is { } processPath
             ? Path.GetDirectoryName(Path.GetFullPath(processPath))
             : null;
@@ -141,8 +157,6 @@ internal static class UpdateApplier
             Path.GetFullPath(args[7]),
             NormalizeSha256(args[5]));
     }
-
-    private static string UpdaterRoot() => Path.Combine(Path.GetTempPath(), UpdaterDirectoryName);
 
     private static string NormalizeSha256(string value)
     {

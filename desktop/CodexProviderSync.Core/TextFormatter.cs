@@ -134,6 +134,16 @@ public static class TextFormatter
         }
         lines.InsertRange(12, rolloutNotes);
 
+        if (status.PendingTransactions.Count > 0)
+        {
+            lines.Insert(6, "  Run restore with the listed backup before the next write operation.");
+            foreach (TransactionRecoveryInfo transaction in status.PendingTransactions.Reverse())
+            {
+                lines.Insert(6, $"  {transaction.State}: {transaction.BackupDirectory}");
+            }
+            lines.Insert(6, "Recovery required:");
+        }
+
         AppendSqliteStatus(lines, status, chinese: false);
         AppendProjectVisibility(lines, status, chinese: false);
         return string.Join(Environment.NewLine, lines);
@@ -175,6 +185,16 @@ public static class TextFormatter
                 status.CurrentProvider.Provider)}");
         }
         lines.InsertRange(12, rolloutNotes);
+
+        if (status.PendingTransactions.Count > 0)
+        {
+            lines.Insert(6, "  下一次写操作前，请使用列出的备份执行恢复。");
+            foreach (TransactionRecoveryInfo transaction in status.PendingTransactions.Reverse())
+            {
+                lines.Insert(6, $"  {transaction.State}: {transaction.BackupDirectory}");
+            }
+            lines.Insert(6, "需要恢复:");
+        }
 
         AppendSqliteStatus(lines, status, chinese: true);
         AppendProjectVisibility(lines, status, chinese: true);

@@ -117,6 +117,8 @@ codex-provider status --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/y
 codex-provider sync --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/you/.codex/sqlite
 ```
 
+The v0.4 Windows release also includes an experimental one-shot automation package for scripts and AI agents. Its write operations are dry-run by default and require an explicit plan, digest, and `--apply` before changing data. See [the automation quickstart](docs/AUTOMATION_QUICKSTART_ZH.md) and [the protocol design](docs/ADR-0001-v0.4-automation-architecture.md).
+
 ## Storage and SQLite resolution
 
 SQLite Home precedence is:

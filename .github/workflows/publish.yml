@@ -36,7 +36,9 @@ jobs:
         shell: pwsh
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-        run: node scripts/verify-release-version.js --tag $env:RELEASE_TAG
+        run: |
+          node scripts/verify-release-version.js --tag $env:RELEASE_TAG
+          node scripts/read-release-metadata.js --tag $env:RELEASE_TAG
 
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
@@ -44,33 +46,25 @@ jobs:
 
       - run: npm ci
       - run: npm test
-      - run: dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj
-      - run: dotnet test desktop/CodexProviderSync.App.Tests/CodexProviderSync.App.Tests.csproj
+      - run: dotnet build CodexProviderSync.sln --configuration Release
+      - run: dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj --configuration Release --no-build
+      - run: dotnet test desktop/CodexProviderSync.Application.Tests/CodexProviderSync.Application.Tests.csproj --configuration Release --no-build
+      - run: dotnet test desktop/CodexProviderSync.Automation.Tests/CodexProviderSync.Automation.Tests.csproj --configuration Release --no-build
+      - run: dotnet test desktop/CodexProviderSync.App.Tests/CodexProviderSync.App.Tests.csproj --configuration Release --no-build
+      - name: Run GUI E2E contract tests (not headful)
+        run: dotnet test desktop/CodexProviderSync.GuiE2E.Tests/CodexProviderSync.GuiE2E.Tests.csproj --configuration Release --no-build
 
-      - name: Build Windows GUI
+      - name: Build Windows GUI and Business Automation API
         shell: pwsh
         run: ./scripts/publish-gui.ps1 -Output artifacts/win-x64
 
       - name: Package release assets
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          $ErrorActionPreference = "Stop"
-          $version = "${{ github.ref_name }}".TrimStart("v")
-          $assetRoot = "artifacts/release"
-          New-Item -ItemType Directory -Force -Path $assetRoot | Out-Null
-
-          $exe = "artifacts/win-x64/CodexProviderSync.exe"
-          $zip = Join-Path $assetRoot "codex-provider-sync-v$version-win-x64.zip"
-          Compress-Archive -Path "artifacts/win-x64/*" -DestinationPath $zip -Force
-          Copy-Item $exe (Join-Path $assetRoot "CodexProviderSync.exe") -Force
-
-          $assets = Get-ChildItem -File $assetRoot | Sort-Object Name
-          $checksums = foreach ($asset in $assets) {
-            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $asset.FullName).Hash.ToLowerInvariant()
-            "$hash  $($asset.Name)"
-            Set-Content -LiteralPath "$($asset.FullName).sha256" -Value "$hash  $($asset.Name)" -Encoding ASCII
-          }
-          Set-Content -LiteralPath (Join-Path $assetRoot "checksums.txt") -Value $checksums -Encoding ASCII
+          $version = $env:RELEASE_TAG.Substring(1)
+          ./scripts/package-release-assets.ps1 -Version $version -PublishOutput artifacts/win-x64 -Output artifacts/release
 
       - name: Upload packaged assets
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -86,6 +80,19 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.1
+        with:
+          node-version: "24"
+
+      - name: Resolve versioned Chinese release announcement
+        id: release_metadata
+        shell: bash
+        run: node scripts/read-release-metadata.js --tag "$GITHUB_REF_NAME" --github-output "$GITHUB_OUTPUT"
+
       - name: Download packaged assets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -95,23 +102,8 @@ jobs:
       - name: Upload release assets
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
+          name: ${{ steps.release_metadata.outputs.release_title }}
+          body_path: ${{ steps.release_metadata.outputs.release_body_path }}
           files: |
             artifacts/release/*
           fail_on_unmatched_files: true
-          body: |
-            ## Windows SmartScreen 提示
-            当前 Windows GUI 未做代码签名，首次运行时可能提示“发布者未知”或“Windows 已保护你的电脑”。这是未签名 EXE 的常见提示。
-
-            请确认下载来源是本项目 GitHub Releases，并可用随附的 SHA256 文件校验后运行。
-
-            ## 安全边界
-            - 不会修改 auth.json
-            - 不会改写对话正文或消息历史
-            - 不会修改 updated_at 来改变排序
-            - 不会重新加密 encrypted_content
-
-            ## 回滚
-            可使用 `codex-provider restore <backup-dir>` 恢复本工具创建的备份。
-
-            ## 已知事项
-            含 encrypted_content 的历史会话跨 provider/account 后，通常只能恢复列表可见性；继续对话或 compact 仍可能失败。

@@ -4,6 +4,7 @@ using System.IO.Pipes;
 using System.Security.Principal;
 using System.Threading;
 using System.Threading.Tasks;
+using CodexProviderSync.App.Automation;
 
 namespace CodexProviderSync.App;
 
@@ -70,10 +71,13 @@ public sealed class FocusRequestServer : IDisposable
                     PipeDirection.In,
                     NamedPipeServerStream.MaxAllowedServerInstances,
                     PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous);
+                    PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
                 await server.WaitForConnectionAsync(_shutdown.Token).ConfigureAwait(false);
-                using StreamReader reader = new(server);
-                string? line = await reader.ReadLineAsync().ConfigureAwait(false);
+                string? line = await GuiAutomationBridge.ReadBoundedLineAsync(
+                    server,
+                    maximumBytes: 16,
+                    timeout: TimeSpan.FromSeconds(2),
+                    cancellationToken: _shutdown.Token).ConfigureAwait(false);
                 if (string.Equals(line, "FOCUS", StringComparison.Ordinal))
                 {
                     _onFocusRequested();

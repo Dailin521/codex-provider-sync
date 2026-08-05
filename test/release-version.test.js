@@ -71,7 +71,10 @@ test("current repository versions match an explicit tag", () => {
 
   assert.deepEqual(result.projects, [
     "desktop/CodexProviderSync.App/CodexProviderSync.App.csproj",
+    "desktop/CodexProviderSync.Application/CodexProviderSync.Application.csproj",
+    "desktop/CodexProviderSync.Automation/CodexProviderSync.Automation.csproj",
     "desktop/CodexProviderSync.Core/CodexProviderSync.Core.csproj",
+    "desktop/CodexProviderSync.GuiE2E/CodexProviderSync.GuiE2E.csproj",
     "desktop/CodexProviderSync.Mac/CodexProviderSync.Mac.csproj",
   ]);
 });

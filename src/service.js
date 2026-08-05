@@ -1,4 +1,5 @@
 import path from "node:path";
+import fs from "node:fs/promises";
 
 import {
   DEFAULT_BACKUP_RETENTION_COUNT,
@@ -18,6 +19,7 @@ import {
 } from "./config-file.js";
 import {
   createBackup,
+  getBackupRecoveryCoverage,
   getBackupSummary,
   pruneBackups,
   restoreBackup,
@@ -28,7 +30,6 @@ import { acquireLock } from "./locking.js";
 import {
   applySessionChanges,
   collectSessionChanges,
-  restoreSessionChanges,
   splitLockedSessionChanges,
   summarizeProviderCounts
 } from "./session-files.js";
@@ -53,6 +54,70 @@ import {
   resolveStorageLayout,
   withStateDbLocation
 } from "./storage-layout.js";
+import {
+  TransactionJournal,
+  assertNoPendingTransactions,
+  findPendingTransactions,
+  getAppliedJournalTargets,
+  getStartedJournalTargets,
+  readTransactionJournal,
+  markBackupTransactionRolledBack
+} from "./transaction-journal.js";
+
+function pathComparisonKey(value) {
+  const resolved = path.resolve(value);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function uniqueResolvedPaths(values) {
+  const pathsByKey = new Map();
+  for (const value of values) {
+    if (typeof value !== "string" || !value) {
+      continue;
+    }
+    const resolved = path.resolve(value);
+    pathsByKey.set(pathComparisonKey(resolved), resolved);
+  }
+  return [...pathsByKey.values()];
+}
+
+export class SyncTransactionError extends Error {
+  constructor(
+    originalError,
+    rollbackErrors,
+    backupDir,
+    completedTargets,
+    uncompletedTargets,
+    { rollbackStatus = "incomplete", recoveryRequired = true } = {}
+  ) {
+    const message = recoveryRequired
+      ? `Failed to restore state after sync error. Original error: ${originalError.message}. Restore error: ${rollbackErrors.join("; ")}`
+      : `Provider sync failed and all observed changes were rolled back. Original error: ${originalError.message}`;
+    super(message, { cause: originalError });
+    this.name = "SyncTransactionError";
+    this.code = recoveryRequired ? "RECOVERY_REQUIRED" : "SYNC_FAILED_ROLLED_BACK";
+    this.originalError = originalError;
+    this.rollbackErrors = rollbackErrors;
+    this.backupDir = backupDir;
+    this.completedTargets = completedTargets;
+    this.uncompletedTargets = uncompletedTargets;
+    this.rollbackStatus = rollbackStatus;
+    this.recoveryRequired = recoveryRequired;
+    this.recoveryInstructions = recoveryRequired
+      ? `Restore the managed backup at ${backupDir}, inspect the pending transaction journal, then retry.`
+      : "No manual recovery is required. Inspect the original error, correct its cause, and retry.";
+  }
+}
+
+function throwIfAborted(signal) {
+  if (!signal?.aborted) {
+    return;
+  }
+  const error = new Error("The provider-sync operation was cancelled.");
+  error.name = "AbortError";
+  error.code = "ABORT_ERR";
+  throw error;
+}
 
 async function prepareStorage({ codexHome: explicitCodexHome, sqliteHome, configText, storage, platform }) {
   if (storage) {
@@ -85,9 +150,88 @@ function formatBytes(bytes) {
 }
 
 function emitProgress(onProgress, event) {
-  if (typeof onProgress === "function") {
-    onProgress(event);
+  if (typeof onProgress !== "function") {
+    return;
   }
+  try {
+    const observerResult = onProgress(event);
+    if (observerResult && typeof observerResult.then === "function") {
+      observerResult.catch(() => {
+        // Progress is an observer channel. Async observer failures must not
+        // change transaction state or surface as unhandled rejections.
+      });
+    }
+  } catch {
+    // Progress is non-authoritative. A UI/CLI observer failure must never
+    // trigger compensation before commit or turn a committed operation into
+    // an apparent failure afterwards.
+  }
+}
+
+async function commitJournalWithReconciliation(journal, faultInjector) {
+  let acknowledgementError = null;
+  try {
+    await journal.committed();
+    await faultInjector?.({ point: "after_transaction_journal_commit_before_ack" });
+  } catch (error) {
+    acknowledgementError = error;
+  }
+
+  let persisted;
+  try {
+    persisted = await readTransactionJournal(journal.filePath);
+  } catch (readError) {
+    if (acknowledgementError) {
+      throw new AggregateError(
+        [acknowledgementError, readError],
+        `Unable to reconcile transaction commit acknowledgement: ${acknowledgementError.message}`,
+        { cause: acknowledgementError }
+      );
+    }
+    throw readError;
+  }
+  if (persisted.terminal
+      && persisted.state === "committed"
+      && persisted.operationId === journal.operationId) {
+    return;
+  }
+  if (acknowledgementError) {
+    throw acknowledgementError;
+  }
+  throw new Error(`Transaction journal did not persist a valid committed terminal state: ${journal.filePath}`);
+}
+
+async function rollbackJournalWithReconciliation(journal, faultInjector) {
+  let acknowledgementError = null;
+  try {
+    await journal.rolledBack();
+    await faultInjector?.({ point: "after_transaction_journal_rollback_before_ack" });
+  } catch (error) {
+    acknowledgementError = error;
+  }
+
+  let persisted;
+  try {
+    persisted = await readTransactionJournal(journal.filePath);
+  } catch (readError) {
+    if (acknowledgementError) {
+      throw new AggregateError(
+        [acknowledgementError, readError],
+        `Unable to reconcile transaction rollback acknowledgement: ${acknowledgementError.message}`,
+        { cause: acknowledgementError }
+      );
+    }
+    throw readError;
+  }
+  if (persisted.terminal
+      && persisted.state === "rolledBack"
+      && persisted.operationId === journal.operationId) {
+    return;
+  }
+  if (acknowledgementError) {
+    throw acknowledgementError;
+  }
+  throw new Error(`Transaction journal did not persist a valid rolledBack terminal state: ${journal.filePath}`);
 }
 
 function sumCounts(counts) {
@@ -135,6 +279,7 @@ export async function getStatus({ codexHome: explicitCodexHome, sqliteHome, plat
     ? []
     : await readProjectThreadVisibility(storage);
   const backupSummary = await getBackupSummary(codexHome);
+  const pendingTransactions = await findPendingTransactions(codexHome);
 
   return {
     codexHome,
@@ -154,7 +299,13 @@ export async function getStatus({ codexHome: explicitCodexHome, sqliteHome, plat
     sqliteRepairStats,
     projectThreadVisibility,
     backupRoot: defaultBackupRoot(codexHome),
-    backupSummary
+    backupSummary,
+    pendingTransactions: pendingTransactions.map((transaction) => ({
+      operationId: transaction.operationId ?? null,
+      state: transaction.state,
+      backupDir: transaction.backupDir,
+      journalPath: transaction.filePath
+    }))
   };
 }
 
@@ -167,6 +318,15 @@ export function renderStatus(status) {
     `Backups: ${status.backupSummary.count} (${formatBytes(status.backupSummary.totalBytes)})`,
     `Backup root: ${status.backupRoot}`
   ];
+
+  if (status.pendingTransactions?.length) {
+    lines.push("");
+    lines.push("Recovery required:");
+    for (const transaction of status.pendingTransactions) {
+      lines.push(`  ${transaction.state}: ${transaction.backupDir}`);
+    }
+    lines.push("  Run restore with the listed backup before the next write operation.");
+  }
 
   lines.push("");
   lines.push("Rollout files:");
@@ -239,7 +399,9 @@ async function runSyncCore({
   sqliteBusyTimeoutMs,
   onProgress,
   model = null,
-  platform
+  platform,
+  faultInjector,
+  signal
 } = {}, { afterBackup } = {}) {
   if (!Number.isInteger(keepCount) || keepCount < 1) {
     throw new Error(`Invalid automatic keep count: ${keepCount}. Expected an integer greater than or equal to 1.`);
@@ -247,19 +409,24 @@ async function runSyncCore({
 
   const codexHome = providedStorage?.codexHome ?? normalizeCodexHome(explicitCodexHome);
   const configPath = path.join(codexHome, "config.toml");
-  const configText = await readConfigText(configPath);
-  const storage = await prepareStorage({ codexHome, sqliteHome, configText, storage: providedStorage, platform });
-  assertSqliteAccessSupported(storage, "sync");
-  if (!storage.stateDbLocation && isConfiguredSqliteHome(storage)) {
-    throw missingConfiguredStateDbError(storage);
-  }
-  const current = readCurrentProviderFromConfigText(configText);
-  const targetProvider = provider ?? current.provider ?? DEFAULT_PROVIDER;
-
   const releaseLock = await acquireLock(codexHome, "sync");
   let backupDir = null;
+  let journal = null;
   let backupDurationMs = 0;
   try {
+    await assertNoPendingTransactions(codexHome);
+    throwIfAborted(signal);
+    const configText = await readConfigText(configPath);
+    if (configBackupText !== undefined && configText !== configBackupText) {
+      throw new Error("config.toml changed before the switch operation acquired its lock. Refresh and retry.");
+    }
+    const storage = await prepareStorage({ codexHome, sqliteHome, configText, storage: providedStorage, platform });
+    assertSqliteAccessSupported(storage, "sync");
+    if (!storage.stateDbLocation && isConfiguredSqliteHome(storage)) {
+      throw missingConfiguredStateDbError(storage);
+    }
+    const current = readCurrentProviderFromConfigText(configText);
+    const targetProvider = provider ?? current.provider ?? DEFAULT_PROVIDER;
     emitProgress(onProgress, { stage: "scan_rollout_files", status: "start" });
     const {
       changes,
@@ -301,6 +468,8 @@ async function runSyncCore({
       status: "start",
       writableCount: writableChanges.length
     });
+    throwIfAborted(signal);
+    await faultInjector?.({ point: "before_backup" });
     const backupStartedAt = Date.now();
     backupDir = await createBackup({
       storage,
@@ -318,12 +487,38 @@ async function runSyncCore({
       durationMs: backupDurationMs
     });
 
-    if (typeof afterBackup === "function") {
-      await afterBackup(backupDir);
-    }
+    const globalStatePath = path.join(codexHome, ".codex-global-state.json");
+    const globalStateBackupPath = path.join(codexHome, ".codex-global-state.json.bak");
+    const globalStatePresent = await fs.access(globalStatePath).then(() => true).catch(() => false);
+    const sqliteTarget = storage.stateDbLocation?.path ?? null;
+    const potentialTargets = uniqueResolvedPaths([
+      ...writableChanges.map((change) => change.path),
+      ...(globalStatePresent ? [globalStatePath, globalStateBackupPath] : []),
+      ...(configBackupText !== undefined ? [configPath] : []),
+      ...(sqliteTarget ? [sqliteTarget] : [])
+    ]);
+    journal = await TransactionJournal.create(backupDir, {
+      codexHome,
+      targetProvider,
+      potentialTargets
+    });
 
     let sessionRestoreNeeded = false;
     let appliedSessionChanges = [];
+    let sqliteMutationCommitted = false;
+    let sqliteCommitAttempted = false;
+    let configMutationAttempted = false;
+    const completedTargets = [];
+    const completedTargetKeys = new Set();
+    let transactionCommitted = false;
+    const recordCompletedTarget = (targetPath) => {
+      const fullPath = path.resolve(targetPath);
+      const key = pathComparisonKey(fullPath);
+      if (!completedTargetKeys.has(key)) {
+        completedTargetKeys.add(key);
+        completedTargets.push(fullPath);
+      }
+    };
     let globalStateRestoreNeeded = false;
     let workspaceRootResult = {
       updated: false,
@@ -331,6 +526,17 @@ async function runSyncCore({
       savedWorkspaceRootCount: 0
     };
     try {
+      if (typeof afterBackup === "function") {
+        throwIfAborted(signal);
+        await journal.applying("config", configPath);
+        configMutationAttempted = true;
+        await afterBackup(backupDir);
+        recordCompletedTarget(configPath);
+        await faultInjector?.({ point: "after_config_mutation_before_applied", path: configPath });
+        await journal.applied("config", configPath);
+        await faultInjector?.({ point: "after_config_apply", path: configPath });
+      }
+
       let applyResult = { appliedChanges: 0, appliedPaths: [], skippedPaths: [] };
       emitProgress(onProgress, { stage: "update_sqlite", status: "start" });
       emitProgress(onProgress, {
@@ -338,22 +544,88 @@ async function runSyncCore({
         status: "start",
         writableCount: writableChanges.length
       });
+      if (sqliteTarget) {
+        await journal.applying("sqlite", sqliteTarget);
+      }
       const sqliteResult = await updateSqliteProvider(
         storage,
         targetProvider,
         async () => {
           if (writableChanges.length > 0) {
-            applyResult = await applySessionChanges(writableChanges, { targetModel: model });
-            const appliedPathSet = new Set(applyResult.appliedPaths ?? []);
-            appliedSessionChanges = writableChanges.filter((change) => appliedPathSet.has(change.path));
-            sessionRestoreNeeded = appliedSessionChanges.length > 0;
-            await updateSessionBackupManifest(backupDir, appliedSessionChanges);
+            applyResult = await applySessionChanges(writableChanges, {
+              targetModel: model,
+              onBeforeApply: async (change) => {
+                throwIfAborted(signal);
+                await journal.applying("rollout", change.path);
+                await faultInjector?.({
+                  point: "before_rollout_apply",
+                  path: change.path,
+                  targetIndex: appliedSessionChanges.length + 1
+                });
+              },
+              onMutation: async (change, mutation) => {
+                recordCompletedTarget(change.path);
+                await faultInjector?.({
+                  point: "after_rollout_mutation_before_applied",
+                  path: change.path,
+                  mutation
+                });
+              },
+              onApplied: async (change) => {
+                appliedSessionChanges.push(change);
+                sessionRestoreNeeded = true;
+                await journal.applied("rollout", change.path);
+                await updateSessionBackupManifest(backupDir, appliedSessionChanges);
+                await faultInjector?.({ point: "after_rollout_apply", path: change.path, appliedCount: appliedSessionChanges.length });
+              },
+              onSkipped: async (change, reason) => {
+                await journal.skipped("rollout", change.path);
+                await faultInjector?.({ point: "after_rollout_skip", path: change.path, reason });
+              }
+            });
           }
-          workspaceRootResult = await syncWorkspaceRoots(storage, { cwdStats });
-          globalStateRestoreNeeded = workspaceRootResult.updated;
+          workspaceRootResult = await syncWorkspaceRoots(storage, {
+            cwdStats,
+            onBeforeWrite: async (targetPath) => {
+              throwIfAborted(signal);
+              await journal.applying("globalState", targetPath);
+            },
+            onApplied: async (targetPath) => {
+              globalStateRestoreNeeded = true;
+              recordCompletedTarget(targetPath);
+              await journal.applied("globalState", targetPath);
+              await faultInjector?.({ point: "after_global_state_apply", path: targetPath });
+            }
+          });
+          throwIfAborted(signal);
         },
-        { busyTimeoutMs: sqliteBusyTimeoutMs, userEventThreadIds, threadCwdById, targetModel: model }
+        {
+          busyTimeoutMs: sqliteBusyTimeoutMs,
+          userEventThreadIds,
+          threadCwdById,
+          targetModel: model,
+          onCommitAttempt(result) {
+            sqliteCommitAttempted = result.databasePresent && result.updatedRows > 0;
+          },
+          afterCommit: () => faultInjector?.({
+            point: "after_sqlite_commit_before_ack",
+            path: sqliteTarget
+          })
+        }
       );
+      sqliteMutationCommitted = sqliteResult.databasePresent && sqliteResult.updatedRows > 0;
+      if (sqliteMutationCommitted) {
+        recordCompletedTarget(sqliteTarget);
+      }
+      throwIfAborted(signal);
+      if (sqliteTarget) {
+        if (sqliteMutationCommitted) {
+          await journal.applied("sqlite", sqliteTarget);
+        } else {
+          await journal.skipped("sqlite", sqliteTarget);
+        }
+        await faultInjector?.({ point: "after_sqlite_commit", path: sqliteTarget });
+      }
       emitProgress(onProgress, {
         stage: "rewrite_rollout_files",
         status: "complete",
@@ -369,6 +641,11 @@ async function runSyncCore({
         ...skippedRolloutFiles,
         ...applyResult.skippedPaths
       ])].sort((left, right) => left.localeCompare(right));
+      throwIfAborted(signal);
+      await faultInjector?.({ point: "before_transaction_commit", completedCount: completedTargets.length });
+      await commitJournalWithReconciliation(journal, faultInjector);
+      transactionCommitted = true;
+      await faultInjector?.({ point: "after_transaction_commit", completedCount: completedTargets.length });
       let autoPruneResult = null;
       let autoPruneWarning = null;
       emitProgress(onProgress, {
@@ -387,7 +664,7 @@ async function runSyncCore({
         deletedCount: autoPruneResult?.deletedCount ?? 0,
         warning: autoPruneWarning
       });
-      return {
+      const result = {
         codexHome,
         sqliteHome: storage.sqliteHome,
         sqliteHomeSource: storage.sqliteHomeSource,
@@ -410,32 +687,145 @@ async function runSyncCore({
         autoPruneResult,
         autoPruneWarning
       };
+      return result;
     } catch (error) {
+      if (transactionCommitted) {
+        throw error;
+      }
+      try {
+        const persistedTerminal = journal
+          ? await readTransactionJournal(journal.filePath)
+          : null;
+        if (persistedTerminal?.terminal && persistedTerminal.state === "committed") {
+          // A terminal commit is authoritative even if an observer or the
+          // acknowledgement path failed before the in-memory flag advanced.
+          // Never append rollback events or compensate committed state.
+          throw error;
+        }
+      } catch (reconciliationError) {
+        if (reconciliationError === error) {
+          throw error;
+        }
+        // A journal read failure is handled by the recovery path below.
+      }
+
       const restoreFailures = [];
-      if (sessionRestoreNeeded) {
+      try {
+        await journal?.rollingBack(error);
+      } catch (journalError) {
+        restoreFailures.push(`transaction journal: ${journalError.message}`);
+      }
+      let journalSnapshot = null;
+      try {
+        journalSnapshot = journal ? await readTransactionJournal(journal.filePath) : null;
+      } catch (journalError) {
+        restoreFailures.push(`transaction journal read: ${journalError.message}`);
+      }
+      const startedRolloutTargets = journalSnapshot
+        ? getStartedJournalTargets(journalSnapshot, "rollout")
+        : (sessionRestoreNeeded
+          ? appliedSessionChanges.map((change) => change.path)
+          : writableChanges.map((change) => change.path));
+      const startedGlobalStateTargets = journalSnapshot
+        ? getStartedJournalTargets(journalSnapshot, "globalState")
+        : (globalStateRestoreNeeded || globalStatePresent
+          ? [globalStatePath, globalStateBackupPath]
+          : []);
+      const startedConfigTargets = journalSnapshot
+        ? getStartedJournalTargets(journalSnapshot, "config")
+        : (configMutationAttempted ? [configPath] : []);
+
+      if (startedRolloutTargets.length > 0) {
         try {
-          await restoreSessionChanges(appliedSessionChanges.map((change) => ({
-            path: change.path,
-            originalFirstLine: change.originalFirstLine,
-            originalSeparator: change.originalSeparator
-          })));
+          await faultInjector?.({ point: "before_rollout_rollback", appliedCount: startedRolloutTargets.length });
+          await restoreBackup(backupDir, storage, {
+            restoreConfig: false,
+            restoreGlobalState: false,
+            restoreDatabase: false,
+            restoreSessions: true,
+            sessionTargetPaths: startedRolloutTargets
+          });
         } catch (restoreError) {
           restoreFailures.push(`rollout files: ${restoreError.message}`);
         }
       }
-      if (globalStateRestoreNeeded && backupDir) {
+      if (startedGlobalStateTargets.length > 0 && backupDir) {
         try {
-          await restoreGlobalStateFilesFromBackup(backupDir, codexHome);
+          await faultInjector?.({ point: "before_global_state_rollback" });
+          await restoreGlobalStateFilesFromBackup(backupDir, codexHome, {
+            targetPaths: startedGlobalStateTargets
+          });
         } catch (restoreError) {
           restoreFailures.push(`global state: ${restoreError.message}`);
         }
       }
+      if (startedConfigTargets.length > 0 && configBackupText !== undefined) {
+        try {
+          await faultInjector?.({ point: "before_config_rollback", path: configPath });
+          await writeConfigText(configPath, configBackupText);
+        } catch (restoreError) {
+          restoreFailures.push(`config: ${restoreError.message}`);
+        }
+      }
+      const sqliteRestoreRequired = sqliteMutationCommitted || sqliteCommitAttempted;
+      if (sqliteRestoreRequired && backupDir) {
+        try {
+          const sqliteTarget = storage.stateDbLocation?.path ?? storage.sqliteHome;
+          await faultInjector?.({ point: "before_sqlite_rollback", path: sqliteTarget });
+          await restoreBackup(backupDir, storage, {
+            restoreConfig: false,
+            restoreDatabase: true,
+            restoreSessions: false
+          });
+        } catch (restoreError) {
+          restoreFailures.push(`SQLite: ${restoreError.message}`);
+        }
+      }
+      if (restoreFailures.length === 0) {
+        try {
+          if (journal) {
+            await rollbackJournalWithReconciliation(journal, faultInjector);
+          }
+        } catch (journalError) {
+          restoreFailures.push(`transaction journal: ${journalError.message}`);
+        }
+      }
       if (restoreFailures.length > 0) {
-        throw new Error(
-          `Failed to restore state after sync error. Original error: ${error.message}. Restore error: ${restoreFailures.join("; ")}`
+        try {
+          await journal?.recoveryRequired(error, restoreFailures);
+        } catch {
+          // Preserve the original and rollback errors even if the journal is
+          // no longer writable.
+        }
+        const persistedCompletedTargets = journalSnapshot
+          ? uniqueResolvedPaths([...getAppliedJournalTargets(journalSnapshot), ...completedTargets])
+          : uniqueResolvedPaths(completedTargets);
+        const uncompletedTargets = uniqueResolvedPaths([
+          ...startedRolloutTargets,
+          ...startedGlobalStateTargets,
+          ...startedConfigTargets,
+          ...(sqliteRestoreRequired && sqliteTarget ? [sqliteTarget] : [])
+        ]);
+        throw new SyncTransactionError(
+          error,
+          restoreFailures,
+          backupDir,
+          persistedCompletedTargets,
+          uncompletedTargets,
+          { rollbackStatus: "incomplete", recoveryRequired: true }
         );
       }
-      throw error;
+      const persistedCompletedTargets = journalSnapshot
+        ? uniqueResolvedPaths([...getAppliedJournalTargets(journalSnapshot), ...completedTargets])
+        : uniqueResolvedPaths(completedTargets);
+      throw new SyncTransactionError(
+        error,
+        [],
+        backupDir,
+        persistedCompletedTargets,
+        [],
+        { rollbackStatus: "complete", recoveryRequired: false }
+      );
     }
   } finally {
     await releaseLock();
@@ -450,7 +840,9 @@ export async function runSwitch({
   keepRootModel = false,
   keepCount = DEFAULT_BACKUP_RETENTION_COUNT,
   onProgress,
-  platform
+  platform,
+  faultInjector,
+  signal
 }) {
   if (!provider) {
     throw new Error("Missing provider id. Usage: codex-provider switch <provider-id>");
@@ -496,54 +888,47 @@ export async function runSwitch({
     }
   }
 
-  let configMutationAttempted = false;
-  try {
-    // `nextConfigText` has the final root-level `model` value. Use that to
-    // drive the per-thread rewrite so old sessions match new sessions.
-    let modelForThreads = null;
-    if (modelSync.applied && modelSync.model) {
-      modelForThreads = modelSync.model;
-    } else {
-      modelForThreads = readRootModelFromConfigText(nextConfigText);
-    }
-    const syncResult = await runSyncCore(
-      {
-        codexHome,
-        storage,
-        provider,
-        configBackupText: originalConfigText,
-        keepCount,
-        onProgress,
-        model: modelForThreads
-      },
-      {
-        afterBackup: async () => {
-          emitProgress(onProgress, {
-            stage: "update_config",
-            status: "start",
-            provider
-          });
-          configMutationAttempted = true;
-          await writeConfigText(configPath, nextConfigText);
-          emitProgress(onProgress, {
-            stage: "update_config",
-            status: "complete",
-            provider
-          });
-        }
-      }
-    );
-    return {
-      ...syncResult,
-      configUpdated: true,
-      modelSync
-    };
-  } catch (error) {
-    if (configMutationAttempted) {
-      await writeConfigText(configPath, originalConfigText);
-    }
-    throw error;
+  // `nextConfigText` has the final root-level `model` value. Use that to
+  // drive the per-thread rewrite so old sessions match new sessions.
+  let modelForThreads = null;
+  if (modelSync.applied && modelSync.model) {
+    modelForThreads = modelSync.model;
+  } else {
+    modelForThreads = readRootModelFromConfigText(nextConfigText);
   }
+  const syncResult = await runSyncCore(
+    {
+      codexHome,
+      storage,
+      provider,
+      configBackupText: originalConfigText,
+      keepCount,
+      onProgress,
+      model: modelForThreads,
+      faultInjector,
+      signal
+    },
+    {
+      afterBackup: async () => {
+        emitProgress(onProgress, {
+          stage: "update_config",
+          status: "start",
+          provider
+        });
+        await writeConfigText(configPath, nextConfigText);
+        emitProgress(onProgress, {
+          stage: "update_config",
+          status: "complete",
+          provider
+        });
+      }
+    }
+  );
+  return {
+    ...syncResult,
+    configUpdated: true,
+    modelSync
+  };
 }
 
 export async function runRestore({
@@ -571,12 +956,64 @@ export async function runRestore({
   }
   const releaseLock = await acquireLock(codexHome, "restore");
   try {
-    return await restoreBackup(path.resolve(backupDir), storage, {
+    const normalizedBackupDir = path.resolve(backupDir);
+    let boundJournal = null;
+    try {
+      boundJournal = await readTransactionJournal(
+        path.join(normalizedBackupDir, "transaction-journal.jsonl")
+      );
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw error;
+      }
+    }
+    if (boundJournal && !boundJournal.terminal) {
+      const journalUncertain = boundJournal.invalidTail || boundJournal.events.length === 0;
+      let conservativeCoverage = null;
+      if (journalUncertain) {
+        try {
+          conservativeCoverage = await getBackupRecoveryCoverage(normalizedBackupDir, storage);
+        } catch (coverageError) {
+          coverageError.code = "RECOVERY_REQUIRED";
+          coverageError.backupDir = normalizedBackupDir;
+          throw coverageError;
+        }
+      }
+      const missingKinds = [];
+      if ((getStartedJournalTargets(boundJournal, "rollout").length > 0
+          || conservativeCoverage?.sessions) && !restoreSessions) {
+        missingKinds.push("rollout sessions");
+      }
+      if ((getStartedJournalTargets(boundJournal, "sqlite").length > 0
+          || conservativeCoverage?.database) && !restoreDatabase) {
+        missingKinds.push("SQLite database");
+      }
+      if ((getStartedJournalTargets(boundJournal, "config").length > 0
+          || conservativeCoverage?.config) && !restoreConfig) {
+        missingKinds.push("config.toml");
+      }
+      if ((getStartedJournalTargets(boundJournal, "globalState").length > 0
+          || conservativeCoverage?.globalState) && !restoreConfig) {
+        missingKinds.push("global state");
+      }
+      if (missingKinds.length > 0) {
+        const error = new Error(
+          `Partial restore would leave a pending transaction unresolved. Include: ${missingKinds.join(", ")}.`
+        );
+        error.code = "RECOVERY_REQUIRED";
+        error.backupDir = normalizedBackupDir;
+        error.missingRestoreKinds = missingKinds;
+        throw error;
+      }
+    }
+    const result = await restoreBackup(normalizedBackupDir, storage, {
       restoreConfig,
       restoreDatabase,
       restoreSessions,
       allowSqliteHomeRelocation
     });
+    await markBackupTransactionRolledBack(normalizedBackupDir);
+    return result;
   } finally {
     await releaseLock();
   }

@@ -1,0 +1,195 @@
+{
+  "$schema": "https://schemas.codex-provider-sync.invalid/gui-e2e-scenarios-0.4.json",
+  "schemaVersion": "0.4",
+  "manifestVersion": "0.4.0",
+  "executionPolicy": {
+    "requiresWindows": true,
+    "requiresUserInteractive": true,
+    "requiresActiveDesktop": true,
+    "requiresVisiblePublishedExe": true,
+    "requiresRealControlsAndEvents": true,
+    "blockedIsFailure": true,
+    "skippedIsFailure": true,
+    "unitTestsMayClaimGuiPass": false
+  },
+  "nonGatingManifestScenarioIds": [
+    "gui.status.wsl-diagnostic",
+    "gui.provider.remove-manual-validation",
+    "gui.switch.model-custom-validation",
+    "gui.operation.busy",
+    "gui.operation.busy-state",
+    "gui.operation.failure",
+    "gui.restore.relocation-config-conflict",
+    "gui.restore.sqlite-relocation",
+    "gui.restore.failure",
+    "gui.restore.no-target-validation",
+    "gui.restore.confirm-sqlite-relocation",
+    "gui.restore.metadata-failure",
+    "gui.update.available",
+    "gui.update.timeout",
+    "gui.update.failure",
+    "gui.update.apply-failure",
+    "gui.logs.open-directory-failure",
+    "gui.logs.write-failure-warning"
+  ],
+  "groups": [
+    {
+      "id": "lifecycle",
+      "entryIds": ["window.main"],
+      "scenarioIds": ["gui.launch", "gui.focus-existing-instance", "gui.shutdown"],
+      "requiredEvidence": ["published-exe-sha256", "visible-main-window", "real-window-lifecycle"]
+    },
+    {
+      "id": "storage",
+      "entryIds": [
+        "storage.codexHome",
+        "storage.codexHome.browse",
+        "storage.sqliteHome",
+        "storage.sqliteHome.browse",
+        "storage.codexHome.recent",
+        "dialog.storage.codexHomePicker",
+        "dialog.storage.sqliteHomePicker"
+      ],
+      "scenarioIds": [
+        "gui.status.explicit-codex-home",
+        "gui.settings.recent-home-persistence",
+        "gui.status.browse-codex-home",
+        "gui.status.explicit-sqlite-home",
+        "gui.settings.sqlite-home-persistence",
+        "gui.status.browse-sqlite-home",
+        "gui.settings.recent-home-identity",
+        "gui.settings.recent-home-selection"
+      ],
+      "requiredEvidence": ["bridge-control-event", "native-folder-dialog", "restart-persistence"]
+    },
+    {
+      "id": "status",
+      "entryIds": ["status.refresh", "status.output"],
+      "scenarioIds": [
+        "gui.status.refresh",
+        "gui.status.refresh-failure",
+        "gui.status.rendered-result"
+      ],
+      "requiredEvidence": ["bridge-control-event", "application-trace", "rendered-status", "isolated-failure-path"]
+    },
+    {
+      "id": "provider",
+      "entryIds": [
+        "provider.list",
+        "provider.manualId",
+        "provider.addManual",
+        "provider.removeManual",
+        "state.selectedProvider",
+        "provider.row",
+        "dialog.validation"
+      ],
+      "scenarioIds": [
+        "gui.provider.select",
+        "gui.provider.persist-selection",
+        "gui.provider.manual-input",
+        "gui.provider.add-manual",
+        "gui.provider.add-manual-validation",
+        "gui.provider.remove-manual",
+        "gui.provider.selection-state",
+        "gui.provider.dynamic-row-identity",
+        "gui.provider.dynamic-row-selection"
+      ],
+      "requiredEvidence": ["bridge-control-event", "native-message-box", "stable-dynamic-id", "restart-persistence"]
+    },
+    {
+      "id": "switch-inputs",
+      "entryIds": [
+        "execution.updateConfig",
+        "execution.model.followProvider",
+        "execution.model.keepCurrent",
+        "execution.model.custom",
+        "execution.customModel"
+      ],
+      "scenarioIds": [
+        "gui.switch.mode",
+        "gui.switch.model-follow-provider",
+        "gui.switch.model-keep-current",
+        "gui.switch.model-custom-mode",
+        "gui.switch.model-custom-value"
+      ],
+      "requiredEvidence": ["bridge-control-event", "native-message-box", "real-enabled-state"]
+    },
+    {
+      "id": "sync-switch",
+      "entryIds": ["operation.execute", "dialog.confirmation"],
+      "scenarioIds": [
+        "gui.sync.mode",
+        "gui.sync.confirm-close-codex",
+        "gui.sync.execute",
+        "gui.switch.execute"
+      ],
+      "requiredEvidence": ["bridge-control-event", "native-message-box", "application-trace", "before-after-file-diff"]
+    },
+    {
+      "id": "operation-state",
+      "entryIds": ["state.operation", "dialog.operationFailure"],
+      "scenarioIds": [
+        "gui.operation.ready-state"
+      ],
+      "requiredEvidence": ["real-enabled-state", "application-trace", "native-message-box", "isolated-failure-path"]
+    },
+    {
+      "id": "restore",
+      "entryIds": [
+        "restore.includeConfig",
+        "restore.includeDatabase",
+        "restore.includeSessions",
+        "restore.execute",
+        "dialog.restore.backupPicker"
+      ],
+      "scenarioIds": [
+        "gui.restore.include-config",
+        "gui.restore.include-database",
+        "gui.restore.include-sessions",
+        "gui.restore.execute",
+        "gui.restore.cancel",
+        "gui.restore.select-backup",
+        "gui.restore.confirm-targets",
+        "gui.restore.confirm-close-codex"
+      ],
+      "requiredEvidence": ["bridge-control-event", "native-folder-dialog", "native-message-box", "application-trace", "before-after-file-diff"]
+    },
+    {
+      "id": "backup",
+      "entryIds": ["backup.retentionCount", "backups.openDirectory", "backups.prune"],
+      "scenarioIds": [
+        "gui.backup.retention",
+        "gui.backup.retention-persistence",
+        "gui.backup.open-directory",
+        "gui.backup.prune",
+        "gui.backup.prune-cancel",
+        "gui.backup.prune-confirmation"
+      ],
+      "requiredEvidence": ["bridge-control-event", "native-message-box", "application-trace", "restart-persistence", "no-external-child-process"]
+    },
+    {
+      "id": "updates",
+      "entryIds": ["updates.check", "dialog.update"],
+      "scenarioIds": [
+        "gui.update.check",
+        "gui.update.no-update"
+      ],
+      "requiredEvidence": ["bridge-control-event", "native-message-box", "isolated-platform-boundary", "no-network-or-external-process"]
+    },
+    {
+      "id": "logs",
+      "entryIds": ["logs.openDirectory", "logs.output"],
+      "scenarioIds": [
+        "gui.logs.open-directory",
+        "gui.logs.rendered-output"
+      ],
+      "requiredEvidence": ["bridge-control-event", "rendered-log-output", "no-external-child-process"]
+    },
+    {
+      "id": "warnings",
+      "entryIds": ["warning.closeCodex.primary", "warning.closeCodex.secondary"],
+      "scenarioIds": ["gui.warning.close-codex", "gui.warning.close-app-server"],
+      "requiredEvidence": ["visible-real-control-text"]
+    }
+  ]
+}
