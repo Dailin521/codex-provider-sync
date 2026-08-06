@@ -23,8 +23,7 @@ import {
   getBackupSummary,
   pruneBackups,
   restoreBackup,
-  restoreGlobalStateFilesFromBackup,
-  updateSessionBackupManifest
+  restoreGlobalStateFilesFromBackup
 } from "./backup.js";
 import { acquireLock } from "./locking.js";
 import {
@@ -575,7 +574,6 @@ async function runSyncCore({
                 appliedSessionChanges.push(change);
                 sessionRestoreNeeded = true;
                 await journal.applied("rollout", change.path);
-                await updateSessionBackupManifest(backupDir, appliedSessionChanges);
                 await faultInjector?.({ point: "after_rollout_apply", path: change.path, appliedCount: appliedSessionChanges.length });
               },
               onSkipped: async (change, reason) => {

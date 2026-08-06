@@ -16,7 +16,11 @@ import {
 import { getStatus, renderStatus, runRestore, runSwitch, runSync } from "../src/service.js";
 import { DB_FILE_BASENAME, DEFAULT_BACKUP_RETENTION_COUNT, SQLITE_DIR_BASENAME } from "../src/constants.js";
 import { getUnsupportedNodeVersionMessage } from "../src/node-version.js";
-import { applySessionChanges, collectSessionChanges } from "../src/session-files.js";
+import {
+  applySessionChanges,
+  collectSessionChanges,
+  createWindowsExclusiveRewriteWorker
+} from "../src/session-files.js";
 import { openDatabase } from "../src/sqlite.js";
 import {
   TransactionJournal,
@@ -720,6 +724,40 @@ test("repeated sync is idempotent for rollout and SQLite state", async () => {
   assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
+test("runSync leaves the backup manifest and metadata unchanged after creation", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-immutable-backup.jsonl");
+  await writeRollout(sessionPath, "thread-immutable-backup", "apigather");
+  await writeStateDb(codexHome, [{ id: "thread-immutable-backup", model_provider: "apigather" }]);
+
+  let backupDir = null;
+  let manifestBefore = null;
+  let metadataBefore = null;
+  const result = await runSync({
+    codexHome,
+    onProgress(event) {
+      if (event.stage === "create_backup" && event.status === "complete") {
+        backupDir = event.backupDir;
+      }
+    },
+    async faultInjector({ point }) {
+      if (point === "before_rollout_apply" && manifestBefore === null) {
+        manifestBefore = await fs.readFile(path.join(backupDir, "session-meta-backup.json"));
+        metadataBefore = await fs.readFile(path.join(backupDir, "metadata.json"));
+      }
+    }
+  });
+
+  assert.equal(result.changedSessionFiles, 1);
+  assert.ok(manifestBefore);
+  assert.ok(metadataBefore);
+  assert.deepEqual(await fs.readFile(path.join(backupDir, "session-meta-backup.json")), manifestBefore);
+  assert.deepEqual(await fs.readFile(path.join(backupDir, "metadata.json")), metadataBefore);
+  const manifest = JSON.parse(manifestBefore.toString("utf8"));
+  assert.equal(manifest.appliedPaths, null);
+});
+
 test("failure after model mutation but before journal applied restores full rollout bytes", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "gpt-new"');
@@ -752,6 +790,56 @@ test("failure after model mutation but before journal applied restores full roll
   assert.ok(error.completedTargets.includes(path.resolve(sessionPath)));
   assert.deepEqual(await fs.readFile(sessionPath), before);
   assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("lost Windows worker acknowledgement after File.Replace restores the applying target", {
+  skip: process.platform !== "win32"
+}, async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const configPath = path.join(codexHome, "config.toml");
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-lost-worker-ack.jsonl");
+  await writeRollout(sessionPath, "thread-lost-worker-ack", "apigather");
+  const before = await fs.readFile(sessionPath);
+  const { changes } = await collectSessionChanges(codexHome, "openai");
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: changes,
+    configPath
+  });
+  const journal = await TransactionJournal.create(backupDir, {
+    codexHome,
+    targetProvider: "openai",
+    potentialTargets: [sessionPath]
+  });
+
+  await assert.rejects(
+    applySessionChanges(changes, {
+      onBeforeApply: (change) => journal.applying("rollout", change.path),
+      windowsRewriteWorkerFactory: async () => {
+        const actual = await createWindowsExclusiveRewriteWorker();
+        return {
+          async rewrite(change, options) {
+            await actual.rewrite(change, options);
+            throw new Error("injected lost worker acknowledgement");
+          },
+          close: () => actual.close()
+        };
+      }
+    }),
+    /injected lost worker acknowledgement/
+  );
+
+  assert.notDeepEqual(await fs.readFile(sessionPath), before);
+  const pending = await readTransactionJournal(journal.filePath);
+  assert.equal(pending.state, "applying");
+  await restoreBackup(backupDir, codexHome, {
+    restoreConfig: false,
+    restoreDatabase: false,
+    restoreSessions: true
+  });
+  assert.deepEqual(await fs.readFile(sessionPath), before);
 });
 
 test("immutable full manifest restores a later applying target after abrupt exit", async () => {
@@ -797,6 +885,7 @@ test("immutable full manifest restores a later applying target after abrupt exit
   const fullBackupDir = path.join(backupRoot(codexHome), backupDir);
   const manifest = JSON.parse(await fs.readFile(path.join(fullBackupDir, "session-meta-backup.json"), "utf8"));
   assert.equal(manifest.files.length, 2);
+  assert.equal(manifest.appliedPaths, null);
 
   await runRestore({
     codexHome,
@@ -807,6 +896,51 @@ test("immutable full manifest restores a later applying target after abrupt exit
   assert.deepEqual(await fs.readFile(firstPath), before[0]);
   assert.deepEqual(await fs.readFile(secondPath), before[1]);
   assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("abrupt parent exit after the first applied rollout never mutates the next rollout", {
+  skip: process.platform !== "win32"
+}, async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const firstPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-parent-exit-a.jsonl");
+  const secondPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-parent-exit-b.jsonl");
+  await writeRollout(firstPath, "thread-parent-exit-a", "apigather");
+  await writeRollout(secondPath, "thread-parent-exit-b", "apigather");
+  const before = await Promise.all([fs.readFile(firstPath), fs.readFile(secondPath)]);
+
+  const childScript = `
+    import { runSync } from "./src/service.js";
+    await runSync({
+      codexHome: ${JSON.stringify(codexHome)},
+      provider: "openai",
+      faultInjector: ({ point, appliedCount }) => {
+        if (point === "after_rollout_apply" && appliedCount === 1) {
+          process.exit(24);
+        }
+      }
+    });
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", childScript], {
+    cwd: path.resolve(".")
+  });
+  const exitCode = await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", resolve);
+  });
+
+  assert.equal(exitCode, 24);
+  assert.notDeepEqual(await fs.readFile(firstPath), before[0]);
+  assert.deepEqual(await fs.readFile(secondPath), before[1]);
+  const [backupDir] = await fs.readdir(backupRoot(codexHome));
+  await runRestore({
+    codexHome,
+    backupDir: path.join(backupRoot(codexHome), backupDir),
+    restoreConfig: false,
+    restoreDatabase: false
+  });
+  assert.deepEqual(await fs.readFile(firstPath), before[0]);
+  assert.deepEqual(await fs.readFile(secondPath), before[1]);
 });
 
 test("foreign operationId and missing-final-newline journals stay pending until explicit restore", async (t) => {
@@ -3757,6 +3891,45 @@ test("invalid journal tail with no validated target restores the full session ma
   assert.equal(repaired.state, "rolledBack");
   assert.equal(repaired.terminal, true);
   assert.deepEqual(await findPendingTransactions(codexHome), []);
+});
+
+test("missing or empty journal restores the full immutable session manifest", async (t) => {
+  for (const journalState of ["missing", "empty"]) {
+    await t.test(journalState, async () => {
+      const { codexHome } = await makeTempCodexHome();
+      await writeConfig(codexHome, 'model_provider = "openai"');
+      const configPath = path.join(codexHome, "config.toml");
+      const sessionPath = path.join(
+        codexHome,
+        "sessions",
+        "2026",
+        "03",
+        "19",
+        `rollout-${journalState}-journal.jsonl`
+      );
+      await writeRollout(sessionPath, `thread-${journalState}-journal`, "apigather");
+      const original = await fs.readFile(sessionPath, "utf8");
+      const { changes } = await collectSessionChanges(codexHome, "openai");
+      const backupDir = await createBackup({
+        codexHome,
+        targetProvider: "openai",
+        sessionChanges: changes,
+        configPath
+      });
+      if (journalState === "empty") {
+        await fs.writeFile(path.join(backupDir, "transaction-journal.jsonl"), "", "utf8");
+      }
+      await writeRollout(sessionPath, `thread-${journalState}-journal`, "openai");
+
+      await restoreBackup(backupDir, codexHome, {
+        restoreConfig: false,
+        restoreDatabase: false,
+        restoreSessions: true
+      });
+
+      assert.equal(await fs.readFile(sessionPath, "utf8"), original);
+    });
+  }
 });
 
 test("automatic rollback does not report success unless the rolledBack terminal re-reads valid", async () => {
