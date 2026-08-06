@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -467,24 +467,6 @@ function isValidWindowsRewriteResult(result) {
     || result === "SKIP_CHANGED";
 }
 
-function parseWindowsRewriteResults(stdout, changes) {
-  const trimmed = stdout.trim();
-  const parsed = trimmed ? JSON.parse(trimmed) : [];
-  const results = Array.isArray(parsed) ? parsed : [parsed];
-
-  if (results.length !== changes.length) {
-    throw new Error(`Unexpected rewrite result count. Expected ${changes.length}, received ${results.length}.`);
-  }
-
-  return results.map((entry, index) => {
-    const expectedPath = changes[index].path;
-    if (entry?.path !== expectedPath || !isValidWindowsRewriteResult(entry?.result)) {
-      throw new Error(`Unexpected rewrite result for ${expectedPath}: ${JSON.stringify(entry)}`);
-    }
-    return entry.result;
-  });
-}
-
 async function restoreOriginalMtime(filePath, mtimeMs) {
   if (!Number.isFinite(mtimeMs)) {
     return;
@@ -498,16 +480,22 @@ async function restoreOriginalMtime(filePath, mtimeMs) {
   }
 }
 
-async function invokeWindowsExclusiveRewriteBatch(changes, { requireOriginalMatch }) {
-  if (!changes.length) {
-    return [];
-  }
+const WINDOWS_REWRITE_PROTOCOL_VERSION = 1;
+const WINDOWS_REWRITE_READY_TIMEOUT_MS = 15_000;
 
-  const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "codex-provider-rewrite-"));
-  const manifestPath = path.join(tempDir, "changes.json");
-  const script = `
+const WINDOWS_EXCLUSIVE_REWRITE_WORKER_SCRIPT = `
 & {
-  param([string]$manifestPath)
+  $ErrorActionPreference = "Stop"
+  $ProgressPreference = "SilentlyContinue"
+  $utf8 = [System.Text.UTF8Encoding]::new($false)
+  [Console]::InputEncoding = $utf8
+  [Console]::OutputEncoding = $utf8
+
+  function Write-ProtocolMessage($value) {
+    $json = $value | ConvertTo-Json -Compress -Depth 8
+    [Console]::Out.WriteLine($json)
+    [Console]::Out.Flush()
+  }
 
   function Read-FirstLineRecord([System.IO.FileStream]$stream) {
     $stream.Seek(0, [System.IO.SeekOrigin]::Begin) | Out-Null
@@ -554,7 +542,7 @@ async function invokeWindowsExclusiveRewriteBatch(changes, { requireOriginalMatc
       try {
         $source = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
       } catch {
-        if (Test-Path $path) {
+        if (Test-Path -LiteralPath $path) {
           return "SKIP_BUSY"
         }
         return "SKIP_CHANGED"
@@ -604,7 +592,7 @@ async function invokeWindowsExclusiveRewriteBatch(changes, { requireOriginalMatc
       try {
         [System.IO.File]::Replace($tmpPath, $path, $replaceBackupPath, $true)
       } catch {
-        if (Test-Path $path) {
+        if (Test-Path -LiteralPath $path) {
           return "SKIP_BUSY"
         }
         return "SKIP_CHANGED"
@@ -618,58 +606,285 @@ async function invokeWindowsExclusiveRewriteBatch(changes, { requireOriginalMatc
       if ($source) {
         $source.Dispose()
       }
-      Remove-Item -Path $tmpPath -Force -ErrorAction SilentlyContinue
-      Remove-Item -Path $replaceBackupPath -Force -ErrorAction SilentlyContinue
+      Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue
+      Remove-Item -LiteralPath $replaceBackupPath -Force -ErrorAction SilentlyContinue
     }
   }
 
-  $changes = Get-Content -Raw -Encoding UTF8 -Path $manifestPath | ConvertFrom-Json
-  if ($null -eq $changes) {
-    $changes = @()
-  } elseif ($changes -is [string] -or $changes -isnot [System.Collections.IEnumerable]) {
-    $changes = @($changes)
-  } else {
-    $changes = @($changes)
-  }
-
-  $results = @(foreach ($change in $changes) {
-    [pscustomobject]@{
-      path = [string]$change.path
-      result = Invoke-RewriteChange $change
-    }
+  Write-ProtocolMessage ([ordered]@{
+    protocolVersion = 1
+    type = "ready"
   })
 
-  $results | ConvertTo-Json -Compress
+  while ($null -ne ($line = [Console]::In.ReadLine())) {
+    if ([string]::IsNullOrWhiteSpace($line)) {
+      continue
+    }
+
+    $request = $null
+    try {
+      $request = $line | ConvertFrom-Json
+      $requestPath = [string]$request.path
+      if (([int]$request.protocolVersion -ne 1) -or
+          ([string]$request.type -ne "rewrite") -or
+          ($null -eq $request.id) -or
+          [string]::IsNullOrWhiteSpace($requestPath) -or
+          (-not [System.IO.Path]::IsPathRooted($requestPath))) {
+        throw [System.InvalidOperationException]::new("Invalid Windows rewrite worker request.")
+      }
+
+      $result = Invoke-RewriteChange $request
+      Write-ProtocolMessage ([ordered]@{
+        protocolVersion = 1
+        type = "result"
+        id = $request.id
+        path = $requestPath
+        result = $result
+      })
+    } catch {
+      [Console]::Error.WriteLine($_.Exception.ToString())
+      [Console]::Error.Flush()
+      $errorId = $null
+      $errorPath = $null
+      if ($null -ne $request) {
+        $errorId = $request.id
+        $errorPath = [string]$request.path
+      }
+      Write-ProtocolMessage ([ordered]@{
+        protocolVersion = 1
+        type = "error"
+        id = $errorId
+        path = $errorPath
+        message = $_.Exception.Message
+      })
+      exit 1
+    }
+  }
 }
 `.trim();
 
-  try {
-    const manifestChanges = changes.map((change) => ({
-      ...change,
-      requireOriginalMatch
-    }));
-    await fsp.writeFile(
-      manifestPath,
-      JSON.stringify(manifestChanges),
-      "utf8"
-    );
+function formatWindowsRewriteWorkerError(message, stderr) {
+  const detail = stderr.trim();
+  return detail ? `${message} PowerShell diagnostics: ${detail}` : message;
+}
 
-    const { stdout } = await execFileAsync("powershell.exe", [
+function writeWorkerRequest(stream, request) {
+  return new Promise((resolve, reject) => {
+    stream.write(`${JSON.stringify(request)}\n`, "utf8", (error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+export async function createWindowsExclusiveRewriteWorker(options = {}) {
+  const {
+    spawnImpl = spawn,
+    readyTimeoutMs = WINDOWS_REWRITE_READY_TIMEOUT_MS
+  } = options;
+  const child = spawnImpl("powershell.exe", [
+      "-NoLogo",
       "-NoProfile",
+      "-NonInteractive",
+      "-InputFormat",
+      "Text",
+      "-OutputFormat",
+      "Text",
       "-ExecutionPolicy",
       "Bypass",
       "-Command",
-      script,
-      manifestPath
+      WINDOWS_EXCLUSIVE_REWRITE_WORKER_SCRIPT
     ], {
-      maxBuffer: 16 * 1024 * 1024
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true
     });
 
-    return parseWindowsRewriteResults(stdout, changes);
+  let stderr = "";
+  let spawnError = null;
+  let exitInfo = null;
+  let closed = false;
+  let inFlight = false;
+  let nextRequestId = 1;
+  let stdinError = null;
+  const stdoutLines = readline.createInterface({
+    input: child.stdout,
+    crlfDelay: Infinity
+  });
+  const stdoutIterator = stdoutLines[Symbol.asyncIterator]();
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    stderr = `${stderr}${chunk}`.slice(-64 * 1024);
+  });
+  child.stdin.on("error", (error) => {
+    stdinError = error;
+  });
+
+  const completion = new Promise((resolve) => {
+    child.once("error", (error) => {
+      spawnError = error;
+      resolve({ error, code: null, signal: null });
+    });
+    child.once("exit", (code, signal) => {
+      exitInfo = { error: null, code, signal };
+      resolve(exitInfo);
+    });
+  });
+
+  async function readProtocolMessage(timeoutMs = null) {
+    let timeoutId = null;
+    const timeoutPromise = timeoutMs === null
+      ? null
+      : new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`Windows rewrite worker did not become ready within ${timeoutMs} ms.`));
+        }, timeoutMs);
+      });
+    try {
+      const nextLine = timeoutPromise
+        ? await Promise.race([stdoutIterator.next(), timeoutPromise])
+        : await stdoutIterator.next();
+      if (nextLine.done) {
+        const message = spawnError
+          ? `Unable to start Windows rewrite worker: ${spawnError.message}`
+          : `Windows rewrite worker closed stdout unexpectedly${exitInfo ? ` (exit ${exitInfo.code ?? "null"}, signal ${exitInfo.signal ?? "null"})` : ""}.`;
+        throw new Error(formatWindowsRewriteWorkerError(message, stderr));
+      }
+      try {
+        return JSON.parse(nextLine.value);
+      } catch (error) {
+        throw new Error(
+          formatWindowsRewriteWorkerError(
+            `Windows rewrite worker returned malformed JSON: ${error.message}`,
+            stderr
+          )
+        );
+      }
+    } finally {
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+      }
+    }
+  }
+
+  try {
+    const ready = await readProtocolMessage(readyTimeoutMs);
+    if (ready?.protocolVersion !== WINDOWS_REWRITE_PROTOCOL_VERSION || ready?.type !== "ready") {
+      throw new Error(`Unexpected Windows rewrite worker ready message: ${JSON.stringify(ready)}`);
+    }
   } catch (error) {
-    throw wrapRolloutFileBusyError(error, changes[0]?.path, "rewrite");
+    child.stdin.destroy();
+    child.kill();
+    stdoutLines.close();
+    throw error;
+  }
+
+  return {
+    pid: child.pid,
+    async rewrite(change, { requireOriginalMatch }) {
+      if (closed) {
+        throw new Error("Windows rewrite worker is already closed.");
+      }
+      if (inFlight) {
+        throw new Error("Windows rewrite worker already has an in-flight request.");
+      }
+      if (!change || typeof change.path !== "string" || !path.isAbsolute(change.path)) {
+        throw new Error(`Windows rewrite worker requires an absolute rollout path: ${change?.path ?? "(missing)"}`);
+      }
+
+      const id = nextRequestId;
+      nextRequestId += 1;
+      inFlight = true;
+      try {
+        await writeWorkerRequest(child.stdin, {
+          ...change,
+          protocolVersion: WINDOWS_REWRITE_PROTOCOL_VERSION,
+          type: "rewrite",
+          id,
+          requireOriginalMatch: Boolean(requireOriginalMatch)
+        });
+        const response = await readProtocolMessage();
+        if (response?.protocolVersion !== WINDOWS_REWRITE_PROTOCOL_VERSION
+            || response?.type !== "result"
+            || response?.id !== id
+            || response?.path !== change.path
+            || !isValidWindowsRewriteResult(response?.result)) {
+          throw new Error(`Unexpected Windows rewrite worker response for ${change.path}: ${JSON.stringify(response)}`);
+        }
+        return response.result;
+      } catch (error) {
+        child.stdin.destroy();
+        child.kill();
+        throw wrapRolloutFileBusyError(
+          new Error(
+            formatWindowsRewriteWorkerError(
+              `Windows rewrite worker failed for ${change.path}: ${stdinError?.message ?? error.message}`,
+              stderr
+            ),
+            { cause: error }
+          ),
+          change.path,
+          "rewrite"
+        );
+      } finally {
+        inFlight = false;
+      }
+    },
+    async close() {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      if (!child.stdin.destroyed) {
+        child.stdin.end();
+      }
+      const completed = await completion;
+      stdoutLines.close();
+      if (completed.error) {
+        throw new Error(formatWindowsRewriteWorkerError(
+          `Windows rewrite worker failed to start: ${completed.error.message}`,
+          stderr
+        ));
+      }
+      if (completed.code !== 0) {
+        throw new Error(formatWindowsRewriteWorkerError(
+          `Windows rewrite worker exited with code ${completed.code ?? "null"} and signal ${completed.signal ?? "null"}.`,
+          stderr
+        ));
+      }
+    }
+  };
+}
+
+async function invokeWindowsExclusiveRewriteBatch(changes, { requireOriginalMatch }) {
+  if (!changes.length) {
+    return [];
+  }
+
+  let worker = null;
+  let primaryError = null;
+  try {
+    worker = await createWindowsExclusiveRewriteWorker();
+    const results = [];
+    for (const change of changes) {
+      results.push(await worker.rewrite(change, { requireOriginalMatch }));
+    }
+    return results;
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
-    await fsp.rm(tempDir, { recursive: true, force: true });
+    if (worker) {
+      try {
+        await worker.close();
+      } catch (closeError) {
+        if (!primaryError) {
+          throw closeError;
+        }
+      }
+    }
   }
 }
 
@@ -1095,7 +1310,8 @@ export async function applySessionChanges(changes, options = {}) {
     onBeforeApply,
     onMutation,
     onApplied,
-    onSkipped
+    onSkipped,
+    windowsRewriteWorkerFactory = createWindowsExclusiveRewriteWorker
   } = options ?? {};
   const skippedPaths = [];
   const appliedPaths = [];
@@ -1113,31 +1329,50 @@ export async function applySessionChanges(changes, options = {}) {
   const firstLineChanges = normalizedChanges.filter((change) => !change?.modelOnlyChange);
 
   if (process.platform === "win32") {
-    // Process one file per helper invocation. A failed Windows batch cannot
-    // report which earlier members were already replaced, which was the root
-    // cause of #69. Per-target calls let the durable coordinator observe each
-    // successful mutation before the next target starts.
-    for (const change of firstLineChanges) {
-      await onBeforeApply?.(change);
-      const [result] = await invokeWindowsExclusiveRewriteBatch([change], { requireOriginalMatch: true });
-      if (result === "APPLIED" || result === "APPLIED_IN_PLACE") {
-        appliedChanges += 1;
-        inPlaceChanges += result === "APPLIED_IN_PLACE" ? 1 : 0;
-        appliedPaths.push(change.path);
-        await onMutation?.(change, { stage: "firstLine", result });
-        if (change.modelRewriteRequired) {
-          const modelResult = await rewriteRolloutModelField(change, targetModel);
-          retainOrValidateModelSnapshot(change, modelResult.originalTurnContextModels);
-          change.appliedTurnContextRewrites = modelResult.replacedLines;
-          if (modelResult.replacedLines > 0) {
-            await onMutation?.(change, { stage: "model", result: "APPLIED" });
+    // Keep one PowerShell process alive, but send exactly one target at a time.
+    // The coordinator persists applying/applied around each awaited request, so
+    // an abrupt exit can never mutate a later rollout that has no journal entry.
+    let worker = null;
+    let primaryError = null;
+    try {
+      if (firstLineChanges.length > 0) {
+        worker = await windowsRewriteWorkerFactory();
+      }
+      for (const change of firstLineChanges) {
+        await onBeforeApply?.(change);
+        const result = await worker.rewrite(change, { requireOriginalMatch: true });
+        if (result === "APPLIED" || result === "APPLIED_IN_PLACE") {
+          appliedChanges += 1;
+          inPlaceChanges += result === "APPLIED_IN_PLACE" ? 1 : 0;
+          appliedPaths.push(change.path);
+          await onMutation?.(change, { stage: "firstLine", result });
+          if (change.modelRewriteRequired) {
+            const modelResult = await rewriteRolloutModelField(change, targetModel);
+            retainOrValidateModelSnapshot(change, modelResult.originalTurnContextModels);
+            change.appliedTurnContextRewrites = modelResult.replacedLines;
+            if (modelResult.replacedLines > 0) {
+              await onMutation?.(change, { stage: "model", result: "APPLIED" });
+            }
+          }
+          await restoreOriginalMtime(change.path, change.originalMtimeMs);
+          await onApplied?.(change);
+        } else {
+          skippedPaths.push(change.path);
+          await onSkipped?.(change, result);
+        }
+      }
+    } catch (error) {
+      primaryError = error;
+      throw error;
+    } finally {
+      if (worker) {
+        try {
+          await worker.close();
+        } catch (closeError) {
+          if (!primaryError) {
+            throw closeError;
           }
         }
-        await restoreOriginalMtime(change.path, change.originalMtimeMs);
-        await onApplied?.(change);
-      } else {
-        skippedPaths.push(change.path);
-        await onSkipped?.(change, result);
       }
     }
   } else {
