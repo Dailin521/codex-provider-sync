@@ -724,7 +724,7 @@ test("repeated sync is idempotent for rollout and SQLite state", async () => {
   assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
-test("runSync leaves the backup manifest and metadata unchanged after creation", async () => {
+test("runSync leaves the backup manifest and metadata payload unchanged after creation", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-immutable-backup.jsonl");
@@ -753,7 +753,27 @@ test("runSync leaves the backup manifest and metadata unchanged after creation",
   assert.ok(manifestBefore);
   assert.ok(metadataBefore);
   assert.deepEqual(await fs.readFile(path.join(backupDir, "session-meta-backup.json")), manifestBefore);
-  assert.deepEqual(await fs.readFile(path.join(backupDir, "metadata.json")), metadataBefore);
+  const metadataBeforeValue = JSON.parse(metadataBefore.toString("utf8"));
+  const metadataAfterValue = JSON.parse(
+    await fs.readFile(path.join(backupDir, "metadata.json"), "utf8")
+  );
+  const {
+    sizeBytes: sizeBytesBefore,
+    fileCount: fileCountBefore,
+    ...metadataPayloadBefore
+  } = metadataBeforeValue;
+  const {
+    sizeBytes: sizeBytesAfter,
+    fileCount: fileCountAfter,
+    ...metadataPayloadAfter
+  } = metadataAfterValue;
+  assert.deepEqual(metadataPayloadAfter, metadataPayloadBefore);
+  assert.ok(sizeBytesAfter > sizeBytesBefore);
+  assert.equal(fileCountAfter, fileCountBefore + 1);
+  assert.deepEqual(
+    { sizeBytes: sizeBytesAfter, fileCount: fileCountAfter },
+    await getDirectoryInventory(backupDir)
+  );
   const manifest = JSON.parse(manifestBefore.toString("utf8"));
   assert.equal(manifest.appliedPaths, null);
 });
@@ -1416,6 +1436,24 @@ async function writeBackup(codexHome, directoryName, files) {
   return totalBytes;
 }
 
+async function getDirectoryInventory(directoryPath) {
+  const entries = await fs.readdir(directoryPath, { withFileTypes: true });
+  let sizeBytes = 0;
+  let fileCount = 0;
+  for (const entry of entries) {
+    const fullPath = path.join(directoryPath, entry.name);
+    if (entry.isDirectory()) {
+      const child = await getDirectoryInventory(fullPath);
+      sizeBytes += child.sizeBytes;
+      fileCount += child.fileCount;
+    } else if (entry.isFile()) {
+      sizeBytes += (await fs.stat(fullPath)).size;
+      fileCount += 1;
+    }
+  }
+  return { sizeBytes, fileCount };
+}
+
 async function writeConfig(codexHome, modelProviderLine = "") {
   const config = `${modelProviderLine}${modelProviderLine ? "\n" : ""}sandbox_mode = "danger-full-access"\n\n[model_providers.apigather]\nbase_url = "https://example.com"\n`;
   await fs.writeFile(path.join(codexHome, "config.toml"), config, "utf8");
@@ -1641,6 +1679,9 @@ test("runSync rewrites rollout files and sqlite, then restore reverts both", asy
   assert.ok(backupMetadata.sizeBytes > 0);
   assert.ok(Number.isSafeInteger(backupMetadata.fileCount));
   assert.ok(backupMetadata.fileCount > 0);
+  const backupInventory = await getDirectoryInventory(syncResult.backupDir);
+  assert.equal(backupMetadata.sizeBytes, backupInventory.sizeBytes);
+  assert.equal(backupMetadata.fileCount, backupInventory.fileCount);
   assert.deepEqual(
     backupMetadata.dbFiles.map((fileName) => fileName.replaceAll("\\", "/")),
     ["sqlite/state_5.sqlite"]

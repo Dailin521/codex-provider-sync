@@ -635,6 +635,7 @@ public sealed class CodexSyncService
             await journal.CommittedAsync();
             transactionCommitted = true;
             await journal.DisposeAsync();
+            await _backupService.RefreshMetadataInventoryAsync(backupDir);
             long mutationDurationMs = ElapsedMilliseconds(mutationStarted);
             if (FaultInjector is not null)
             {
@@ -1203,6 +1204,7 @@ public sealed class CodexSyncService
             preparation.BackupDirectory,
             codexHome,
             result.TargetProvider);
+        await _backupService.RefreshMetadataInventoryAsync(preparation.BackupDirectory);
         return result;
     }
 

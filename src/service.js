@@ -22,6 +22,7 @@ import {
   getBackupRecoveryCoverage,
   getBackupSummary,
   pruneBackups,
+  refreshBackupInventory,
   restoreBackup,
   restoreGlobalStateFilesFromBackup
 } from "./backup.js";
@@ -643,6 +644,7 @@ async function runSyncCore({
       await faultInjector?.({ point: "before_transaction_commit", completedCount: completedTargets.length });
       await commitJournalWithReconciliation(journal, faultInjector);
       transactionCommitted = true;
+      await refreshBackupInventory(backupDir);
       await faultInjector?.({ point: "after_transaction_commit", completedCount: completedTargets.length });
       let autoPruneResult = null;
       let autoPruneWarning = null;
@@ -1011,6 +1013,7 @@ export async function runRestore({
       allowSqliteHomeRelocation
     });
     await markBackupTransactionRolledBack(normalizedBackupDir);
+    await refreshBackupInventory(normalizedBackupDir);
     return result;
   } finally {
     await releaseLock();

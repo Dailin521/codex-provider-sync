@@ -962,10 +962,19 @@ public sealed class CoreIntegrationTests
         Assert.Equal(2, syncResult.SqliteRowsUpdated);
         Assert.Equal(2, syncResult.PerformanceMetrics.RolloutScan.EnumeratedRolloutFiles);
         Assert.Equal(2, syncResult.PerformanceMetrics.RolloutScan.ContentScanPasses);
-        Assert.Equal(2, syncResult.PerformanceMetrics.JournalFullValidationCount);
+        Assert.Equal(
+            OperatingSystem.IsWindows() ? 2 : 8,
+            syncResult.PerformanceMetrics.JournalFullValidationCount);
         BackupMetadataFile backupMetadata = JsonSerializer.Deserialize<BackupMetadataFile>(
             await File.ReadAllTextAsync(Path.Combine(syncResult.BackupDir, "metadata.json")),
             new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase })!;
+        Assert.Equal(
+            Directory.EnumerateFiles(syncResult.BackupDir, "*", SearchOption.AllDirectories)
+                .Sum(static path => new FileInfo(path).Length),
+            backupMetadata.SizeBytes);
+        Assert.Equal(
+            Directory.EnumerateFiles(syncResult.BackupDir, "*", SearchOption.AllDirectories).Count(),
+            backupMetadata.FileCount);
         Assert.Equal(
         [
             Path.Combine(AppConstants.SqliteDirBasename, AppConstants.DbFileBasename)

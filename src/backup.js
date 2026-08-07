@@ -379,6 +379,16 @@ export async function updateSessionBackupManifest(backupDir, sessionChanges, opt
   });
 }
 
+export async function refreshBackupInventory(backupDir, options = {}) {
+  const normalizedBackupDir = path.resolve(backupDir);
+  const metadataPath = path.join(normalizedBackupDir, "metadata.json");
+  const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
+  if (metadata?.namespace !== BACKUP_NAMESPACE || !new Set([1, 2]).has(metadata.version)) {
+    throw new Error(`Unsupported backup metadata in ${metadataPath}.`);
+  }
+  await writeMetadataWithInventory(normalizedBackupDir, metadata, options);
+}
+
 export async function getBackupSummary(codexHome) {
   const backupRoot = defaultBackupRoot(codexHome);
   const backupDirs = await listManagedBackupDirectories(backupRoot);

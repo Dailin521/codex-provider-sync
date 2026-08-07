@@ -471,6 +471,22 @@ public sealed class BackupService
         };
     }
 
+    internal async Task RefreshMetadataInventoryAsync(string backupDir)
+    {
+        string normalizedBackupDir = Path.GetFullPath(backupDir);
+        string metadataPath = Path.Combine(normalizedBackupDir, "metadata.json");
+        BackupMetadataFile metadata = JsonSerializer.Deserialize<BackupMetadataFile>(
+            await File.ReadAllTextAsync(metadataPath),
+            JsonOptions()) ?? throw new InvalidOperationException($"Backup metadata is invalid: {backupDir}");
+        if (!string.Equals(metadata.Namespace, AppConstants.BackupNamespace, StringComparison.Ordinal)
+            || metadata.Version is not (1 or 2))
+        {
+            throw new InvalidOperationException($"Unsupported backup metadata in {metadataPath}.");
+        }
+
+        await WriteMetadataWithInventoryAsync(normalizedBackupDir, metadata);
+    }
+
     public Task<BackupSummary> GetBackupSummaryAsync(string codexHome)
     {
         string backupRoot = AppConstants.DefaultBackupRoot(codexHome);
