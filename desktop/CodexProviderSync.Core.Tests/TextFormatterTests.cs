@@ -145,6 +145,42 @@ public sealed class TextFormatterTests
         Assert.Contains("释放空间: 2 KB", pruneText);
     }
 
+    [Fact]
+    public void PerformanceFormatters_ReportStageDurationsAndStructuralCounts()
+    {
+        SyncPerformanceMetrics sync = new()
+        {
+            TotalDurationMs = 100,
+            PreparationDurationMs = 20,
+            CheckedPlanValidationDurationMs = 15,
+            BackupDurationMs = 10,
+            MutationDurationMs = 50,
+            PruneDurationMs = 5,
+            JournalFullValidationCount = 2,
+            RolloutScan = new SessionScanMetrics
+            {
+                EnumeratedRolloutFiles = 800,
+                ContentScanPasses = 800
+            }
+        };
+        StatusPerformanceMetrics status = new()
+        {
+            TotalDurationMs = 30,
+            RolloutScanDurationMs = 20,
+            BackupSummaryDurationMs = 4,
+            RolloutScan = sync.RolloutScan
+        };
+
+        string syncText = TextFormatter.FormatPerformanceMetrics(sync, TextFormatter.ChineseSimplified);
+        string statusText = TextFormatter.FormatPerformanceMetrics(status, TextFormatter.English);
+
+        Assert.Contains("计划校验=15ms", syncText);
+        Assert.Contains("内容扫描=800", syncText);
+        Assert.Contains("journal全量校验=2", syncText);
+        Assert.Contains("rollout-scan=20ms", statusText);
+        Assert.Contains("content-scans=800", statusText);
+    }
+
     private static StatusSnapshot MinimalStatus() => new()
     {
         CodexHome = @"C:\Codex",

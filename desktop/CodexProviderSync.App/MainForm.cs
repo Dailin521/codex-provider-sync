@@ -940,6 +940,9 @@ public sealed class MainForm : Form
                 result,
                 request is SwitchProviderRequest ? "已切换并同步" : "已同步",
                 TextFormatter.ChineseSimplified));
+            AppendLog(TextFormatter.FormatPerformanceMetrics(
+                result.PerformanceMetrics,
+                TextFormatter.ChineseSimplified));
             AppendLog(FormatModelSyncOutcome(result.ModelSync));
             AppendLog(string.Empty);
             await RefreshStatusCoreAsync(request.CodexHome, request.SqliteHomeOverride, provider);
@@ -1591,6 +1594,9 @@ public sealed class MainForm : Form
         ReloadProviderList();
         _codexHomeCombo.Text = _currentStatus.CodexHome;
         AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 已刷新: {_currentStatus.CodexHome}");
+        AppendLog(TextFormatter.FormatPerformanceMetrics(
+            _currentStatus.PerformanceMetrics,
+            TextFormatter.ChineseSimplified));
     }
 
     private WindowBoundsState CaptureWindowBounds()

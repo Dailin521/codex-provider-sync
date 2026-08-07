@@ -54,6 +54,12 @@ internal sealed record CoreWriteTargetSpec(
     string Action,
     CoreWriteFingerprintMode FingerprintMode = CoreWriteFingerprintMode.Content);
 
+internal sealed record CoreWriteContentFingerprintHint(
+    string Path,
+    string Fingerprint,
+    long Length,
+    long LastWriteTimeUtcTicks);
+
 internal static class CoreWriteSnapshotBuilder
 {
     private const string FormatVersion = "core-write-snapshot-v2";
@@ -64,17 +70,36 @@ internal static class CoreWriteSnapshotBuilder
         IEnumerable<CoreWriteTargetSpec> targets,
         IEnumerable<CoreWriteTargetSpec>? autoPruneDeletionTargets = null,
         IEnumerable<CoreWritePlanWarning>? warnings = null,
-        CancellationToken cancellationToken = default)
+        IEnumerable<CoreWriteContentFingerprintHint>? contentFingerprintHints = null,
+        CancellationToken cancellationToken = default,
+        Action<string>? fingerprintObserver = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(operation);
         ArgumentNullException.ThrowIfNull(binding);
 
+        Dictionary<(string Path, CoreWriteFingerprintMode Mode), string> fingerprintCache = [];
+        foreach (CoreWriteContentFingerprintHint hint in contentFingerprintHints ?? [])
+        {
+            string fullPath = Path.GetFullPath(hint.Path);
+            FileInfo current = new(fullPath);
+            if (!current.Exists
+                || current.Length != hint.Length
+                || current.LastWriteTimeUtc.Ticks != hint.LastWriteTimeUtcTicks)
+            {
+                throw new CoreWritePlanStaleException();
+            }
+            fingerprintCache[(fullPath, CoreWriteFingerprintMode.Content)] = hint.Fingerprint;
+        }
         IReadOnlyList<CoreWritePlanTarget> capturedTargets = await CaptureTargetsAsync(
             targets,
-            cancellationToken);
+            fingerprintCache,
+            cancellationToken,
+            fingerprintObserver);
         IReadOnlyList<CoreWritePlanTarget> capturedAutoPruneTargets = await CaptureTargetsAsync(
             autoPruneDeletionTargets ?? [],
-            cancellationToken);
+            fingerprintCache,
+            cancellationToken,
+            fingerprintObserver);
         IReadOnlyList<CoreWritePlanWarning> capturedWarnings = (warnings ?? [])
             .Select(static warning => warning with { })
             .OrderBy(static warning => warning.Code, StringComparer.Ordinal)
@@ -132,7 +157,9 @@ internal static class CoreWriteSnapshotBuilder
 
     private static async Task<IReadOnlyList<CoreWritePlanTarget>> CaptureTargetsAsync(
         IEnumerable<CoreWriteTargetSpec> specs,
-        CancellationToken cancellationToken)
+        Dictionary<(string Path, CoreWriteFingerprintMode Mode), string> fingerprintCache,
+        CancellationToken cancellationToken,
+        Action<string>? fingerprintObserver)
     {
         CoreWriteTargetSpec[] normalized = specs
             .Select(static spec => new CoreWriteTargetSpec(
@@ -144,19 +171,15 @@ internal static class CoreWriteSnapshotBuilder
             .ThenBy(static spec => spec.Action, StringComparer.Ordinal)
             .ToArray();
         List<CoreWritePlanTarget> result = new(normalized.Length);
-        Dictionary<(string Path, CoreWriteFingerprintMode Mode), string> fingerprintCache = [];
         foreach (CoreWriteTargetSpec spec in normalized)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            (string Path, CoreWriteFingerprintMode Mode) cacheKey = (spec.Path, spec.FingerprintMode);
-            if (!fingerprintCache.TryGetValue(cacheKey, out string? fingerprint))
-            {
-                fingerprint = await FingerprintPathAsync(
-                    spec.Path,
-                    spec.FingerprintMode,
-                    cancellationToken);
-                fingerprintCache.Add(cacheKey, fingerprint);
-            }
+            string fingerprint = await FingerprintPathAsync(
+                spec.Path,
+                spec.FingerprintMode,
+                fingerprintCache,
+                cancellationToken,
+                fingerprintObserver);
             result.Add(new CoreWritePlanTarget(spec.Path, spec.Action, fingerprint));
         }
         return result.AsReadOnly();
@@ -165,26 +188,44 @@ internal static class CoreWriteSnapshotBuilder
     private static async Task<string> FingerprintPathAsync(
         string fullPath,
         CoreWriteFingerprintMode mode,
-        CancellationToken cancellationToken)
+        Dictionary<(string Path, CoreWriteFingerprintMode Mode), string> fingerprintCache,
+        CancellationToken cancellationToken,
+        Action<string>? fingerprintObserver)
     {
+        fullPath = Path.GetFullPath(fullPath);
+        (string Path, CoreWriteFingerprintMode Mode) cacheKey = (fullPath, mode);
+        if (fingerprintCache.TryGetValue(cacheKey, out string? cached))
+        {
+            return cached;
+        }
+
         cancellationToken.ThrowIfCancellationRequested();
+        fingerprintObserver?.Invoke(fullPath);
+        string fingerprint;
         if (!File.Exists(fullPath) && !Directory.Exists(fullPath))
         {
-            if (mode == CoreWriteFingerprintMode.SqliteWalContent)
-            {
-                return FingerprintEmptySqliteWal(fullPath);
-            }
-            return Sha256($"missing\n{fullPath}");
+            fingerprint = mode == CoreWriteFingerprintMode.SqliteWalContent
+                ? FingerprintEmptySqliteWal(fullPath)
+                : Sha256($"missing\n{fullPath}");
+            fingerprintCache.Add(cacheKey, fingerprint);
+            return fingerprint;
         }
 
         FileAttributes attributes = File.GetAttributes(fullPath);
         if ((attributes & FileAttributes.ReparsePoint) != 0)
         {
             DateTime lastWrite = File.GetLastWriteTimeUtc(fullPath);
-            return Sha256($"reparse\n{fullPath}\n{(int)attributes}\n{lastWrite.Ticks}");
+            fingerprint = Sha256($"reparse\n{fullPath}\n{(int)attributes}\n{lastWrite.Ticks}");
+            fingerprintCache.Add(cacheKey, fingerprint);
+            return fingerprint;
         }
-        return (attributes & FileAttributes.Directory) != 0
-            ? await FingerprintDirectoryAsync(fullPath, mode, cancellationToken)
+        fingerprint = (attributes & FileAttributes.Directory) != 0
+            ? await FingerprintDirectoryAsync(
+                fullPath,
+                mode,
+                fingerprintCache,
+                cancellationToken,
+                fingerprintObserver)
             : mode switch
             {
                 CoreWriteFingerprintMode.RecursiveInventory => FingerprintFileInventory(fullPath, attributes),
@@ -198,12 +239,16 @@ internal static class CoreWriteSnapshotBuilder
                     cancellationToken),
                 _ => await FingerprintFileAsync(fullPath, cancellationToken)
             };
+        fingerprintCache.Add(cacheKey, fingerprint);
+        return fingerprint;
     }
 
     private static async Task<string> FingerprintDirectoryAsync(
         string directoryPath,
         CoreWriteFingerprintMode mode,
-        CancellationToken cancellationToken)
+        Dictionary<(string Path, CoreWriteFingerprintMode Mode), string> fingerprintCache,
+        CancellationToken cancellationToken,
+        Action<string>? fingerprintObserver)
     {
         StringBuilder canonical = new();
         Append(canonical, "type", "directory");
@@ -231,7 +276,12 @@ internal static class CoreWriteSnapshotBuilder
             Append(
                 canonical,
                 "entry.fingerprint",
-                await FingerprintPathAsync(entry, mode, cancellationToken));
+                await FingerprintPathAsync(
+                    entry,
+                    mode,
+                    fingerprintCache,
+                    cancellationToken,
+                    fingerprintObserver));
         }
         return Sha256(canonical.ToString());
     }

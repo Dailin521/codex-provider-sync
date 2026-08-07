@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace CodexProviderSync.Core;
 
 public sealed class CodexSyncService
@@ -50,13 +52,16 @@ public sealed class CodexSyncService
         string? explicitCodexHome = null,
         string? explicitSqliteHome = null)
     {
+        long totalStarted = Stopwatch.GetTimestamp();
         string codexHome = _codexHomeService.NormalizeCodexHome(explicitCodexHome);
         await _codexHomeService.EnsureCodexHomeAsync(codexHome);
         string configText = await _configFileService.ReadConfigTextAsync(_codexHomeService.ConfigPath(codexHome));
         CodexStorageLayout storage = await PrepareStorageAsync(codexHome, explicitSqliteHome, configText);
         CurrentProviderInfo currentProvider = _configFileService.ReadCurrentProviderFromConfigText(configText);
         IReadOnlyList<string> configuredProviders = _configFileService.ListConfiguredProviderIds(configText);
+        long rolloutScanStarted = Stopwatch.GetTimestamp();
         SessionChangeCollection rolloutInfo = await _sessionRolloutService.CollectSessionChangesAsync(codexHome, "__status_only__", skipLockedReads: true);
+        long rolloutScanDurationMs = ElapsedMilliseconds(rolloutScanStarted);
         StateDbLocation? stateDbLocation = storage.StateDbLocation;
         ProviderCounts? sqliteCounts = storage.SqliteAccess.Supported
             ? await _sqliteStateService.ReadSqliteProviderCountsAsync(storage)
@@ -71,7 +76,9 @@ public sealed class CodexSyncService
             || sqliteCounts?.Unreadable == true
             ? []
             : await _globalStateService.ReadProjectThreadVisibilityAsync(storage);
+        long backupSummaryStarted = Stopwatch.GetTimestamp();
         BackupSummary backupSummary = await _backupService.GetBackupSummaryAsync(codexHome);
+        long backupSummaryDurationMs = ElapsedMilliseconds(backupSummaryStarted);
         IReadOnlyList<PendingTransactionInfo> pendingTransactions = await FileTransactionJournal.FindPendingAsync(codexHome);
 
         return new StatusSnapshot
@@ -100,7 +107,14 @@ public sealed class CodexSyncService
                     item.State,
                     item.BackupDir,
                     item.JournalPath))
-                .ToArray()
+                .ToArray(),
+            PerformanceMetrics = new StatusPerformanceMetrics
+            {
+                TotalDurationMs = ElapsedMilliseconds(totalStarted),
+                RolloutScanDurationMs = rolloutScanDurationMs,
+                BackupSummaryDurationMs = backupSummaryDurationMs,
+                RolloutScan = rolloutInfo.ScanMetrics
+            }
         };
     }
 
@@ -260,7 +274,8 @@ public sealed class CodexSyncService
     private async Task<CoreWritePlanSnapshot> BuildSyncPlanSnapshotAsync(
         SyncPreparation preparation,
         int keepCount,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool useContentFingerprintHints = true)
     {
         string operation = preparation.SwitchPreparation is null ? "sync" : "switch";
         List<CoreWriteTargetSpec> targets =
@@ -339,6 +354,15 @@ public sealed class CodexSyncService
                 "delete",
                 CoreWriteFingerprintMode.RecursiveInventory)),
             warnings: warnings,
+            contentFingerprintHints: useContentFingerprintHints
+                ? preparation.WritableChanges
+                    .Where(static change => change.ContentFingerprint is not null)
+                    .Select(static change => new CoreWriteContentFingerprintHint(
+                        change.Path,
+                        change.ContentFingerprint!,
+                        change.OriginalFileLength,
+                        change.OriginalLastWriteTimeUtcTicks))
+                : null,
             cancellationToken: cancellationToken);
     }
 
@@ -366,12 +390,14 @@ public sealed class CodexSyncService
         DateTimeOffset? snapshotExpiresAtUtc,
         CancellationToken cancellationToken = default)
     {
+        long totalStarted = Stopwatch.GetTimestamp();
         ValidateAutomaticRetention(keepCount);
 
         string codexHome = _codexHomeService.NormalizeCodexHome(explicitCodexHome);
         await _codexHomeService.EnsureCodexHomeAsync(codexHome);
         await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "sync");
         await FileTransactionJournal.AssertNoPendingAsync(codexHome);
+        long preparationStarted = Stopwatch.GetTimestamp();
         SyncPreparation preparation = await PrepareSyncAsync(
             codexHome,
             provider,
@@ -380,6 +406,7 @@ public sealed class CodexSyncService
             explicitSqliteHome,
             switchPreparationFactory,
             cancellationToken);
+        long preparationDurationMs = ElapsedMilliseconds(preparationStarted);
         string configPath = preparation.ConfigPath;
         string configText = preparation.ConfigText;
         SwitchPreparation? switchPreparation = preparation.SwitchPreparation;
@@ -394,16 +421,20 @@ public sealed class CodexSyncService
         List<string> skippedRolloutFiles = [.. preparation.SkippedRolloutFiles];
         IReadOnlyList<string> skippedUnreadableRolloutFiles = preparation.SkippedUnreadableRolloutFiles;
         IReadOnlyList<CoreWritePlanTarget>? checkedAutoPruneDeletionTargets = null;
+        long checkedPlanValidationDurationMs = 0;
         if (expectedSnapshot is not null)
         {
+            long checkedPlanValidationStarted = Stopwatch.GetTimestamp();
             AssertSnapshotFresh(snapshotExpiresAtUtc);
             CoreWritePlanSnapshot actualSnapshot = await BuildSyncPlanSnapshotAsync(
                 preparation,
                 keepCount,
-                cancellationToken);
+                cancellationToken,
+                useContentFingerprintHints: false);
             CoreWriteSnapshotBuilder.AssertExactMatch(expectedSnapshot, actualSnapshot);
             AssertSnapshotFresh(snapshotExpiresAtUtc);
             checkedAutoPruneDeletionTargets = expectedSnapshot.AutoPruneDeletionTargets;
+            checkedPlanValidationDurationMs = ElapsedMilliseconds(checkedPlanValidationStarted);
         }
         cancellationToken.ThrowIfCancellationRequested();
         if (FaultInjector is not null)
@@ -411,12 +442,15 @@ public sealed class CodexSyncService
             await FaultInjector("before_backup", null, 0);
         }
         string? effectiveConfigBackupText = switchPreparation is null ? configBackupText : configText;
+        long backupStarted = Stopwatch.GetTimestamp();
         string backupDir = await _backupService.CreateBackupAsync(
             storage,
             targetProvider,
             writableChanges,
             configPath,
             effectiveConfigBackupText);
+        long backupDurationMs = ElapsedMilliseconds(backupStarted);
+        long mutationStarted = Stopwatch.GetTimestamp();
         List<SessionChange> appliedSessionChanges = [];
         bool sqliteMutationCommitted = false;
         bool sqliteCommitAttempted = false;
@@ -429,7 +463,7 @@ public sealed class CodexSyncService
             .Concat(switchPreparation is null ? [] : [Path.GetFullPath(configPath)])
             .Concat(storage.StateDbLocation is null ? [] : [Path.GetFullPath(storage.StateDbLocation.Path)])
             .ToArray();
-        FileTransactionJournal journal = await FileTransactionJournal.CreateAsync(
+        await using FileTransactionJournal journal = await FileTransactionJournal.CreateOwnedAsync(
             backupDir,
             codexHome,
             targetProvider,
@@ -600,6 +634,8 @@ public sealed class CodexSyncService
             }
             await journal.CommittedAsync();
             transactionCommitted = true;
+            await journal.DisposeAsync();
+            long mutationDurationMs = ElapsedMilliseconds(mutationStarted);
             if (FaultInjector is not null)
             {
                 await FaultInjector("after_transaction_commit", null, completedTargets.Count);
@@ -607,6 +643,7 @@ public sealed class CodexSyncService
 
             BackupPruneResult? autoPruneResult = null;
             string? autoPruneWarning = null;
+            long pruneStarted = Stopwatch.GetTimestamp();
             try
             {
                 autoPruneResult = await _backupService.PruneAutomaticBackupsAsync(
@@ -619,6 +656,7 @@ public sealed class CodexSyncService
             {
                 autoPruneWarning = $"Automatic backup cleanup failed: {error.Message}";
             }
+            long pruneDurationMs = ElapsedMilliseconds(pruneStarted);
 
             SyncResult result = new()
             {
@@ -645,7 +683,18 @@ public sealed class CodexSyncService
                 AutoPruneResult = autoPruneResult,
                 AutoPruneWarning = autoPruneWarning,
                 ConfigUpdated = switchPreparation is not null,
-                ModelSync = switchPreparation?.ModelSync ?? ModelSyncOutcome.NotApplicable()
+                ModelSync = switchPreparation?.ModelSync ?? ModelSyncOutcome.NotApplicable(),
+                PerformanceMetrics = new SyncPerformanceMetrics
+                {
+                    TotalDurationMs = ElapsedMilliseconds(totalStarted),
+                    PreparationDurationMs = preparationDurationMs,
+                    CheckedPlanValidationDurationMs = checkedPlanValidationDurationMs,
+                    BackupDurationMs = backupDurationMs,
+                    MutationDurationMs = mutationDurationMs,
+                    PruneDurationMs = pruneDurationMs,
+                    JournalFullValidationCount = journal.AppendFullJournalValidationCount,
+                    RolloutScan = sessionInfo.ScanMetrics
+                }
             };
             return result;
         }
@@ -1443,6 +1492,9 @@ public sealed class CodexSyncService
 
         return $"Encrypted content warning: {total} rollout file(s) contain encrypted_content from provider(s) {string.Join(", ", riskyProviders)}. Visibility metadata can be synchronized to {targetProvider}, but continuing or compacting those histories may fail with invalid_encrypted_content. Return to the original provider/account or start a new session if you need reliable continuation.";
     }
+
+    private static long ElapsedMilliseconds(long started) =>
+        (long)Math.Round(Stopwatch.GetElapsedTime(started).TotalMilliseconds);
 
     private async Task<CodexStorageLayout> PrepareStorageAsync(
         string codexHome,

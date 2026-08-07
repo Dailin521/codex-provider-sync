@@ -1637,6 +1637,10 @@ test("runSync rewrites rollout files and sqlite, then restore reverts both", asy
   assert.equal(backupMetadata.version, 2);
   assert.equal(backupMetadata.sqliteHome, path.join(codexHome, SQLITE_DIR_BASENAME));
   assert.deepEqual(backupMetadata.sqliteDbFiles, [DB_FILE_BASENAME]);
+  assert.ok(Number.isSafeInteger(backupMetadata.sizeBytes));
+  assert.ok(backupMetadata.sizeBytes > 0);
+  assert.ok(Number.isSafeInteger(backupMetadata.fileCount));
+  assert.ok(backupMetadata.fileCount > 0);
   assert.deepEqual(
     backupMetadata.dbFiles.map((fileName) => fileName.replaceAll("\\", "/")),
     ["sqlite/state_5.sqlite"]
@@ -3607,6 +3611,33 @@ test("pruneBackups removes the oldest backup directories", async () => {
   await assert.rejects(fs.access(path.join(backupRoot(codexHome), "20260319T000000000Z")));
   await fs.access(path.join(backupRoot(codexHome), "20260320T000000000Z"));
   await fs.access(path.join(backupRoot(codexHome), "20260321T000000000Z"));
+});
+
+test("backup summary and prune use cached inventory with legacy fallback", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  const cachedDir = path.join(backupRoot(codexHome), "20260319T000000000Z");
+  const legacyDir = path.join(backupRoot(codexHome), "20260320T000000000Z");
+  await fs.mkdir(cachedDir, { recursive: true });
+  await fs.mkdir(legacyDir, { recursive: true });
+  await fs.writeFile(path.join(cachedDir, "metadata.json"), JSON.stringify({
+    namespace: "provider-sync",
+    sizeBytes: 123,
+    fileCount: 1
+  }), "utf8");
+  await fs.writeFile(path.join(cachedDir, "added-later.bin"), "x".repeat(4096), "utf8");
+  await fs.writeFile(path.join(legacyDir, "metadata.json"), JSON.stringify({
+    namespace: "provider-sync"
+  }), "utf8");
+  await fs.writeFile(path.join(legacyDir, "payload.bin"), "legacy", "utf8");
+  const legacyBytes = (await fs.stat(path.join(legacyDir, "metadata.json"))).size
+    + (await fs.stat(path.join(legacyDir, "payload.bin"))).size;
+
+  const summary = await getBackupSummary(codexHome);
+  assert.deepEqual(summary, { count: 2, totalBytes: 123 + legacyBytes });
+
+  const pruned = await pruneBackups(codexHome, 1);
+  assert.equal(pruned.deletedCount, 1);
+  assert.equal(pruned.freedBytes, 123);
 });
 
 test("pruneBackups ignores directories without managed backup metadata", async () => {

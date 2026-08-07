@@ -37,6 +37,16 @@ public sealed class StatusSnapshot
     public required string BackupRoot { get; init; }
     public required BackupSummary BackupSummary { get; init; }
     public IReadOnlyList<TransactionRecoveryInfo> PendingTransactions { get; init; } = [];
+    [JsonIgnore]
+    public StatusPerformanceMetrics PerformanceMetrics { get; init; } = new();
+}
+
+public sealed class StatusPerformanceMetrics
+{
+    public long TotalDurationMs { get; init; }
+    public long RolloutScanDurationMs { get; init; }
+    public long BackupSummaryDurationMs { get; init; }
+    public SessionScanMetrics RolloutScan { get; init; } = new();
 }
 
 public sealed record TransactionRecoveryInfo(
@@ -119,6 +129,8 @@ public sealed class SessionChange
     public required string UpdatedFirstLine { get; init; }
     public bool ModelOnlyChange { get; init; }
     public IReadOnlyList<TurnContextModelBackup> OriginalTurnContextModels { get; set; } = [];
+    [JsonIgnore]
+    public string? ContentFingerprint { get; init; }
 }
 
 public sealed class TurnContextModelBackup
@@ -137,6 +149,16 @@ public sealed class SessionChangeCollection
     public required ProviderCounts EncryptedContentCounts { get; init; }
     public required IReadOnlyCollection<string> UserEventThreadIds { get; init; }
     public required IReadOnlyDictionary<string, string> ThreadCwdsById { get; init; }
+    public SessionScanMetrics ScanMetrics { get; init; } = new();
+}
+
+public sealed class SessionScanMetrics
+{
+    public int EnumeratedRolloutFiles { get; init; }
+    public int ParsedSessionFiles { get; init; }
+    public int ContentScanPasses { get; init; }
+    public int ModelScanFiles { get; init; }
+    public long DurationMs { get; init; }
 }
 
 public sealed class SyncResult
@@ -165,6 +187,20 @@ public sealed class SyncResult
     public ModelSyncOutcome ModelSync { get; init; } = ModelSyncOutcome.NotApplicable();
     public BackupPruneResult? AutoPruneResult { get; init; }
     public string? AutoPruneWarning { get; init; }
+    [JsonIgnore]
+    public SyncPerformanceMetrics PerformanceMetrics { get; init; } = new();
+}
+
+public sealed class SyncPerformanceMetrics
+{
+    public long TotalDurationMs { get; init; }
+    public long PreparationDurationMs { get; init; }
+    public long CheckedPlanValidationDurationMs { get; init; }
+    public long BackupDurationMs { get; init; }
+    public long MutationDurationMs { get; init; }
+    public long PruneDurationMs { get; init; }
+    public int JournalFullValidationCount { get; init; }
+    public SessionScanMetrics RolloutScan { get; init; } = new();
 }
 
 public sealed class ModelSyncOutcome
@@ -281,6 +317,8 @@ internal sealed class BackupMetadataFile
     public Dictionary<string, bool>? GlobalStateFiles { get; init; }
     public bool? GlobalStateFilePresent { get; init; }
     public bool? GlobalStateBackupFilePresent { get; init; }
+    public long? SizeBytes { get; init; }
+    public int? FileCount { get; init; }
 }
 
 internal sealed class SessionBackupManifest

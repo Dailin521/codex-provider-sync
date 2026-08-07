@@ -960,6 +960,9 @@ public sealed class CoreIntegrationTests
         Assert.Empty(syncResult.SkippedLockedRolloutFiles);
         Assert.Empty(syncResult.SkippedUnreadableRolloutFiles);
         Assert.Equal(2, syncResult.SqliteRowsUpdated);
+        Assert.Equal(2, syncResult.PerformanceMetrics.RolloutScan.EnumeratedRolloutFiles);
+        Assert.Equal(2, syncResult.PerformanceMetrics.RolloutScan.ContentScanPasses);
+        Assert.Equal(2, syncResult.PerformanceMetrics.JournalFullValidationCount);
         BackupMetadataFile backupMetadata = JsonSerializer.Deserialize<BackupMetadataFile>(
             await File.ReadAllTextAsync(Path.Combine(syncResult.BackupDir, "metadata.json")),
             new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase })!;
@@ -1343,6 +1346,8 @@ public sealed class CoreIntegrationTests
         Assert.Equal(fixture.StateDbPath(), status.StateDbLocation.Path);
         Assert.Equal(2, status.BackupSummary.Count);
         Assert.Equal(backupOneBytes + backupTwoBytes, status.BackupSummary.TotalBytes);
+        Assert.Equal(2, status.PerformanceMetrics.RolloutScan.EnumeratedRolloutFiles);
+        Assert.Equal(2, status.PerformanceMetrics.RolloutScan.ContentScanPasses);
         Assert.Contains($"database: {fixture.StateDbPath()}", TextFormatter.FormatStatus(status));
     }
 

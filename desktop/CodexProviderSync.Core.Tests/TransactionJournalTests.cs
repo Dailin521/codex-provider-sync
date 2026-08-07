@@ -82,6 +82,90 @@ public sealed class TransactionJournalTests
         Assert.Equal(3, applied.LastSequence);
         Assert.Equal("applied", applied.State);
         Assert.False(applied.InvalidTail);
+        Assert.Equal(1, fixture.Journal.AppendFullJournalValidationCount);
+    }
+
+    [Fact]
+    public async Task NormalProgressAppends_DoNotReparseGrowingJournal()
+    {
+        JournalFixture fixture = await JournalFixture.CreateAsync(32, owned: true);
+
+        foreach (string target in fixture.Targets)
+        {
+            await fixture.Journal.ApplyingAsync("rollout", target);
+            await fixture.Journal.AppliedAsync("rollout", target);
+        }
+
+        Assert.Equal(
+            OperatingSystem.IsWindows() ? 0 : 64,
+            fixture.Journal.AppendFullJournalValidationCount);
+        await fixture.Journal.CommittedAsync();
+        Assert.Equal(
+            OperatingSystem.IsWindows() ? 2 : 66,
+            fixture.Journal.AppendFullJournalValidationCount);
+
+        PendingTransactionInfo committed = await fixture.Journal.ReadCurrentInfoAsync();
+        Assert.True(committed.Terminal);
+        Assert.Equal(66, committed.LastSequence);
+        Assert.All(committed.AffectedTargets, target => Assert.Equal("applied", target.State));
+    }
+
+    [Fact]
+    public async Task AppendAsync_RejectsSameLengthInvalidTailBeforeWriting()
+    {
+        JournalFixture fixture = await JournalFixture.CreateAsync(1);
+        byte[] before = await File.ReadAllBytesAsync(fixture.Journal.FilePath);
+        Assert.Equal((byte)'\n', before[^1]);
+        before[^1] = (byte)' ';
+        await File.WriteAllBytesAsync(fixture.Journal.FilePath, before);
+        long invalidLength = new FileInfo(fixture.Journal.FilePath).Length;
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => fixture.Journal.ApplyingAsync("rollout", fixture.Targets[0]));
+
+        Assert.Contains("invalid", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(invalidLength, new FileInfo(fixture.Journal.FilePath).Length);
+        Assert.Equal(1, fixture.Journal.AppendFullJournalValidationCount);
+        Assert.True((await fixture.Journal.ReadCurrentInfoAsync()).InvalidTail);
+    }
+
+    [Fact]
+    public async Task AppendAsync_RejectsSameLengthPreparedRewriteBeforeWriting()
+    {
+        JournalFixture fixture = await JournalFixture.CreateAsync(1);
+        string originalTarget = Path.GetFullPath(fixture.Targets[0]);
+        string before = await File.ReadAllTextAsync(fixture.Journal.FilePath);
+        string rewritten = before.Replace("rollout-0.jsonl", "rollout-0.jsonx", StringComparison.Ordinal);
+        Assert.Equal(before.Length, rewritten.Length);
+        Assert.NotEqual(before, rewritten);
+        await File.WriteAllTextAsync(fixture.Journal.FilePath, rewritten);
+        long rewrittenLength = new FileInfo(fixture.Journal.FilePath).Length;
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => fixture.Journal.ApplyingAsync("rollout", originalTarget));
+
+        Assert.Contains("prepared", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(rewrittenLength, new FileInfo(fixture.Journal.FilePath).Length);
+    }
+
+    [Fact]
+    public async Task OwnedJournal_BlocksExternalSameLengthRewriteOnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        JournalFixture fixture = await JournalFixture.CreateAsync(1, owned: true);
+        await Assert.ThrowsAsync<IOException>(
+            async () =>
+            {
+                await using FileStream _ = new(
+                    fixture.Journal.FilePath,
+                    FileMode.Open,
+                    FileAccess.Write,
+                    FileShare.ReadWrite | FileShare.Delete);
+            });
+        await fixture.Journal.ApplyingAsync("rollout", fixture.Targets[0]);
     }
 
     [Fact]
@@ -185,7 +269,7 @@ public sealed class TransactionJournalTests
         FileTransactionJournal Journal,
         IReadOnlyList<string> Targets)
     {
-        internal static async Task<JournalFixture> CreateAsync(int targetCount)
+        internal static async Task<JournalFixture> CreateAsync(int targetCount, bool owned = false)
         {
             string root = Path.Combine(
                 Path.GetTempPath(),
@@ -197,11 +281,17 @@ public sealed class TransactionJournalTests
             string[] targets = Enumerable.Range(0, targetCount)
                 .Select(index => Path.Combine(codexHome, $"rollout-{index}.jsonl"))
                 .ToArray();
-            FileTransactionJournal journal = await FileTransactionJournal.CreateAsync(
-                backupDir,
-                codexHome,
-                "target-provider",
-                targets);
+            FileTransactionJournal journal = owned
+                ? await FileTransactionJournal.CreateOwnedAsync(
+                    backupDir,
+                    codexHome,
+                    "target-provider",
+                    targets)
+                : await FileTransactionJournal.CreateAsync(
+                    backupDir,
+                    codexHome,
+                    "target-provider",
+                    targets);
             return new JournalFixture(root, journal, targets);
         }
     }

@@ -27,6 +27,34 @@ public static class TextFormatter
             : FormatSyncResultEnglish(result, label);
     }
 
+    public static string FormatPerformanceMetrics(SyncPerformanceMetrics metrics, string language)
+    {
+        bool chinese = IsChinese(language);
+        return chinese
+            ? $"性能: 总计={metrics.TotalDurationMs}ms; 准备={metrics.PreparationDurationMs}ms; "
+                + $"计划校验={metrics.CheckedPlanValidationDurationMs}ms; 备份={metrics.BackupDurationMs}ms; "
+                + $"写入={metrics.MutationDurationMs}ms; 清理={metrics.PruneDurationMs}ms; "
+                + $"rollout={metrics.RolloutScan.EnumeratedRolloutFiles}; 内容扫描={metrics.RolloutScan.ContentScanPasses}; "
+                + $"journal全量校验={metrics.JournalFullValidationCount}"
+            : $"Performance: total={metrics.TotalDurationMs}ms; prepare={metrics.PreparationDurationMs}ms; "
+                + $"plan-check={metrics.CheckedPlanValidationDurationMs}ms; backup={metrics.BackupDurationMs}ms; "
+                + $"mutation={metrics.MutationDurationMs}ms; prune={metrics.PruneDurationMs}ms; "
+                + $"rollouts={metrics.RolloutScan.EnumeratedRolloutFiles}; content-scans={metrics.RolloutScan.ContentScanPasses}; "
+                + $"journal-full-validations={metrics.JournalFullValidationCount}";
+    }
+
+    public static string FormatPerformanceMetrics(StatusPerformanceMetrics metrics, string language)
+    {
+        bool chinese = IsChinese(language);
+        return chinese
+            ? $"刷新性能: 总计={metrics.TotalDurationMs}ms; rollout扫描={metrics.RolloutScanDurationMs}ms; "
+                + $"备份统计={metrics.BackupSummaryDurationMs}ms; rollout={metrics.RolloutScan.EnumeratedRolloutFiles}; "
+                + $"内容扫描={metrics.RolloutScan.ContentScanPasses}"
+            : $"Refresh performance: total={metrics.TotalDurationMs}ms; rollout-scan={metrics.RolloutScanDurationMs}ms; "
+                + $"backup-summary={metrics.BackupSummaryDurationMs}ms; rollouts={metrics.RolloutScan.EnumeratedRolloutFiles}; "
+                + $"content-scans={metrics.RolloutScan.ContentScanPasses}";
+    }
+
     public static string FormatRestoreResult(RestoreResult result) =>
         FormatRestoreResult(result, English);
 

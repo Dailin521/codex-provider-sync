@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 
 namespace CodexProviderSync.Core;
@@ -8,6 +9,8 @@ public sealed class BackupService
     private readonly SqliteStateService _sqliteStateService;
 
     internal Func<string, string, string, Task>? AtomicWriteFaultInjector { get; set; }
+
+    internal Action<string>? DirectoryInventoryFallbackObserver { get; set; }
 
     public BackupService(SessionRolloutService sessionRolloutService, SqliteStateService sqliteStateService)
     {
@@ -136,10 +139,7 @@ public sealed class BackupService
             GlobalStateFilePresent = globalStateFilePresent,
             GlobalStateBackupFilePresent = globalStateBackupFilePresent
         };
-        await AtomicFile.WriteAllTextAsync(
-            Path.Combine(backupDir, "metadata.json"),
-            JsonSerializer.Serialize(metadata, JsonOptions()),
-            faultInjector: AtomicWriteFaultInjector);
+        await WriteMetadataWithInventoryAsync(backupDir, metadata);
 
         return backupDir;
     }
@@ -332,17 +332,16 @@ public sealed class BackupService
             ChangedSessionFiles = sessionChanges.Count,
             GlobalStateFiles = metadata.GlobalStateFiles,
             GlobalStateFilePresent = metadata.GlobalStateFilePresent,
-            GlobalStateBackupFilePresent = metadata.GlobalStateBackupFilePresent
+            GlobalStateBackupFilePresent = metadata.GlobalStateBackupFilePresent,
+            SizeBytes = metadata.SizeBytes,
+            FileCount = metadata.FileCount
         };
 
         await AtomicFile.WriteAllTextAsync(
             manifestPath,
             JsonSerializer.Serialize(sessionManifest, JsonOptions()),
             faultInjector: AtomicWriteFaultInjector);
-        await AtomicFile.WriteAllTextAsync(
-            metadataPath,
-            JsonSerializer.Serialize(metadata, JsonOptions()),
-            faultInjector: AtomicWriteFaultInjector);
+        await WriteMetadataWithInventoryAsync(normalizedBackupDir, metadata);
     }
 
     internal async Task<IReadOnlyList<SessionBackupManifestEntry>> ReadSessionBackupEntriesAsync(
@@ -487,7 +486,7 @@ public sealed class BackupService
             }
 
             List<DirectoryInfo> entries = GetManagedBackupDirectories(backupRoot);
-            long totalBytes = entries.Sum(static entry => GetDirectorySize(entry.FullName));
+            long totalBytes = entries.Sum(entry => GetBackupDirectorySize(entry.FullName));
 
             return new BackupSummary
             {
@@ -581,7 +580,7 @@ public sealed class BackupService
             long freedBytes = 0;
             foreach (DirectoryInfo entry in toDelete)
             {
-                freedBytes += GetDirectorySize(entry.FullName);
+                freedBytes += GetBackupDirectorySize(entry.FullName);
                 entry.Delete(recursive: true);
             }
 
@@ -912,16 +911,127 @@ public sealed class BackupService
         };
     }
 
-    private static long GetDirectorySize(string directoryPath)
+    private async Task WriteMetadataWithInventoryAsync(string backupDir, BackupMetadataFile metadata)
+    {
+        string metadataPath = Path.Combine(backupDir, "metadata.json");
+        (long payloadBytes, int payloadFileCount) = GetDirectoryInventory(
+            backupDir,
+            metadataPath);
+        int fileCount = checked(payloadFileCount + 1);
+        long sizeBytes = 0;
+        string serialized = string.Empty;
+        for (int attempt = 0; attempt < 8; attempt += 1)
+        {
+            BackupMetadataFile withInventory = CopyMetadataWithInventory(metadata, sizeBytes, fileCount);
+            serialized = JsonSerializer.Serialize(withInventory, JsonOptions());
+            long nextSizeBytes = checked(payloadBytes + Encoding.UTF8.GetByteCount(serialized));
+            if (nextSizeBytes == sizeBytes)
+            {
+                break;
+            }
+            sizeBytes = nextSizeBytes;
+        }
+
+        BackupMetadataFile finalMetadata = CopyMetadataWithInventory(metadata, sizeBytes, fileCount);
+        serialized = JsonSerializer.Serialize(finalMetadata, JsonOptions());
+        long verifiedSizeBytes = checked(payloadBytes + Encoding.UTF8.GetByteCount(serialized));
+        if (verifiedSizeBytes != sizeBytes)
+        {
+            finalMetadata = CopyMetadataWithInventory(metadata, verifiedSizeBytes, fileCount);
+            serialized = JsonSerializer.Serialize(finalMetadata, JsonOptions());
+        }
+        await AtomicFile.WriteAllTextAsync(
+            metadataPath,
+            serialized,
+            faultInjector: AtomicWriteFaultInjector);
+    }
+
+    private static BackupMetadataFile CopyMetadataWithInventory(
+        BackupMetadataFile metadata,
+        long sizeBytes,
+        int fileCount)
+    {
+        return new BackupMetadataFile
+        {
+            Version = metadata.Version,
+            Namespace = metadata.Namespace,
+            CodexHome = metadata.CodexHome,
+            SqliteHome = metadata.SqliteHome,
+            TargetProvider = metadata.TargetProvider,
+            CreatedAt = metadata.CreatedAt,
+            DbFiles = metadata.DbFiles,
+            SqliteDbFiles = metadata.SqliteDbFiles,
+            ChangedSessionFiles = metadata.ChangedSessionFiles,
+            GlobalStateFiles = metadata.GlobalStateFiles,
+            GlobalStateFilePresent = metadata.GlobalStateFilePresent,
+            GlobalStateBackupFilePresent = metadata.GlobalStateBackupFilePresent,
+            SizeBytes = sizeBytes,
+            FileCount = fileCount
+        };
+    }
+
+    private long GetBackupDirectorySize(string directoryPath)
+    {
+        if (TryReadCachedDirectoryInventory(directoryPath, out long sizeBytes))
+        {
+            return sizeBytes;
+        }
+        DirectoryInventoryFallbackObserver?.Invoke(directoryPath);
+        return GetDirectoryInventory(directoryPath).SizeBytes;
+    }
+
+    private static bool TryReadCachedDirectoryInventory(string directoryPath, out long sizeBytes)
+    {
+        sizeBytes = 0;
+        string metadataPath = Path.Combine(directoryPath, "metadata.json");
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(File.ReadAllText(metadataPath));
+            JsonElement root = document.RootElement;
+            if (!root.TryGetProperty("namespace", out JsonElement namespaceValue)
+                || !string.Equals(namespaceValue.GetString(), AppConstants.BackupNamespace, StringComparison.Ordinal)
+                || !root.TryGetProperty("sizeBytes", out JsonElement sizeValue)
+                || !sizeValue.TryGetInt64(out long cachedSize)
+                || cachedSize < 0
+                || !root.TryGetProperty("fileCount", out JsonElement countValue)
+                || !countValue.TryGetInt32(out int cachedFileCount)
+                || cachedFileCount < 1)
+            {
+                return false;
+            }
+            sizeBytes = cachedSize;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static (long SizeBytes, int FileCount) GetDirectoryInventory(
+        string directoryPath,
+        string? excludedFilePath = null)
     {
         if (!Directory.Exists(directoryPath))
         {
-            return 0;
+            return (0, 0);
         }
 
-        return Directory
-            .EnumerateFiles(directoryPath, "*", SearchOption.AllDirectories)
-            .Sum(static filePath => new FileInfo(filePath).Length);
+        string? excluded = string.IsNullOrWhiteSpace(excludedFilePath)
+            ? null
+            : Path.GetFullPath(excludedFilePath);
+        long sizeBytes = 0;
+        int fileCount = 0;
+        foreach (string filePath in Directory.EnumerateFiles(directoryPath, "*", SearchOption.AllDirectories))
+        {
+            if (excluded is not null && PathsEqual(filePath, excluded))
+            {
+                continue;
+            }
+            sizeBytes = checked(sizeBytes + new FileInfo(filePath).Length);
+            fileCount = checked(fileCount + 1);
+        }
+        return (sizeBytes, fileCount);
     }
 
     private static List<DirectoryInfo> GetManagedBackupDirectories(string backupRoot)
@@ -945,7 +1055,7 @@ public sealed class BackupService
 
         try
         {
-            BackupMetadataFile? metadata = JsonSerializer.Deserialize<BackupMetadataFile>(
+            BackupMetadataValidationFile? metadata = JsonSerializer.Deserialize<BackupMetadataValidationFile>(
                 File.ReadAllText(metadataPath),
                 JsonOptions());
             return string.Equals(metadata?.Namespace, AppConstants.BackupNamespace, StringComparison.Ordinal);
@@ -954,6 +1064,22 @@ public sealed class BackupService
         {
             return false;
         }
+    }
+
+    private sealed class BackupMetadataValidationFile
+    {
+        public int Version { get; init; }
+        public required string Namespace { get; init; }
+        public required string CodexHome { get; init; }
+        public string? SqliteHome { get; init; }
+        public required string TargetProvider { get; init; }
+        public required DateTimeOffset CreatedAt { get; init; }
+        public required List<string> DbFiles { get; init; }
+        public List<string> SqliteDbFiles { get; init; } = [];
+        public int ChangedSessionFiles { get; init; }
+        public Dictionary<string, bool>? GlobalStateFiles { get; init; }
+        public bool? GlobalStateFilePresent { get; init; }
+        public bool? GlobalStateBackupFilePresent { get; init; }
     }
 }
 

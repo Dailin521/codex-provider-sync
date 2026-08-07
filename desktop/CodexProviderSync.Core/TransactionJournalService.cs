@@ -3,7 +3,7 @@ using System.Text.Json;
 
 namespace CodexProviderSync.Core;
 
-internal sealed class FileTransactionJournal
+internal sealed class FileTransactionJournal : IAsyncDisposable
 {
     internal const string FileName = "transaction-journal.jsonl";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -11,20 +11,46 @@ internal sealed class FileTransactionJournal
     private readonly string _filePath;
     private readonly string _operationId;
     private readonly SemaphoreSlim _appendGate = new(1, 1);
+    private FileStream? _writerLease;
     private int _sequence;
+    private PendingTransactionInfo? _current;
+    private long _expectedLength;
+    private byte[] _expectedTailRecord = [];
+    private bool _disposed;
 
-    private FileTransactionJournal(string filePath, string operationId, int sequence = 0)
+    private FileTransactionJournal(
+        string filePath,
+        string operationId,
+        PendingTransactionInfo? current = null,
+        FileStream? writerLease = null)
     {
         _filePath = filePath;
         _operationId = operationId;
-        _sequence = sequence;
+        _current = current;
+        _writerLease = writerLease;
+        _sequence = current?.LastSequence ?? 0;
+        _expectedLength = current is null ? 0 : -1;
     }
 
     internal string FilePath => _filePath;
 
+    internal int AppendFullJournalValidationCount { get; private set; }
+
     internal Func<string, string, Task>? AppendFaultInjector { get; set; }
 
-    internal Task<PendingTransactionInfo> ReadCurrentInfoAsync() => ReadInfoAsync(_filePath);
+    internal async Task<PendingTransactionInfo> ReadCurrentInfoAsync()
+    {
+        await _appendGate.WaitAsync();
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            return (await ReadJournalForCurrentInstanceAsync()).Info;
+        }
+        finally
+        {
+            _appendGate.Release();
+        }
+    }
 
     internal static async Task<FileTransactionJournal> CreateAsync(
         string backupDir,
@@ -32,23 +58,62 @@ internal sealed class FileTransactionJournal
         string targetProvider,
         IEnumerable<string> potentialTargets)
     {
+        return await CreateCoreAsync(
+            backupDir,
+            codexHome,
+            targetProvider,
+            potentialTargets,
+            acquireWriterLease: false);
+    }
+
+    internal static async Task<FileTransactionJournal> CreateOwnedAsync(
+        string backupDir,
+        string codexHome,
+        string targetProvider,
+        IEnumerable<string> potentialTargets)
+    {
+        return await CreateCoreAsync(
+            backupDir,
+            codexHome,
+            targetProvider,
+            potentialTargets,
+            acquireWriterLease: OperatingSystem.IsWindows());
+    }
+
+    private static async Task<FileTransactionJournal> CreateCoreAsync(
+        string backupDir,
+        string codexHome,
+        string targetProvider,
+        IEnumerable<string> potentialTargets,
+        bool acquireWriterLease)
+    {
+        string filePath = Path.Combine(backupDir, FileName);
         string operationId = Guid.NewGuid().ToString("D");
-        FileTransactionJournal journal = new(
-            Path.Combine(backupDir, FileName),
-            operationId);
-        await journal.AppendAsync("prepared", new Dictionary<string, object?>
+        FileStream? writerLease = acquireWriterLease
+            ? OpenWriterLease(filePath, FileMode.CreateNew)
+            : null;
+        FileTransactionJournal journal = new(filePath, operationId, writerLease: writerLease);
+        try
         {
-            ["protocolVersion"] = 1,
-            ["backupDir"] = Path.GetFullPath(backupDir),
-            ["codexHome"] = Path.GetFullPath(codexHome),
-            ["targetProvider"] = targetProvider,
-            ["potentialTargets"] = potentialTargets
-                .Select(Path.GetFullPath)
-                .Distinct(PathComparer)
-                .Order(PathComparer)
-                .ToArray()
-        });
-        return journal;
+            await journal.AppendAsync("prepared", new Dictionary<string, object?>
+            {
+                ["protocolVersion"] = 1,
+                ["backupDir"] = Path.GetFullPath(backupDir),
+                ["codexHome"] = Path.GetFullPath(codexHome),
+                ["targetProvider"] = targetProvider,
+                ["potentialTargets"] = potentialTargets
+                    .Select(Path.GetFullPath)
+                    .Distinct(PathComparer)
+                    .Order(PathComparer)
+                    .ToArray()
+            });
+            return journal;
+        }
+        catch
+        {
+            await journal.DisposeAsync();
+            throw;
+        }
     }
 
     internal Task ApplyingAsync(string kind, string targetPath) => AppendAsync(
@@ -96,29 +161,9 @@ internal sealed class FileTransactionJournal
         await _appendGate.WaitAsync();
         try
         {
-            PendingTransactionInfo? before = null;
-            if (File.Exists(_filePath) && new FileInfo(_filePath).Length > 0)
-            {
-                before = await ReadInfoAsync(_filePath);
-                if (before.InvalidTail)
-                {
-                    throw new InvalidOperationException(
-                        state == "committed"
-                            ? $"Transaction journal is invalid and cannot commit until recovery: {_filePath}"
-                            : $"Transaction journal is invalid and requires recovery before append: {_filePath}");
-                }
-                if (!string.Equals(before.OperationId, _operationId, StringComparison.Ordinal))
-                {
-                    throw new InvalidOperationException(
-                        $"Transaction journal operationId changed before append: {_filePath}");
-                }
-                _sequence = before.LastSequence;
-            }
-            else if (_sequence != 0)
-            {
-                throw new InvalidOperationException(
-                    $"Transaction journal disappeared after it was created: {_filePath}");
-            }
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            bool terminal = state is "committed" or "rolledBack";
+            PendingTransactionInfo? before = await EnsureJournalFrontierAsync(forceFullValidation: terminal);
 
             ValidateAppendTransition(before, state, details);
             int nextSequence = _sequence + 1;
@@ -141,20 +186,38 @@ internal sealed class FileTransactionJournal
             // The journal is a cross-runtime recovery protocol. Always use LF
             // so Node and .NET produce byte-compatible JSONL on every platform.
             byte[] bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(value, JsonOptions) + "\n");
+            long appendOffset = _expectedLength;
             try
             {
                 if (AppendFaultInjector is not null)
                 {
                     await AppendFaultInjector("before-write", state);
                 }
-                await using (FileStream stream = new(
-                    _filePath,
-                    FileMode.Append,
-                    FileAccess.Write,
-                    FileShare.Read,
-                    4096,
-                    FileOptions.Asynchronous | FileOptions.WriteThrough))
+                if (_writerLease is not null)
                 {
+                    if (_writerLease.Length != appendOffset)
+                    {
+                        throw new InvalidOperationException(
+                            $"Transaction journal changed while preparing to append: {_filePath}");
+                    }
+                    _writerLease.Seek(appendOffset, SeekOrigin.Begin);
+                    await _writerLease.WriteAsync(bytes);
+                    if (AppendFaultInjector is not null)
+                    {
+                        await AppendFaultInjector("after-write-before-flush", state);
+                    }
+                    await _writerLease.FlushAsync();
+                    _writerLease.Flush(flushToDisk: true);
+                }
+                else
+                {
+                    await using FileStream stream = new(
+                        _filePath,
+                        FileMode.Append,
+                        FileAccess.Write,
+                        FileShare.Read,
+                        4096,
+                        FileOptions.Asynchronous | FileOptions.WriteThrough);
                     await stream.WriteAsync(bytes);
                     if (AppendFaultInjector is not null)
                     {
@@ -167,23 +230,45 @@ internal sealed class FileTransactionJournal
                 {
                     await AppendFaultInjector("after-flush-before-verify", state);
                 }
+
+                try
+                {
+                    await VerifyAppendedRecordAsync(appendOffset, bytes);
+                }
+                catch (InvalidOperationException error) when (terminal)
+                {
+                    throw new InvalidOperationException(
+                        $"Transaction journal append could not be verified after writing {state}: {_filePath}",
+                        error);
+                }
+
+                if (terminal)
+                {
+                    JournalReadResult verified = await ReadJournalForAppendAsync();
+                    AdoptJournalState(verified);
+                    PendingTransactionInfo afterTerminal = verified.Info;
+                    if (afterTerminal.InvalidTail
+                        || !afterTerminal.Terminal
+                        || !string.Equals(afterTerminal.OperationId, _operationId, StringComparison.Ordinal)
+                        || afterTerminal.LastSequence != nextSequence
+                        || !string.Equals(afterTerminal.State, state, StringComparison.Ordinal))
+                    {
+                        throw new InvalidOperationException(
+                            $"Transaction journal append could not be verified after writing {state}: {_filePath}");
+                    }
+                    return;
+                }
+
+                PendingTransactionInfo after = AdvanceJournalState(before, state, details, nextSequence);
+                _current = after;
+                _sequence = nextSequence;
+                _expectedLength = appendOffset + bytes.Length;
+                _expectedTailRecord = bytes;
             }
             catch
             {
                 await ReconcileSequenceAfterAppendAttemptAsync();
                 throw;
-            }
-
-            PendingTransactionInfo after = await ReadInfoAsync(_filePath);
-            _sequence = after.LastSequence;
-            if (after.InvalidTail
-                || !string.Equals(after.OperationId, _operationId, StringComparison.Ordinal)
-                || after.LastSequence != nextSequence
-                || !string.Equals(after.State, state, StringComparison.Ordinal)
-                || (state is "committed" or "rolledBack") != after.Terminal)
-            {
-                throw new InvalidOperationException(
-                    $"Transaction journal append could not be verified after writing {state}: {_filePath}");
             }
         }
         finally
@@ -204,13 +289,14 @@ internal sealed class FileTransactionJournal
             // reached the durable/readable journal. Treat that exact terminal
             // event as authoritative so the coordinator never compensates a
             // transaction after it was already recorded committed.
-            PendingTransactionInfo current = await ReadInfoAsync(_filePath);
+            JournalReadResult reconciled = await ReadJournalForCurrentInstanceAsync();
+            PendingTransactionInfo current = reconciled.Info;
             if (!current.InvalidTail
                 && current.Terminal
                 && string.Equals(current.OperationId, _operationId, StringComparison.Ordinal)
                 && string.Equals(current.State, state, StringComparison.Ordinal))
             {
-                _sequence = current.LastSequence;
+                AdoptJournalState(reconciled);
                 return;
             }
             throw;
@@ -222,14 +308,22 @@ internal sealed class FileTransactionJournal
         if (!File.Exists(_filePath))
         {
             _sequence = 0;
+            _current = null;
+            _expectedLength = 0;
+            _expectedTailRecord = [];
             return;
         }
         try
         {
-            PendingTransactionInfo current = await ReadInfoAsync(_filePath);
-            if (string.Equals(current.OperationId, _operationId, StringComparison.Ordinal))
+            JournalReadResult read = await ReadJournalForAppendAsync();
+            if (string.Equals(read.Info.OperationId, _operationId, StringComparison.Ordinal))
             {
-                _sequence = current.LastSequence;
+                AdoptJournalState(read);
+            }
+            else
+            {
+                _expectedLength = -1;
+                _expectedTailRecord = [];
             }
         }
         catch
@@ -237,6 +331,262 @@ internal sealed class FileTransactionJournal
             // Preserve the original append failure. The next append performs a
             // full journal validation and will fail closed if recovery is needed.
         }
+    }
+
+    private async Task<PendingTransactionInfo?> EnsureJournalFrontierAsync(bool forceFullValidation)
+    {
+        if (!File.Exists(_filePath))
+        {
+            if (_sequence != 0 || _current is not null)
+            {
+                throw new InvalidOperationException(
+                    $"Transaction journal disappeared after it was created: {_filePath}");
+            }
+            _expectedLength = 0;
+            _expectedTailRecord = [];
+            return null;
+        }
+
+        long actualLength = new FileInfo(_filePath).Length;
+        if (actualLength == 0 && _sequence == 0 && _current is null)
+        {
+            _expectedLength = 0;
+            _expectedTailRecord = [];
+            return null;
+        }
+        bool frontierMatches = _writerLease is not null
+            && OperatingSystem.IsWindows()
+            && !forceFullValidation
+            && actualLength == _expectedLength
+            && await TailMatchesAsync(actualLength, _expectedTailRecord);
+        if (!frontierMatches)
+        {
+            JournalReadResult read = await ReadJournalForAppendAsync();
+            AdoptJournalState(read);
+        }
+
+        if (_current is null)
+        {
+            return null;
+        }
+        if (_current.InvalidTail)
+        {
+            throw new InvalidOperationException(
+                forceFullValidation
+                    ? $"Transaction journal is invalid and cannot commit until recovery: {_filePath}"
+                    : $"Transaction journal is invalid and requires recovery before append: {_filePath}");
+        }
+        if (!string.Equals(_current.OperationId, _operationId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Transaction journal operationId changed before append: {_filePath}");
+        }
+        _sequence = _current.LastSequence;
+        return _current;
+    }
+
+    private async Task<JournalReadResult> ReadJournalForAppendAsync()
+    {
+        AppendFullJournalValidationCount += 1;
+        return await ReadJournalForCurrentInstanceAsync();
+    }
+
+    private Task<JournalReadResult> ReadJournalForCurrentInstanceAsync()
+    {
+        return _writerLease is null
+            ? ReadJournalAsync(_filePath)
+            : ReadJournalAsync(_filePath, _writerLease);
+    }
+
+    private void AdoptJournalState(JournalReadResult read)
+    {
+        _current = read.Info;
+        _sequence = read.Info.LastSequence;
+        _expectedLength = _writerLease?.Length ?? new FileInfo(_filePath).Length;
+        _expectedTailRecord = read.ValidLines.Count == 0
+            ? []
+            : Encoding.UTF8.GetBytes(read.ValidLines[^1] + "\n");
+    }
+
+    private async Task VerifyAppendedRecordAsync(long appendOffset, byte[] expectedRecord)
+    {
+        if (_writerLease is not null)
+        {
+            long leasedExpectedLength = appendOffset + expectedRecord.Length;
+            if (_writerLease.Length != leasedExpectedLength)
+            {
+                throw new InvalidOperationException(
+                    $"Transaction journal changed while appending: {_filePath}");
+            }
+            _writerLease.Seek(appendOffset, SeekOrigin.Begin);
+            byte[] leasedActual = new byte[expectedRecord.Length];
+            await _writerLease.ReadExactlyAsync(leasedActual);
+            if (!leasedActual.AsSpan().SequenceEqual(expectedRecord))
+            {
+                throw new InvalidOperationException(
+                    $"Transaction journal append bytes could not be verified: {_filePath}");
+            }
+            return;
+        }
+
+        await using FileStream stream = new(
+            _filePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete,
+            4096,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        long expectedLength = appendOffset + expectedRecord.Length;
+        if (stream.Length != expectedLength)
+        {
+            throw new InvalidOperationException(
+                $"Transaction journal changed while appending: {_filePath}");
+        }
+
+        stream.Seek(appendOffset, SeekOrigin.Begin);
+        byte[] actual = new byte[expectedRecord.Length];
+        await stream.ReadExactlyAsync(actual);
+        if (!actual.AsSpan().SequenceEqual(expectedRecord))
+        {
+            throw new InvalidOperationException(
+                $"Transaction journal append bytes could not be verified: {_filePath}");
+        }
+    }
+
+    private async Task<bool> TailMatchesAsync(long actualLength, byte[] expectedTail)
+    {
+        if (actualLength == 0)
+        {
+            return expectedTail.Length == 0;
+        }
+        if (expectedTail.Length == 0 || actualLength < expectedTail.Length)
+        {
+            return false;
+        }
+
+        if (_writerLease is not null)
+        {
+            if (_writerLease.Length != actualLength)
+            {
+                return false;
+            }
+            _writerLease.Seek(actualLength - expectedTail.Length, SeekOrigin.Begin);
+            byte[] leasedTail = new byte[expectedTail.Length];
+            await _writerLease.ReadExactlyAsync(leasedTail);
+            return leasedTail.AsSpan().SequenceEqual(expectedTail);
+        }
+
+        await using FileStream stream = new(
+            _filePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete,
+            4096,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        if (stream.Length != actualLength)
+        {
+            return false;
+        }
+        stream.Seek(actualLength - expectedTail.Length, SeekOrigin.Begin);
+        byte[] actualTail = new byte[expectedTail.Length];
+        await stream.ReadExactlyAsync(actualTail);
+        return actualTail.AsSpan().SequenceEqual(expectedTail);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await _appendGate.WaitAsync();
+        try
+        {
+            if (_disposed)
+            {
+                return;
+            }
+            _disposed = true;
+            FileStream? writerLease = Interlocked.Exchange(ref _writerLease, null);
+            if (writerLease is not null)
+            {
+                await writerLease.DisposeAsync();
+            }
+        }
+        finally
+        {
+            _appendGate.Release();
+        }
+    }
+
+    private static FileStream OpenWriterLease(string filePath, FileMode mode)
+    {
+        return new FileStream(
+            filePath,
+            mode,
+            FileAccess.ReadWrite,
+            FileShare.Read,
+            4096,
+            FileOptions.Asynchronous | FileOptions.WriteThrough | FileOptions.SequentialScan);
+    }
+
+    private PendingTransactionInfo AdvanceJournalState(
+        PendingTransactionInfo? current,
+        string nextState,
+        IReadOnlyDictionary<string, object?>? details,
+        int nextSequence)
+    {
+        IReadOnlyList<string> potentialTargets = current?.PotentialTargets
+            ?? ReadPreparedPotentialTargets(details);
+        Dictionary<string, TransactionTargetInfo> affected = new(PathComparer);
+        if (current is not null)
+        {
+            foreach (TransactionTargetInfo target in current.AffectedTargets)
+            {
+                affected[target.Kind + "\0" + Path.GetFullPath(target.TargetPath)] = target;
+            }
+        }
+
+        if (nextState is "applying" or "applied" or "skipped")
+        {
+            string kind = ReadRequiredDetail(details, "kind");
+            string targetPath = Path.GetFullPath(ReadRequiredDetail(details, "targetPath"));
+            string key = kind + "\0" + targetPath;
+            if (nextState == "skipped")
+            {
+                affected.Remove(key);
+            }
+            else
+            {
+                affected[key] = new TransactionTargetInfo(kind, targetPath, nextState);
+            }
+        }
+
+        bool terminal = nextState is "committed" or "rolledBack";
+        string journalPath = current?.JournalPath ?? _filePath;
+        return new PendingTransactionInfo(
+            journalPath,
+            current?.BackupDir ?? Path.GetDirectoryName(_filePath)!,
+            current?.OperationId ?? _operationId,
+            nextSequence,
+            nextState,
+            terminal,
+            InvalidTail: false,
+            LastValidState: nextState,
+            potentialTargets,
+            affected.Values.ToArray());
+    }
+
+    private static IReadOnlyList<string> ReadPreparedPotentialTargets(
+        IReadOnlyDictionary<string, object?>? details)
+    {
+        if (details is not null
+            && details.TryGetValue("potentialTargets", out object? value)
+            && value is IEnumerable<string> targets)
+        {
+            return targets
+                .Select(Path.GetFullPath)
+                .Distinct(PathComparer)
+                .Order(PathComparer)
+                .ToArray();
+        }
+        return [];
     }
 
     private static void ValidateAppendTransition(
@@ -436,7 +786,7 @@ internal sealed class FileTransactionJournal
         FileTransactionJournal journal = new(
             journalPath,
             info.OperationId!,
-            info.LastSequence);
+            info);
         if (info.State is not ("rollingBack" or "recoveryRequired"))
         {
             await journal.RollingBackAsync(new InvalidOperationException("Explicit managed-backup restore"));
@@ -465,6 +815,23 @@ internal sealed class FileTransactionJournal
     private static async Task<JournalReadResult> ReadJournalAsync(string journalPath)
     {
         byte[] journalBytes = await File.ReadAllBytesAsync(journalPath);
+        return ParseJournal(journalPath, journalBytes);
+    }
+
+    private static async Task<JournalReadResult> ReadJournalAsync(string journalPath, FileStream stream)
+    {
+        if (stream.Length > int.MaxValue)
+        {
+            throw new InvalidOperationException($"Transaction journal is too large to validate: {journalPath}");
+        }
+        byte[] journalBytes = new byte[(int)stream.Length];
+        stream.Seek(0, SeekOrigin.Begin);
+        await stream.ReadExactlyAsync(journalBytes);
+        return ParseJournal(journalPath, journalBytes);
+    }
+
+    private static JournalReadResult ParseJournal(string journalPath, byte[] journalBytes)
+    {
         bool missingTerminalLf = journalBytes.Length > 0 && journalBytes[^1] != (byte)'\n';
         string journalText = Encoding.UTF8.GetString(journalBytes);
         string? operationId = null;
