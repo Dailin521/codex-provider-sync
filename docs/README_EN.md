@@ -9,9 +9,11 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
 [![Community](https://img.shields.io/badge/community-LINUX%20DO-2ea043.svg)](https://linux.do/)
 
-[Download Windows GUI](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [Build macOS GUI](README_MAC_GUI_EN.md) · [中文](../README.md) · English
+[Web UI](../README.md) · [中文](README_ZH.md) · [日本語](README_JA.md) · [한국어](README_KO.md) · English
 
 </div>
+
+> The repository root [README](../README.md) is the canonical English documentation and now focuses on the Web UI. This file is retained as a longer legacy reference.
 
 ## When You Need It
 
@@ -45,7 +47,9 @@ If your current switcher already keeps all history visible, you do not need to r
 
 ## Quick Start
 
-### Windows GUI
+### Desktop GUI (deprecated)
+
+The Desktop GUI is deprecated and is not the recommended interface. Use the local Web UI described in the root README instead.
 
 For normal Windows use, download the standalone GUI from [Releases](https://github.com/Dailin521/codex-provider-sync/releases/latest):
 
