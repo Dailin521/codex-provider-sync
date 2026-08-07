@@ -504,19 +504,18 @@ test("runRestore reports a warning instead of failing when the inventory refresh
   const synced = await runSync({ codexHome });
   const backupDir = synced.backupDir;
 
-  // Leave the metadata perfectly readable so the restore itself proceeds, and
-  // fail only the write the post-restore inventory refresh performs: the atomic
-  // writer reopens its staged replacement with the original file's mode, which
-  // a read-only metadata.json makes impossible.
-  const metadataPath = path.join(backupDir, "metadata.json");
-  await fs.chmod(metadataPath, 0o444);
-
-  let result;
-  try {
-    result = await runRestore({ backupDir, codexHome });
-  } finally {
-    await fs.chmod(metadataPath, 0o644);
-  }
+  // Fail only the write the post-restore inventory refresh performs. The
+  // injected seam is deterministic regardless of the user the suite runs as,
+  // which file permission bits are not: root bypasses them entirely.
+  const result = await runRestore({
+    backupDir,
+    codexHome,
+    faultInjector: ({ point }) => {
+      if (point === "before_atomic_replace") {
+        throw new Error("injected inventory write failure");
+      }
+    }
+  });
 
   // The restore itself is authoritative and must still be reported as done.
   assert.equal(result.targetProvider, "openai");

@@ -968,7 +968,8 @@ export async function runRestore({
   restoreDatabase = true,
   restoreSessions = true,
   allowSqliteHomeRelocation = false,
-  platform
+  platform,
+  faultInjector
 }) {
   if (!backupDir) {
     throw new Error("Missing backup path. Usage: codex-provider restore <backup-dir>");
@@ -1046,7 +1047,7 @@ export async function runRestore({
     // inventory only corrects metadata.json bookkeeping, so surface a failure as
     // a warning instead of reporting a completed restore as failed.
     try {
-      await refreshBackupInventory(normalizedBackupDir);
+      await refreshBackupInventory(normalizedBackupDir, { faultInjector });
     } catch (inventoryError) {
       return {
         ...result,
