@@ -1,4 +1,6 @@
 using System.Buffers;
+using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -9,9 +11,14 @@ namespace CodexProviderSync.Core;
 public sealed class SessionRolloutService
 {
     private const string StatusOnlyProvider = "__status_only__";
-    private const int ScanBufferSize = 1024 * 1024;
-
     internal Func<string, SessionChange, Task>? ApplyFaultInjector { get; set; }
+
+    /// <summary>
+    /// Test seam invoked after a rollout's content digest is folded but before
+    /// its post-scan snapshot is taken, so a test can deterministically mutate
+    /// the file inside that window.
+    /// </summary>
+    internal Func<string, Task>? ScanFaultInjector { get; set; }
 
     public async Task<SessionChangeCollection> CollectSessionChangesAsync(
         string codexHome,
@@ -19,6 +26,11 @@ public sealed class SessionRolloutService
         bool skipLockedReads = false,
         string? targetModel = null)
     {
+        long scanStarted = Stopwatch.GetTimestamp();
+        int enumeratedRolloutFiles = 0;
+        int parsedSessionFiles = 0;
+        int contentScanPasses = 0;
+        int modelScanFiles = 0;
         List<SessionChange> changes = [];
         List<string> lockedPaths = [];
         List<string> unreadablePaths = [];
@@ -41,9 +53,12 @@ public sealed class SessionRolloutService
                 .EnumerateFiles(rootDir, "rollout-*.jsonl", SearchOption.AllDirectories)
                 .Order(StringComparer.Ordinal))
             {
+                enumeratedRolloutFiles += 1;
                 FirstLineRecord record;
+                FileSnapshot scanStart;
                 try
                 {
+                    scanStart = GetFileSnapshot(rolloutPath);
                     record = await ReadFirstLineRecordAsync(rolloutPath);
                 }
                 catch (Exception error) when (skipLockedReads && IsRolloutFileBusyError(error))
@@ -61,6 +76,7 @@ public sealed class SessionRolloutService
                 {
                     continue;
                 }
+                parsedSessionFiles += 1;
 
                 string currentProvider = payload!["model_provider"]?.GetValue<string>() ?? "(missing)";
                 Dictionary<string, int> bucket = dirName == "archived_sessions" ? archivedCounts : sessionCounts;
@@ -72,14 +88,22 @@ public sealed class SessionRolloutService
                 {
                     threadCwdsById[metadataThreadId] = ToDesktopWorkspacePath(metadataCwd);
                 }
-                bool hasEncryptedContent;
+                RolloutContentScan contentScan;
                 try
                 {
-                    hasEncryptedContent = await FileHasEncryptedContentAsync(rolloutPath, record.FirstLine, record.Offset);
-                    if (payload["id"]?.GetValue<string>() is string threadId
-                        && await FileHasUserEventAsync(rolloutPath, record.FirstLine, record.Offset))
+                    bool collectModels = !string.IsNullOrEmpty(targetModel);
+                    bool providerMayChange = !string.Equals(targetProvider, StatusOnlyProvider, StringComparison.Ordinal)
+                        && !string.Equals(currentProvider, targetProvider, StringComparison.Ordinal);
+                    contentScan = await ScanRolloutContentAsync(
+                        rolloutPath,
+                        record,
+                        collectModels,
+                        collectFingerprint: providerMayChange);
+                    contentScanPasses += 1;
+                    modelScanFiles += collectModels ? 1 : 0;
+                    if (ScanFaultInjector is not null)
                     {
-                        userEventThreadIds.Add(threadId);
+                        await ScanFaultInjector(rolloutPath);
                     }
                 }
                 catch (Exception error) when (skipLockedReads && IsRolloutFileBusyError(error))
@@ -93,7 +117,13 @@ public sealed class SessionRolloutService
                     continue;
                 }
 
-                if (hasEncryptedContent)
+                if (payload["id"]?.GetValue<string>() is string threadId
+                    && contentScan.HasUserEvent)
+                {
+                    userEventThreadIds.Add(threadId);
+                }
+
+                if (contentScan.HasEncryptedContent)
                 {
                     Dictionary<string, int> encryptedBucket = dirName == "archived_sessions" ? encryptedArchivedCounts : encryptedSessionCounts;
                     encryptedBucket[currentProvider] = encryptedBucket.TryGetValue(currentProvider, out int encryptedCount) ? encryptedCount + 1 : 1;
@@ -106,31 +136,35 @@ public sealed class SessionRolloutService
                 bool modelChanged = false;
                 if (!string.IsNullOrEmpty(targetModel))
                 {
-                    try
-                    {
-                        currentModelBackups = await ReadTurnContextModelBackupsAsync(rolloutPath, record);
-                        currentModels = currentModelBackups
-                            .SelectMany(static backup => backup.OriginalModels.Count > 0
-                                ? backup.OriginalModels
-                                : [backup.OriginalModel])
-                            .ToArray();
-                        modelChanged = currentModels.Any(model => !string.Equals(model, targetModel, StringComparison.Ordinal));
-                    }
-                    catch (Exception error) when (skipLockedReads && IsRolloutFileBusyError(error))
-                    {
-                        lockedPaths.Add(rolloutPath);
-                        continue;
-                    }
-                    catch (Exception error) when (skipLockedReads && IsRolloutFileUnreadableError(error))
-                    {
-                        unreadablePaths.Add(rolloutPath);
-                        continue;
-                    }
+                    currentModelBackups = contentScan.TurnContextModels;
+                    currentModels = currentModelBackups
+                        .SelectMany(static backup => backup.OriginalModels.Count > 0
+                            ? backup.OriginalModels
+                            : [backup.OriginalModel])
+                        .ToArray();
+                    modelChanged = currentModels.Any(model => !string.Equals(model, targetModel, StringComparison.Ordinal));
                 }
 
                 if (providerChanged || modelChanged)
                 {
                     FileSnapshot snapshot = GetFileSnapshot(rolloutPath);
+                    if (contentScan.ContentFingerprint is not null && snapshot != scanStart)
+                    {
+                        // The rollout grew or was touched while we were folding
+                        // its content digest, so the fingerprint describes a
+                        // state that no longer exists and must not be cached as
+                        // a plan hint. An active Codex session appending to its
+                        // own rollout is the ordinary cause, so report it the
+                        // same way a busy file is reported and keep rewriting
+                        // the rest instead of aborting the whole sync.
+                        if (skipLockedReads)
+                        {
+                            lockedPaths.Add(rolloutPath);
+                            continue;
+                        }
+
+                        throw new CoreWritePlanStaleException();
+                    }
                     if (providerChanged)
                     {
                         payload["model_provider"] = targetProvider;
@@ -148,7 +182,10 @@ public sealed class SessionRolloutService
                         OriginalProvider = currentProvider,
                         UpdatedFirstLine = providerChanged ? root!.ToJsonString() : record.FirstLine,
                         ModelOnlyChange = !providerChanged && modelChanged,
-                        OriginalTurnContextModels = currentModelBackups
+                        OriginalTurnContextModels = currentModelBackups,
+                        ContentFingerprint = contentScan.ContentFingerprint is null
+                            ? null
+                            : $"sha256:{contentScan.ContentFingerprint}:{snapshot.Length}:{snapshot.LastWriteTimeUtcTicks}"
                     });
                 }
             }
@@ -170,7 +207,15 @@ public sealed class SessionRolloutService
                 ArchivedSessions = encryptedArchivedCounts
             },
             UserEventThreadIds = userEventThreadIds,
-            ThreadCwdsById = threadCwdsById
+            ThreadCwdsById = threadCwdsById,
+            ScanMetrics = new SessionScanMetrics
+            {
+                EnumeratedRolloutFiles = enumeratedRolloutFiles,
+                ParsedSessionFiles = parsedSessionFiles,
+                ContentScanPasses = contentScanPasses,
+                ModelScanFiles = modelScanFiles,
+                DurationMs = (long)Math.Round(Stopwatch.GetElapsedTime(scanStarted).TotalMilliseconds)
+            }
         };
     }
 
@@ -463,12 +508,20 @@ public sealed class SessionRolloutService
                     bool crlf = newlineIndex > 0 && current[newlineIndex - 1] == '\r';
                     int lineLength = crlf ? newlineIndex - 1 : newlineIndex;
                     string firstLine = Encoding.UTF8.GetString(current[..lineLength]);
-                    return new FirstLineRecord(firstLine, crlf ? "\r\n" : "\n", newlineIndex + 1);
+                    return new FirstLineRecord(
+                        firstLine,
+                        crlf ? "\r\n" : "\n",
+                        newlineIndex + 1,
+                        current[..(newlineIndex + 1)].ToArray());
                 }
             }
 
             string text = Encoding.UTF8.GetString(collected.GetBuffer(), 0, (int)collected.Length);
-            return new FirstLineRecord(text, string.Empty, (int)collected.Length);
+            return new FirstLineRecord(
+                text,
+                string.Empty,
+                (int)collected.Length,
+                collected.GetBuffer().AsSpan(0, (int)collected.Length).ToArray());
         }
         finally
         {
@@ -499,27 +552,72 @@ public sealed class SessionRolloutService
         "\"model\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    private static async Task<IReadOnlyList<TurnContextModelBackup>> ReadTurnContextModelBackupsAsync(
+    private static async Task<RolloutContentScan> ScanRolloutContentAsync(
         string rolloutPath,
-        FirstLineRecord record)
+        FirstLineRecord record,
+        bool collectModels,
+        bool collectFingerprint)
     {
         List<TurnContextModelBackup> backups = [];
+        bool hasEncryptedContent = record.FirstLine.Contains("encrypted_content", StringComparison.Ordinal);
+        bool hasUserEvent = false;
+        try
+        {
+            hasUserEvent = RecordHasUserEvent(JsonNode.Parse(record.FirstLine));
+        }
+        catch
+        {
+            // Keep scanning the rest of the rollout below.
+        }
         try
         {
             await using FileStream stream = new(
                 rolloutPath,
                 FileMode.Open,
                 FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete);
+                FileShare.Read,
+                64 * 1024,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
             stream.Seek(record.Offset, SeekOrigin.Begin);
-            using StreamReader reader = new(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, bufferSize: 4096, leaveOpen: true);
+            using IncrementalHash? contentHash = collectFingerprint
+                ? IncrementalHash.CreateHash(HashAlgorithmName.SHA256)
+                : null;
+            contentHash?.AppendData(record.PrefixBytes);
+            using HashingReadStream hashingStream = new(stream, contentHash);
+            using StreamReader reader = new(
+                hashingStream,
+                Encoding.UTF8,
+                detectEncodingFromByteOrderMarks: false,
+                bufferSize: 64 * 1024,
+                leaveOpen: true);
             int lineIndex = 1;
             string? line;
             while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) is not null)
             {
-                if (!TurnContextTypeRegex.IsMatch(line))
+                if (!hasEncryptedContent
+                    && line.Contains("encrypted_content", StringComparison.Ordinal))
+                {
+                    hasEncryptedContent = true;
+                }
+                if (!hasUserEvent && !string.IsNullOrWhiteSpace(line))
+                {
+                    try
+                    {
+                        hasUserEvent = RecordHasUserEvent(JsonNode.Parse(line));
+                    }
+                    catch
+                    {
+                        // Ignore malformed non-metadata lines; positive evidence is sufficient.
+                    }
+                }
+
+                if (!collectModels || !TurnContextTypeRegex.IsMatch(line))
                 {
                     lineIndex += 1;
+                    if (!collectModels && !collectFingerprint && hasEncryptedContent && hasUserEvent)
+                    {
+                        break;
+                    }
                     continue;
                 }
 
@@ -550,7 +648,14 @@ public sealed class SessionRolloutService
                 }
                 lineIndex += 1;
             }
-            return backups;
+            string? contentFingerprint = contentHash is null
+                ? null
+                : Convert.ToHexString(contentHash.GetHashAndReset()).ToLowerInvariant();
+            return new RolloutContentScan(
+                hasEncryptedContent,
+                hasUserEvent,
+                backups,
+                contentFingerprint);
         }
         catch (Exception error) when (IsRolloutFileBusyError(error))
         {
@@ -927,188 +1032,6 @@ public sealed class SessionRolloutService
         return new FileSnapshot(fileInfo.Length, fileInfo.LastWriteTimeUtc.Ticks);
     }
 
-    private static async Task<bool> FileContainsTextAsync(string filePath, string text, int startOffset)
-    {
-        byte[] needle = Encoding.UTF8.GetBytes(text);
-        byte[] buffer = ArrayPool<byte>.Shared.Rent(ScanBufferSize);
-        byte[] tail = [];
-
-        try
-        {
-            await using FileStream stream = new(
-                filePath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                ScanBufferSize,
-                FileOptions.Asynchronous | FileOptions.SequentialScan);
-
-            if (startOffset > 0)
-            {
-                stream.Seek(startOffset, SeekOrigin.Begin);
-            }
-
-            while (true)
-            {
-                int bytesRead = await stream.ReadAsync(buffer.AsMemory(0, ScanBufferSize));
-                if (bytesRead == 0)
-                {
-                    return false;
-                }
-
-                byte[] haystack = buffer;
-                int haystackLength = bytesRead;
-                if (tail.Length > 0)
-                {
-                    haystackLength = tail.Length + bytesRead;
-                    haystack = ArrayPool<byte>.Shared.Rent(haystackLength);
-                    Buffer.BlockCopy(tail, 0, haystack, 0, tail.Length);
-                    Buffer.BlockCopy(buffer, 0, haystack, tail.Length, bytesRead);
-                }
-
-                try
-                {
-                    if (ContainsNeedle(haystack, haystackLength, needle))
-                    {
-                        return true;
-                    }
-
-                    int keepBytes = Math.Min(Math.Max(0, needle.Length - 1), haystackLength);
-                    if (keepBytes == 0)
-                    {
-                        tail = [];
-                    }
-                    else
-                    {
-                        tail = new byte[keepBytes];
-                        Buffer.BlockCopy(haystack, haystackLength - keepBytes, tail, 0, keepBytes);
-                    }
-                }
-                finally
-                {
-                    if (!ReferenceEquals(haystack, buffer))
-                    {
-                        ArrayPool<byte>.Shared.Return(haystack);
-                    }
-                }
-            }
-        }
-        catch (Exception error)
-        {
-            throw WrapRolloutFileBusyError(error, filePath, "scan");
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(buffer);
-        }
-    }
-
-    private static bool ContainsNeedle(byte[] haystack, int haystackLength, byte[] needle)
-    {
-        if (needle.Length == 0)
-        {
-            return true;
-        }
-
-        if (haystackLength < needle.Length)
-        {
-            return false;
-        }
-
-        int lastStart = haystackLength - needle.Length;
-        for (int index = 0; index <= lastStart; index += 1)
-        {
-            bool match = true;
-            for (int needleIndex = 0; needleIndex < needle.Length; needleIndex += 1)
-            {
-                if (haystack[index + needleIndex] != needle[needleIndex])
-                {
-                    match = false;
-                    break;
-                }
-            }
-
-            if (match)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static async Task<bool> FileHasEncryptedContentAsync(string filePath, string firstLine, int startOffset)
-    {
-        if (firstLine.Contains("encrypted_content", StringComparison.Ordinal))
-        {
-            return true;
-        }
-
-        return await FileContainsTextAsync(filePath, "encrypted_content", startOffset);
-    }
-
-    private static async Task<bool> FileHasUserEventAsync(string filePath, string firstLine, int startOffset)
-    {
-        try
-        {
-            if (RecordHasUserEvent(JsonNode.Parse(firstLine)))
-            {
-                return true;
-            }
-        }
-        catch
-        {
-            // Keep scanning the rest of the rollout below.
-        }
-
-        try
-        {
-            await using FileStream stream = new(
-                filePath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                64 * 1024,
-                FileOptions.Asynchronous | FileOptions.SequentialScan);
-            if (startOffset > 0)
-            {
-                stream.Seek(startOffset, SeekOrigin.Begin);
-            }
-
-            using StreamReader reader = new(
-                stream,
-                Encoding.UTF8,
-                detectEncodingFromByteOrderMarks: true,
-                bufferSize: 64 * 1024,
-                leaveOpen: false);
-            while (await reader.ReadLineAsync() is string rawLine)
-            {
-                if (string.IsNullOrWhiteSpace(rawLine))
-                {
-                    continue;
-                }
-
-                try
-                {
-                    if (RecordHasUserEvent(JsonNode.Parse(rawLine)))
-                    {
-                        return true;
-                    }
-                }
-                catch
-                {
-                    // Ignore malformed non-metadata lines; provider sync only needs positive evidence.
-                }
-            }
-
-            return false;
-        }
-        catch (Exception error)
-        {
-            throw WrapRolloutFileBusyError(error, filePath, "scan");
-        }
-    }
-
     private static bool RecordHasUserEvent(JsonNode? record)
     {
         if (record is not JsonObject root)
@@ -1250,8 +1173,77 @@ public sealed class SessionRolloutService
             error);
     }
 
-    private readonly record struct FirstLineRecord(string FirstLine, string Separator, int Offset);
+    private readonly record struct FirstLineRecord(
+        string FirstLine,
+        string Separator,
+        int Offset,
+        byte[] PrefixBytes);
     private readonly record struct FileSnapshot(long Length, long LastWriteTimeUtcTicks);
+    private readonly record struct RolloutContentScan(
+        bool HasEncryptedContent,
+        bool HasUserEvent,
+        IReadOnlyList<TurnContextModelBackup> TurnContextModels,
+        string? ContentFingerprint);
+
+    private sealed class HashingReadStream(Stream inner, IncrementalHash? hash) : Stream
+    {
+        public override bool CanRead => inner.CanRead;
+        public override bool CanSeek => inner.CanSeek;
+        public override bool CanWrite => false;
+        public override long Length => inner.Length;
+        public override long Position { get => inner.Position; set => inner.Position = value; }
+        public override void Flush() => inner.Flush();
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            int read = inner.Read(buffer, offset, count);
+            if (read > 0)
+            {
+                hash?.AppendData(buffer, offset, read);
+            }
+            return read;
+        }
+        public override int Read(Span<byte> buffer)
+        {
+            int read = inner.Read(buffer);
+            if (read > 0)
+            {
+                hash?.AppendData(buffer[..read]);
+            }
+            return read;
+        }
+        public override async Task<int> ReadAsync(
+            byte[] buffer,
+            int offset,
+            int count,
+            CancellationToken cancellationToken)
+        {
+            int read = await inner.ReadAsync(buffer.AsMemory(offset, count), cancellationToken);
+            if (read > 0)
+            {
+                hash?.AppendData(buffer, offset, read);
+            }
+            return read;
+        }
+        public override async ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            int read = await inner.ReadAsync(buffer, cancellationToken);
+            if (read > 0)
+            {
+                hash?.AppendData(buffer.Span[..read]);
+            }
+            return read;
+        }
+        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        protected override void Dispose(bool disposing)
+        {
+            // The caller owns the underlying rollout stream.
+            base.Dispose(disposing);
+        }
+    }
     private readonly record struct ModelLineRewrite(
         string Line,
         bool Replaced,

@@ -322,26 +322,18 @@ export async function createBackup({
     "utf8"
   );
 
-  await writeFileAtomic(
-    path.join(backupDir, "metadata.json"),
-    JSON.stringify(
-      {
-        version: 2,
-        namespace: BACKUP_NAMESPACE,
-        codexHome,
-        sqliteHome: actualSqliteHome,
-        targetProvider,
-        createdAt: sessionManifest.createdAt,
-        dbFiles: copiedDbFiles,
-        sqliteDbFiles: copiedSqliteDbFiles,
-        globalStateFiles,
-        changedSessionFiles: sessionChanges.length
-      },
-      null,
-      2
-    ),
-    "utf8"
-  );
+  await writeMetadataWithInventory(backupDir, {
+    version: 2,
+    namespace: BACKUP_NAMESPACE,
+    codexHome,
+    sqliteHome: actualSqliteHome,
+    targetProvider,
+    createdAt: sessionManifest.createdAt,
+    dbFiles: copiedDbFiles,
+    sqliteDbFiles: copiedSqliteDbFiles,
+    globalStateFiles,
+    changedSessionFiles: sessionChanges.length
+  });
 
   return backupDir;
 }
@@ -382,12 +374,19 @@ export async function updateSessionBackupManifest(backupDir, sessionChanges, opt
     "utf8",
     { faultInjector: options.faultInjector }
   );
-  await writeFileAtomic(
-    metadataPath,
-    JSON.stringify(metadata, null, 2),
-    "utf8",
-    { faultInjector: options.faultInjector }
-  );
+  await writeMetadataWithInventory(backupDir, metadata, {
+    faultInjector: options.faultInjector
+  });
+}
+
+export async function refreshBackupInventory(backupDir, options = {}) {
+  const normalizedBackupDir = path.resolve(backupDir);
+  const metadataPath = path.join(normalizedBackupDir, "metadata.json");
+  const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
+  if (metadata?.namespace !== BACKUP_NAMESPACE || !new Set([1, 2]).has(metadata.version)) {
+    throw new Error(`Unsupported backup metadata in ${metadataPath}.`);
+  }
+  await writeMetadataWithInventory(normalizedBackupDir, metadata, options);
 }
 
 export async function getBackupSummary(codexHome) {
@@ -395,7 +394,7 @@ export async function getBackupSummary(codexHome) {
   const backupDirs = await listManagedBackupDirectories(backupRoot);
   let totalBytes = 0;
   for (const entry of backupDirs) {
-    totalBytes += await getDirectorySize(entry.fullPath);
+    totalBytes += await getBackupDirectorySize(entry.fullPath);
   }
 
   return {
@@ -420,7 +419,7 @@ export async function pruneBackups(codexHome, keepCount = DEFAULT_BACKUP_RETENTI
     .filter((entry) => !protectedBackups.has(pathComparisonKey(entry.fullPath)));
   let freedBytes = 0;
   for (const entry of toDelete) {
-    freedBytes += await getDirectorySize(entry.fullPath);
+    freedBytes += await getBackupDirectorySize(entry.fullPath);
     await fs.rm(entry.fullPath, { recursive: true, force: true });
   }
 
@@ -715,29 +714,77 @@ async function isManagedBackupDirectory(backupDir) {
   }
 }
 
+async function writeMetadataWithInventory(backupDir, metadata, options = {}) {
+  const metadataPath = path.join(backupDir, "metadata.json");
+  const payload = await getDirectoryInventory(backupDir, metadataPath);
+  const fileCount = payload.fileCount + 1;
+  let sizeBytes = 0;
+  let serialized = "";
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    serialized = JSON.stringify({ ...metadata, sizeBytes, fileCount }, null, 2);
+    const nextSizeBytes = payload.sizeBytes + Buffer.byteLength(serialized, "utf8");
+    if (nextSizeBytes === sizeBytes) {
+      await writeFileAtomic(metadataPath, serialized, "utf8", options);
+      return;
+    }
+    sizeBytes = nextSizeBytes;
+  }
+  throw new Error(`Backup metadata inventory did not converge: ${metadataPath}`);
+}
+
+async function getBackupDirectorySize(backupDir) {
+  try {
+    const metadata = JSON.parse(
+      await fs.readFile(path.join(backupDir, "metadata.json"), "utf8")
+    );
+    if (metadata?.namespace === BACKUP_NAMESPACE
+        && Number.isSafeInteger(metadata.sizeBytes)
+        && metadata.sizeBytes >= 0
+        && Number.isSafeInteger(metadata.fileCount)
+        && metadata.fileCount >= 1) {
+      return metadata.sizeBytes;
+    }
+  } catch {
+    // Older or damaged inventory fields fall back to the recursive scan below.
+  }
+  return getDirectorySize(backupDir);
+}
+
 async function getDirectorySize(directoryPath) {
+  return (await getDirectoryInventory(directoryPath)).sizeBytes;
+}
+
+async function getDirectoryInventory(directoryPath, excludedFilePath = null) {
   let entries;
   try {
     entries = await fs.readdir(directoryPath, { withFileTypes: true });
   } catch (error) {
     if (error?.code === "ENOENT") {
-      return 0;
+      return { sizeBytes: 0, fileCount: 0 };
     }
     throw error;
   }
 
-  let total = 0;
+  let sizeBytes = 0;
+  let fileCount = 0;
+  const excluded = excludedFilePath === null ? null : path.resolve(excludedFilePath);
   for (const entry of entries) {
     const fullPath = path.join(directoryPath, entry.name);
     if (entry.isDirectory()) {
-      total += await getDirectorySize(fullPath);
+      const child = await getDirectoryInventory(fullPath, excluded);
+      sizeBytes += child.sizeBytes;
+      fileCount += child.fileCount;
       continue;
     }
     if (entry.isFile()) {
+      if (excluded !== null && path.resolve(fullPath) === excluded) {
+        continue;
+      }
       const stat = await fs.stat(fullPath);
-      total += stat.size;
+      sizeBytes += stat.size;
+      fileCount += 1;
     }
   }
 
-  return total;
+  return { sizeBytes, fileCount };
 }

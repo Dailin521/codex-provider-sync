@@ -492,6 +492,37 @@ test("unfinished journal blocks writes until the bound backup is restored", asyn
   assert.equal(result.targetProvider, "openai");
 });
 
+test("runRestore reports a warning instead of failing when the inventory refresh fails", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");
+  await writeRollout(sessionPath, "thread-a", "apigather");
+  await writeStateDb(codexHome, [
+    { id: "thread-a", model_provider: "apigather", archived: false }
+  ]);
+
+  const synced = await runSync({ codexHome });
+  const backupDir = synced.backupDir;
+
+  // Fail only the write the post-restore inventory refresh performs. The
+  // injected seam is deterministic regardless of the user the suite runs as,
+  // which file permission bits are not: root bypasses them entirely.
+  const result = await runRestore({
+    backupDir,
+    codexHome,
+    faultInjector: ({ point }) => {
+      if (point === "before_atomic_replace") {
+        throw new Error("injected inventory write failure");
+      }
+    }
+  });
+
+  // The restore itself is authoritative and must still be reported as done.
+  assert.equal(result.targetProvider, "openai");
+  assert.match(result.backupInventoryWarning, /Backup inventory refresh failed/);
+  assert.match(await fs.readFile(sessionPath, "utf8"), /"model_provider":"apigather"/);
+});
+
 test("crash recovery restores actually mutated rollout and database from a pending journal", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
@@ -724,7 +755,7 @@ test("repeated sync is idempotent for rollout and SQLite state", async () => {
   assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
-test("runSync leaves the backup manifest and metadata unchanged after creation", async () => {
+test("runSync leaves the backup manifest and metadata payload unchanged after creation", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-immutable-backup.jsonl");
@@ -753,7 +784,27 @@ test("runSync leaves the backup manifest and metadata unchanged after creation",
   assert.ok(manifestBefore);
   assert.ok(metadataBefore);
   assert.deepEqual(await fs.readFile(path.join(backupDir, "session-meta-backup.json")), manifestBefore);
-  assert.deepEqual(await fs.readFile(path.join(backupDir, "metadata.json")), metadataBefore);
+  const metadataBeforeValue = JSON.parse(metadataBefore.toString("utf8"));
+  const metadataAfterValue = JSON.parse(
+    await fs.readFile(path.join(backupDir, "metadata.json"), "utf8")
+  );
+  const {
+    sizeBytes: sizeBytesBefore,
+    fileCount: fileCountBefore,
+    ...metadataPayloadBefore
+  } = metadataBeforeValue;
+  const {
+    sizeBytes: sizeBytesAfter,
+    fileCount: fileCountAfter,
+    ...metadataPayloadAfter
+  } = metadataAfterValue;
+  assert.deepEqual(metadataPayloadAfter, metadataPayloadBefore);
+  assert.ok(sizeBytesAfter > sizeBytesBefore);
+  assert.equal(fileCountAfter, fileCountBefore + 1);
+  assert.deepEqual(
+    { sizeBytes: sizeBytesAfter, fileCount: fileCountAfter },
+    await getDirectoryInventory(backupDir)
+  );
   const manifest = JSON.parse(manifestBefore.toString("utf8"));
   assert.equal(manifest.appliedPaths, null);
 });
@@ -1416,6 +1467,24 @@ async function writeBackup(codexHome, directoryName, files) {
   return totalBytes;
 }
 
+async function getDirectoryInventory(directoryPath) {
+  const entries = await fs.readdir(directoryPath, { withFileTypes: true });
+  let sizeBytes = 0;
+  let fileCount = 0;
+  for (const entry of entries) {
+    const fullPath = path.join(directoryPath, entry.name);
+    if (entry.isDirectory()) {
+      const child = await getDirectoryInventory(fullPath);
+      sizeBytes += child.sizeBytes;
+      fileCount += child.fileCount;
+    } else if (entry.isFile()) {
+      sizeBytes += (await fs.stat(fullPath)).size;
+      fileCount += 1;
+    }
+  }
+  return { sizeBytes, fileCount };
+}
+
 async function writeConfig(codexHome, modelProviderLine = "") {
   const config = `${modelProviderLine}${modelProviderLine ? "\n" : ""}sandbox_mode = "danger-full-access"\n\n[model_providers.apigather]\nbase_url = "https://example.com"\n`;
   await fs.writeFile(path.join(codexHome, "config.toml"), config, "utf8");
@@ -1637,6 +1706,13 @@ test("runSync rewrites rollout files and sqlite, then restore reverts both", asy
   assert.equal(backupMetadata.version, 2);
   assert.equal(backupMetadata.sqliteHome, path.join(codexHome, SQLITE_DIR_BASENAME));
   assert.deepEqual(backupMetadata.sqliteDbFiles, [DB_FILE_BASENAME]);
+  assert.ok(Number.isSafeInteger(backupMetadata.sizeBytes));
+  assert.ok(backupMetadata.sizeBytes > 0);
+  assert.ok(Number.isSafeInteger(backupMetadata.fileCount));
+  assert.ok(backupMetadata.fileCount > 0);
+  const backupInventory = await getDirectoryInventory(syncResult.backupDir);
+  assert.equal(backupMetadata.sizeBytes, backupInventory.sizeBytes);
+  assert.equal(backupMetadata.fileCount, backupInventory.fileCount);
   assert.deepEqual(
     backupMetadata.dbFiles.map((fileName) => fileName.replaceAll("\\", "/")),
     ["sqlite/state_5.sqlite"]
@@ -3609,6 +3685,33 @@ test("pruneBackups removes the oldest backup directories", async () => {
   await fs.access(path.join(backupRoot(codexHome), "20260321T000000000Z"));
 });
 
+test("backup summary and prune use cached inventory with legacy fallback", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  const cachedDir = path.join(backupRoot(codexHome), "20260319T000000000Z");
+  const legacyDir = path.join(backupRoot(codexHome), "20260320T000000000Z");
+  await fs.mkdir(cachedDir, { recursive: true });
+  await fs.mkdir(legacyDir, { recursive: true });
+  await fs.writeFile(path.join(cachedDir, "metadata.json"), JSON.stringify({
+    namespace: "provider-sync",
+    sizeBytes: 123,
+    fileCount: 1
+  }), "utf8");
+  await fs.writeFile(path.join(cachedDir, "added-later.bin"), "x".repeat(4096), "utf8");
+  await fs.writeFile(path.join(legacyDir, "metadata.json"), JSON.stringify({
+    namespace: "provider-sync"
+  }), "utf8");
+  await fs.writeFile(path.join(legacyDir, "payload.bin"), "legacy", "utf8");
+  const legacyBytes = (await fs.stat(path.join(legacyDir, "metadata.json"))).size
+    + (await fs.stat(path.join(legacyDir, "payload.bin"))).size;
+
+  const summary = await getBackupSummary(codexHome);
+  assert.deepEqual(summary, { count: 2, totalBytes: 123 + legacyBytes });
+
+  const pruned = await pruneBackups(codexHome, 1);
+  assert.equal(pruned.deletedCount, 1);
+  assert.equal(pruned.freedBytes, 123);
+});
+
 test("pruneBackups ignores directories without managed backup metadata", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeBackup(codexHome, "20260320T000000000Z", [
@@ -3667,6 +3770,55 @@ test("runSync auto-prunes backups to the default retention count", async () => {
   assert.equal(result.autoPruneResult.deletedCount, 1);
   assert.equal(result.autoPruneResult.remainingCount, DEFAULT_BACKUP_RETENTION_COUNT);
   assert.equal(result.autoPruneWarning, null);
+});
+
+test("runSync succeeds with a warning and still prunes when the inventory refresh fails after commit", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");
+  await writeRollout(sessionPath, "thread-a", "apigather");
+  await writeStateDb(codexHome, [
+    { id: "thread-a", model_provider: "apigather", archived: false }
+  ]);
+
+  for (let index = 0; index < DEFAULT_BACKUP_RETENTION_COUNT; index += 1) {
+    await writeBackup(codexHome, `20240101T0000${String(index).padStart(2, "0")}000Z`, [
+      ["note.txt", `backup-${index}`]
+    ]);
+  }
+
+  const result = await runSync({
+    codexHome,
+    // Break the inventory refresh that runs right after the journal commit. The
+    // transaction is durable by then, so the sync must report success with a
+    // warning instead of failing and skipping the prune below.
+    async faultInjector({ point }) {
+      if (point !== "before_transaction_commit") {
+        return;
+      }
+      const dirs = await fs.readdir(backupRoot(codexHome));
+      for (const dir of dirs) {
+        const candidate = path.join(backupRoot(codexHome), dir);
+        try {
+          await fs.access(path.join(candidate, "transaction-journal.jsonl"));
+        } catch {
+          continue;
+        }
+        // Keep the namespace so the directory is still a managed backup for the
+        // prune pass, but make the version unreadable so only the inventory
+        // refresh fails.
+        const metadataPath = path.join(candidate, "metadata.json");
+        const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
+        await fs.writeFile(metadataPath, JSON.stringify({ ...metadata, version: 99 }, null, 2));
+      }
+    }
+  });
+
+  assert.equal(result.autoPruneResult.deletedCount, 1);
+  assert.match(result.autoPruneWarning, /Backup inventory refresh failed/);
+  assert.match(await fs.readFile(sessionPath, "utf8"), /"model_provider":"openai"/);
+  assert.equal(await readProvider(codexHome, "thread-a"), "openai");
+  assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
 test("runSync uses a custom automatic backup retention count", async () => {

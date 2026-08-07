@@ -6,6 +6,45 @@ namespace CodexProviderSync.Core.Tests;
 public sealed class CoreWritePlanningTests
 {
     [Fact]
+    public async Task ContentFingerprintHint_ReusesExactDigestForPlanPreview()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"codex-provider-hint-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        string path = Path.Combine(root, "rollout.jsonl");
+        await File.WriteAllTextAsync(path, "{\"type\":\"session_meta\"}\n");
+        try
+        {
+            FileInfo info = new(path);
+            string digest = "sha256:" + Convert.ToHexString(
+                    System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(path)))
+                .ToLowerInvariant()
+                + $":{info.Length}:{info.LastWriteTimeUtc.Ticks}";
+            int hintedReads = 0;
+            CoreWritePlanSnapshot hinted = await CoreWriteSnapshotBuilder.BuildAsync(
+                "sync",
+                "hinted",
+                [new CoreWriteTargetSpec(path, "replace")],
+                contentFingerprintHints:
+                [
+                    new CoreWriteContentFingerprintHint(
+                        path,
+                        digest,
+                        info.Length,
+                        info.LastWriteTimeUtc.Ticks)
+                ],
+                fingerprintObserver: _ => hintedReads += 1);
+
+            CoreWritePlanTarget target = Assert.Single(hinted.Targets);
+            Assert.Equal(digest, target.Fingerprint);
+            Assert.Equal(0, hintedReads);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task CheckedSync_RejectsDriftBeforeBackupOrMutation()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
@@ -522,6 +561,39 @@ public sealed class CoreWritePlanningTests
             "sqlite-wal-normalization",
             [walTarget]);
         CoreWriteSnapshotBuilder.AssertExactMatch(empty, missingAgain);
+    }
+
+    [Fact]
+    public async Task SnapshotBuilder_ReusesRecursiveInventoryAcrossMainAndAutoPruneTargets()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        string backupRoot = Path.Combine(fixture.Root, "backups");
+        string candidate = Path.Combine(backupRoot, "20260807T000000000Z");
+        string payload = Path.Combine(candidate, "metadata.json");
+        Directory.CreateDirectory(candidate);
+        await File.WriteAllTextAsync(payload, "{}");
+        List<string> fingerprintedPaths = [];
+
+        CoreWritePlanSnapshot snapshot = await CoreWriteSnapshotBuilder.BuildAsync(
+            "sync",
+            "shared-recursive-inventory",
+            [new CoreWriteTargetSpec(
+                backupRoot,
+                "create-and-prune",
+                CoreWriteFingerprintMode.RecursiveInventory)],
+            [new CoreWriteTargetSpec(
+                candidate,
+                "delete",
+                CoreWriteFingerprintMode.RecursiveInventory)],
+            fingerprintObserver: fingerprintedPaths.Add);
+
+        Assert.Single(snapshot.Targets);
+        Assert.Single(snapshot.AutoPruneDeletionTargets);
+        StringComparer comparer = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
+        Assert.Equal(1, fingerprintedPaths.Count(path => comparer.Equals(path, Path.GetFullPath(candidate))));
+        Assert.Equal(1, fingerprintedPaths.Count(path => comparer.Equals(path, Path.GetFullPath(payload))));
     }
 
     [Fact]

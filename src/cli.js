@@ -328,6 +328,9 @@ async function main() {
     console.log(`Restored backup from ${path.resolve(backupDir)}`);
     console.log(`Codex home: ${result.codexHome}`);
     console.log(`Provider at backup time: ${result.targetProvider}`);
+    if (result.backupInventoryWarning) {
+      console.log(`Backup inventory warning: ${result.backupInventoryWarning}`);
+    }
     return;
   }
 

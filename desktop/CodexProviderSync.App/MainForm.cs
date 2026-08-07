@@ -940,6 +940,9 @@ public sealed class MainForm : Form
                 result,
                 request is SwitchProviderRequest ? "已切换并同步" : "已同步",
                 TextFormatter.ChineseSimplified));
+            AppendLog(TextFormatter.FormatPerformanceMetrics(
+                result.PerformanceMetrics,
+                TextFormatter.ChineseSimplified));
             AppendLog(FormatModelSyncOutcome(result.ModelSync));
             AppendLog(string.Empty);
             await RefreshStatusCoreAsync(request.CodexHome, request.SqliteHomeOverride, provider);
@@ -1076,8 +1079,16 @@ public sealed class MainForm : Form
     {
         string path = _currentStatus?.BackupRoot ?? AppConstants.DefaultBackupRoot(CurrentCodexHome());
         EnsureAutomationPath(path, GuiAutomationCatalog.Ids.OpenBackupDirectory);
-        Directory.CreateDirectory(path);
-        _platformBoundary.OpenPath(path);
+        try
+        {
+            Directory.CreateDirectory(path);
+            _platformBoundary.OpenPath(path);
+        }
+        catch (Exception error)
+        {
+            AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 打开备份目录失败: {error}");
+            MessageBox.Show(this, $"无法打开备份目录。{Environment.NewLine}{Environment.NewLine}{error.Message}", Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     private void OpenLogFolder()
@@ -1591,6 +1602,9 @@ public sealed class MainForm : Form
         ReloadProviderList();
         _codexHomeCombo.Text = _currentStatus.CodexHome;
         AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 已刷新: {_currentStatus.CodexHome}");
+        AppendLog(TextFormatter.FormatPerformanceMetrics(
+            _currentStatus.PerformanceMetrics,
+            TextFormatter.ChineseSimplified));
     }
 
     private WindowBoundsState CaptureWindowBounds()

@@ -36,6 +36,12 @@ public sealed class BackupParityTests
         Assert.False(globalStateFiles.GetProperty(AppConstants.GlobalStateBackupFileBasename).GetBoolean());
         Assert.True(metadataRoot.GetProperty("globalStateFilePresent").GetBoolean());
         Assert.False(metadataRoot.GetProperty("globalStateBackupFilePresent").GetBoolean());
+        Assert.True(metadataRoot.GetProperty("sizeBytes").GetInt64() > 0);
+        Assert.True(metadataRoot.GetProperty("fileCount").GetInt32() > 0);
+        Assert.Equal(
+            Directory.EnumerateFiles(backupDir, "*", SearchOption.AllDirectories)
+                .Sum(static path => new FileInfo(path).Length),
+            metadataRoot.GetProperty("sizeBytes").GetInt64());
 
         using JsonDocument manifest = JsonDocument.Parse(
             await File.ReadAllTextAsync(Path.Combine(backupDir, "session-meta-backup.json")));
@@ -46,6 +52,79 @@ public sealed class BackupParityTests
         Assert.Equal(
             originalTimestamp.UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture),
             entry.GetProperty("originalLastWriteTimeUtcTicks").GetString());
+    }
+
+    [Fact]
+    public async Task BackupSummary_UsesCachedInventoryAndFallsBackForLegacyMetadata()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        string cached = fixture.BackupPath("20260708T091011111Z");
+        string legacy = fixture.BackupPath("20260708T091011110Z");
+        Directory.CreateDirectory(cached);
+        Directory.CreateDirectory(legacy);
+        await File.WriteAllTextAsync(
+            Path.Combine(cached, "metadata.json"),
+            JsonSerializer.Serialize(new
+            {
+                version = 2,
+                @namespace = AppConstants.BackupNamespace,
+                codexHome = fixture.CodexHome,
+                targetProvider = "openai",
+                createdAt = DateTimeOffset.UtcNow,
+                dbFiles = Array.Empty<string>(),
+                changedSessionFiles = 0,
+                sizeBytes = 123L,
+                fileCount = 1
+            }));
+        await File.WriteAllTextAsync(Path.Combine(cached, "added-later.bin"), new string('x', 4096));
+        await File.WriteAllTextAsync(
+            Path.Combine(legacy, "metadata.json"),
+            JsonSerializer.Serialize(new
+            {
+                version = 1,
+                @namespace = AppConstants.BackupNamespace,
+                codexHome = fixture.CodexHome,
+                targetProvider = "openai",
+                createdAt = DateTimeOffset.UtcNow,
+                dbFiles = Array.Empty<string>(),
+                changedSessionFiles = 0
+            }));
+        await File.WriteAllTextAsync(Path.Combine(legacy, "payload.bin"), new string('y', 17));
+
+        List<string> fallbacks = [];
+        BackupService backups = new(new SessionRolloutService(), new SqliteStateService())
+        {
+            DirectoryInventoryFallbackObserver = fallbacks.Add
+        };
+        BackupSummary summary = await backups.GetBackupSummaryAsync(fixture.CodexHome);
+
+        long legacyBytes = Directory.EnumerateFiles(legacy, "*", SearchOption.AllDirectories)
+            .Sum(static path => new FileInfo(path).Length);
+        Assert.Equal(2, summary.Count);
+        Assert.Equal(123L + legacyBytes, summary.TotalBytes);
+        Assert.Single(fallbacks);
+        Assert.Equal(Path.GetFullPath(legacy), Path.GetFullPath(fallbacks[0]));
+    }
+
+    [Fact]
+    public async Task IncompleteMetadata_IsNotManagedOrPrunedEvenWithProviderSyncNamespace()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        string incomplete = fixture.BackupPath("20260708T091011109Z");
+        Directory.CreateDirectory(incomplete);
+        string sentinel = Path.Combine(incomplete, "keep.txt");
+        await File.WriteAllTextAsync(
+            Path.Combine(incomplete, "metadata.json"),
+            "{\"namespace\":\"provider-sync\",\"sizeBytes\":1,\"fileCount\":1}");
+        await File.WriteAllTextAsync(sentinel, "must remain");
+
+        BackupService backups = new(new SessionRolloutService(), new SqliteStateService());
+        BackupSummary summary = await backups.GetBackupSummaryAsync(fixture.CodexHome);
+        BackupPruneResult pruned = await backups.PruneBackupsAsync(fixture.CodexHome, 0);
+
+        Assert.Equal(0, summary.Count);
+        Assert.Equal(0, pruned.DeletedCount);
+        Assert.True(File.Exists(sentinel));
     }
 
     [Fact]

@@ -22,6 +22,7 @@ import {
   getBackupRecoveryCoverage,
   getBackupSummary,
   pruneBackups,
+  refreshBackupInventory,
   restoreBackup,
   restoreGlobalStateFilesFromBackup
 } from "./backup.js";
@@ -198,6 +199,20 @@ async function commitJournalWithReconciliation(journal, faultInjector) {
     throw acknowledgementError;
   }
   throw new Error(`Transaction journal did not persist a valid committed terminal state: ${journal.filePath}`);
+}
+
+// Rewrites the retained backup's recorded size and file count after the journal
+// reached a terminal state, so status and pruning do not trust an inventory
+// captured before those journal records existed. Used on the rollback paths,
+// where the caller is already reporting a failure: a bookkeeping problem here
+// must never replace the original error.
+async function tryRefreshBackupInventory(backupDir) {
+  try {
+    await refreshBackupInventory(backupDir);
+  } catch {
+    // The original sync failure and its rollback details are the authoritative
+    // diagnosis and must reach the caller unchanged.
+  }
 }
 
 async function rollbackJournalWithReconciliation(journal, faultInjector) {
@@ -643,6 +658,16 @@ async function runSyncCore({
       await faultInjector?.({ point: "before_transaction_commit", completedCount: completedTargets.length });
       await commitJournalWithReconciliation(journal, faultInjector);
       transactionCommitted = true;
+      // The transaction is committed and every target is on disk. Refreshing the
+      // inventory only corrects the recorded size and file count in
+      // metadata.json, so a failure must degrade to a warning: throwing would
+      // report a successful sync as failed and skip the pruning below.
+      let backupInventoryWarning = null;
+      try {
+        await refreshBackupInventory(backupDir);
+      } catch (inventoryError) {
+        backupInventoryWarning = `Backup inventory refresh failed: ${inventoryError instanceof Error ? inventoryError.message : String(inventoryError)}`;
+      }
       await faultInjector?.({ point: "after_transaction_commit", completedCount: completedTargets.length });
       let autoPruneResult = null;
       let autoPruneWarning = null;
@@ -662,6 +687,10 @@ async function runSyncCore({
         deletedCount: autoPruneResult?.deletedCount ?? 0,
         warning: autoPruneWarning
       });
+      autoPruneWarning = [backupInventoryWarning, autoPruneWarning]
+        .filter((part) => typeof part === "string" && part.trim().length > 0)
+        .map((part) => part.trim())
+        .join(" | ") || null;
       const result = {
         codexHome,
         sqliteHome: storage.sqliteHome,
@@ -795,6 +824,7 @@ async function runSyncCore({
           // Preserve the original and rollback errors even if the journal is
           // no longer writable.
         }
+        await tryRefreshBackupInventory(backupDir);
         const persistedCompletedTargets = journalSnapshot
           ? uniqueResolvedPaths([...getAppliedJournalTargets(journalSnapshot), ...completedTargets])
           : uniqueResolvedPaths(completedTargets);
@@ -813,6 +843,7 @@ async function runSyncCore({
           { rollbackStatus: "incomplete", recoveryRequired: true }
         );
       }
+      await tryRefreshBackupInventory(backupDir);
       const persistedCompletedTargets = journalSnapshot
         ? uniqueResolvedPaths([...getAppliedJournalTargets(journalSnapshot), ...completedTargets])
         : uniqueResolvedPaths(completedTargets);
@@ -937,7 +968,8 @@ export async function runRestore({
   restoreDatabase = true,
   restoreSessions = true,
   allowSqliteHomeRelocation = false,
-  platform
+  platform,
+  faultInjector
 }) {
   if (!backupDir) {
     throw new Error("Missing backup path. Usage: codex-provider restore <backup-dir>");
@@ -1011,6 +1043,17 @@ export async function runRestore({
       allowSqliteHomeRelocation
     });
     await markBackupTransactionRolledBack(normalizedBackupDir);
+    // The restore and its journal marker are already durable. Refreshing the
+    // inventory only corrects metadata.json bookkeeping, so surface a failure as
+    // a warning instead of reporting a completed restore as failed.
+    try {
+      await refreshBackupInventory(normalizedBackupDir, { faultInjector });
+    } catch (inventoryError) {
+      return {
+        ...result,
+        backupInventoryWarning: `Backup inventory refresh failed: ${inventoryError instanceof Error ? inventoryError.message : String(inventoryError)}`
+      };
+    }
     return result;
   } finally {
     await releaseLock();

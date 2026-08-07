@@ -227,11 +227,16 @@ internal sealed class SystemAppPlatformBoundary(IAppPathProvider paths) : IAppPl
 
     public void OpenPath(string path)
     {
+        // With UseShellExecute the shell may satisfy the request through a
+        // process it already owns - Explorer reusing an open window is the
+        // common case - and then returns no Process handle even though the
+        // path opened. A null result therefore carries no failure information;
+        // a genuine failure such as a missing path surfaces as Win32Exception.
         _ = Process.Start(new ProcessStartInfo
         {
             FileName = path,
             UseShellExecute = true
-        }) ?? throw new InvalidOperationException($"Unable to open {path}.");
+        });
     }
 
     public void StartUpdate(string downloadedExePath, string targetExePath, string expectedSha256) =>
