@@ -137,7 +137,7 @@ If the output says Windows cannot safely access SQLite through a WSL UNC path:
 If sync reports `Skipped locked rollout files`:
 
 - treat the sync as mostly successful
-- explain that the active session still holds one or more rollout files open
+- explain that an active session either still holds one or more rollout files open, or appended to one while it was being scanned
 - tell the user to rerun `codex-provider sync` after that session ends if they want a full rewrite
 
 If `switch <provider-id>` fails because the provider is missing:

@@ -83,6 +83,13 @@ public static class TextFormatter
                 : $"Backup created at: {result.CreatedAt:O}");
         }
 
+        if (!string.IsNullOrWhiteSpace(result.BackupInventoryWarning))
+        {
+            lines.Add(IsChinese(language)
+                ? $"备份清单警告: {result.BackupInventoryWarning}"
+                : $"Backup inventory warning: {result.BackupInventoryWarning}");
+        }
+
         return string.Join(Environment.NewLine, lines);
     }
 

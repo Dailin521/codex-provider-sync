@@ -245,6 +245,14 @@ public sealed class RestoreResult
     public required string TargetProvider { get; init; }
     public DateTimeOffset? CreatedAt { get; init; }
     public int ChangedSessionFiles { get; init; }
+
+    /// <summary>
+    /// Set when the restore itself succeeded but refreshing the backup
+    /// directory inventory afterwards did not. The restored state is already
+    /// authoritative; only the recorded size and file count in metadata.json
+    /// may be stale.
+    /// </summary>
+    public string? BackupInventoryWarning { get; init; }
 }
 
 public sealed class BackupStorageInfo

@@ -635,7 +635,20 @@ public sealed class CodexSyncService
             await journal.CommittedAsync();
             transactionCommitted = true;
             await journal.DisposeAsync();
-            await _backupService.RefreshMetadataInventoryAsync(backupDir);
+            // The transaction is already committed and every target is on disk.
+            // Refreshing the backup inventory only corrects the recorded size
+            // and file count in metadata.json, so a failure here must degrade
+            // to a warning: throwing would report a successful sync as failed
+            // and skip the automatic backup pruning below.
+            string? backupInventoryWarning = null;
+            try
+            {
+                await _backupService.RefreshMetadataInventoryAsync(backupDir);
+            }
+            catch (Exception error)
+            {
+                backupInventoryWarning = $"Backup inventory refresh failed: {error.Message}";
+            }
             long mutationDurationMs = ElapsedMilliseconds(mutationStarted);
             if (FaultInjector is not null)
             {
@@ -658,6 +671,7 @@ public sealed class CodexSyncService
                 autoPruneWarning = $"Automatic backup cleanup failed: {error.Message}";
             }
             long pruneDurationMs = ElapsedMilliseconds(pruneStarted);
+            autoPruneWarning = JoinBackupWarnings(backupInventoryWarning, autoPruneWarning);
 
             SyncResult result = new()
             {
@@ -1204,8 +1218,27 @@ public sealed class CodexSyncService
             preparation.BackupDirectory,
             codexHome,
             result.TargetProvider);
-        await _backupService.RefreshMetadataInventoryAsync(preparation.BackupDirectory);
-        return result;
+        // The restore and its journal marker are already durable. Refreshing the
+        // inventory only corrects metadata.json bookkeeping, so surface a
+        // failure as a warning instead of reporting a completed restore as
+        // failed.
+        try
+        {
+            await _backupService.RefreshMetadataInventoryAsync(preparation.BackupDirectory);
+            return result;
+        }
+        catch (Exception error)
+        {
+            return new RestoreResult
+            {
+                CodexHome = result.CodexHome,
+                BackupDir = result.BackupDir,
+                TargetProvider = result.TargetProvider,
+                CreatedAt = result.CreatedAt,
+                ChangedSessionFiles = result.ChangedSessionFiles,
+                BackupInventoryWarning = $"Backup inventory refresh failed: {error.Message}"
+            };
+        }
     }
 
     private async Task<RestorePreparation> PrepareRestoreAsync(
@@ -1497,6 +1530,15 @@ public sealed class CodexSyncService
 
     private static long ElapsedMilliseconds(long started) =>
         (long)Math.Round(Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+
+    private static string? JoinBackupWarnings(string? first, string? second)
+    {
+        string[] parts = new[] { first, second }
+            .Where(static part => !string.IsNullOrWhiteSpace(part))
+            .Select(static part => part!.Trim())
+            .ToArray();
+        return parts.Length == 0 ? null : string.Join(" | ", parts);
+    }
 
     private async Task<CodexStorageLayout> PrepareStorageAsync(
         string codexHome,

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Diagnostics;
 using Microsoft.Data.Sqlite;
 
@@ -1595,6 +1596,67 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
+    public async Task CollectSessionChanges_ReportsLockedInsteadOfAborting_WhenRolloutChangesDuringScan()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string movingPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        string stablePath = fixture.RolloutPath("sessions", "rollout-b.jsonl");
+        await fixture.WriteRolloutAsync(movingPath, "thread-a", "apigather");
+        await fixture.WriteRolloutAsync(stablePath, "thread-b", "apigather");
+
+        // Emulate an active Codex session appending to its own rollout inside the
+        // window between the digest fold and the post-scan snapshot.
+        SessionRolloutService service = new()
+        {
+            ScanFaultInjector = async scannedPath =>
+            {
+                if (string.Equals(scannedPath, movingPath, StringComparison.Ordinal))
+                {
+                    await File.AppendAllTextAsync(
+                        scannedPath,
+                        "{\"timestamp\":\"2026-03-19T00:00:01.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"assistant_message\",\"message\":\"live\"}}\n");
+                }
+            }
+        };
+
+        SessionChangeCollection collected = await service.CollectSessionChangesAsync(
+            fixture.CodexHome,
+            "openai",
+            skipLockedReads: true);
+
+        Assert.Contains(movingPath, collected.LockedPaths);
+        Assert.DoesNotContain(movingPath, collected.Changes.Select(static change => change.Path));
+        Assert.Contains(stablePath, collected.Changes.Select(static change => change.Path));
+
+        // The rest of the corpus is still rewritten; only the live rollout waits.
+        SessionApplyResult applyResult = await service.ApplySessionChangesAsync(collected.Changes);
+        Assert.Equal(1, applyResult.AppliedCount);
+        Assert.Empty(applyResult.SkippedPaths);
+        Assert.Contains("\"model_provider\":\"apigather\"", await File.ReadAllTextAsync(movingPath));
+        Assert.Contains("\"model_provider\":\"openai\"", await File.ReadAllTextAsync(stablePath));
+    }
+
+    [Fact]
+    public async Task CollectSessionChanges_Throws_WhenRolloutChangesDuringScanWithoutSkipLockedReads()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string movingPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutAsync(movingPath, "thread-a", "apigather");
+
+        SessionRolloutService service = new()
+        {
+            ScanFaultInjector = async scannedPath => await File.AppendAllTextAsync(
+                scannedPath,
+                "{\"timestamp\":\"2026-03-19T00:00:01.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"assistant_message\",\"message\":\"live\"}}\n")
+        };
+
+        await Assert.ThrowsAsync<CoreWritePlanStaleException>(() =>
+            service.CollectSessionChangesAsync(fixture.CodexHome, "openai", skipLockedReads: false));
+    }
+
+    [Fact]
     public async Task ApplySessionChanges_RewritesFile_WhenRolloutIsUnchanged()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
@@ -1811,6 +1873,58 @@ public sealed class CoreIntegrationTests
         Assert.Equal(1, result.AutoPruneResult!.DeletedCount);
         Assert.Equal(AppConstants.DefaultBackupRetentionCount, result.AutoPruneResult.RemainingCount);
         Assert.True(string.IsNullOrWhiteSpace(result.AutoPruneWarning));
+    }
+
+    [Fact]
+    public async Task RunSync_SucceedsWithWarningAndStillPrunes_WhenInventoryRefreshFailsAfterCommit()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-a", "apigather");
+        await fixture.WriteStateDbAsync([("thread-a", "apigather", false)]);
+
+        for (int index = 0; index < AppConstants.DefaultBackupRetentionCount; index += 1)
+        {
+            await fixture.WriteBackupAsync(
+                $"20240101T0000{index:00}000Z",
+                ("note.txt", $"backup-{index}"));
+        }
+
+        // Break the inventory refresh that runs immediately after the journal
+        // commit. The transaction is durable by then, so the sync must report
+        // success with a warning rather than failing.
+        CodexSyncService service = new();
+        service.FaultInjector = (point, _, _) =>
+        {
+            if (point == "before_transaction_commit")
+            {
+                // The backup directory this transaction owns is the only one
+                // still carrying a journal file. Keep the namespace so it stays a
+                // managed backup for the prune pass, but make the version
+                // unreadable so only the inventory refresh fails.
+                string activeBackupDir = Directory
+                    .GetDirectories(fixture.BackupRoot())
+                    .Single(dir => File.Exists(Path.Combine(dir, FileTransactionJournal.FileName)));
+                string metadataPath = Path.Combine(activeBackupDir, "metadata.json");
+                JsonNode metadata = JsonNode.Parse(File.ReadAllText(metadataPath))!;
+                metadata["version"] = 99;
+                File.WriteAllText(metadataPath, metadata.ToJsonString());
+            }
+
+            return Task.CompletedTask;
+        };
+
+        SyncResult result = await service.RunSyncAsync(fixture.CodexHome);
+
+        Assert.NotNull(result.AutoPruneResult);
+        Assert.Equal(1, result.AutoPruneResult!.DeletedCount);
+        Assert.Contains("Backup inventory refresh failed", result.AutoPruneWarning);
+
+        // The mutation itself still landed.
+        Assert.Contains("\"model_provider\":\"openai\"", await File.ReadAllTextAsync(sessionPath));
+        Assert.Equal("openai", await ReadProviderAsync(fixture.StateDbPath(), "thread-a"));
+        Assert.Empty(await FileTransactionJournal.FindPendingAsync(fixture.CodexHome));
     }
 
     [Fact]

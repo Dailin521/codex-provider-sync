@@ -644,7 +644,16 @@ async function runSyncCore({
       await faultInjector?.({ point: "before_transaction_commit", completedCount: completedTargets.length });
       await commitJournalWithReconciliation(journal, faultInjector);
       transactionCommitted = true;
-      await refreshBackupInventory(backupDir);
+      // The transaction is committed and every target is on disk. Refreshing the
+      // inventory only corrects the recorded size and file count in
+      // metadata.json, so a failure must degrade to a warning: throwing would
+      // report a successful sync as failed and skip the pruning below.
+      let backupInventoryWarning = null;
+      try {
+        await refreshBackupInventory(backupDir);
+      } catch (inventoryError) {
+        backupInventoryWarning = `Backup inventory refresh failed: ${inventoryError instanceof Error ? inventoryError.message : String(inventoryError)}`;
+      }
       await faultInjector?.({ point: "after_transaction_commit", completedCount: completedTargets.length });
       let autoPruneResult = null;
       let autoPruneWarning = null;
@@ -664,6 +673,10 @@ async function runSyncCore({
         deletedCount: autoPruneResult?.deletedCount ?? 0,
         warning: autoPruneWarning
       });
+      autoPruneWarning = [backupInventoryWarning, autoPruneWarning]
+        .filter((part) => typeof part === "string" && part.trim().length > 0)
+        .map((part) => part.trim())
+        .join(" | ") || null;
       const result = {
         codexHome,
         sqliteHome: storage.sqliteHome,
@@ -1013,7 +1026,17 @@ export async function runRestore({
       allowSqliteHomeRelocation
     });
     await markBackupTransactionRolledBack(normalizedBackupDir);
-    await refreshBackupInventory(normalizedBackupDir);
+    // The restore and its journal marker are already durable. Refreshing the
+    // inventory only corrects metadata.json bookkeeping, so surface a failure as
+    // a warning instead of reporting a completed restore as failed.
+    try {
+      await refreshBackupInventory(normalizedBackupDir);
+    } catch (inventoryError) {
+      return {
+        ...result,
+        backupInventoryWarning: `Backup inventory refresh failed: ${inventoryError instanceof Error ? inventoryError.message : String(inventoryError)}`
+      };
+    }
     return result;
   } finally {
     await releaseLock();

@@ -13,6 +13,13 @@ public sealed class SessionRolloutService
     private const string StatusOnlyProvider = "__status_only__";
     internal Func<string, SessionChange, Task>? ApplyFaultInjector { get; set; }
 
+    /// <summary>
+    /// Test seam invoked after a rollout's content digest is folded but before
+    /// its post-scan snapshot is taken, so a test can deterministically mutate
+    /// the file inside that window.
+    /// </summary>
+    internal Func<string, Task>? ScanFaultInjector { get; set; }
+
     public async Task<SessionChangeCollection> CollectSessionChangesAsync(
         string codexHome,
         string targetProvider,
@@ -94,6 +101,10 @@ public sealed class SessionRolloutService
                         collectFingerprint: providerMayChange);
                     contentScanPasses += 1;
                     modelScanFiles += collectModels ? 1 : 0;
+                    if (ScanFaultInjector is not null)
+                    {
+                        await ScanFaultInjector(rolloutPath);
+                    }
                 }
                 catch (Exception error) when (skipLockedReads && IsRolloutFileBusyError(error))
                 {
@@ -139,6 +150,19 @@ public sealed class SessionRolloutService
                     FileSnapshot snapshot = GetFileSnapshot(rolloutPath);
                     if (contentScan.ContentFingerprint is not null && snapshot != scanStart)
                     {
+                        // The rollout grew or was touched while we were folding
+                        // its content digest, so the fingerprint describes a
+                        // state that no longer exists and must not be cached as
+                        // a plan hint. An active Codex session appending to its
+                        // own rollout is the ordinary cause, so report it the
+                        // same way a busy file is reported and keep rewriting
+                        // the rest instead of aborting the whole sync.
+                        if (skipLockedReads)
+                        {
+                            lockedPaths.Add(rolloutPath);
+                            continue;
+                        }
+
                         throw new CoreWritePlanStaleException();
                     }
                     if (providerChanged)
