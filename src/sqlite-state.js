@@ -197,8 +197,14 @@ export function configureSqliteWriteDurability(db) {
 }
 
 function isSqliteBusyError(error) {
-  const message = `${error?.code ?? ""} ${error?.message ?? ""}`.toLowerCase();
-  return message.includes("database is locked") || message.includes("sqlite_busy") || message.includes("busy");
+  const code = String(error?.code ?? "").toUpperCase();
+  const message = String(error?.message ?? "").toLowerCase();
+  return code === "SQLITE_BUSY"
+    || code.startsWith("SQLITE_BUSY_")
+    || code === "SQLITE_LOCKED"
+    || code.startsWith("SQLITE_LOCKED_")
+    || message.includes("database is locked")
+    || message.includes("database table is locked");
 }
 
 function isSqliteMalformedError(error) {
