@@ -46,6 +46,57 @@ public sealed class CoreIntegrationTests
         Assert.Equal("apigather", await ReadProviderAsync(fixture.StateDbPath(), "thread-a"));
         Assert.Equal("apigather", await ReadProviderAsync(fixture.StateDbPath(), "thread-b"));
         Assert.Empty(await FileTransactionJournal.FindPendingAsync(fixture.CodexHome));
+
+        // The rollback appended more journal records after the inventory was
+        // written, so the retained backup must record its real size. Status and
+        // pruning read these cached values without revalidating them.
+        AssertBackupInventoryMatchesDisk(error.BackupDirectory);
+    }
+
+    [Fact]
+    public async Task RunSync_RefreshesRetainedBackupInventory_WhenRollbackCompletes()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        string sessionPath = fixture.RolloutPath("sessions", "rollout-a.jsonl");
+        await fixture.WriteRolloutAsync(sessionPath, "thread-a", "apigather");
+        await fixture.WriteStateDbAsync([("thread-a", "apigather", false)]);
+
+        // Fail the apply so the rollback path runs and the journal appends its
+        // terminal records after metadata.json was already written.
+        CodexSyncService service = new();
+        service.FaultInjector = (point, _, _) =>
+        {
+            if (point == "before_rollout_apply")
+            {
+                throw new IOException("injected apply failure");
+            }
+            return Task.CompletedTask;
+        };
+
+        SyncTransactionException error = await Assert.ThrowsAsync<SyncTransactionException>(
+            () => service.RunSyncAsync(fixture.CodexHome, provider: "openai"));
+
+        // Pin the path this covers: the rollback succeeded, so the journal wrote
+        // its rolledBack record into the retained backup after the inventory was
+        // captured. The recorded size and file count must still match disk.
+        Assert.Equal("complete", error.RollbackStatus);
+        Assert.False(error.RecoveryRequired);
+        AssertBackupInventoryMatchesDisk(error.BackupDirectory);
+    }
+
+    private static void AssertBackupInventoryMatchesDisk(string backupDirectory)
+    {
+        string metadataPath = Path.Combine(backupDirectory, "metadata.json");
+        using JsonDocument document = JsonDocument.Parse(File.ReadAllText(metadataPath));
+        long recordedSize = document.RootElement.GetProperty("sizeBytes").GetInt64();
+        int recordedCount = document.RootElement.GetProperty("fileCount").GetInt32();
+
+        string[] actualFiles = Directory.GetFiles(backupDirectory, "*", SearchOption.AllDirectories);
+        long actualSize = actualFiles.Sum(file => new FileInfo(file).Length);
+
+        Assert.Equal(actualFiles.Length, recordedCount);
+        Assert.Equal(actualSize, recordedSize);
     }
 
     [Fact]

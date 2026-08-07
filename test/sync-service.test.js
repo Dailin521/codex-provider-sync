@@ -492,6 +492,38 @@ test("unfinished journal blocks writes until the bound backup is restored", asyn
   assert.equal(result.targetProvider, "openai");
 });
 
+test("runRestore reports a warning instead of failing when the inventory refresh fails", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");
+  await writeRollout(sessionPath, "thread-a", "apigather");
+  await writeStateDb(codexHome, [
+    { id: "thread-a", model_provider: "apigather", archived: false }
+  ]);
+
+  const synced = await runSync({ codexHome });
+  const backupDir = synced.backupDir;
+
+  // Leave the metadata perfectly readable so the restore itself proceeds, and
+  // fail only the write the post-restore inventory refresh performs: the atomic
+  // writer reopens its staged replacement with the original file's mode, which
+  // a read-only metadata.json makes impossible.
+  const metadataPath = path.join(backupDir, "metadata.json");
+  await fs.chmod(metadataPath, 0o444);
+
+  let result;
+  try {
+    result = await runRestore({ backupDir, codexHome });
+  } finally {
+    await fs.chmod(metadataPath, 0o644);
+  }
+
+  // The restore itself is authoritative and must still be reported as done.
+  assert.equal(result.targetProvider, "openai");
+  assert.match(result.backupInventoryWarning, /Backup inventory refresh failed/);
+  assert.match(await fs.readFile(sessionPath, "utf8"), /"model_provider":"apigather"/);
+});
+
 test("crash recovery restores actually mutated rollout and database from a pending journal", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');

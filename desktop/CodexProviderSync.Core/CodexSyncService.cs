@@ -776,6 +776,7 @@ public sealed class CodexSyncService
                     // Preserve the original and rollback failures when the
                     // journal itself is no longer writable.
                 }
+                await TryRefreshBackupInventoryAsync(backupDir);
                 IReadOnlyList<string> reportedCompletedTargets = BuildReportedCompletedTargets(
                     completedTargets,
                     observedMutatedTargets);
@@ -793,6 +794,7 @@ public sealed class CodexSyncService
                     recoveryRequired: true);
             }
 
+            await TryRefreshBackupInventoryAsync(backupDir);
             IReadOnlyList<string> completedAfterRollback = BuildReportedCompletedTargets(
                 completedTargets,
                 observedMutatedTargets);
@@ -1530,6 +1532,26 @@ public sealed class CodexSyncService
 
     private static long ElapsedMilliseconds(long started) =>
         (long)Math.Round(Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+
+    /// <summary>
+    /// Rewrites the retained backup's recorded size and file count after the
+    /// journal reached a terminal state, so status and pruning do not trust an
+    /// inventory captured before those journal records existed. Used on the
+    /// rollback paths, where the caller is already reporting a failure: a
+    /// bookkeeping problem here must never replace the original error.
+    /// </summary>
+    private async Task TryRefreshBackupInventoryAsync(string backupDir)
+    {
+        try
+        {
+            await _backupService.RefreshMetadataInventoryAsync(backupDir);
+        }
+        catch
+        {
+            // The original sync failure and its rollback details are the
+            // authoritative diagnosis and must reach the caller unchanged.
+        }
+    }
 
     private static string? JoinBackupWarnings(string? first, string? second)
     {

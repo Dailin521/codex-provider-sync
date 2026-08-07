@@ -226,6 +226,70 @@ public sealed class MainFormPresentationTests
         }
     }
 
+    [Fact]
+    public void OpenBackupFolder_ReportsNoError_WhenShellReusesAnExistingProcess()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"codex-provider-ui-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            // Explorer commonly satisfies a folder request through a window it
+            // already owns and then returns no Process handle. The boundary must
+            // treat that as a successful open, not a failure.
+            RecordingPlatformBoundary boundary = new();
+            using MainForm form = new(new ExecutionLogService(root), platformBoundary: boundary);
+            SetField(form, "_currentStatus", StatusWithBackupRoot(root));
+
+            Invoke(form, "OpenBackupFolder");
+
+            Assert.Equal(root, Assert.Single(boundary.OpenedPaths));
+            Assert.DoesNotContain("打开备份目录失败", Field<TextBox>(form, "_logBox").Text);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    // The failure branch of OpenBackupFolder is deliberately not covered here:
+    // its catch reports through MessageBox.Show, which has no injection seam in
+    // MainForm, so a test driving it would block the runner on a modal dialog.
+
+    private static StatusSnapshot StatusWithBackupRoot(string backupRoot) => new()
+    {
+        CodexHome = @"C:\Users\user\.codex",
+        SqliteAccess = new SqliteAccessInfo(true, "windows", null),
+        CurrentProvider = new CurrentProviderInfo("openai", false),
+        ConfiguredProviders = ["openai"],
+        RolloutCounts = new ProviderCounts(),
+        LockedRolloutFiles = [],
+        UnreadableRolloutFiles = [],
+        EncryptedContentCounts = new ProviderCounts(),
+        SqliteCounts = null,
+        BackupRoot = backupRoot,
+        BackupSummary = new BackupSummary { Count = 0, TotalBytes = 0 }
+    };
+
+    private sealed class RecordingPlatformBoundary : IAppPlatformBoundary
+    {
+        public List<string> OpenedPaths { get; } = [];
+
+        public bool UpdatesEnabled => false;
+
+        public string? PickFolder(IWin32Window owner, FolderPickerRequest request) => null;
+
+        public Task<UpdateCheckResult> CheckForUpdateAsync(
+            UpdateService updateService,
+            Version currentVersion,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public void OpenPath(string path) => OpenedPaths.Add(path);
+
+        public void StartUpdate(string downloadedExePath, string targetExePath, string expectedSha256) =>
+            throw new NotSupportedException();
+    }
+
     private static T Field<T>(MainForm form, string name) where T : class
     {
         return typeof(MainForm)

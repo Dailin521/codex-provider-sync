@@ -201,6 +201,20 @@ async function commitJournalWithReconciliation(journal, faultInjector) {
   throw new Error(`Transaction journal did not persist a valid committed terminal state: ${journal.filePath}`);
 }
 
+// Rewrites the retained backup's recorded size and file count after the journal
+// reached a terminal state, so status and pruning do not trust an inventory
+// captured before those journal records existed. Used on the rollback paths,
+// where the caller is already reporting a failure: a bookkeeping problem here
+// must never replace the original error.
+async function tryRefreshBackupInventory(backupDir) {
+  try {
+    await refreshBackupInventory(backupDir);
+  } catch {
+    // The original sync failure and its rollback details are the authoritative
+    // diagnosis and must reach the caller unchanged.
+  }
+}
+
 async function rollbackJournalWithReconciliation(journal, faultInjector) {
   let acknowledgementError = null;
   try {
@@ -810,6 +824,7 @@ async function runSyncCore({
           // Preserve the original and rollback errors even if the journal is
           // no longer writable.
         }
+        await tryRefreshBackupInventory(backupDir);
         const persistedCompletedTargets = journalSnapshot
           ? uniqueResolvedPaths([...getAppliedJournalTargets(journalSnapshot), ...completedTargets])
           : uniqueResolvedPaths(completedTargets);
@@ -828,6 +843,7 @@ async function runSyncCore({
           { rollbackStatus: "incomplete", recoveryRequired: true }
         );
       }
+      await tryRefreshBackupInventory(backupDir);
       const persistedCompletedTargets = journalSnapshot
         ? uniqueResolvedPaths([...getAppliedJournalTargets(journalSnapshot), ...completedTargets])
         : uniqueResolvedPaths(completedTargets);

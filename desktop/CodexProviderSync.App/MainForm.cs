@@ -1079,8 +1079,16 @@ public sealed class MainForm : Form
     {
         string path = _currentStatus?.BackupRoot ?? AppConstants.DefaultBackupRoot(CurrentCodexHome());
         EnsureAutomationPath(path, GuiAutomationCatalog.Ids.OpenBackupDirectory);
-        Directory.CreateDirectory(path);
-        _platformBoundary.OpenPath(path);
+        try
+        {
+            Directory.CreateDirectory(path);
+            _platformBoundary.OpenPath(path);
+        }
+        catch (Exception error)
+        {
+            AppendLog($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 打开备份目录失败: {error}");
+            MessageBox.Show(this, $"无法打开备份目录。{Environment.NewLine}{Environment.NewLine}{error.Message}", Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     private void OpenLogFolder()
