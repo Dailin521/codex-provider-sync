@@ -159,6 +159,7 @@ $planDigest = $planResponse.data.digest
 
 - [Windows GUI 说明](docs/README_GUI_ZH.md)
 - macOS GUI 说明：[中文](docs/README_MAC_GUI_ZH.md) · [English](docs/README_MAC_GUI_EN.md)
+- [v0.4.1 中文发布说明](docs/release-notes/v0.4.1-zh.md)
 - [v0.4.0 中文发布说明](docs/release-notes/v0.4.0-zh.md)
 - [v0.4.0 技术发布说明](docs/RELEASE_NOTES_V0.4.0.md)
 - [更新日志](CHANGELOG.md)

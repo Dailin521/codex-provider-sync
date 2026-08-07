@@ -153,6 +153,7 @@ Before each `sync` or `switch`, the tool creates a backup under:
 
 - [Windows GUI guide](README_GUI_ZH.md)
 - [macOS GUI guide](README_MAC_GUI_EN.md)
+- [v0.4.1 Chinese release announcement](release-notes/v0.4.1-zh.md)
 - [v0.4.0 Chinese release announcement](release-notes/v0.4.0-zh.md)
 - [v0.4.0 technical release notes](RELEASE_NOTES_V0.4.0.md)
 - [Changelog](../CHANGELOG.md)
