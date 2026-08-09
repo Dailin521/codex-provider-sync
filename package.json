@@ -1,6 +1,6 @@
 {
   "name": "codex-provider-sync",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Synchronize Codex session provider metadata across rollout files and SQLite state.",
   "type": "module",
   "files": [
@@ -8,16 +8,21 @@
     "CHANGELOG.md",
     "AGENTS.md",
     "docs",
-    "src"
+    "src",
+    "web/dist"
   ],
   "bin": {
-    "codex-provider": "./src/cli.js"
+    "codex-provider": "src/cli.js"
   },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "web:build": "vite build --config web/vite.config.js",
+    "web:start": "node src/cli.js web",
+    "publish:npm": "node scripts/publish-npm.js",
+    "prepare": "npm run web:build"
   },
   "engines": {
-    "node": ">=16.0.0"
+    "node": ">=16.20.2"
   },
   "keywords": [
     "codex",
@@ -28,5 +33,16 @@
   "license": "MIT",
   "optionalDependencies": {
     "better-sqlite3": "8.7.0"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^4.5.14"
+  },
+  "overrides": {
+    "node-releases": "2.0.18"
   }
 }
