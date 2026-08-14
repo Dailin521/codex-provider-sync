@@ -161,6 +161,10 @@ dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.cs
 
 Maintainers can publish the CLI/Web package independently of Windows GUI releases. See the [npm publishing guide (Chinese)](NPM_PUBLISHING.md).
 
+## Acknowledgements
+
+Thanks to [@tangquanwei](https://github.com/tangquanwei) for proposing and implementing the Local Web UI, contributing history browsing and the multilingual documentation foundation, and bringing it into v0.5.0 through [PR #80](https://github.com/Dailin521/codex-provider-sync/pull/80). See [PR #73](https://github.com/Dailin521/codex-provider-sync/pull/73) for the original proposal.
+
 ## License
 
 [MIT](../LICENSE)

@@ -161,6 +161,10 @@ dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.cs
 
 유지관리자는 Windows GUI Release와 별도로 CLI/Web 패키지를 게시할 수 있습니다. [npm 게시 안내(중국어)](NPM_PUBLISHING.md)를 참조하세요.
 
+## 감사의 말
+
+로컬 Web UI를 제안하고 구현했으며, 채팅 기록 탐색과 다국어 문서의 기반을 기여하고 [PR #80](https://github.com/Dailin521/codex-provider-sync/pull/80)을 통해 v0.5.0에 도입한 [@tangquanwei](https://github.com/tangquanwei)에게 감사드립니다. 최초 제안은 [PR #73](https://github.com/Dailin521/codex-provider-sync/pull/73)을 참조하세요.
+
 ## License
 
 MIT

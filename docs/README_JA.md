@@ -161,6 +161,10 @@ dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.cs
 
 メンテナーは、Windows GUI の Release とは独立して CLI/Web パッケージを公開できます。[npm 公開ガイド（中国語）](NPM_PUBLISHING.md)を参照してください。
 
+## 謝辞
+
+ローカル Web UI を提案・実装し、履歴閲覧機能と多言語ドキュメントの基盤を提供するとともに、[PR #80](https://github.com/Dailin521/codex-provider-sync/pull/80) を通じて v0.5.0 に導入した [@tangquanwei](https://github.com/tangquanwei) に感謝します。最初の提案は [PR #73](https://github.com/Dailin521/codex-provider-sync/pull/73) を参照してください。
+
 ## License
 
 MIT
