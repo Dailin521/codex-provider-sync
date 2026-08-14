@@ -45,6 +45,7 @@ jobs:
           dotnet-version: "10.0.x"
 
       - run: npm ci
+      - run: npm run web:build
       - run: npm test
       - run: dotnet build CodexProviderSync.sln --configuration Release
       - run: dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj --configuration Release --no-build

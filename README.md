@@ -9,7 +9,9 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Community](https://img.shields.io/badge/community-LINUX%20DO-2ea043.svg)](https://linux.do/)
 
-[下载 Windows GUI](https://github.com/Dailin521/codex-provider-sync/releases/latest) · 中文 · [English](docs/README_EN.md) · [日本語](docs/README_JA.md) · [한국어](docs/README_KO.md)
+[**下载 Windows GUI**](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [使用本地 Web UI（需 CLI）](#本地-web-ui)
+
+语言：**中文** · [English](docs/README_EN.md) · [日本語](docs/README_JA.md) · [한국어](docs/README_KO.md)
 
 </div>
 
@@ -23,9 +25,9 @@
 
 | 场景 | 推荐入口 |
 | --- | --- |
-| Windows 桌面 | [原生 Windows GUI](#windows-gui) |
-| macOS 桌面 | [本地 Web UI](#本地-web-ui)；[原生 GUI 构建说明](docs/README_MAC_GUI_ZH.md) |
-| 需要浏览器界面或跨平台使用 | [本地 Web UI](#本地-web-ui) |
+| Windows 桌面 | [下载 Windows GUI](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [使用说明](#windows-gui) |
+| macOS 桌面 | [本地 Web UI（需 CLI）](#本地-web-ui)；[原生 GUI 构建说明](docs/README_MAC_GUI_ZH.md) |
+| 需要浏览器界面或跨平台使用 | [本地 Web UI（需 CLI）](#本地-web-ui) |
 | 脚本、CI 或 WSL | [CLI](#cli) |
 
 ### Windows GUI
@@ -42,9 +44,10 @@
 
 ### 本地 Web UI
 
-已安装 CLI 后运行：
+本地 Web UI 由 CLI 提供。安装 Node.js `16.20.2+` 后，安装本项目官方 npm 包并启动：
 
 ```bash
+npm install -g @dailin521/codex-provider-sync
 codex-provider web
 ```
 
@@ -58,16 +61,16 @@ codex-provider web --port 8792     # 指定端口
 codex-provider web --reset-access  # 重新配对浏览器
 ```
 
-Web UI 默认只监听 `127.0.0.1`，并自动打开浏览器完成配对。存储路径由 Profile 管理，写操作需要确认；Profile 发生变化时必须重新确认。
+Web UI 默认只监听 `127.0.0.1`，并自动打开浏览器完成配对。存储路径由页面顶部的存储配置（Profile）管理，写操作需要确认；存储配置发生变化时必须重新确认。
 
 [Web UI 完整说明](docs/README_WEB_UI_ZH.md)
 
 ### CLI
 
-CLI 支持 Node.js `16.20.2+`。未安装时运行：
+CLI 支持 Node.js `16.20.2+`。安装 Node.js 后，安装本项目官方 npm 包：
 
 ```bash
-npm install -g git+https://github.com/Dailin521/codex-provider-sync.git
+npm install -g @dailin521/codex-provider-sync
 codex-provider status
 codex-provider sync
 ```
@@ -80,6 +83,8 @@ codex-provider sync
 | `codex-provider restore <backup-dir>` | 恢复备份 |
 | `codex-provider watch` | 监听配置和 SQLite 变化 |
 
+`switch` 默认会在目标 Provider section 定义了 `model` 时同步根级 `model`。使用 `--keep-root-model` 保留当前值，或使用 `--model <name>` 显式指定。
+
 SQLite Home 解析顺序：`--sqlite-home` → `config.toml` 根级 `sqlite_home` → `CODEX_SQLITE_HOME` → `<Codex Home>/sqlite`。只有默认布局会回退到 `<Codex Home>/state_5.sqlite`。
 
 ## 当前架构
@@ -90,8 +95,9 @@ flowchart LR
     WebServer --> NodeService["Node Service"]
     CLI["Node CLI"] --> NodeService
 
-    DesktopGUI["Desktop GUI<br/>Windows / macOS"] --> Application[".NET Application"]
+    WindowsGUI["Windows GUI"] --> Application[".NET Application"]
     Application --> DotNetCore[".NET Core"]
+    MacGUI["macOS GUI"] --> DotNetCore
 
     NodeService --> Storage["Codex Storage"]
     DotNetCore --> Storage
@@ -103,12 +109,12 @@ flowchart LR
 ```
 
 - Web UI 和 CLI 使用同一套 Node 服务逻辑。
-- Windows 和 macOS GUI 通过 Application 层调用 .NET Core。
-- 两条路径处理相同的配置、rollout、SQLite 和备份安全边界。
+- Windows GUI 通过 Application 层调用 .NET Core；macOS GUI 当前直接调用 .NET Core。
+- Node 服务和 .NET Core 处理相同的配置、rollout、SQLite 和备份安全边界。
 
 ## 安全边界
 
-- 每次 `sync` / `switch` 前备份到 `~/.codex/backups_state/provider-sync/<timestamp>`。
+- 每次 `sync` / `switch` 前备份到 `<Codex Home>/backups_state/provider-sync/<timestamp>`；使用默认 Codex Home 时即为 `~/.codex/backups_state/provider-sync/<timestamp>`。
 - 不修改消息正文、会话标题、认证信息、`auth.json` 或 `updated_at`。
 - SQLite 被占用时，请关闭 Codex、Codex App 和 app-server 后重试。
 - 活跃会话锁住 rollout 时，其余文件继续处理；结束会话后再次同步即可。
@@ -134,6 +140,8 @@ npm run web:start
 npm test
 dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj
 ```
+
+npm 包发布维护流程见 [npm 发布维护指南](docs/NPM_PUBLISHING.md)。CLI/Web 包可以独立发布，不要求同步创建 Windows GUI Release。
 
 ## License
 
