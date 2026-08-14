@@ -242,6 +242,8 @@ h2 { margin-bottom: 5px; font-size: 16px; letter-spacing: -.014em; }
 .toast--success > div > svg { color: var(--success); }
 .toast--error { border-left-color: var(--danger); }
 .toast--error > div > svg { color: var(--danger); }
+.toast--warning { border-left-color: var(--warning); }
+.toast--warning > div > svg { color: var(--warning); }
 .spin { animation: spin 1s linear infinite; }
 
 .history-toolbar { display: grid; grid-template-columns: minmax(220px, 1.7fr) repeat(3, minmax(130px, 1fr)); gap: 9px; margin-bottom: 14px; }

@@ -39,6 +39,20 @@ function normalizeProfile({ id, name, codexHome, sqliteHome }) {
   };
 }
 
+function profileRevision(profile) {
+  const canonical = JSON.stringify({
+    id: profile.id,
+    name: profile.name,
+    codexHome: profile.codexHome,
+    sqliteHome: profile.sqliteHome
+  });
+  return crypto.createHash("sha256").update(canonical, "utf8").digest("base64url");
+}
+
+function publicProfile(profile) {
+  return { ...profile, revision: profileRevision(profile) };
+}
+
 async function assertDirectoryWhenPresent(value, label) {
   if (!value) {
     return;
@@ -112,7 +126,11 @@ export class WebUiStateStore {
   }
 
   listProfiles() {
-    return this.state.profiles.map((profile) => ({ ...profile }));
+    return this.state.profiles.map(publicProfile);
+  }
+
+  hasProfile(profileId) {
+    return this.state.profiles.some((profile) => profile.id === profileId);
   }
 
   getProfile(profileId = DEFAULT_PROFILE_ID) {
@@ -120,7 +138,7 @@ export class WebUiStateStore {
     if (!profile) {
       throw new Error(`Unknown storage profile: ${profileId}`);
     }
-    return { ...profile };
+    return publicProfile(profile);
   }
 
   async saveProfile(input) {
@@ -137,7 +155,7 @@ export class WebUiStateStore {
       this.state.profiles.push(profile);
     }
     await this.persist();
-    return { ...profile };
+    return publicProfile(profile);
   }
 
   async deleteProfile(profileId) {
@@ -201,11 +219,12 @@ export function createMemoryWebUiState(defaultProfile) {
   let credentialHashes = [];
   let profiles = [normalizedDefault];
   return {
-    listProfiles: () => profiles.map((profile) => ({ ...profile })),
+    listProfiles: () => profiles.map(publicProfile),
+    hasProfile: (profileId) => profiles.some((profile) => profile.id === profileId),
     getProfile(profileId = DEFAULT_PROFILE_ID) {
       const profile = profiles.find((entry) => entry.id === profileId);
       if (!profile) throw new Error(`Unknown storage profile: ${profileId}`);
-      return { ...profile };
+      return publicProfile(profile);
     },
     async saveProfile(input) {
       const profile = normalizeProfile(input);
@@ -213,7 +232,7 @@ export function createMemoryWebUiState(defaultProfile) {
       const index = profiles.findIndex((entry) => entry.id === profile.id);
       if (index >= 0) profiles[index] = profile;
       else profiles.push(profile);
-      return { ...profile };
+      return publicProfile(profile);
     },
     async deleteProfile(profileId) {
       if (profileId === DEFAULT_PROFILE_ID) throw new Error("The default storage profile cannot be deleted.");
@@ -237,4 +256,4 @@ export function createMemoryWebUiState(defaultProfile) {
   };
 }
 
-export { DEFAULT_PROFILE_ID, hashSecret };
+export { DEFAULT_PROFILE_ID, hashSecret, profileRevision };

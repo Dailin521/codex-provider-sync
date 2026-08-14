@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import {
   PairingRequiredError,
+  ProfileRevisionError,
   apiRequest,
   forgetThisBrowser,
   getActivity,
@@ -12,6 +13,7 @@ import {
 } from "./api.js";
 import { usePersistentState } from "./hooks.js";
 import { createLatestRequestGate, scheduleDebounced } from "./history-requests.js";
+import { captureProfileOperation, dedupeHistorySessions, operationToast, restoreRelocationState } from "./operation-state.js";
 import { createProfileRefresh, storagePayload } from "./profile-refresh.js";
 import {
   ActivityIcon,
@@ -386,7 +388,8 @@ function ExecutionPanel({ status, providers, selectedProvider, setSelectedProvid
   const selectedOption = providers.find((provider) => provider.id === selectedProvider);
   const switchAllowed = selectedOption?.configured;
   const validManualProvider = /^[A-Za-z0-9_.-]+$/.test(manualProvider.trim());
-  const executeDisabled = busy || !selectedProvider || status?.sqliteAccess?.supported === false || status?.sqliteCounts?.unreadable;
+  const sqliteUnsupported = status?.sqliteAccess?.supported === false;
+  const executeDisabled = busy || !selectedProvider || sqliteUnsupported || status?.sqliteCounts?.unreadable;
 
   return (
     <section className="execution-panel">
@@ -441,6 +444,8 @@ function ExecutionPanel({ status, providers, selectedProvider, setSelectedProvid
         </fieldset>
       ) : null}
 
+      {sqliteUnsupported ? <div className="modal-callout modal-callout--danger"><AlertIcon size={18} /><div><strong>此 SQLite 布局仅供诊断</strong><span>{status?.sqliteAccess?.message || "当前 SQLite 路径不可由 Web UI 安全写入，因此已禁用执行同步。"}</span></div></div> : null}
+
       <div className="backup-assurance"><CheckIcon size={16} /><span>修改前创建 metadata v2 备份，并记录 SQLite Home</span></div>
       <button
         className="button button--primary execute-button"
@@ -455,7 +460,7 @@ function ExecutionPanel({ status, providers, selectedProvider, setSelectedProvid
   );
 }
 
-function RecentBackups({ backups, onViewAll, onRestore }) {
+function RecentBackups({ backups, onViewAll, onRestore, restoreDisabled }) {
   return (
     <section className="recent-backups">
       <div className="section-title-row section-title-row--compact">
@@ -468,7 +473,7 @@ function RecentBackups({ backups, onViewAll, onRestore }) {
             <div className="backup-icon"><HistoryIcon size={17} /></div>
             <div className="backup-main"><strong>{formatDate(backup.metadata.createdAt)}</strong><span>{backup.metadata.targetProvider} · {backup.metadata.changedSessionFiles ?? 0} 个 rollout</span></div>
             <div className="backup-size">{formatBytes(backup.sizeBytes)}</div>
-            <button className="button button--quiet button--compact" type="button" onClick={() => onRestore(backup)}>恢复</button>
+            <button className="button button--quiet button--compact" type="button" disabled={restoreDisabled} title={restoreDisabled ? "当前 SQLite 路径仅供诊断，不能恢复" : undefined} onClick={() => onRestore(backup)}>恢复</button>
           </div>
         ))}
       </div>
@@ -484,7 +489,7 @@ function Overview({ status, backups, providers, selectedProvider, setSelectedPro
       <div className="overview-lower-grid">
         <div className="overview-main-column">
           <ProjectVisibility projects={status?.projectThreadVisibility ?? []} />
-          <RecentBackups backups={backups} onViewAll={() => setView("backups")} onRestore={onRestore} />
+          <RecentBackups backups={backups} onViewAll={() => setView("backups")} onRestore={onRestore} restoreDisabled={status?.sqliteAccess?.supported === false} />
         </div>
         <ExecutionPanel
           status={status}
@@ -503,6 +508,7 @@ function Overview({ status, backups, providers, selectedProvider, setSelectedPro
 
 function BackupsView({ backups, status, busy, onRestore, onPrune }) {
   const [keepCount, setKeepCount] = usePersistentState("cps.web.keepCount", 5);
+  const restoreDisabled = status?.sqliteAccess?.supported === false;
   return (
     <div className="view-content">
       <section className="page-intro">
@@ -517,7 +523,7 @@ function BackupsView({ backups, status, busy, onRestore, onPrune }) {
               <div className="backup-date"><strong>{formatDate(backup.metadata.createdAt)}</strong><span>{backup.id}</span></div>
               <div className="backup-facts"><span>Provider <strong>{backup.metadata.targetProvider}</strong></span><span>Rollout <strong>{backup.metadata.changedSessionFiles ?? 0}</strong></span><span>SQLite <strong>{backup.metadata.sqliteDbFiles?.length ? "已包含" : "未包含"}</strong></span></div>
               <div className="backup-source"><span>SQLite Home</span><code>{backup.metadata.sqliteHome ?? "旧版 metadata 未记录"}</code></div>
-              <div className="backup-row-actions"><span>{formatBytes(backup.sizeBytes)}</span><button className="button button--secondary button--compact" type="button" disabled={busy} onClick={() => onRestore(backup)}>恢复</button></div>
+              <div className="backup-row-actions"><span>{formatBytes(backup.sizeBytes)}</span><button className="button button--secondary button--compact" type="button" disabled={busy || restoreDisabled} title={restoreDisabled ? "当前 SQLite 路径仅供诊断，不能恢复" : undefined} onClick={() => onRestore(backup)}>恢复</button></div>
             </article>
           ))}
         </div>
@@ -568,6 +574,21 @@ function HistoryView({ profileId, status }) {
   const projects = [...new Set((status?.projectThreadVisibility ?? []).map((item) => item.root))];
 
   useEffect(() => {
+    listRequest.current.cancel();
+    detailRequest.current.cancel();
+    setQuery("");
+    setCommittedQuery("");
+    setProvider("");
+    setProject("");
+    setArchived("all");
+    setPage(1);
+    setHistory({ sessions: [], total: 0, pageSize: 50, hasNextPage: false });
+    setSelectedId("");
+    setDetail(null);
+    setError("");
+  }, [profileId]);
+
+  useEffect(() => {
     return scheduleDebounced(() => setCommittedQuery(query), 300, window);
   }, [query]);
 
@@ -577,8 +598,9 @@ function HistoryView({ profileId, status }) {
     try {
       const payload = await getHistory({ ...storagePayload(profileId), page, pageSize: 50, query: committedQuery, provider, project, archived }, { signal: controller.signal });
       if (!listRequest.current.isLatest(sequence)) return;
-      setHistory(payload.history);
-      setSelectedId((current) => payload.history.sessions.some((session) => session.id === current) ? current : payload.history.sessions[0]?.id ?? "");
+      const nextHistory = { ...payload.history, sessions: dedupeHistorySessions(payload.history?.sessions) };
+      setHistory(nextHistory);
+      setSelectedId((current) => nextHistory.sessions.some((session) => session.id === current) ? current : nextHistory.sessions[0]?.id ?? "");
     } catch (requestError) {
       if (requestError.name !== "AbortError" && listRequest.current.isLatest(sequence)) setError(requestError.message);
     } finally {
@@ -662,21 +684,27 @@ function ExecuteModal({ plan, status, selectedProvider, onCancel, onConfirm }) {
   );
 }
 
-function RestoreModal({ backup, status, onCancel, onConfirm }) {
+function RestoreModal({ backup, status, profile, onCancel, onConfirm }) {
   const [restoreConfig, setRestoreConfig] = useState(false);
   const [restoreDatabase, setRestoreDatabase] = useState(true);
   const [restoreSessions, setRestoreSessions] = useState(true);
   const targetSqliteHome = getTargetSqliteHome(status);
-  const relocates = restoreDatabase && backup.metadata.version >= 2 && backup.metadata.sqliteHome && !pathsEqual(backup.metadata.sqliteHome, targetSqliteHome);
-  const relocationBlocked = relocates && restoreConfig;
+  const relocation = restoreRelocationState({
+    backup,
+    profile,
+    targetSqliteHome,
+    restoreDatabase,
+    restoreConfig,
+    sqliteSupported: status?.sqliteAccess?.supported !== false
+  });
   return (
     <Modal
       title="恢复备份"
       confirmLabel="覆盖当前元数据"
       tone="danger"
       onCancel={onCancel}
-      confirmDisabled={(!restoreConfig && !restoreDatabase && !restoreSessions) || relocationBlocked}
-      onConfirm={() => onConfirm({ restoreConfig, restoreDatabase, restoreSessions, allowSqliteHomeRelocation: Boolean(relocates) })}
+      confirmDisabled={(!restoreConfig && !restoreDatabase && !restoreSessions) || !relocation.canSubmit}
+      onConfirm={() => onConfirm({ restoreConfig, restoreDatabase, restoreSessions, allowSqliteHomeRelocation: relocation.requiresRelocation })}
     >
       <div className="restore-summary"><HistoryIcon size={20} /><div><strong>{formatDate(backup.metadata.createdAt)} · {backup.metadata.targetProvider}</strong><code>{backup.path}</code></div></div>
       <fieldset className="restore-options">
@@ -685,7 +713,8 @@ function RestoreModal({ backup, status, onCancel, onConfirm }) {
         <label><input type="checkbox" checked={restoreDatabase} onChange={(event) => setRestoreDatabase(event.target.checked)} /><span><strong>SQLite 线程数据库</strong><small>恢复 state_5.sqlite 及备份中的 WAL/SHM</small></span></label>
         <label><input type="checkbox" checked={restoreSessions} onChange={(event) => setRestoreSessions(event.target.checked)} /><span><strong>Rollout 元数据</strong><small>恢复 session_meta 和被修改的 turn_context.model</small></span></label>
       </fieldset>
-      {relocates ? <div className={`modal-callout ${relocationBlocked ? "modal-callout--danger" : "modal-callout--warning"}`}><AlertIcon size={18} /><div><strong>SQLite Home 与备份来源不同</strong><span>来源：{backup.metadata.sqliteHome}<br />目标：{targetSqliteHome}<br />{relocationBlocked ? "迁移数据库时不能同时恢复旧 config.toml。" : "确认后数据库将恢复到当前目标位置。"}</span></div></div> : null}
+      {status?.sqliteAccess?.supported === false ? <div className="modal-callout modal-callout--danger"><AlertIcon size={18} /><div><strong>当前 SQLite 路径仅供诊断</strong><span>{status.sqliteAccess.message || "不能从 Web UI 执行恢复。"}</span></div></div> : null}
+      {relocation.requiresRelocation ? <div className={`modal-callout ${relocation.missingExplicitTarget || relocation.configRestoreConflict ? "modal-callout--danger" : "modal-callout--warning"}`}><AlertIcon size={18} /><div><strong>SQLite Home 与备份来源不同</strong><span>来源：{backup.metadata.sqliteHome}<br />目标：{targetSqliteHome}<br />{relocation.missingExplicitTarget ? "当前 Profile 未明确配置 SQLite Home，不能提交数据库迁移恢复。" : relocation.configRestoreConflict ? "迁移数据库时不能同时恢复旧 config.toml。" : "确认后数据库将恢复到当前 Profile 明确配置的目标位置。"}</span></div></div> : null}
       <div className="modal-callout"><AlertIcon size={18} /><div><strong>恢复前请关闭 Codex</strong><span>该操作将覆盖所选的当前元数据；请确认 Codex CLI、App 和 app-server 已关闭。</span></div></div>
     </Modal>
   );
@@ -760,6 +789,7 @@ export default function App() {
         .map((id) => ({ id, sources: ["manual"], configured: false, current: false, manual: true }))
     ];
   }, [status, manualProviders]);
+  const selectedProfile = profiles.find((profile) => profile.id === profileId) ?? null;
 
   const profileRefreshRef = useRef(null);
   if (!profileRefreshRef.current) {
@@ -796,6 +826,27 @@ export default function App() {
     setProfiles(payload.profiles);
     setProfileId((current) => payload.profiles.some((profile) => profile.id === current) ? current : "default");
   }, [setProfileId]);
+
+  const handleProfileConflict = useCallback(async () => {
+    setModal(null);
+    try {
+      await refreshProfiles();
+      await refresh({ quiet: true });
+    } catch {
+      // The user can still retry after the next explicit refresh.
+    }
+    setToast({ tone: "warning", title: "配置已变更，请重新确认", message: "已刷新存储配置和当前状态；未自动重试原操作。" });
+  }, [refresh, refreshProfiles]);
+
+  const openProfileOperation = useCallback((operation) => {
+    const captured = captureProfileOperation(selectedProfile, operation);
+    if (!captured) {
+      setToast({ tone: "warning", title: "配置需要刷新", message: "没有可用的配置版本，请刷新后重新确认操作。" });
+      refreshProfiles().catch(() => {});
+      return;
+    }
+    setModal(captured);
+  }, [refreshProfiles, selectedProfile]);
 
   useEffect(() => {
     let cancelled = false;
@@ -854,18 +905,26 @@ export default function App() {
     setBusy(true);
     setView("activity");
     try {
-      const common = { ...storagePayload(targetProfileId), provider: selectedProvider, keepCount: plan.keepCount };
+      const common = { ...storagePayload(targetProfileId), profileRevision: modal.profileRevision, provider: modal.selectedProvider, keepCount: plan.keepCount };
       const payload = plan.mode === "switch"
         ? await apiRequest("/api/switch", { ...common, model: plan.modelMode === "custom" ? plan.model : undefined, keepRootModel: plan.modelMode === "keep" })
         : await apiRequest("/api/sync", common);
-      setToast({ tone: "success", title: plan.mode === "switch" ? "切换并同步完成" : "同步完成", message: `备份：${payload.result.backupDir}` });
+      setToast(operationToast(payload, {
+        successTitle: plan.mode === "switch" ? "切换并同步完成" : "同步完成",
+        partialTitle: plan.mode === "switch" ? "切换并同步部分完成" : "同步部分完成",
+        message: `备份：${payload.result?.backupDir ?? "已创建"}`
+      }));
       await refresh({ quiet: true });
     } catch (error) {
+      if (error instanceof ProfileRevisionError) {
+        await handleProfileConflict();
+        return;
+      }
       setToast({ tone: "error", title: "操作失败", message: error.message });
     } finally {
       setBusy(false);
     }
-  }, [modal, profileId, selectedProvider, refresh]);
+  }, [handleProfileConflict, modal, refresh]);
 
   const restore = useCallback(async (options) => {
     const backup = modal.backup;
@@ -874,15 +933,19 @@ export default function App() {
     setBusy(true);
     setView("activity");
     try {
-      await apiRequest("/api/restore", { ...storagePayload(targetProfileId), backupId: backup.id, ...options });
-      setToast({ tone: "success", title: "备份恢复完成", message: backup.id });
+      const payload = await apiRequest("/api/restore", { ...storagePayload(targetProfileId), profileRevision: modal.profileRevision, backupId: backup.id, ...options });
+      setToast(operationToast(payload, { successTitle: "备份恢复完成", partialTitle: "备份恢复部分完成", message: backup.id }));
       await refresh({ quiet: true });
     } catch (error) {
+      if (error instanceof ProfileRevisionError) {
+        await handleProfileConflict();
+        return;
+      }
       setToast({ tone: "error", title: "恢复失败", message: error.message });
     } finally {
       setBusy(false);
     }
-  }, [modal, profileId, refresh]);
+  }, [handleProfileConflict, modal, refresh]);
 
   const prune = useCallback(async () => {
     const keepCount = modal.keepCount;
@@ -890,37 +953,53 @@ export default function App() {
     setModal(null);
     setBusy(true);
     try {
-      const payload = await apiRequest("/api/prune", { ...storagePayload(targetProfileId), keepCount });
-      setToast({ tone: "success", title: "旧备份清理完成", message: `删除 ${payload.result.deletedCount} 份，释放 ${formatBytes(payload.result.freedBytes)}` });
+      const payload = await apiRequest("/api/prune", { ...storagePayload(targetProfileId), profileRevision: modal.profileRevision, keepCount });
+      setToast(operationToast(payload, {
+        successTitle: "旧备份清理完成",
+        partialTitle: "旧备份清理部分完成",
+        message: `删除 ${payload.result?.deletedCount ?? 0} 份，释放 ${formatBytes(payload.result?.freedBytes)}`
+      }));
       await refresh({ quiet: true });
     } catch (error) {
+      if (error instanceof ProfileRevisionError) {
+        await handleProfileConflict();
+        return;
+      }
       setToast({ tone: "error", title: "备份清理失败", message: error.message });
     } finally {
       setBusy(false);
     }
-  }, [modal, profileId, refresh]);
+  }, [handleProfileConflict, modal, refresh]);
 
   const closeToast = useCallback(() => setToast(null), []);
   const saveProfile = useCallback(async (profile) => {
     try {
-      const payload = await apiRequest("/api/profiles/save", profile);
+      const payload = await apiRequest("/api/profiles/save", profile.revision ? { ...profile, profileRevision: profile.revision } : profile);
       setModal(null);
       await refreshProfiles();
       setProfileId(payload.profile.id);
       setToast({ tone: "success", title: "存储配置已保存", message: payload.profile.name });
     } catch (error) {
+      if (error instanceof ProfileRevisionError) {
+        await handleProfileConflict();
+        return;
+      }
       setToast({ tone: "error", title: "配置保存失败", message: error.message });
     }
-  }, [refreshProfiles, setProfileId]);
+  }, [handleProfileConflict, refreshProfiles, setProfileId]);
   const deleteProfile = useCallback(async () => {
     try {
-      await apiRequest("/api/profiles/delete", { profileId });
+      await apiRequest("/api/profiles/delete", { profileId, profileRevision: selectedProfile?.revision });
       setProfileId("default");
       await refreshProfiles();
     } catch (error) {
+      if (error instanceof ProfileRevisionError) {
+        await handleProfileConflict();
+        return;
+      }
       setToast({ tone: "error", title: "配置删除失败", message: error.message });
     }
-  }, [profileId, refreshProfiles, setProfileId]);
+  }, [handleProfileConflict, profileId, refreshProfiles, selectedProfile?.revision, setProfileId]);
   const forgetBrowser = useCallback(async () => {
     await forgetThisBrowser().catch(() => {});
     setAccessState("required");
@@ -945,13 +1024,13 @@ export default function App() {
       <Sidebar view={view} setView={setView} status={status} onForgetBrowser={forgetBrowser} />
       <main className="main-area">
       <StorageBar profiles={profiles} profileId={profileId} setProfileId={setProfileId} status={status} onAddProfile={() => setModal({ type: "profile" })} onDeleteProfile={deleteProfile} onRefresh={() => refresh()} loading={loading} profileSwitchDisabled={busy || Boolean(modal)} />
-        {view === "overview" ? <Overview status={status} backups={backups} providers={providers} selectedProvider={selectedProvider} setSelectedProvider={setSelectedProvider} onAddManualProvider={addManualProvider} onRemoveManualProvider={removeManualProvider} onExecute={(plan) => setModal({ type: "execute", plan, profileId })} onRestore={(backup) => setModal({ type: "restore", backup, profileId })} setView={setView} busy={busy} loading={loading} /> : null}
+        {view === "overview" ? <Overview status={status} backups={backups} providers={providers} selectedProvider={selectedProvider} setSelectedProvider={setSelectedProvider} onAddManualProvider={addManualProvider} onRemoveManualProvider={removeManualProvider} onExecute={(plan) => openProfileOperation({ type: "execute", plan, selectedProvider })} onRestore={(backup) => openProfileOperation({ type: "restore", backup })} setView={setView} busy={busy} loading={loading} /> : null}
         {view === "history" ? <HistoryView profileId={profileId} status={status} /> : null}
-        {view === "backups" ? <BackupsView backups={backups} status={status} busy={busy} onRestore={(backup) => setModal({ type: "restore", backup, profileId })} onPrune={(keepCount) => setModal({ type: "prune", keepCount, profileId })} /> : null}
+        {view === "backups" ? <BackupsView backups={backups} status={status} busy={busy} onRestore={(backup) => openProfileOperation({ type: "restore", backup })} onPrune={(keepCount) => openProfileOperation({ type: "prune", keepCount })} /> : null}
         {view === "activity" ? <ActivityView activity={activity} activeOperation={activeOperation} /> : null}
       </main>
       {modal?.type === "execute" ? <ExecuteModal plan={modal.plan} status={status} selectedProvider={selectedProvider} onCancel={() => setModal(null)} onConfirm={execute} /> : null}
-      {modal?.type === "restore" ? <RestoreModal backup={modal.backup} status={status} onCancel={() => setModal(null)} onConfirm={restore} /> : null}
+      {modal?.type === "restore" ? <RestoreModal backup={modal.backup} status={status} profile={modal.profile} onCancel={() => setModal(null)} onConfirm={restore} /> : null}
       {modal?.type === "prune" ? <PruneModal keepCount={modal.keepCount} backups={backups} onCancel={() => setModal(null)} onConfirm={prune} /> : null}
       {modal?.type === "profile" ? <ProfileModal onCancel={() => setModal(null)} onConfirm={saveProfile} /> : null}
       <Toast toast={toast} onClose={closeToast} />

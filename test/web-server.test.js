@@ -46,7 +46,15 @@ async function startFixture(services = {}, options = {}) {
     "utf8"
   );
   const stateStore = options.stateStore ?? createMemoryWebUiState({ codexHome: "/tmp/.codex" });
-  const handle = createWebUiServer({ webRoot: root, services, stateStore, now: options.now, pairingTtlMs: options.pairingTtlMs });
+  const handle = createWebUiServer({
+    webRoot: root,
+    services,
+    stateStore,
+    now: options.now,
+    pairingTtlMs: options.pairingTtlMs,
+    platform: options.platform,
+    environment: options.environment
+  });
   await new Promise((resolve, reject) => {
     handle.server.once("error", reject);
     handle.server.listen(0, "127.0.0.1", resolve);
@@ -77,11 +85,15 @@ async function startFixture(services = {}, options = {}) {
 }
 
 async function api(handle, pathname, body = {}, credential, { originHeader = handle.origin, hostHeader } = {}) {
+  const profileRevisionEndpoints = new Set(["/api/sync", "/api/switch", "/api/restore", "/api/prune"]);
+  const profile = profileRevisionEndpoints.has(pathname) && body.profileId && !Object.hasOwn(body, "profileRevision")
+    ? handle.stateStore.getProfile(body.profileId)
+    : null;
   return request({
     origin: handle.origin,
     pathname,
     method: "POST",
-    body,
+    body: profile ? { ...body, profileRevision: profile.revision } : body,
     hostHeader,
     headers: {
       Origin: originHeader,
@@ -329,7 +341,7 @@ test("startWebUi refuses to reuse an instance launched with a different SQLite h
     // Launching with a different SQLite home must not silently reuse instance A.
     await assert.rejects(
       startWebUi({ port: 0, openBrowser: false, codexHome: root, sqliteHome: homeB, stateFile, runtimeFile, webRoot }),
-      /already running.*SQLite home/
+      /resolved Codex Home/
     );
 
     // The rejection must leave the original instance and its runtime descriptor intact.
@@ -416,6 +428,215 @@ test("startWebUi reports occupied ports clearly and handles unavailable or headl
   } finally {
     await handle?.close();
     await new Promise((resolve) => occupied.close(resolve));
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Web UI operations require a current profile revision and preserve a captured profile snapshot", async () => {
+  let syncCalls = 0;
+  const handle = await startFixture({ runSync: async () => { syncCalls += 1; return {}; } });
+  try {
+    const first = await handle.pair();
+    const second = await handle.pair();
+    await api(handle, "/api/profiles/save", {
+      profileId: "work",
+      name: "Work",
+      codexHome: "/tmp/work-before"
+    }, first.credential);
+    const stale = handle.stateStore.getProfile("work");
+    await api(handle, "/api/profiles/save", {
+      profileId: "work",
+      name: "Work updated",
+      codexHome: "/tmp/work-after",
+      profileRevision: stale.revision
+    }, second.credential);
+
+    const changed = await request({
+      origin: handle.origin,
+      pathname: "/api/sync",
+      method: "POST",
+      body: { profileId: "work", profileRevision: stale.revision, provider: "openai", keepCount: 5 },
+      headers: { Origin: handle.origin, "X-Codex-Provider-Device": first.credential }
+    });
+    assert.equal(changed.status, 409);
+    assert.equal(changed.payload.code, "PROFILE_CHANGED");
+    assert.equal(changed.payload.profile.codexHome, path.resolve("/tmp/work-after"));
+    assert.equal(syncCalls, 0);
+
+    const required = await request({
+      origin: handle.origin,
+      pathname: "/api/sync",
+      method: "POST",
+      body: { profileId: "work", provider: "openai", keepCount: 5 },
+      headers: { Origin: handle.origin, "X-Codex-Provider-Device": first.credential }
+    });
+    assert.equal(required.status, 409);
+    assert.equal(required.payload.code, "PROFILE_REVISION_REQUIRED");
+    assert.equal(syncCalls, 0);
+  } finally {
+    await handle.close();
+  }
+});
+
+test("Web UI profile save and delete reject missing or stale revisions without changing the profile", async () => {
+  const handle = await startFixture();
+  try {
+    const { credential } = await handle.pair();
+    await api(handle, "/api/profiles/save", {
+      profileId: "work",
+      name: "Work",
+      codexHome: "/tmp/work-before"
+    }, credential);
+    const initial = handle.stateStore.getProfile("work");
+
+    const missingSaveRevision = await api(handle, "/api/profiles/save", {
+      profileId: "work",
+      name: "Should not overwrite",
+      codexHome: "/tmp/work-missing"
+    }, credential);
+    assert.equal(missingSaveRevision.status, 409);
+    assert.equal(missingSaveRevision.payload.code, "PROFILE_REVISION_REQUIRED");
+    assert.equal(handle.stateStore.getProfile("work").codexHome, path.resolve("/tmp/work-before"));
+
+    await api(handle, "/api/profiles/save", {
+      profileId: "work",
+      name: "Work updated",
+      codexHome: "/tmp/work-after",
+      profileRevision: initial.revision
+    }, credential);
+    const missingDeleteRevision = await api(handle, "/api/profiles/delete", {
+      profileId: "work"
+    }, credential);
+    assert.equal(missingDeleteRevision.status, 409);
+    assert.equal(missingDeleteRevision.payload.code, "PROFILE_REVISION_REQUIRED");
+    assert.equal(handle.stateStore.hasProfile("work"), true);
+
+    const staleDelete = await api(handle, "/api/profiles/delete", {
+      profileId: "work",
+      profileRevision: initial.revision
+    }, credential);
+    assert.equal(staleDelete.status, 409);
+    assert.equal(staleDelete.payload.code, "PROFILE_CHANGED");
+    assert.equal(handle.stateStore.hasProfile("work"), true);
+
+    const current = handle.stateStore.getProfile("work");
+    const deleted = await api(handle, "/api/profiles/delete", {
+      profileId: "work",
+      profileRevision: current.revision
+    }, credential);
+    assert.equal(deleted.status, 200);
+    assert.equal(handle.stateStore.hasProfile("work"), false);
+  } finally {
+    await handle.close();
+  }
+});
+
+test("Web UI marks skipped locked rollout files as a partial operation outcome", async () => {
+  const handle = await startFixture({
+    readConfigText: async () => 'model = "gpt-5"\n',
+    readRootModelFromConfigText: () => "gpt-5",
+    runSync: async () => ({ skippedLockedRolloutFiles: ["rollout-active.jsonl"] })
+  });
+  try {
+    const { credential } = await handle.pair();
+    const response = await api(handle, "/api/sync", { profileId: "default", provider: "openai", keepCount: 5 }, credential);
+    assert.equal(response.status, 200);
+    assert.equal(response.payload.result.outcome, "partial");
+  } finally {
+    await handle.close();
+  }
+});
+
+test("Web UI restore requires an explicit SQLite Home for relocation and rejects WSL UNC storage", async () => {
+  let restoreCalls = 0;
+  const backups = { backupRoot: "/tmp/.codex/backups_state/provider-sync", backups: [{ id: "known", path: "/tmp/.codex/backups_state/provider-sync/known", metadata: {} }] };
+  const handle = await startFixture({ listBackups: async () => backups, runRestore: async () => { restoreCalls += 1; return {}; } });
+  try {
+    const { credential } = await handle.pair();
+    const relocation = await api(handle, "/api/restore", {
+      profileId: "default",
+      backupId: "known",
+      restoreDatabase: true,
+      allowSqliteHomeRelocation: true
+    }, credential);
+    assert.equal(relocation.status, 400);
+    assert.match(relocation.payload.error, /explicit SQLite Home target/);
+    assert.equal(restoreCalls, 0);
+  } finally {
+    await handle.close();
+  }
+
+  const base = createMemoryWebUiState({ codexHome: "/tmp/.codex" });
+  const wslStore = {
+    ...base,
+    getProfile(profileId) {
+      return { ...base.getProfile(profileId), sqliteHome: "\\\\wsl.localhost\\Ubuntu\\home\\user\\.codex\\sqlite" };
+    }
+  };
+  const wslHandle = await startFixture({ runSync: async () => { restoreCalls += 1; return {}; } }, { stateStore: wslStore, platform: "win32" });
+  try {
+    const { credential } = await wslHandle.pair();
+    const rejected = await api(wslHandle, "/api/sync", { profileId: "default", provider: "openai", keepCount: 5 }, credential);
+    assert.equal(rejected.status, 400);
+    assert.match(rejected.payload.error, /Windows cannot safely access SQLite through the WSL UNC path/);
+    assert.equal(restoreCalls, 0);
+  } finally {
+    await wslHandle.close();
+  }
+});
+
+test("startWebUi reuses only a matching effective storage identity and replaces dead descriptors", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-provider-sync-runtime-identity-"));
+  const webRoot = path.join(root, "web");
+  const stateFile = path.join(root, "state.json");
+  const runtimeFile = path.join(root, "runtime.json");
+  const homeA = path.join(root, "sqlite-a");
+  const homeB = path.join(root, "sqlite-b");
+  await fs.mkdir(webRoot);
+  await fs.writeFile(path.join(webRoot, "index.html"), "<!doctype html><title>fixture</title>");
+  let first;
+  try {
+    first = await startWebUi({ port: 0, openBrowser: false, codexHome: root, stateFile, runtimeFile, webRoot, environment: { CODEX_SQLITE_HOME: homeA }, platform: "linux" });
+    const descriptor = JSON.parse(await fs.readFile(runtimeFile, "utf8"));
+    assert.equal(descriptor.codexHome, path.resolve(root));
+    assert.equal(descriptor.sqliteHome, path.resolve(homeA));
+
+    const reused = await startWebUi({ port: 0, openBrowser: false, codexHome: root, stateFile, runtimeFile, webRoot, environment: { CODEX_SQLITE_HOME: homeA }, platform: "linux" });
+    assert.equal(reused.reused, true);
+    await assert.rejects(
+      startWebUi({ port: 0, openBrowser: false, codexHome: root, stateFile, runtimeFile, webRoot, environment: { CODEX_SQLITE_HOME: homeB }, platform: "linux" }),
+      /resolved Codex Home/
+    );
+    await first.close();
+    first = null;
+
+    await fs.writeFile(runtimeFile, `${JSON.stringify({ port: 9, internalSecret: "stale", codexHome: path.resolve(root), sqliteHome: path.resolve(homeA) })}\n`);
+    first = await startWebUi({ port: 0, openBrowser: false, codexHome: root, stateFile, runtimeFile, webRoot, environment: { CODEX_SQLITE_HOME: homeA }, platform: "linux" });
+    assert.notEqual(JSON.parse(await fs.readFile(runtimeFile, "utf8")).port, 9);
+  } finally {
+    await first?.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("runtime identity ignores path case only for win32", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-provider-sync-runtime-case-"));
+  const webRoot = path.join(root, "web");
+  const stateFile = path.join(root, "state.json");
+  const runtimeFile = path.join(root, "runtime.json");
+  await fs.mkdir(webRoot);
+  await fs.writeFile(path.join(webRoot, "index.html"), "<!doctype html><title>fixture</title>");
+  let first;
+  try {
+    first = await startWebUi({ port: 0, openBrowser: false, codexHome: root, sqliteHome: path.join(root, "Sqlite"), stateFile, runtimeFile, webRoot, platform: "win32" });
+    const win32Reuse = await startWebUi({ port: 0, openBrowser: false, codexHome: root, sqliteHome: path.join(root, "sqlite"), stateFile, runtimeFile, webRoot, platform: "win32" });
+    assert.equal(win32Reuse.reused, true);
+    await assert.rejects(
+      startWebUi({ port: 0, openBrowser: false, codexHome: root, sqliteHome: path.join(root, "sqlite"), stateFile, runtimeFile, webRoot, platform: "linux" }),
+      /resolved Codex Home/
+    );
+  } finally {
+    await first?.close();
     await fs.rm(root, { recursive: true, force: true });
   }
 });

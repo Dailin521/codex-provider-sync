@@ -10,6 +10,7 @@ import { readConfigText, readRootModelFromConfigText } from "./config-file.js";
 import { defaultCodexHome } from "./constants.js";
 import { getHistorySession, listHistory } from "./history.js";
 import { getStatus, runPruneBackups, runRestore, runSwitch, runSync } from "./service.js";
+import { resolveStorageLayout } from "./storage-layout.js";
 import { createMemoryWebUiState, WebUiStateStore } from "./web-state.js";
 
 const DEFAULT_PORT = 8791;
@@ -109,9 +110,46 @@ function resolveStorageProfile(input, stateStore) {
   const profile = stateStore.getProfile(profileId);
   return {
     profileId: profile.id,
+    profileRevision: profile.revision,
     codexHome: profile.codexHome,
     ...(profile.sqliteHome ? { sqliteHome: profile.sqliteHome } : {})
   };
+}
+
+function captureProfileRevision(profileId, suppliedRevision, stateStore, response) {
+  const profile = stateStore.getProfile(profileId);
+  if (typeof suppliedRevision !== "string" || !suppliedRevision) {
+    sendJson(response, 409, {
+      error: "This operation requires the current storage profile revision. Refresh the profile and try again.",
+      code: "PROFILE_REVISION_REQUIRED",
+      profile
+    });
+    return null;
+  }
+  if (suppliedRevision !== profile.revision) {
+    sendJson(response, 409, {
+      error: "The storage profile changed after this operation was prepared. Refresh and confirm again.",
+      code: "PROFILE_CHANGED",
+      profile
+    });
+    return null;
+  }
+  return profile;
+}
+
+function captureStorageProfile(input, stateStore, response) {
+  if (Object.hasOwn(input ?? {}, "codexHome") || Object.hasOwn(input ?? {}, "sqliteHome")) {
+    throw new Error("Storage paths must be selected through a server-managed profileId.");
+  }
+  const profileId = requireString(input?.profileId ?? "default", "profileId", { maxLength: 80 });
+  const profile = captureProfileRevision(profileId, input?.profileRevision, stateStore, response);
+  if (!profile) return null;
+  const snapshot = {
+    profileId: profile.id,
+    codexHome: profile.codexHome,
+    ...(profile.sqliteHome ? { sqliteHome: profile.sqliteHome } : {})
+  };
+  return Object.freeze(snapshot);
 }
 
 function serializeStatus(status) {
@@ -274,7 +312,9 @@ export function createWebUiServer({
   stateStore = createMemoryWebUiState({ codexHome: defaultCodexHome() }),
   internalSecret = randomSecret(),
   pairingTtlMs = PAIRING_TTL_MS,
-  now = () => Date.now()
+  now = () => Date.now(),
+  platform = process.platform,
+  environment = process.env
 } = {}) {
   const api = {
     getStatus: services.getStatus ?? getStatus,
@@ -336,14 +376,41 @@ export function createWebUiServer({
     record("info", `${kind} started`);
     try {
       const result = await operation();
-      record("success", `${kind} completed`);
-      sendJson(response, 200, { result });
+      const outcome = Array.isArray(result?.skippedLockedRolloutFiles) && result.skippedLockedRolloutFiles.length > 0
+        ? "partial"
+        : "success";
+      record(outcome === "partial" ? "warning" : "success", `${kind} completed`);
+      sendJson(response, 200, { result: { ...result, outcome } });
     } catch (error) {
       record("error", `${kind} failed`, error instanceof Error ? error.message : String(error));
       sendError(response, 400, error);
     } finally {
       activeOperation = null;
     }
+  };
+
+  const resolveOperationLayout = async (storage) => {
+    let configText = "";
+    try {
+      configText = await api.readConfigText(path.join(storage.codexHome, "config.toml"));
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    return resolveStorageLayout({
+      codexHome: storage.codexHome,
+      sqliteHome: storage.sqliteHome,
+      configText,
+      env: environment,
+      platform
+    });
+  };
+
+  const assertWebOperationStorage = async (storage, operation) => {
+    const layout = await resolveOperationLayout(storage);
+    if (layout.sqliteAccess.supported === false) {
+      throw new Error(`Cannot ${operation}: ${layout.sqliteAccess.message}`);
+    }
+    return layout;
   };
 
   const server = http.createServer(async (request, response) => {
@@ -407,8 +474,12 @@ export function createWebUiServer({
 
         const body = await readJsonBody(request);
         if (pathname === "/api/profiles/save") {
+          const profileId = requireString(body.profileId, "profileId", { maxLength: 80 });
+          if (stateStore.hasProfile(profileId) && !captureProfileRevision(profileId, body.profileRevision, stateStore, response)) {
+            return;
+          }
           const profile = await stateStore.saveProfile({
-            id: requireString(body.profileId, "profileId", { maxLength: 80 }),
+            id: profileId,
             name: requireString(body.name, "name", { maxLength: 120 }),
             codexHome: requireString(body.codexHome, "codexHome"),
             sqliteHome: requireString(body.sqliteHome, "sqliteHome", { optional: true })
@@ -418,7 +489,9 @@ export function createWebUiServer({
         }
 
         if (pathname === "/api/profiles/delete") {
-          await stateStore.deleteProfile(requireString(body.profileId, "profileId", { maxLength: 80 }));
+          const profileId = requireString(body.profileId, "profileId", { maxLength: 80 });
+          if (!captureProfileRevision(profileId, body.profileRevision, stateStore, response)) return;
+          await stateStore.deleteProfile(profileId);
           sendJson(response, 200, { ok: true });
           return;
         }
@@ -460,8 +533,10 @@ export function createWebUiServer({
         }
 
         if (pathname === "/api/sync") {
+          const storage = captureStorageProfile(body, stateStore, response);
+          if (!storage) return;
           await withOperation("sync", response, async () => {
-            const storage = resolveStorageProfile(body, stateStore);
+            await assertWebOperationStorage(storage, "sync");
             const provider = requireProvider(body.provider);
             const keepCount = requireKeepCount(body.keepCount);
             const configText = await api.readConfigText(path.join(storage.codexHome, "config.toml"));
@@ -478,8 +553,10 @@ export function createWebUiServer({
         }
 
         if (pathname === "/api/switch") {
+          const storage = captureStorageProfile(body, stateStore, response);
+          if (!storage) return;
           await withOperation("switch", response, async () => {
-            const storage = resolveStorageProfile(body, stateStore);
+            await assertWebOperationStorage(storage, "switch");
             const provider = requireProvider(body.provider);
             const keepCount = requireKeepCount(body.keepCount);
             const model = requireString(body.model, "model", { optional: true, maxLength: 500 });
@@ -496,8 +573,10 @@ export function createWebUiServer({
         }
 
         if (pathname === "/api/restore") {
+          const storage = captureStorageProfile(body, stateStore, response);
+          if (!storage) return;
           await withOperation("restore", response, async () => {
-            const storage = resolveStorageProfile(body, stateStore);
+            await assertWebOperationStorage(storage, "restore");
             const backupId = requireString(body.backupId, "backupId", { maxLength: 300 });
             const listed = await api.listBackups(storage.codexHome);
             const backup = listed.backups.find((entry) => entry.id === backupId);
@@ -509,6 +588,9 @@ export function createWebUiServer({
             const restoreSessions = Boolean(body.restoreSessions);
             if (!restoreConfig && !restoreDatabase && !restoreSessions) {
               throw new Error("Select at least one backup content type to restore.");
+            }
+            if (body.allowSqliteHomeRelocation && !storage.sqliteHome) {
+              throw new Error("SQLite Home relocation requires a storage profile with an explicit SQLite Home target.");
             }
             return api.runRestore({
               ...storage,
@@ -523,9 +605,10 @@ export function createWebUiServer({
         }
 
         if (pathname === "/api/prune") {
+          const storage = captureStorageProfile(body, stateStore, response);
+          if (!storage) return;
           await withOperation("prune backups", response, async () => {
-            const { codexHome } = resolveStorageProfile(body, stateStore);
-            return api.runPruneBackups({ codexHome, keepCount: requireKeepCount(body.keepCount, { allowZero: true }) });
+            return api.runPruneBackups({ codexHome: storage.codexHome, keepCount: requireKeepCount(body.keepCount, { allowZero: true }) });
           });
           return;
         }
@@ -593,6 +676,24 @@ function requestExistingPairing({ port, internalSecret, resetAccess }) {
   });
 }
 
+function requestExistingHealth(port) {
+  return new Promise((resolve) => {
+    const request = http.request({
+      hostname: "127.0.0.1",
+      port,
+      path: "/api/health",
+      method: "GET",
+      timeout: 1500
+    }, (response) => {
+      response.resume();
+      resolve(response.statusCode === 200);
+    });
+    request.once("timeout", () => request.destroy());
+    request.once("error", () => resolve(false));
+    request.end();
+  });
+}
+
 async function readRuntimeDescriptor(runtimeFile) {
   try {
     const value = JSON.parse(await fs.readFile(runtimeFile, "utf8"));
@@ -612,24 +713,43 @@ async function removeOwnedRuntimeDescriptor(runtimeFile, internalSecret) {
   }
 }
 
-function normalizeExplicitSqliteHome(value) {
-  return typeof value === "string" && value.trim() ? path.resolve(value.trim()) : null;
+function comparableRuntimePath(value, platform) {
+  return platform === "win32" ? value.toLowerCase() : value;
 }
 
-function comparableSqliteHome(value, platform) {
-  const resolved = normalizeExplicitSqliteHome(value);
-  return resolved && platform === "win32" ? resolved.toLowerCase() : resolved;
+function hasRuntimeIdentity(value) {
+  return typeof value?.codexHome === "string" && typeof value?.sqliteHome === "string";
 }
 
-function sqliteHomeMismatchError(existing, requestedSqliteHome) {
-  const existingLabel = existing.sqliteHome ?? "<default>";
-  const requestedLabel = requestedSqliteHome ?? "<default>";
+function runtimeIdentityMatches(existing, requested, platform) {
+  return comparableRuntimePath(existing.codexHome, platform) === comparableRuntimePath(requested.codexHome, platform)
+    && comparableRuntimePath(existing.sqliteHome, platform) === comparableRuntimePath(requested.sqliteHome, platform);
+}
+
+function runtimeIdentityMismatchError(existing, requested) {
   return new Error(
-    `A Web UI instance is already running on port ${existing.port} with SQLite home "${existingLabel}", `
-    + `but this launch requested "${requestedLabel}". `
-    + "Close the existing Web UI instance and restart with the new --sqlite-home, "
-    + "or relaunch with the same SQLite home to reuse it."
+    `A Web UI instance is already running on port ${existing.port} for Codex Home "${existing.codexHome}" and SQLite Home "${existing.sqliteHome}", `
+    + `but this launch resolved Codex Home "${requested.codexHome}" and SQLite Home "${requested.sqliteHome}". `
+    + "Close the existing Web UI instance and restart with the requested storage identity."
   );
+}
+
+function legacyRuntimeDescriptorError(existing) {
+  return new Error(
+    `A Web UI instance is already running on port ${existing.port}, but its runtime descriptor does not contain the effective Codex Home and SQLite Home. `
+    + "Close that Web UI instance and restart it so the storage identity can be recorded safely."
+  );
+}
+
+async function resolveRuntimeIdentity({ codexHome, sqliteHome, environment, platform }) {
+  let configText = "";
+  try {
+    configText = await readConfigText(path.join(codexHome, "config.toml"));
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  const layout = resolveStorageLayout({ codexHome, sqliteHome, configText, env: environment, platform });
+  return { codexHome: layout.codexHome, sqliteHome: layout.sqliteHome };
 }
 
 export async function startWebUi({
@@ -653,16 +773,20 @@ export async function startWebUi({
     throw new Error(`Web UI build not found at ${webRoot}. Run \"npm run web:build\" first.`);
   });
 
-  const controlCodexHome = path.resolve(codexHome ?? process.env.CODEX_HOME ?? defaultCodexHome());
+  const controlCodexHome = path.resolve(codexHome ?? environment.CODEX_HOME ?? defaultCodexHome());
   const resolvedStateFile = path.resolve(stateFile ?? path.join(controlCodexHome, STATE_FILENAME));
   const resolvedRuntimeFile = path.resolve(runtimeFile ?? path.join(controlCodexHome, RUNTIME_FILENAME));
+  const runtimeIdentity = await resolveRuntimeIdentity({ codexHome: controlCodexHome, sqliteHome, environment, platform });
   const existing = await readRuntimeDescriptor(resolvedRuntimeFile);
   if (existing) {
-    const requestedSqliteHome = comparableSqliteHome(sqliteHome, platform);
-    if (comparableSqliteHome(existing.sqliteHome, platform) !== requestedSqliteHome) {
-      throw sqliteHomeMismatchError(existing, normalizeExplicitSqliteHome(sqliteHome));
-    }
-    try {
+    if (!await requestExistingHealth(existing.port)) {
+      await fs.rm(resolvedRuntimeFile, { force: true }).catch(() => {});
+    } else {
+      if (!hasRuntimeIdentity(existing)) throw legacyRuntimeDescriptorError(existing);
+      if (!runtimeIdentityMatches(existing, runtimeIdentity, platform)) {
+        throw runtimeIdentityMismatchError(existing, runtimeIdentity);
+      }
+      try {
       const pairingToken = await requestExistingPairing({
         port: existing.port,
         internalSecret: existing.internalSecret,
@@ -680,8 +804,9 @@ export async function startWebUi({
         browserOpened,
         close: async () => {}
       };
-    } catch {
-      await fs.rm(resolvedRuntimeFile, { force: true }).catch(() => {});
+      } catch (error) {
+        throw new Error("The existing Web UI instance is alive but could not accept a pairing request. Close it and restart the Web UI.", { cause: error });
+      }
     }
   }
 
@@ -691,7 +816,7 @@ export async function startWebUi({
   });
   await stateStore.initialize({ resetAccess });
   const internalSecret = randomSecret();
-  const handle = createWebUiServer({ webRoot, services, stateStore, internalSecret });
+  const handle = createWebUiServer({ webRoot, services, stateStore, internalSecret, platform, environment });
   try {
     await new Promise((resolve, reject) => {
       handle.server.once("error", reject);
@@ -709,7 +834,7 @@ export async function startWebUi({
   handle.setBaseUrl(url);
   const pairingUrl = `${url}/#pair=${encodeURIComponent(handle.issuePairing())}`;
   await fs.mkdir(path.dirname(resolvedRuntimeFile), { recursive: true });
-  await fs.writeFile(resolvedRuntimeFile, `${JSON.stringify({ port: actualPort, internalSecret, pid: process.pid, sqliteHome: normalizeExplicitSqliteHome(sqliteHome) })}\n`, { encoding: "utf8", mode: 0o600 });
+  await fs.writeFile(resolvedRuntimeFile, `${JSON.stringify({ port: actualPort, internalSecret, pid: process.pid, ...runtimeIdentity })}\n`, { encoding: "utf8", mode: 0o600 });
   await fs.chmod(resolvedRuntimeFile, 0o600).catch(() => {});
   const browserOpened = openBrowser && canOpenLocalUrl(platform, environment)
     ? await openUrl(pairingUrl, platform)

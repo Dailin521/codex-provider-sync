@@ -47,3 +47,43 @@ test("history detail returns only safe messages with a limit", async () => {
     await fs.rm(home, { recursive: true, force: true });
   }
 });
+
+test("history keeps the newest session when rollouts share a thread id", async () => {
+  const { home } = await fixture();
+  try {
+    const archived = path.join(home, "archived_sessions", "2026", "08", "04", "rollout-copy.jsonl");
+    await fs.mkdir(path.dirname(archived), { recursive: true });
+    await fs.writeFile(archived, `${JSON.stringify({ type: "session_meta", payload: { id: "thread-one", title: "新副本", cwd: "/work/demo", model_provider: "openai" } })}\n`, "utf8");
+    const newer = new Date(Date.now() + 1000);
+    await fs.utimes(archived, newer, newer);
+    const result = await listHistory(home, { page: 1, pageSize: 50 });
+    assert.equal(result.total, 1);
+    assert.equal(result.sessions[0].title, "新副本");
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test("history ignores rollout files that disappear before their content is read", async () => {
+  const { home, file } = await fixture();
+  try {
+    await fs.rm(file);
+    const result = await listHistory(home, { page: 1, pageSize: 50 });
+    assert.equal(result.total, 0);
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test("history exposes a stable rollout path id when a session has no thread id", async () => {
+  const { home, file } = await fixture();
+  try {
+    await fs.writeFile(file, `${JSON.stringify({ type: "session_meta", payload: { title: "No thread id", cwd: "/work/demo", model_provider: "openai" } })}\n`, "utf8");
+    const result = await listHistory(home, { page: 1, pageSize: 50 });
+    assert.equal(result.total, 1);
+    assert.equal(result.sessions[0].id, path.resolve(file));
+    assert.equal(result.sessions[0].rolloutPath, path.resolve(file));
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});

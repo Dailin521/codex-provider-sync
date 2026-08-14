@@ -16,7 +16,7 @@
 
 `codex-provider-sync` is a local metadata-consistency tool for Codex. After changing the root `model_provider`, older sessions may still be on disk while rollout files, the SQLite thread index, or project metadata still points to the previous Provider. Codex can then hide those sessions from its list, project view, or `/resume`.
 
-The primary interface is a browser-based Web UI running on localhost. It reuses the same Node.js core service as the CLI and does not reimplement synchronization in the browser.
+For typical Windows users, the native Desktop GUI is the recommended default interface. The browser-based Web UI is an optional local, cross-platform interface for browser-driven interaction. It runs on localhost, is not a hosted site, and does not replace the native Windows GUI. It reuses the same Node.js core service as the CLI and does not reimplement synchronization in the browser.
 
 The tool does not sign you in, manage `auth.json`, switch accounts, or modify message bodies.
 ![alt text](images/README/2026-08-05T03-53-48.708Z.png)
@@ -155,9 +155,9 @@ Before each `sync` or `switch`, a backup is created under:
 - Sessions containing `encrypted_content` may become visible but still fail to continue or compact across Providers/accounts.
 - Windows processes cannot safely operate on SQLite through `\\wsl.localhost\...` or `\\wsl$\...`; use the corresponding Linux path inside WSL.
 
-## Desktop GUI status
+## Desktop GUI
 
-The Desktop GUI is deprecated and is no longer the recommended or primary interface. Existing Windows/macOS builds remain available for compatibility, but new features—especially Chat History—are implemented in the Web UI first.
+For typical Windows users, use the native Desktop GUI first. The local Web UI is available as an optional cross-platform and browser-interaction entry point; it is not a hosted site and does not replace the native Windows GUI. New capabilities may be available in the Web UI while native GUI support continues.
 
 Legacy GUI references:
 

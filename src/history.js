@@ -90,7 +90,7 @@ async function readRollout(filePath, archived) {
       if (!meta && record.type === "session_meta" && record.payload && typeof record.payload === "object") {
         const payload = record.payload;
         meta = {
-          id: typeof payload.id === "string" ? payload.id : null,
+          threadId: typeof payload.id === "string" && payload.id ? payload.id : null,
           title: firstText(payload.title, payload.name),
           cwd: firstText(payload.cwd),
           provider: firstText(payload.model_provider) || "(missing)",
@@ -105,9 +105,20 @@ async function readRollout(filePath, archived) {
     lines.close();
     stream.destroy();
   }
-  if (!meta?.id) return null;
+  if (!meta) return null;
+  const rolloutPath = path.resolve(filePath);
   const updatedAt = messages.at(-1)?.timestamp ?? stat.mtime.toISOString();
-  return { ...meta, updatedAt, archived, messages, messageCount: messages.length, filePath, mtimeMs: stat.mtimeMs };
+  return {
+    ...meta,
+    id: meta.threadId ?? rolloutPath,
+    rolloutPath,
+    updatedAt,
+    archived,
+    messages,
+    messageCount: messages.length,
+    filePath,
+    mtimeMs: stat.mtimeMs
+  };
 }
 
 async function collectHistory(codexHome) {
@@ -115,14 +126,24 @@ async function collectHistory(codexHome) {
   for (const dirName of SESSION_DIRS) {
     const files = await listRolloutFiles(path.join(codexHome, dirName));
     for (const filePath of files) {
-      const session = await readRollout(filePath, dirName === "archived_sessions");
+      let session;
+      try {
+        session = await readRollout(filePath, dirName === "archived_sessions");
+      } catch (error) {
+        if (error?.code === "ENOENT") continue;
+        throw error;
+      }
       if (session) sessions.push(session);
     }
   }
   const byId = new Map();
   for (const session of sessions) {
-    const existing = byId.get(session.id);
-    if (!existing || session.mtimeMs >= existing.mtimeMs) byId.set(session.id, session);
+    const normalizedPath = session.rolloutPath;
+    const key = session.threadId
+      ? `thread:${session.threadId}`
+      : `path:${process.platform === "win32" ? normalizedPath.toLowerCase() : normalizedPath}`;
+    const existing = byId.get(key);
+    if (!existing || session.mtimeMs >= existing.mtimeMs) byId.set(key, session);
   }
   return [...byId.values()].sort((a, b) => Date.parse(b.updatedAt || 0) - Date.parse(a.updatedAt || 0) || b.mtimeMs - a.mtimeMs);
 }
@@ -131,6 +152,7 @@ function publicSession(session) {
   const firstUserMessage = session.messages.find((message) => message.role === "user")?.text ?? "";
   return {
     id: session.id,
+    rolloutPath: session.rolloutPath,
     title: session.title || firstUserMessage.slice(0, 80) || "未命名会话",
     cwd: session.cwd,
     provider: session.provider,
