@@ -4,9 +4,10 @@ Web UI 是现有 CLI 和 Desktop GUI 的浏览器界面。它不会在浏览器�
 
 ## 启动
 
-安装依赖时会自动构建 Web 资源。之后运行：
+Web UI 由 CLI 提供。安装 Node.js `16.20.2+` 后，安装本项目官方 npm 包并启动：
 
 ```bash
+npm install -g @dailin521/codex-provider-sync
 codex-provider web
 ```
 

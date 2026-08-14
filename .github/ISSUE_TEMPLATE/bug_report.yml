@@ -13,8 +13,8 @@ body:
     id: version
     attributes:
       label: codex-provider-sync 版本
-      description: 例如 v0.2.4。GUI 版本请填写 Release 版本；CLI 版本请填写 `npm list -g codex-provider-sync` 或安装来源。
-      placeholder: v0.2.4
+      description: 例如 v0.5.0。GUI 版本请填写 Release 版本；CLI 版本请填写 `npm list -g @dailin521/codex-provider-sync` 或安装来源。
+      placeholder: v0.5.0
     validations:
       required: true
   - type: dropdown

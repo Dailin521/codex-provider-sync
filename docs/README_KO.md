@@ -9,7 +9,9 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
 [![Community](https://img.shields.io/badge/community-LINUX%20DO-2ea043.svg)](https://linux.do/)
 
-[Windows GUI 다운로드](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [中文](../README.md) · [English](README_EN.md) · [日本語](README_JA.md) · 한국어
+[**Windows GUI 다운로드**](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [로컬 Web UI 사용 (CLI 필요)](#로컬-web-ui)
+
+언어: [中文](../README.md) · [English](README_EN.md) · [日本語](README_JA.md) · **한국어**
 
 </div>
 
@@ -21,30 +23,33 @@
 
 ## 빠른 시작
 
+> Windows GUI와 로컬 Web UI의 화면 언어는 현재 중국어 간체만 지원합니다.
+
 | 상황 | 권장 방법 |
 | --- | --- |
-| Windows 데스크톱 | [네이티브 Windows GUI](#windows-gui) |
-| macOS 데스크톱 | [로컬 Web UI](#로컬-web-ui) / [네이티브 GUI 빌드 안내](README_MAC_GUI_EN.md) |
-| 브라우저 UI 또는 크로스 플랫폼 사용 | [로컬 Web UI](#로컬-web-ui) |
+| Windows 데스크톱 | [Windows GUI 다운로드](https://github.com/Dailin521/codex-provider-sync/releases/latest) / [사용 방법](#windows-gui) |
+| macOS 데스크톱 | [로컬 Web UI (CLI 필요)](#로컬-web-ui) / [네이티브 GUI 빌드 안내 (영문)](README_MAC_GUI_EN.md) |
+| 브라우저 UI 또는 크로스 플랫폼 사용 | [로컬 Web UI (CLI 필요)](#로컬-web-ui) |
 | 스크립트, CI 또는 WSL | [CLI](#cli) |
 
 ### Windows GUI
 
 [Releases](https://github.com/Dailin521/codex-provider-sync/releases/latest)에서 `CodexProviderSync.exe`를 다운로드합니다.
 
-1. "새로 고침"을 클릭합니다.
+1. `刷新`(새로 고침)을 클릭합니다.
 2. 대상 Provider를 선택합니다.
-3. "지금 동기화"를 클릭합니다.
+3. `立即同步`(지금 동기화)를 클릭합니다.
 
 프로그램은 코드 서명되지 않았으므로 Windows에서 보안 경고가 표시될 수 있습니다. 이 프로젝트의 Releases에서만 다운로드하세요.
 
-[Windows GUI 전체 안내](README_GUI_ZH.md)
+[Windows GUI 전체 안내 (중국어)](README_GUI_ZH.md)
 
 ### 로컬 Web UI
 
-CLI를 설치한 뒤 실행합니다.
+로컬 Web UI는 CLI에 포함되어 있습니다. Node.js `16.20.2+`를 설치한 다음 이 프로젝트의 공식 npm 패키지를 설치하고 실행하세요.
 
 ```bash
+npm install -g @dailin521/codex-provider-sync
 codex-provider web
 ```
 
@@ -58,16 +63,16 @@ codex-provider web --port 8792     # 포트 지정
 codex-provider web --reset-access  # 브라우저 재페어링
 ```
 
-Web UI는 기본적으로 `127.0.0.1`에서만 수신하며, 브라우저를 자동으로 열어 페어링을 진행합니다. 저장 경로는 Profile로 관리하고 쓰기 작업에는 확인이 필요합니다. Profile이 변경되면 다시 확인해야 합니다.
+Web UI는 기본적으로 `127.0.0.1`에서만 수신하며, 브라우저를 자동으로 열어 페어링을 진행합니다. 저장 경로는 페이지 상단의 저장 구성(Profile)에서 관리합니다. 쓰기 작업에는 확인이 필요하며, 저장 구성이 변경되면 다시 확인해야 합니다.
 
-[Web UI 전체 안내](README_WEB_UI_ZH.md)
+[Web UI 전체 안내 (중국어)](README_WEB_UI_ZH.md)
 
 ### CLI
 
-CLI는 Node.js `16.20.2+`를 지원합니다. 설치하지 않았다면 다음을 실행합니다.
+CLI는 Node.js `16.20.2+`를 지원합니다. Node.js를 설치한 후 이 프로젝트의 공식 npm 패키지를 설치합니다.
 
 ```bash
-npm install -g git+https://github.com/Dailin521/codex-provider-sync.git
+npm install -g @dailin521/codex-provider-sync
 codex-provider status
 codex-provider sync
 ```
@@ -80,6 +85,8 @@ codex-provider sync
 | `codex-provider restore <backup-dir>` | 백업 복원 |
 | `codex-provider watch` | 설정과 SQLite 변경 감시 |
 
+대상 Provider section에 `model`이 정의되어 있으면 `switch`는 기본적으로 루트 수준의 `model`도 업데이트합니다. 현재 값을 유지하려면 `--keep-root-model`, 명시적으로 지정하려면 `--model <name>`을 사용하세요.
+
 SQLite Home 해석 순서: `--sqlite-home` → `config.toml` 루트의 `sqlite_home` → `CODEX_SQLITE_HOME` → `<Codex Home>/sqlite`. 기본 레이아웃에서만 `<Codex Home>/state_5.sqlite`로 대체합니다.
 
 ## 현재 아키텍처
@@ -90,8 +97,9 @@ flowchart LR
     WebServer --> NodeService["Node Service"]
     CLI["Node CLI"] --> NodeService
 
-    DesktopGUI["Desktop GUI<br/>Windows / macOS"] --> Application[".NET Application"]
+    WindowsGUI["Windows GUI"] --> Application[".NET Application"]
     Application --> DotNetCore[".NET Core"]
+    MacGUI["macOS GUI"] --> DotNetCore
 
     NodeService --> Storage["Codex Storage"]
     DotNetCore --> Storage
@@ -103,12 +111,12 @@ flowchart LR
 ```
 
 - Web UI와 CLI는 동일한 Node 서비스 로직을 사용합니다.
-- Windows/macOS GUI는 Application 계층을 통해 .NET Core를 호출합니다.
-- 두 경로는 동일한 설정, rollout, SQLite, 백업 안전 범위를 처리합니다.
+- Windows GUI는 Application 계층을 통해 .NET Core를 호출하고, macOS GUI는 현재 .NET Core를 직접 호출합니다.
+- Node 서비스와 .NET Core는 동일한 설정, rollout, SQLite, 백업 안전 범위를 처리합니다.
 
 ## 안전 범위
 
-- 매 `sync` / `switch` 전 `~/.codex/backups_state/provider-sync/<timestamp>`에 백업합니다.
+- 매 `sync` / `switch` 전 `<Codex Home>/backups_state/provider-sync/<timestamp>`에 백업합니다. 기본 Codex Home에서는 `~/.codex/backups_state/provider-sync/<timestamp>`입니다.
 - 메시지 본문, 세션 제목, 인증 정보, `auth.json`, `updated_at`은 수정하지 않습니다.
 - SQLite가 사용 중이면 Codex, Codex App, app-server를 닫은 뒤 다시 시도하세요.
 - 활성 세션이 rollout을 잠그면 나머지 파일은 계속 처리합니다. 세션 종료 후 다시 동기화하면 됩니다.
@@ -119,11 +127,11 @@ flowchart LR
 
 - [AI / Agent 가이드](../AGENTS.md)
 
-- [Windows GUI](README_GUI_ZH.md)
-- [Web UI](README_WEB_UI_ZH.md)
+- [Windows GUI (중국어)](README_GUI_ZH.md)
+- [Web UI (중국어)](README_WEB_UI_ZH.md)
 - [中文](../README.md) · [English](README_EN.md) · [日本語](README_JA.md)
 - [macOS GUI: 中文](README_MAC_GUI_ZH.md) · [English](README_MAC_GUI_EN.md)
-- [작동 원리](WORKING_PRINCIPLE_ZH.md) · [변경 이력](../CHANGELOG.md) · [기여 안내](../CONTRIBUTING.md)
+- [작동 원리 (중국어)](WORKING_PRINCIPLE_ZH.md) · [변경 이력](../CHANGELOG.md) · [기여 안내](../CONTRIBUTING.md)
 
 ## 개발
 
@@ -134,6 +142,8 @@ npm run web:start
 npm test
 dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj
 ```
+
+유지관리자는 Windows GUI Release와 별도로 CLI/Web 패키지를 게시할 수 있습니다. [npm 게시 안내(중국어)](NPM_PUBLISHING.md)를 참조하세요.
 
 ## License
 

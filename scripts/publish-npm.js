@@ -39,13 +39,31 @@ function parseArgs(argv) {
   return options;
 }
 
-function npmCommand() {
-  return process.platform === "win32" ? "npm.cmd" : "npm";
+function npmInvocation(args) {
+  const candidates = [
+    process.env.npm_execpath?.trim(),
+    path.resolve(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js"),
+    path.resolve(path.dirname(process.execPath), "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+    ...(process.env.PATH ?? "")
+      .split(path.delimiter)
+      .filter(Boolean)
+      .map((directory) => path.resolve(directory.replace(/^"|"$/g, ""), "node_modules", "npm", "bin", "npm-cli.js")),
+  ];
+  const npmCli = candidates.find((candidate) => candidate && fs.existsSync(candidate));
+  if (npmCli) {
+    return { command: process.execPath, args: [npmCli, ...args] };
+  }
+
+  if (process.platform === "win32") {
+    throw new Error("Could not locate npm-cli.js. Run this script through `npm run publish:npm` or repair the Node.js/npm installation.");
+  }
+  return { command: "npm", args };
 }
 
 function runNpm(args, { env = process.env } = {}) {
   console.log(`\n$ npm ${args.map((value) => value === env.NPM_OTP ? "--otp ******" : value).join(" ")}`);
-  const result = spawnSync(npmCommand(), args, { cwd: rootDir, env, stdio: "inherit" });
+  const invocation = npmInvocation(args);
+  const result = spawnSync(invocation.command, invocation.args, { cwd: rootDir, env, stdio: "inherit" });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`npm ${args[0]} failed with exit code ${result.status}.`);
 }
@@ -66,7 +84,7 @@ function main() {
   console.log(`Preparing ${manifest.name}@${manifest.version} for npm.`);
 
   const registryArgs = ["--registry", options.registry];
-  runNpm(["whoami", ...registryArgs]);
+  if (!options.dryRun) runNpm(["whoami", ...registryArgs]);
   runNpm(["run", "web:build"]);
   if (!options.skipTests) runNpm(["test"]);
   runNpm(["pack", "--dry-run", "--json", ...registryArgs]);
