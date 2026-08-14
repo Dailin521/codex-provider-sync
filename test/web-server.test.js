@@ -831,9 +831,20 @@ test("Web UI restore requires an explicit SQLite Home for relocation and rejects
     await handle.close();
   }
 
+  const rawWslUnc = "\\\\wsl.localhost\\Ubuntu\\home\\user\\.codex\\sqlite";
+  const wslCodexHome = await fs.mkdtemp(path.join(os.tmpdir(), "codex-provider-sync-wsl-unc-"));
+  const baseWslStore = createMemoryWebUiState({ codexHome: wslCodexHome });
+  const wslStore = {
+    ...baseWslStore,
+    getProfile(profileId) {
+      return { ...baseWslStore.getProfile(profileId), sqliteHome: rawWslUnc };
+    }
+  };
+  assert.equal(wslStore.getProfile("default").sqliteHome, rawWslUnc);
+
   const wslHandle = await startFixture(
     { runSync: async () => { restoreCalls += 1; return {}; } },
-    { platform: "win32", defaultSqliteHome: "\\\\wsl.localhost\\Ubuntu\\home\\user\\.codex\\sqlite" }
+    { platform: "win32", stateStore: wslStore }
   );
   try {
     const { credential } = await wslHandle.pair();
@@ -843,6 +854,7 @@ test("Web UI restore requires an explicit SQLite Home for relocation and rejects
     assert.equal(restoreCalls, 0);
   } finally {
     await wslHandle.close();
+    await fs.rm(wslCodexHome, { recursive: true, force: true });
   }
 });
 
