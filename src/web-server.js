@@ -191,23 +191,24 @@ function storageRevision(profile, storage, configText, platform) {
 function serializeStatus(status) {
   const rollout = status.rolloutCounts ?? { sessions: {}, archived_sessions: {} };
   const sqlite = status.sqliteCounts;
-  const normalizeCounts = (counts) => Object.fromEntries(
-    Object.entries(counts ?? {}).sort(([left], [right]) => left.localeCompare(right))
-  );
-  const normalizeDistribution = (distribution) => ({
-    sessions: normalizeCounts(distribution?.sessions),
-    archived_sessions: normalizeCounts(distribution?.archived_sessions)
-  });
-  const rolloutJson = JSON.stringify(normalizeDistribution(rollout));
-  const sqliteComparable = sqlite && !sqlite.unreadable
-    ? JSON.stringify(normalizeDistribution(sqlite))
-    : null;
+  const targetProvider = status.currentProvider;
+  const matchesTargetProvider = (distribution) => ["sessions", "archived_sessions"].every((scope) => (
+    Object.entries(distribution?.[scope] ?? {}).every(([provider, count]) => count === 0 || provider === targetProvider)
+  ));
+  const sqliteReadable = Boolean(sqlite && !sqlite.unreadable);
+  const rolloutScanComplete = !status.lockedRolloutFiles?.length;
   return {
     ...status,
     alignment: {
-      aligned: Boolean(sqliteComparable && rolloutJson === sqliteComparable),
-      sqliteReadable: Boolean(sqlite && !sqlite.unreadable),
-      targetProvider: status.currentProvider
+      aligned: Boolean(
+        targetProvider
+        && sqliteReadable
+        && rolloutScanComplete
+        && matchesTargetProvider(rollout)
+        && matchesTargetProvider(sqlite)
+      ),
+      sqliteReadable,
+      targetProvider
     }
   };
 }

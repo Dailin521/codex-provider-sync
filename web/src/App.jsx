@@ -247,7 +247,7 @@ function StatusPanel({ status, loading }) {
         </div>
         <div className={`alignment-state ${aligned ? "alignment-state--success" : "alignment-state--warning"}`}>
           {loading ? <RefreshIcon size={16} className="spin" /> : aligned ? <CheckIcon size={16} /> : <AlertIcon size={16} />}
-          <span>{loading ? "正在检查" : aligned ? "元数据已对齐" : "发现不一致"}</span>
+          <span>{loading ? "正在检查" : aligned ? "Provider 元数据已对齐" : "发现不一致"}</span>
         </div>
       </div>
 

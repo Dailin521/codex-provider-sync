@@ -48,6 +48,43 @@ test("history detail returns only safe messages with a limit", async () => {
   }
 });
 
+test("history prefers canonical user events over response-item bootstrap and duplicate messages", async () => {
+  const { home, file } = await fixture();
+  try {
+    const lines = [
+      { type: "session_meta", timestamp: "2026-08-04T08:00:00.000Z", payload: { id: "thread-one", cwd: "/work/demo", model_provider: "openai" } },
+      { type: "response_item", timestamp: "2026-08-04T08:00:10.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "<recommended_plugins>internal bootstrap</recommended_plugins>" }] } },
+      { type: "response_item", timestamp: "2026-08-04T08:01:00.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "请检查真实标题" }] } },
+      { type: "event_msg", timestamp: "2026-08-04T08:01:00.000Z", payload: { type: "user_message", message: "请检查真实标题" } },
+      { type: "response_item", timestamp: "2026-08-04T08:02:00.000Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "标题已检查。" }] } }
+    ];
+    await fs.writeFile(file, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`, "utf8");
+
+    const list = await listHistory(home, { page: 1, pageSize: 50 });
+    assert.equal(list.sessions[0].title, "请检查真实标题");
+    assert.equal(list.sessions[0].firstUserMessage, "请检查真实标题");
+    assert.equal(list.sessions[0].messageCount, 2);
+
+    const detail = await getHistorySession(home, "thread-one");
+    assert.deepEqual(detail.messages.map(({ role, text }) => ({ role, text })), [
+      { role: "user", text: "请检查真实标题" },
+      { role: "assistant", text: "标题已检查。" }
+    ]);
+
+    const legacyLines = [
+      lines[0],
+      { type: "response_item", timestamp: "2026-08-04T08:01:00.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "旧格式用户消息" }] } },
+      lines.at(-1)
+    ];
+    await fs.writeFile(file, `${legacyLines.map((line) => JSON.stringify(line)).join("\n")}\n`, "utf8");
+    const legacy = await listHistory(home, { page: 1, pageSize: 50 });
+    assert.equal(legacy.sessions[0].firstUserMessage, "旧格式用户消息");
+    assert.equal(legacy.sessions[0].messageCount, 2);
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
 test("history keeps the newest session when rollouts share a thread id", async () => {
   const { home } = await fixture();
   try {

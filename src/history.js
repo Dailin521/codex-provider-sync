@@ -52,18 +52,19 @@ function messageFromRecord(record) {
   if (record.type === "event_msg" && (eventType === "user_message" || eventType === "assistant_message")) {
     const role = eventType === "user_message" ? "user" : "assistant";
     const text = firstText(record.payload?.message, record.payload?.text);
-    return text ? { role, text, timestamp } : null;
+    return text ? { role, text, timestamp, canonicalUser: role === "user" } : null;
   }
 
   for (const key of ["payload", "item", "msg"]) {
     const value = record[key];
     if (!value || typeof value !== "object" || !["user", "assistant"].includes(value.role)) continue;
     const text = firstText(contentText(value.content), value.message, value.text);
-    return text ? { role: value.role, text, timestamp } : null;
+    return text ? { role: value.role, text, timestamp, canonicalUser: false } : null;
   }
   if (record.type === "user_message" || record.type === "assistant_message") {
     const text = firstText(record.message, record.text, record.payload?.message, record.payload?.text);
-    return text ? { role: record.type === "user_message" ? "user" : "assistant", text, timestamp } : null;
+    const role = record.type === "user_message" ? "user" : "assistant";
+    return text ? { role, text, timestamp, canonicalUser: role === "user" } : null;
   }
   return null;
 }
@@ -119,16 +120,20 @@ async function readRollout(filePath, archived) {
     stream.destroy();
   }
   if (!meta) return null;
+  const hasCanonicalUserMessages = messages.some((message) => message.canonicalUser);
+  const visibleMessages = messages
+    .filter((message) => message.role !== "user" || !hasCanonicalUserMessages || message.canonicalUser)
+    .map(({ canonicalUser: _canonicalUser, sequence: _sequence, ...message }, index) => ({ ...message, sequence: index + 1 }));
   const rolloutPath = path.resolve(filePath);
-  const updatedAt = messages.at(-1)?.timestamp ?? stat.mtime.toISOString();
+  const updatedAt = visibleMessages.at(-1)?.timestamp ?? stat.mtime.toISOString();
   return {
     ...meta,
     id: meta.threadId ?? fallbackSessionId(rolloutPath),
     rolloutPath,
     updatedAt,
     archived,
-    messages,
-    messageCount: messages.length,
+    messages: visibleMessages,
+    messageCount: visibleMessages.length,
     filePath,
     mtimeMs: stat.mtimeMs
   };

@@ -148,6 +148,49 @@ function statusFixture(overrides = {}) {
   };
 }
 
+test("status alignment follows the current provider without requiring equal inventory counts", async () => {
+  let currentStatus = statusFixture({
+    currentProvider: "dal",
+    configuredProviders: ["dal", "openai"],
+    rolloutCounts: { sessions: { dal: 949 }, archived_sessions: {} },
+    sqliteCounts: { sessions: { dal: 948 }, archived_sessions: {} }
+  });
+  const handle = await startFixture({ getStatus: async () => currentStatus });
+  try {
+    const paired = await handle.pair();
+    const readAlignment = async () => {
+      const response = await api(handle, "/api/status", { profileId: "default" }, paired.credential);
+      assert.equal(response.status, 200);
+      return response.payload.status.alignment;
+    };
+
+    assert.equal((await readAlignment()).aligned, true);
+
+    currentStatus = {
+      ...currentStatus,
+      sqliteCounts: { sessions: { dal: 947, openai: 1 }, archived_sessions: {} }
+    };
+    assert.equal((await readAlignment()).aligned, false);
+
+    currentStatus = {
+      ...currentStatus,
+      rolloutCounts: { sessions: { openai: 948 }, archived_sessions: {} },
+      sqliteCounts: { sessions: { openai: 948 }, archived_sessions: {} }
+    };
+    assert.equal((await readAlignment()).aligned, false);
+
+    currentStatus = {
+      ...currentStatus,
+      rolloutCounts: { sessions: { dal: 949 }, archived_sessions: {} },
+      sqliteCounts: { sessions: { dal: 948 }, archived_sessions: {} },
+      lockedRolloutFiles: ["C:\\locked-rollout.jsonl"]
+    };
+    assert.equal((await readAlignment()).aligned, false);
+  } finally {
+    await handle.close();
+  }
+});
+
 test("anonymous HTML contains no API or pairing credential and write APIs require pairing", async () => {
   const handle = await startFixture({ getStatus: async () => statusFixture() });
   try {
