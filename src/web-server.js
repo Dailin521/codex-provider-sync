@@ -706,6 +706,7 @@ export function createWebUiServer({
             storage: prepared.storage,
             configText: prepared.configText
           }));
+          status.pathComparisonCaseInsensitive = platform === "win32";
           status.profileId = profile.profileId;
           status.profileRevision = profile.profileRevision;
           status.storageRevision = storageRevision(profile, prepared.storage, platform);

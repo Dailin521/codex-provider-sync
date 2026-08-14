@@ -278,6 +278,7 @@ test("server-managed profiles reject per-operation paths and resolve profileId",
 
     const response = await api(handle, "/api/status", { profileId: "work" }, credential);
     assert.equal(response.status, 200);
+    assert.equal(response.payload.status.pathComparisonCaseInsensitive, process.platform === "win32");
     assert.equal(calls.at(-1).codexHome, path.resolve(workCodexHome));
     assert.equal(calls.at(-1).sqliteHome, path.resolve(workSqliteHome));
   } finally {

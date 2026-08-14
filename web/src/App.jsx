@@ -13,7 +13,7 @@ import {
 } from "./api.js";
 import { usePersistentState } from "./hooks.js";
 import { createLatestRequestGate, scheduleDebounced } from "./history-requests.js";
-import { captureProfileOperation, dedupeHistorySessions, operationToast, restoreRelocationState } from "./operation-state.js";
+import { captureProfileOperation, dedupeHistorySessions, operationToast, resolveRestoreTargetSqliteHome, restoreRelocationState } from "./operation-state.js";
 import { createProfileRefresh, storagePayload } from "./profile-refresh.js";
 import {
   ActivityIcon,
@@ -84,21 +84,6 @@ function SafeMarkdown({ text }) {
     }
     return block.split("\n").map((line, lineIndex, lines) => <React.Fragment key={`line-${index}-${lineIndex}`}>{renderInlineMarkdown(line, `${index}-${lineIndex}`)}{lineIndex < lines.length - 1 ? <br /> : null}</React.Fragment>);
   });
-}
-
-function getTargetSqliteHome(status) {
-  const databasePath = status?.stateDbLocation?.path;
-  if (!databasePath) return status?.sqliteHome ?? "";
-  const separator = databasePath.includes("\\") ? "\\" : "/";
-  const parts = databasePath.split(separator);
-  parts.pop();
-  return parts.join(separator) || separator;
-}
-
-function pathsEqual(left, right) {
-  if (!left || !right) return false;
-  const normalize = (value) => value.replace(/[\\/]+$/, "").replaceAll("\\", "/").toLowerCase();
-  return normalize(left) === normalize(right);
 }
 
 function providersFromStatus(status) {
@@ -688,14 +673,15 @@ function RestoreModal({ backup, status, profile, onCancel, onConfirm }) {
   const [restoreConfig, setRestoreConfig] = useState(false);
   const [restoreDatabase, setRestoreDatabase] = useState(true);
   const [restoreSessions, setRestoreSessions] = useState(true);
-  const targetSqliteHome = getTargetSqliteHome(status);
+  const targetSqliteHome = resolveRestoreTargetSqliteHome(status, backup);
   const relocation = restoreRelocationState({
     backup,
     profile,
     targetSqliteHome,
     restoreDatabase,
     restoreConfig,
-    sqliteSupported: status?.sqliteAccess?.supported !== false
+    sqliteSupported: status?.sqliteAccess?.supported !== false,
+    pathComparisonCaseInsensitive: status?.pathComparisonCaseInsensitive === true
   });
   return (
     <Modal

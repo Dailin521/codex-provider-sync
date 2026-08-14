@@ -50,15 +50,45 @@ export function dedupeHistorySessions(sessions = [], { platform = typeof process
   });
 }
 
-export function restoreRelocationState({ backup, profile, targetSqliteHome, restoreDatabase, restoreConfig, sqliteSupported }) {
+function normalizeStoragePath(value, { caseInsensitive = false } = {}) {
+  const normalized = String(value ?? "").replace(/[\\/]+$/, "").replaceAll("\\", "/");
+  return caseInsensitive ? normalized.toLowerCase() : normalized;
+}
+
+function storagePathsEqual(left, right, options) {
+  return Boolean(left && right && normalizeStoragePath(left, options) === normalizeStoragePath(right, options));
+}
+
+function storageParentPath(value) {
+  const normalized = String(value ?? "").replace(/[\\/]+$/, "");
+  const separatorIndex = Math.max(normalized.lastIndexOf("/"), normalized.lastIndexOf("\\"));
+  if (separatorIndex < 0) return "";
+  if (separatorIndex === 0) return normalized.slice(0, 1);
+  if (separatorIndex === 2 && /^[A-Za-z]:/.test(normalized)) return normalized.slice(0, 3);
+  return normalized.slice(0, separatorIndex);
+}
+
+export function resolveRestoreTargetSqliteHome(status, backup) {
+  const currentDatabasePath = status?.stateDbLocation?.path;
+  if (currentDatabasePath) return storageParentPath(currentDatabasePath);
+  const backupMetadata = backup?.metadata;
+  const comparison = { caseInsensitive: status?.pathComparisonCaseInsensitive === true };
+  if (Number(backupMetadata?.version) >= 2
+      && status?.sqliteHomeSource === "default"
+      && storagePathsEqual(backupMetadata?.sqliteHome, status?.codexHome, comparison)) {
+    return status.codexHome;
+  }
+  return status?.sqliteHome ?? "";
+}
+
+export function restoreRelocationState({ backup, profile, targetSqliteHome, restoreDatabase, restoreConfig, sqliteSupported, pathComparisonCaseInsensitive = false }) {
   const sourceSqliteHome = backup?.metadata?.sqliteHome;
   const explicitSqliteHome = profile?.sqliteHome?.trim() ?? "";
-  const normalize = (value) => String(value ?? "").replace(/[\\/]+$/, "").replaceAll("\\", "/").toLowerCase();
   const requiresRelocation = Boolean(
     restoreDatabase
     && sourceSqliteHome
     && targetSqliteHome
-    && normalize(sourceSqliteHome) !== normalize(targetSqliteHome)
+    && !storagePathsEqual(sourceSqliteHome, targetSqliteHome, { caseInsensitive: pathComparisonCaseInsensitive })
   );
   const missingExplicitTarget = requiresRelocation && !explicitSqliteHome;
   const configRestoreConflict = requiresRelocation && restoreConfig;

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { captureProfileOperation, dedupeHistorySessions, operationToast, restoreRelocationState } from "./operation-state.js";
+import { captureProfileOperation, dedupeHistorySessions, operationToast, resolveRestoreTargetSqliteHome, restoreRelocationState } from "./operation-state.js";
 
 test("captures the profile revision used by a confirmation", () => {
   const profile = { id: "work", revision: "rev-1", sqliteHome: "/data/sqlite" };
@@ -48,6 +48,128 @@ test("requires an explicit profile SQLite home for relocation", () => {
 
   assert.equal(state.missingExplicitTarget, true);
   assert.equal(state.canSubmit, false);
+});
+
+test("restores a missing default legacy-root database to its original candidate", () => {
+  const status = {
+    codexHome: "/home/user/.codex",
+    sqliteHome: "/home/user/.codex/sqlite",
+    sqliteHomeSource: "default",
+    stateDbLocation: null
+  };
+  const backup = { metadata: { version: 2, sqliteHome: "/home/user/.codex" } };
+  const targetSqliteHome = resolveRestoreTargetSqliteHome(status, backup);
+  const state = restoreRelocationState({
+    backup,
+    profile: { id: "default", revision: "rev-1", sqliteHome: "" },
+    targetSqliteHome,
+    restoreDatabase: true,
+    restoreConfig: false,
+    sqliteSupported: true
+  });
+
+  assert.equal(targetSqliteHome, status.codexHome);
+  assert.equal(state.requiresRelocation, false);
+  assert.equal(state.missingExplicitTarget, false);
+  assert.equal(state.canSubmit, true);
+});
+
+test("does not treat an unrelated backup SQLite home as a default legacy candidate", () => {
+  const status = {
+    codexHome: "/home/user/.codex",
+    sqliteHome: "/home/user/.codex/sqlite",
+    sqliteHomeSource: "default",
+    stateDbLocation: null
+  };
+  const backup = { metadata: { version: 2, sqliteHome: "/mnt/other/sqlite" } };
+  const targetSqliteHome = resolveRestoreTargetSqliteHome(status, backup);
+  const state = restoreRelocationState({
+    backup,
+    profile: { id: "default", revision: "rev-1", sqliteHome: "" },
+    targetSqliteHome,
+    restoreDatabase: true,
+    restoreConfig: false,
+    sqliteSupported: true
+  });
+
+  assert.equal(targetSqliteHome, status.sqliteHome);
+  assert.equal(state.requiresRelocation, true);
+  assert.equal(state.missingExplicitTarget, true);
+  assert.equal(state.canSubmit, false);
+});
+
+test("does not enable legacy fallback for a configured SQLite home", () => {
+  const status = {
+    codexHome: "/home/user/.codex",
+    sqliteHome: "/data/configured-sqlite",
+    sqliteHomeSource: "config",
+    stateDbLocation: null
+  };
+  const backup = { metadata: { version: 2, sqliteHome: "/home/user/.codex" } };
+  const targetSqliteHome = resolveRestoreTargetSqliteHome(status, backup);
+  const state = restoreRelocationState({
+    backup,
+    profile: { id: "default", revision: "rev-1", sqliteHome: "" },
+    targetSqliteHome,
+    restoreDatabase: true,
+    restoreConfig: false,
+    sqliteSupported: true
+  });
+
+  assert.equal(targetSqliteHome, status.sqliteHome);
+  assert.equal(state.requiresRelocation, true);
+  assert.equal(state.missingExplicitTarget, true);
+  assert.equal(state.canSubmit, false);
+});
+
+test("does not enable legacy fallback for a CLI SQLite home", () => {
+  const status = {
+    codexHome: "/home/user/.codex",
+    sqliteHome: "/data/cli-sqlite",
+    sqliteHomeSource: "cli",
+    stateDbLocation: null
+  };
+  const backup = { metadata: { version: 2, sqliteHome: "/home/user/.codex" } };
+  const targetSqliteHome = resolveRestoreTargetSqliteHome(status, backup);
+  const state = restoreRelocationState({
+    backup,
+    profile: { id: "default", revision: "rev-1", sqliteHome: "" },
+    targetSqliteHome,
+    restoreDatabase: true,
+    restoreConfig: false,
+    sqliteSupported: true
+  });
+
+  assert.equal(targetSqliteHome, status.sqliteHome);
+  assert.equal(state.requiresRelocation, true);
+  assert.equal(state.missingExplicitTarget, true);
+  assert.equal(state.canSubmit, false);
+});
+
+test("prefers an existing database over the backup legacy candidate", () => {
+  const status = {
+    codexHome: "/home/user/.codex",
+    sqliteHome: "/home/user/.codex/sqlite",
+    sqliteHomeSource: "default",
+    stateDbLocation: { path: "/current/db/state_5.sqlite", source: "sqlite-dir" }
+  };
+  const backup = { metadata: { version: 2, sqliteHome: "/home/user/.codex" } };
+
+  assert.equal(resolveRestoreTargetSqliteHome(status, backup), "/current/db");
+});
+
+test("uses the server platform rule when comparing restore paths", () => {
+  const status = {
+    codexHome: "/Home/User/.codex",
+    sqliteHome: "/Home/User/.codex/sqlite",
+    sqliteHomeSource: "default",
+    stateDbLocation: null,
+    pathComparisonCaseInsensitive: false
+  };
+  const backup = { metadata: { version: 2, sqliteHome: "/home/user/.codex" } };
+
+  assert.equal(resolveRestoreTargetSqliteHome(status, backup), status.sqliteHome);
+  assert.equal(resolveRestoreTargetSqliteHome({ ...status, pathComparisonCaseInsensitive: true }, backup), status.codexHome);
 });
 
 test("deduplicates history by thread id before normalized rollout path", () => {
