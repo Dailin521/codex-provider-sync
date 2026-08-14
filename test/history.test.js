@@ -75,14 +75,17 @@ test("history ignores rollout files that disappear before their content is read"
   }
 });
 
-test("history exposes a stable rollout path id when a session has no thread id", async () => {
+test("history exposes a stable bounded id when a session has no thread id", async () => {
   const { home, file } = await fixture();
   try {
     await fs.writeFile(file, `${JSON.stringify({ type: "session_meta", payload: { title: "No thread id", cwd: "/work/demo", model_provider: "openai" } })}\n`, "utf8");
-    const result = await listHistory(home, { page: 1, pageSize: 50 });
-    assert.equal(result.total, 1);
-    assert.equal(result.sessions[0].id, path.resolve(file));
-    assert.equal(result.sessions[0].rolloutPath, path.resolve(file));
+    const first = await listHistory(home, { page: 1, pageSize: 50 });
+    const second = await listHistory(home, { page: 1, pageSize: 50 });
+    assert.equal(first.total, 1);
+    assert.match(first.sessions[0].id, /^rollout:[A-Za-z0-9_-]{43}$/);
+    assert.equal(first.sessions[0].id, second.sessions[0].id);
+    assert.ok(first.sessions[0].id.length <= 300);
+    assert.equal(first.sessions[0].rolloutPath, path.resolve(file));
   } finally {
     await fs.rm(home, { recursive: true, force: true });
   }

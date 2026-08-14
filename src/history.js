@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
@@ -8,6 +9,18 @@ import { SESSION_DIRS } from "./constants.js";
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 100;
 const DEFAULT_MESSAGE_LIMIT = 200;
+
+function normalizedRolloutPath(rolloutPath) {
+  const absolutePath = path.resolve(rolloutPath);
+  return process.platform === "win32" ? absolutePath.toLowerCase() : absolutePath;
+}
+
+function fallbackSessionId(rolloutPath) {
+  const digest = crypto.createHash("sha256")
+    .update(normalizedRolloutPath(rolloutPath), "utf8")
+    .digest("base64url");
+  return `rollout:${digest}`;
+}
 
 function normalizeText(value) {
   if (typeof value !== "string") return "";
@@ -110,7 +123,7 @@ async function readRollout(filePath, archived) {
   const updatedAt = messages.at(-1)?.timestamp ?? stat.mtime.toISOString();
   return {
     ...meta,
-    id: meta.threadId ?? rolloutPath,
+    id: meta.threadId ?? fallbackSessionId(rolloutPath),
     rolloutPath,
     updatedAt,
     archived,
@@ -138,10 +151,9 @@ async function collectHistory(codexHome) {
   }
   const byId = new Map();
   for (const session of sessions) {
-    const normalizedPath = session.rolloutPath;
     const key = session.threadId
       ? `thread:${session.threadId}`
-      : `path:${process.platform === "win32" ? normalizedPath.toLowerCase() : normalizedPath}`;
+      : `path:${normalizedRolloutPath(session.rolloutPath)}`;
     const existing = byId.get(key);
     if (!existing || session.mtimeMs >= existing.mtimeMs) byId.set(key, session);
   }

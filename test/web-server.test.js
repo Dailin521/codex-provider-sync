@@ -416,6 +416,46 @@ test("Web UI history endpoints delegate through the selected profile", async () 
   }
 });
 
+test("Web UI opens a no-thread-id history session from a rollout path longer than the API id limit", async (t) => {
+  const handle = await startFixture();
+  try {
+    const deepSegments = Array.from({ length: 7 }, (_, index) => `segment-${index}-${"x".repeat(32)}`);
+    const rolloutPath = path.join(handle.root, "sessions", ...deepSegments, "rollout-no-thread-id.jsonl");
+    assert.ok(path.resolve(rolloutPath).length > 300);
+    try {
+      await fs.mkdir(path.dirname(rolloutPath), { recursive: true });
+      await fs.writeFile(rolloutPath, [
+        { type: "session_meta", timestamp: "2026-08-04T08:00:00.000Z", payload: { title: "Long fallback", cwd: "/work/long", model_provider: "openai" } },
+        { type: "event_msg", timestamp: "2026-08-04T08:01:00.000Z", payload: { type: "user_message", message: "Open this session" } }
+      ].map((line) => JSON.stringify(line)).join("\n") + "\n", "utf8");
+    } catch (error) {
+      if (process.platform === "win32" && ["ENAMETOOLONG", "ENOENT"].includes(error?.code)) {
+        t.skip("Windows long-path support is unavailable on this host.");
+        return;
+      }
+      throw error;
+    }
+
+    const { credential } = await handle.pair();
+    const listed = await api(handle, "/api/history", { profileId: "default" }, credential);
+    assert.equal(listed.status, 200);
+    assert.equal(listed.payload.history.total, 1);
+    const [session] = listed.payload.history.sessions;
+    assert.match(session.id, /^rollout:[A-Za-z0-9_-]{43}$/);
+    assert.equal(session.rolloutPath, path.resolve(rolloutPath));
+
+    const detail = await api(handle, "/api/history/session", {
+      profileId: "default",
+      sessionId: session.id
+    }, credential);
+    assert.equal(detail.status, 200);
+    assert.equal(detail.payload.history.session.id, session.id);
+    assert.equal(detail.payload.history.messages[0].text, "Open this session");
+  } finally {
+    await handle.close();
+  }
+});
+
 test("device credentials persist only as hashes and reset invalidates them", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-provider-sync-state-"));
   const filePath = path.join(root, "web-state.json");
