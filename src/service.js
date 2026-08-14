@@ -268,11 +268,17 @@ function buildEncryptedContentWarning(encryptedContentCounts, targetProvider) {
   return `Encrypted content warning: ${total} rollout file(s) contain encrypted_content from provider(s) ${[...riskyProviders].sort().join(", ")}. Visibility metadata can be synchronized to ${targetProvider}, but continuing or compacting those histories may fail with invalid_encrypted_content. Return to the original provider/account or start a new session if you need reliable continuation.`;
 }
 
-export async function getStatus({ codexHome: explicitCodexHome, sqliteHome, platform } = {}) {
-  const codexHome = normalizeCodexHome(explicitCodexHome);
+export async function getStatus({
+  codexHome: explicitCodexHome,
+  sqliteHome,
+  storage: providedStorage,
+  configText: providedConfigText,
+  platform
+} = {}) {
+  const codexHome = providedStorage?.codexHome ?? normalizeCodexHome(explicitCodexHome);
   const configPath = path.join(codexHome, "config.toml");
-  const configText = await readConfigText(configPath);
-  const storage = await prepareStorage({ codexHome, sqliteHome, configText, platform });
+  const configText = providedConfigText ?? await readConfigText(configPath);
+  const storage = await prepareStorage({ codexHome, sqliteHome, configText, storage: providedStorage, platform });
   const current = readCurrentProviderFromConfigText(configText);
   const configuredProviders = listConfiguredProviderIds(configText);
   const {
@@ -409,6 +415,7 @@ async function runSyncCore({
   storage: providedStorage,
   provider,
   configBackupText,
+  expectedConfigText,
   keepCount = DEFAULT_BACKUP_RETENTION_COUNT,
   sqliteBusyTimeoutMs,
   onProgress,
@@ -431,6 +438,9 @@ async function runSyncCore({
     await assertNoPendingTransactions(codexHome);
     throwIfAborted(signal);
     const configText = await readConfigText(configPath);
+    if (expectedConfigText !== undefined && configText !== expectedConfigText) {
+      throw new Error("config.toml changed after the operation was confirmed. Refresh and retry.");
+    }
     if (configBackupText !== undefined && configText !== configBackupText) {
       throw new Error("config.toml changed before the switch operation acquired its lock. Refresh and retry.");
     }
@@ -864,6 +874,8 @@ async function runSyncCore({
 export async function runSwitch({
   codexHome: explicitCodexHome,
   sqliteHome,
+  storage: providedStorage,
+  expectedConfigText,
   provider,
   model,
   keepRootModel = false,
@@ -877,10 +889,13 @@ export async function runSwitch({
     throw new Error("Missing provider id. Usage: codex-provider switch <provider-id>");
   }
 
-  const codexHome = normalizeCodexHome(explicitCodexHome);
+  const codexHome = providedStorage?.codexHome ?? normalizeCodexHome(explicitCodexHome);
   const configPath = path.join(codexHome, "config.toml");
   const originalConfigText = await readConfigText(configPath);
-  const storage = await prepareStorage({ codexHome, sqliteHome, configText: originalConfigText, platform });
+  if (expectedConfigText !== undefined && originalConfigText !== expectedConfigText) {
+    throw new Error("config.toml changed after the operation was confirmed. Refresh and retry.");
+  }
+  const storage = await prepareStorage({ codexHome, sqliteHome, configText: originalConfigText, storage: providedStorage, platform });
   assertSqliteAccessSupported(storage, "switch");
   if (!storage.stateDbLocation && isConfiguredSqliteHome(storage)) {
     throw missingConfiguredStateDbError(storage);
@@ -963,6 +978,8 @@ export async function runSwitch({
 export async function runRestore({
   codexHome: explicitCodexHome,
   sqliteHome,
+  storage: providedStorage,
+  expectedConfigText,
   backupDir,
   restoreConfig = true,
   restoreDatabase = true,
@@ -974,18 +991,21 @@ export async function runRestore({
   if (!backupDir) {
     throw new Error("Missing backup path. Usage: codex-provider restore <backup-dir>");
   }
-  const codexHome = normalizeCodexHome(explicitCodexHome);
+  const codexHome = providedStorage?.codexHome ?? normalizeCodexHome(explicitCodexHome);
   if (allowSqliteHomeRelocation && !(typeof sqliteHome === "string" && sqliteHome.trim())) {
     throw new Error("--allow-sqlite-home-relocation requires an explicit --sqlite-home path.");
   }
-  const configText = await readConfigText(path.join(codexHome, "config.toml"));
-  const storage = await prepareStorage({ codexHome, sqliteHome, configText, platform });
-  assertSqliteAccessSupported(storage, "restore");
-  if (restoreDatabase && !storage.stateDbLocation && isConfiguredSqliteHome(storage)) {
-    throw missingConfiguredStateDbError(storage);
-  }
   const releaseLock = await acquireLock(codexHome, "restore");
   try {
+    const configText = await readConfigText(path.join(codexHome, "config.toml"));
+    if (expectedConfigText !== undefined && configText !== expectedConfigText) {
+      throw new Error("config.toml changed after the operation was confirmed. Refresh and retry.");
+    }
+    const storage = await prepareStorage({ codexHome, sqliteHome, configText, storage: providedStorage, platform });
+    assertSqliteAccessSupported(storage, "restore");
+    if (restoreDatabase && !storage.stateDbLocation && isConfiguredSqliteHome(storage)) {
+      throw missingConfiguredStateDbError(storage);
+    }
     const normalizedBackupDir = path.resolve(backupDir);
     let boundJournal = null;
     try {

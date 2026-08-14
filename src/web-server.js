@@ -10,12 +10,20 @@ import { readConfigText, readRootModelFromConfigText } from "./config-file.js";
 import { defaultCodexHome } from "./constants.js";
 import { getHistorySession, listHistory } from "./history.js";
 import { getStatus, runPruneBackups, runRestore, runSwitch, runSync } from "./service.js";
-import { createMemoryWebUiState, WebUiStateStore } from "./web-state.js";
+import { detectStateDb } from "./sqlite-state.js";
+import { ensureCodexHome, resolveStorageLayout, withStateDbLocation } from "./storage-layout.js";
+import { createMemoryWebUiState, ProfileRevisionConflictError, WebUiStateStore } from "./web-state.js";
 
 const DEFAULT_PORT = 8791;
 const MAX_REQUEST_BYTES = 64 * 1024;
 const ACTIVITY_LIMIT = 250;
 const PAIRING_TTL_MS = 5 * 60 * 1000;
+const INTERNAL_PROTOCOL_VERSION = 2;
+const INTERNAL_NONCE_BYTES = 32;
+const INTERNAL_CHALLENGE_TTL_MS = 30 * 1000;
+const INTERNAL_CHALLENGE_LIMIT = 128;
+const INTERNAL_REQUEST_DOMAIN = "codex-provider-sync:web-ui:internal-pairing:v2:request";
+const INTERNAL_RESPONSE_DOMAIN = "codex-provider-sync:web-ui:internal-pairing:v2:response";
 const DEVICE_SECRET_BYTES = 32;
 const STATE_FILENAME = "provider-sync-web.json";
 const RUNTIME_FILENAME = "provider-sync-web.runtime.json";
@@ -109,31 +117,98 @@ function resolveStorageProfile(input, stateStore) {
   const profile = stateStore.getProfile(profileId);
   return {
     profileId: profile.id,
+    profileRevision: profile.revision,
     codexHome: profile.codexHome,
     ...(profile.sqliteHome ? { sqliteHome: profile.sqliteHome } : {})
   };
 }
 
+function captureProfileRevision(profileId, suppliedRevision, stateStore, response) {
+  const profile = stateStore.getProfile(profileId);
+  if (typeof suppliedRevision !== "string" || !suppliedRevision) {
+    sendJson(response, 409, {
+      error: "This operation requires the current storage profile revision. Refresh the profile and try again.",
+      code: "PROFILE_REVISION_REQUIRED",
+      profile
+    });
+    return null;
+  }
+  if (suppliedRevision !== profile.revision) {
+    sendJson(response, 409, {
+      error: "The storage profile changed after this operation was prepared. Refresh and confirm again.",
+      code: "PROFILE_CHANGED",
+      profile
+    });
+    return null;
+  }
+  return profile;
+}
+
+function captureStorageProfile(input, stateStore, response) {
+  if (Object.hasOwn(input ?? {}, "codexHome") || Object.hasOwn(input ?? {}, "sqliteHome")) {
+    throw new Error("Storage paths must be selected through a server-managed profileId.");
+  }
+  const profileId = requireString(input?.profileId ?? "default", "profileId", { maxLength: 80 });
+  const profile = captureProfileRevision(profileId, input?.profileRevision, stateStore, response);
+  if (!profile) return null;
+  const snapshot = {
+    profileId: profile.id,
+    codexHome: profile.codexHome,
+    ...(profile.sqliteHome ? { sqliteHome: profile.sqliteHome } : {})
+  };
+  return Object.freeze(snapshot);
+}
+
+function comparableStoragePath(value, platform) {
+  if (typeof value !== "string") return null;
+  return platform === "win32" ? value.toLowerCase() : value;
+}
+
+function storageRevision(profile, storage, configText, platform) {
+  const canonical = JSON.stringify({
+    version: 2,
+    profileId: profile.profileId ?? profile.id,
+    profileRevision: profile.profileRevision ?? profile.revision,
+    configRevision: crypto.createHash("sha256").update(configText, "utf8").digest("base64url"),
+    codexHome: comparableStoragePath(storage.codexHome, platform),
+    sqliteHome: comparableStoragePath(storage.sqliteHome, platform),
+    sqliteHomeSource: storage.sqliteHomeSource,
+    sqliteAccess: {
+      supported: storage.sqliteAccess?.supported !== false,
+      reason: storage.sqliteAccess?.reason ?? null
+    },
+    allowLegacyRootFallback: Boolean(storage.allowLegacyRootFallback),
+    stateDbLocation: storage.stateDbLocation
+      ? {
+          path: comparableStoragePath(storage.stateDbLocation.path, platform),
+          source: storage.stateDbLocation.source
+        }
+      : null
+  });
+  return crypto.createHash("sha256").update(canonical, "utf8").digest("base64url");
+}
+
 function serializeStatus(status) {
   const rollout = status.rolloutCounts ?? { sessions: {}, archived_sessions: {} };
   const sqlite = status.sqliteCounts;
-  const normalizeCounts = (counts) => Object.fromEntries(
-    Object.entries(counts ?? {}).sort(([left], [right]) => left.localeCompare(right))
-  );
-  const normalizeDistribution = (distribution) => ({
-    sessions: normalizeCounts(distribution?.sessions),
-    archived_sessions: normalizeCounts(distribution?.archived_sessions)
-  });
-  const rolloutJson = JSON.stringify(normalizeDistribution(rollout));
-  const sqliteComparable = sqlite && !sqlite.unreadable
-    ? JSON.stringify(normalizeDistribution(sqlite))
-    : null;
+  const targetProvider = status.currentProvider;
+  const matchesTargetProvider = (distribution) => ["sessions", "archived_sessions"].every((scope) => (
+    Object.entries(distribution?.[scope] ?? {}).every(([provider, count]) => count === 0 || provider === targetProvider)
+  ));
+  const sqliteReadable = Boolean(sqlite && !sqlite.unreadable);
+  const rolloutScanComplete = !status.lockedRolloutFiles?.length;
   return {
     ...status,
     alignment: {
-      aligned: Boolean(sqliteComparable && rolloutJson === sqliteComparable),
-      sqliteReadable: Boolean(sqlite && !sqlite.unreadable),
-      targetProvider: status.currentProvider
+      aligned: Boolean(
+        targetProvider
+        && sqliteReadable
+        && rolloutScanComplete
+        && matchesTargetProvider(rollout)
+        && matchesTargetProvider(sqlite)
+      ),
+      sqliteReadable,
+      targetProvider
     }
   };
 }
@@ -246,6 +321,67 @@ function secretsMatch(secret, expectedDigest) {
   return candidate.length === expectedDigest.length && crypto.timingSafeEqual(candidate, expectedDigest);
 }
 
+function internalChallengeRequestPayload({ port, instanceId }) {
+  return {
+    protocolVersion: INTERNAL_PROTOCOL_VERSION,
+    port,
+    instanceId
+  };
+}
+
+function internalChallengePayload({ port, instanceId, nonce }) {
+  return {
+    protocolVersion: INTERNAL_PROTOCOL_VERSION,
+    port,
+    instanceId,
+    nonce
+  };
+}
+
+function internalRequestPayload({ port, instanceId, nonce, resetAccess }) {
+  return {
+    protocolVersion: INTERNAL_PROTOCOL_VERSION,
+    port,
+    instanceId,
+    nonce,
+    resetAccess: Boolean(resetAccess)
+  };
+}
+
+function internalResponsePayload({ port, instanceId, nonce, resetAccess, pairingToken }) {
+  return {
+    protocolVersion: INTERNAL_PROTOCOL_VERSION,
+    port,
+    instanceId,
+    nonce,
+    resetAccess: Boolean(resetAccess),
+    pairingToken
+  };
+}
+
+function internalProof(secret, domain, payload) {
+  return crypto.createHmac("sha256", secret)
+    .update(`${domain}\n${JSON.stringify(payload)}`, "utf8")
+    .digest("base64url");
+}
+
+function internalProofsMatch(supplied, expected) {
+  if (typeof supplied !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(supplied)) return false;
+  const candidate = Buffer.from(supplied, "base64url");
+  const expectedBuffer = Buffer.from(expected, "base64url");
+  return candidate.length === expectedBuffer.length && crypto.timingSafeEqual(candidate, expectedBuffer);
+}
+
+function validSecretToken(value) {
+  return typeof value === "string"
+    && /^[A-Za-z0-9_-]{43}$/.test(value)
+    && Buffer.from(value, "base64url").length === INTERNAL_NONCE_BYTES;
+}
+
+function validInternalNonce(value) {
+  return validSecretToken(value);
+}
+
 function isLoopbackHostname(hostname) {
   const normalized = String(hostname).toLowerCase().replace(/^\[|\]$/g, "");
   return normalized === "127.0.0.1" || normalized === "localhost" || normalized === "::1";
@@ -273,8 +409,11 @@ export function createWebUiServer({
   services = {},
   stateStore = createMemoryWebUiState({ codexHome: defaultCodexHome() }),
   internalSecret = randomSecret(),
+  instanceId = randomSecret(),
   pairingTtlMs = PAIRING_TTL_MS,
-  now = () => Date.now()
+  now = () => Date.now(),
+  platform = process.platform,
+  environment = process.env
 } = {}) {
   const api = {
     getStatus: services.getStatus ?? getStatus,
@@ -293,6 +432,7 @@ export function createWebUiServer({
   let activeOperation = null;
   let baseUrl = null;
   let pairing = null;
+  const internalChallenges = new Map();
 
   const record = (level, message, detail = null, operation = activeOperation?.kind ?? null) => {
     activityId += 1;
@@ -336,14 +476,79 @@ export function createWebUiServer({
     record("info", `${kind} started`);
     try {
       const result = await operation();
-      record("success", `${kind} completed`);
-      sendJson(response, 200, { result });
+      const outcome = Array.isArray(result?.skippedLockedRolloutFiles) && result.skippedLockedRolloutFiles.length > 0
+        ? "partial"
+        : "success";
+      record(outcome === "partial" ? "warning" : "success", `${kind} completed`);
+      sendJson(response, 200, { result: { ...result, outcome } });
     } catch (error) {
       record("error", `${kind} failed`, error instanceof Error ? error.message : String(error));
       sendError(response, 400, error);
     } finally {
       activeOperation = null;
     }
+  };
+
+  const resolveOperationStorage = async (profile) => {
+    let configText = "";
+    try {
+      configText = await api.readConfigText(path.join(profile.codexHome, "config.toml"));
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    const layout = resolveStorageLayout({
+      codexHome: profile.codexHome,
+      sqliteHome: profile.sqliteHome,
+      configText,
+      env: environment,
+      platform
+    });
+    await ensureCodexHome(layout);
+    const storage = layout.sqliteAccess.supported === false
+      ? withStateDbLocation(layout, null)
+      : withStateDbLocation(layout, await detectStateDb(layout));
+    return { configText, storage };
+  };
+
+  const captureOperationStorage = async (input, response) => {
+    if (Object.hasOwn(input ?? {}, "codexHome") || Object.hasOwn(input ?? {}, "sqliteHome")) {
+      throw new Error("Storage paths must be selected through a server-managed profileId.");
+    }
+    const profileId = requireString(input?.profileId ?? "default", "profileId", { maxLength: 80 });
+    const profile = captureProfileRevision(profileId, input?.profileRevision, stateStore, response);
+    if (!profile) return null;
+    if (typeof input?.storageRevision !== "string" || !input.storageRevision) {
+      sendJson(response, 409, {
+        error: "This operation requires the confirmed SQLite storage revision. Refresh and confirm again.",
+        code: "STORAGE_REVISION_REQUIRED",
+        profile
+      });
+      return null;
+    }
+    const prepared = await resolveOperationStorage(profile);
+    if (input.storageRevision !== storageRevision(profile, prepared.storage, prepared.configText, platform)) {
+      sendJson(response, 409, {
+        error: "The configuration or effective SQLite storage changed after this operation was prepared. Refresh and confirm again.",
+        code: "STORAGE_CHANGED",
+        profile
+      });
+      return null;
+    }
+    return {
+      profile: Object.freeze({
+        profileId: profile.id,
+        codexHome: profile.codexHome,
+        ...(profile.sqliteHome ? { sqliteHome: profile.sqliteHome } : {})
+      }),
+      ...prepared
+    };
+  };
+
+  const assertWebOperationStorage = (storage, operation) => {
+    if (storage.sqliteAccess.supported === false) {
+      throw new Error(`Cannot ${operation}: ${storage.sqliteAccess.message}`);
+    }
+    return storage;
   };
 
   const server = http.createServer(async (request, response) => {
@@ -368,14 +573,68 @@ export function createWebUiServer({
         return;
       }
 
-      if (request.method === "POST" && pathname === "/api/internal/new-pairing") {
-        if (!secretsMatch(request.headers["x-codex-provider-internal"], secretDigest(internalSecret))) {
-          sendError(response, 403, "Invalid Web UI instance secret.");
+      if (request.method === "POST" && pathname === "/api/internal/challenge") {
+        const body = await readJsonBody(request);
+        const address = server.address();
+        const actualPort = typeof address === "object" && address ? address.port : null;
+        if (body.protocolVersion !== INTERNAL_PROTOCOL_VERSION
+            || body.port !== actualPort
+            || body.instanceId !== instanceId) {
+          sendError(response, 403, "Invalid Web UI authentication challenge.", "INVALID_INTERNAL_CHALLENGE");
           return;
         }
+        const currentTime = now();
+        for (const [nonce, expiresAt] of internalChallenges) {
+          if (expiresAt <= currentTime) internalChallenges.delete(nonce);
+        }
+        const nonce = crypto.randomBytes(INTERNAL_NONCE_BYTES).toString("base64url");
+        internalChallenges.set(nonce, currentTime + INTERNAL_CHALLENGE_TTL_MS);
+        while (internalChallenges.size > INTERNAL_CHALLENGE_LIMIT) {
+          internalChallenges.delete(internalChallenges.keys().next().value);
+        }
+        sendJson(response, 200, internalChallengePayload({ port: actualPort, instanceId, nonce }));
+        return;
+      }
+
+      if (request.method === "POST" && pathname === "/api/internal/new-pairing") {
         const body = await readJsonBody(request);
+        const address = server.address();
+        const actualPort = typeof address === "object" && address ? address.port : null;
+        if (body.protocolVersion !== INTERNAL_PROTOCOL_VERSION
+            || body.port !== actualPort
+            || body.instanceId !== instanceId
+            || !validInternalNonce(body.nonce)
+            || typeof body.resetAccess !== "boolean") {
+          sendError(response, 403, "Invalid authenticated Web UI pairing request.", "INVALID_INTERNAL_PROOF");
+          return;
+        }
+        const signedRequest = internalRequestPayload(body);
+        const expectedProof = internalProof(internalSecret, INTERNAL_REQUEST_DOMAIN, signedRequest);
+        if (!internalProofsMatch(request.headers["x-codex-provider-internal-proof"], expectedProof)) {
+          sendError(response, 403, "Invalid authenticated Web UI pairing request.", "INVALID_INTERNAL_PROOF");
+          return;
+        }
+        const currentTime = now();
+        for (const [nonce, expiresAt] of internalChallenges) {
+          if (expiresAt <= currentTime) internalChallenges.delete(nonce);
+        }
+        if (!internalChallenges.has(body.nonce)) {
+          sendError(response, 403, "The Web UI authentication challenge is missing, expired, or already used.", "INTERNAL_CHALLENGE_REQUIRED");
+          return;
+        }
+        internalChallenges.delete(body.nonce);
         if (body.resetAccess) await stateStore.resetCredentials();
-        sendJson(response, 200, { pairingToken: issuePairing() });
+        const payload = internalResponsePayload({
+          port: actualPort,
+          instanceId,
+          nonce: body.nonce,
+          resetAccess: body.resetAccess,
+          pairingToken: issuePairing()
+        });
+        sendJson(response, 200, {
+          ...payload,
+          proof: internalProof(internalSecret, INTERNAL_RESPONSE_DOMAIN, payload)
+        });
         return;
       }
 
@@ -407,18 +666,30 @@ export function createWebUiServer({
 
         const body = await readJsonBody(request);
         if (pathname === "/api/profiles/save") {
-          const profile = await stateStore.saveProfile({
-            id: requireString(body.profileId, "profileId", { maxLength: 80 }),
-            name: requireString(body.name, "name", { maxLength: 120 }),
-            codexHome: requireString(body.codexHome, "codexHome"),
-            sqliteHome: requireString(body.sqliteHome, "sqliteHome", { optional: true })
-          });
-          sendJson(response, 200, { profile });
+          const profileId = requireString(body.profileId, "profileId", { maxLength: 80 });
+          try {
+            const profile = await stateStore.saveProfile({
+              id: profileId,
+              name: requireString(body.name, "name", { maxLength: 120 }),
+              codexHome: requireString(body.codexHome, "codexHome"),
+              sqliteHome: requireString(body.sqliteHome, "sqliteHome", { optional: true })
+            }, { expectedRevision: body.profileRevision });
+            sendJson(response, 200, { profile });
+          } catch (error) {
+            if (!(error instanceof ProfileRevisionConflictError)) throw error;
+            sendJson(response, 409, {
+              error: error.message,
+              code: error.code,
+              profile: error.profile
+            });
+          }
           return;
         }
 
         if (pathname === "/api/profiles/delete") {
-          await stateStore.deleteProfile(requireString(body.profileId, "profileId", { maxLength: 80 }));
+          const profileId = requireString(body.profileId, "profileId", { maxLength: 80 });
+          if (!captureProfileRevision(profileId, body.profileRevision, stateStore, response)) return;
+          await stateStore.deleteProfile(profileId);
           sendJson(response, 200, { ok: true });
           return;
         }
@@ -430,9 +701,17 @@ export function createWebUiServer({
         }
 
         if (pathname === "/api/status") {
-          const storage = resolveStorageProfile(body, stateStore);
-          const status = serializeStatus(await api.getStatus(storage));
-          status.profileId = storage.profileId;
+          const profile = resolveStorageProfile(body, stateStore);
+          const prepared = await resolveOperationStorage(profile);
+          const status = serializeStatus(await api.getStatus({
+            ...profile,
+            storage: prepared.storage,
+            configText: prepared.configText
+          }));
+          status.pathComparisonCaseInsensitive = platform === "win32";
+          status.profileId = profile.profileId;
+          status.profileRevision = profile.profileRevision;
+          status.storageRevision = storageRevision(profile, prepared.storage, prepared.configText, platform);
           record("info", "Status refreshed", status.codexHome, null);
           sendJson(response, 200, { status });
           return;
@@ -460,14 +739,17 @@ export function createWebUiServer({
         }
 
         if (pathname === "/api/sync") {
+          const operationStorage = await captureOperationStorage(body, response);
+          if (!operationStorage) return;
           await withOperation("sync", response, async () => {
-            const storage = resolveStorageProfile(body, stateStore);
+            assertWebOperationStorage(operationStorage.storage, "sync");
             const provider = requireProvider(body.provider);
             const keepCount = requireKeepCount(body.keepCount);
-            const configText = await api.readConfigText(path.join(storage.codexHome, "config.toml"));
-            const model = api.readRootModelFromConfigText(configText);
+            const model = api.readRootModelFromConfigText(operationStorage.configText);
             return api.runSync({
-              ...storage,
+              ...operationStorage.profile,
+              storage: operationStorage.storage,
+              expectedConfigText: operationStorage.configText,
               provider,
               keepCount,
               model,
@@ -478,13 +760,17 @@ export function createWebUiServer({
         }
 
         if (pathname === "/api/switch") {
+          const operationStorage = await captureOperationStorage(body, response);
+          if (!operationStorage) return;
           await withOperation("switch", response, async () => {
-            const storage = resolveStorageProfile(body, stateStore);
+            assertWebOperationStorage(operationStorage.storage, "switch");
             const provider = requireProvider(body.provider);
             const keepCount = requireKeepCount(body.keepCount);
             const model = requireString(body.model, "model", { optional: true, maxLength: 500 });
             return api.runSwitch({
-              ...storage,
+              ...operationStorage.profile,
+              storage: operationStorage.storage,
+              expectedConfigText: operationStorage.configText,
               provider,
               keepCount,
               model,
@@ -496,10 +782,12 @@ export function createWebUiServer({
         }
 
         if (pathname === "/api/restore") {
+          const operationStorage = await captureOperationStorage(body, response);
+          if (!operationStorage) return;
           await withOperation("restore", response, async () => {
-            const storage = resolveStorageProfile(body, stateStore);
+            assertWebOperationStorage(operationStorage.storage, "restore");
             const backupId = requireString(body.backupId, "backupId", { maxLength: 300 });
-            const listed = await api.listBackups(storage.codexHome);
+            const listed = await api.listBackups(operationStorage.profile.codexHome);
             const backup = listed.backups.find((entry) => entry.id === backupId);
             if (!backup) {
               throw new Error("The selected backup is not a managed backup for this Codex Home.");
@@ -510,8 +798,13 @@ export function createWebUiServer({
             if (!restoreConfig && !restoreDatabase && !restoreSessions) {
               throw new Error("Select at least one backup content type to restore.");
             }
+            if (body.allowSqliteHomeRelocation && !operationStorage.profile.sqliteHome) {
+              throw new Error("SQLite Home relocation requires a storage profile with an explicit SQLite Home target.");
+            }
             return api.runRestore({
-              ...storage,
+              ...operationStorage.profile,
+              storage: operationStorage.storage,
+              expectedConfigText: operationStorage.configText,
               backupDir: backup.path,
               restoreConfig,
               restoreDatabase,
@@ -523,9 +816,10 @@ export function createWebUiServer({
         }
 
         if (pathname === "/api/prune") {
+          const storage = captureStorageProfile(body, stateStore, response);
+          if (!storage) return;
           await withOperation("prune backups", response, async () => {
-            const { codexHome } = resolveStorageProfile(body, stateStore);
-            return api.runPruneBackups({ codexHome, keepCount: requireKeepCount(body.keepCount, { allowZero: true }) });
+            return api.runPruneBackups({ codexHome: storage.codexHome, keepCount: requireKeepCount(body.keepCount, { allowZero: true }) });
           });
           return;
         }
@@ -547,6 +841,7 @@ export function createWebUiServer({
   return {
     server,
     internalSecret,
+    instanceId,
     issuePairing,
     setBaseUrl(value) {
       baseUrl = value;
@@ -557,18 +852,18 @@ export function createWebUiServer({
   };
 }
 
-function requestExistingPairing({ port, internalSecret, resetAccess }) {
+function requestExistingChallenge({ port, instanceId }) {
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ resetAccess });
+    const challengeRequest = internalChallengeRequestPayload({ port, instanceId });
+    const body = JSON.stringify(challengeRequest);
     const request = http.request({
       hostname: "127.0.0.1",
       port,
-      path: "/api/internal/new-pairing",
+      path: "/api/internal/challenge",
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(body),
-        "X-Codex-Provider-Internal": internalSecret
+        "Content-Length": Buffer.byteLength(body)
       },
       timeout: 1500
     }, (response) => {
@@ -577,8 +872,74 @@ function requestExistingPairing({ port, internalSecret, resetAccess }) {
       response.on("end", () => {
         try {
           const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-          if (response.statusCode !== 200 || typeof payload.pairingToken !== "string") {
+          if (response.statusCode !== 200
+              || payload.protocolVersion !== INTERNAL_PROTOCOL_VERSION
+              || payload.port !== port
+              || payload.instanceId !== instanceId
+              || !validInternalNonce(payload.nonce)) {
             reject(new Error("The existing listener is not a compatible Codex Provider Sync Web UI."));
+            return;
+          }
+          resolve(internalChallengePayload(payload));
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    request.once("timeout", () => request.destroy(new Error("Timed out contacting the existing Web UI.")));
+    request.once("error", reject);
+    request.end(body);
+  });
+}
+
+function requestExistingPairing({ port, instanceId, internalSecret, resetAccess, challenge }) {
+  return new Promise((resolve, reject) => {
+    const signedRequest = internalRequestPayload({
+      port,
+      instanceId,
+      nonce: challenge.nonce,
+      resetAccess
+    });
+    const body = JSON.stringify(signedRequest);
+    const request = http.request({
+      hostname: "127.0.0.1",
+      port,
+      path: "/api/internal/new-pairing",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
+        "X-Codex-Provider-Internal-Proof": internalProof(internalSecret, INTERNAL_REQUEST_DOMAIN, signedRequest)
+      },
+      timeout: 1500
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => {
+        try {
+          const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          if (response.statusCode !== 200
+              || payload.protocolVersion !== INTERNAL_PROTOCOL_VERSION
+              || payload.port !== port
+              || payload.instanceId !== instanceId
+              || payload.nonce !== challenge.nonce
+              || payload.resetAccess !== Boolean(resetAccess)
+              || typeof payload.pairingToken !== "string"
+              || !payload.pairingToken
+              || payload.pairingToken.length > 4096) {
+            reject(new Error("The existing listener is not a compatible Codex Provider Sync Web UI."));
+            return;
+          }
+          const signedResponse = internalResponsePayload({
+            port: payload.port,
+            instanceId: payload.instanceId,
+            nonce: payload.nonce,
+            resetAccess: payload.resetAccess,
+            pairingToken: payload.pairingToken
+          });
+          const expectedProof = internalProof(internalSecret, INTERNAL_RESPONSE_DOMAIN, signedResponse);
+          if (!internalProofsMatch(payload.proof, expectedProof)) {
+            reject(new Error("The existing listener failed authenticated Web UI pairing."));
             return;
           }
           resolve(payload.pairingToken);
@@ -596,7 +957,7 @@ function requestExistingPairing({ port, internalSecret, resetAccess }) {
 async function readRuntimeDescriptor(runtimeFile) {
   try {
     const value = JSON.parse(await fs.readFile(runtimeFile, "utf8"));
-    if (Number.isInteger(value?.port) && value.port > 0 && typeof value?.internalSecret === "string") {
+    if (Number.isInteger(value?.port) && value.port > 0 && validSecretToken(value?.internalSecret)) {
       return value;
     }
   } catch {
@@ -612,24 +973,52 @@ async function removeOwnedRuntimeDescriptor(runtimeFile, internalSecret) {
   }
 }
 
-function normalizeExplicitSqliteHome(value) {
-  return typeof value === "string" && value.trim() ? path.resolve(value.trim()) : null;
+function comparableRuntimePath(value, platform) {
+  return platform === "win32" ? value.toLowerCase() : value;
 }
 
-function comparableSqliteHome(value, platform) {
-  const resolved = normalizeExplicitSqliteHome(value);
-  return resolved && platform === "win32" ? resolved.toLowerCase() : resolved;
+function hasRuntimeIdentity(value) {
+  return typeof value?.codexHome === "string" && typeof value?.sqliteHome === "string";
 }
 
-function sqliteHomeMismatchError(existing, requestedSqliteHome) {
-  const existingLabel = existing.sqliteHome ?? "<default>";
-  const requestedLabel = requestedSqliteHome ?? "<default>";
+function hasSecureRuntimeDescriptor(value) {
+  return value?.protocolVersion === INTERNAL_PROTOCOL_VERSION
+    && validSecretToken(value?.instanceId);
+}
+
+function runtimeIdentityMatches(existing, requested, platform) {
+  return comparableRuntimePath(existing.codexHome, platform) === comparableRuntimePath(requested.codexHome, platform)
+    && comparableRuntimePath(existing.sqliteHome, platform) === comparableRuntimePath(requested.sqliteHome, platform);
+}
+
+function runtimeIdentityMismatchError(existing, requested) {
   return new Error(
-    `A Web UI instance is already running on port ${existing.port} with SQLite home "${existingLabel}", `
-    + `but this launch requested "${requestedLabel}". `
-    + "Close the existing Web UI instance and restart with the new --sqlite-home, "
-    + "or relaunch with the same SQLite home to reuse it."
+    `A Web UI instance is already running on port ${existing.port} for Codex Home "${existing.codexHome}" and SQLite Home "${existing.sqliteHome}", `
+    + `but this launch resolved Codex Home "${requested.codexHome}" and SQLite Home "${requested.sqliteHome}". `
+    + "Close the existing Web UI instance and restart with the requested storage identity."
   );
+}
+
+function legacyRuntimeDescriptorError(existing) {
+  return new Error(
+    `A Web UI instance is already running on port ${existing.port}, but its runtime descriptor does not contain the authenticated v2 instance and storage identity. `
+    + "Close that Web UI instance and restart it so the secure runtime identity can be recorded."
+  );
+}
+
+function isConnectionRefused(error) {
+  return error?.code === "ECONNREFUSED" || error?.cause?.code === "ECONNREFUSED";
+}
+
+async function resolveRuntimeIdentity({ codexHome, sqliteHome, environment, platform }) {
+  let configText = "";
+  try {
+    configText = await readConfigText(path.join(codexHome, "config.toml"));
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  const layout = resolveStorageLayout({ codexHome, sqliteHome, configText, env: environment, platform });
+  return { codexHome: layout.codexHome, sqliteHome: layout.sqliteHome };
 }
 
 export async function startWebUi({
@@ -653,21 +1042,43 @@ export async function startWebUi({
     throw new Error(`Web UI build not found at ${webRoot}. Run \"npm run web:build\" first.`);
   });
 
-  const controlCodexHome = path.resolve(codexHome ?? process.env.CODEX_HOME ?? defaultCodexHome());
+  const controlCodexHome = path.resolve(codexHome ?? environment.CODEX_HOME ?? defaultCodexHome());
   const resolvedStateFile = path.resolve(stateFile ?? path.join(controlCodexHome, STATE_FILENAME));
   const resolvedRuntimeFile = path.resolve(runtimeFile ?? path.join(controlCodexHome, RUNTIME_FILENAME));
+  const runtimeIdentity = await resolveRuntimeIdentity({ codexHome: controlCodexHome, sqliteHome, environment, platform });
   const existing = await readRuntimeDescriptor(resolvedRuntimeFile);
   if (existing) {
-    const requestedSqliteHome = comparableSqliteHome(sqliteHome, platform);
-    if (comparableSqliteHome(existing.sqliteHome, platform) !== requestedSqliteHome) {
-      throw sqliteHomeMismatchError(existing, normalizeExplicitSqliteHome(sqliteHome));
-    }
+    let challenge = null;
+    const descriptorInstanceId = hasSecureRuntimeDescriptor(existing) ? existing.instanceId : "legacy";
     try {
-      const pairingToken = await requestExistingPairing({
+      challenge = await requestExistingChallenge({
         port: existing.port,
-        internalSecret: existing.internalSecret,
-        resetAccess
+        instanceId: descriptorInstanceId
       });
+    } catch (error) {
+      if (isConnectionRefused(error)) {
+        await removeOwnedRuntimeDescriptor(resolvedRuntimeFile, existing.internalSecret);
+      } else {
+        throw new Error("The existing listener could not complete secure Web UI authentication. Close it and restart the Web UI.", { cause: error });
+      }
+    }
+    if (challenge) {
+      if (!hasSecureRuntimeDescriptor(existing) || !hasRuntimeIdentity(existing)) throw legacyRuntimeDescriptorError(existing);
+      if (!runtimeIdentityMatches(existing, runtimeIdentity, platform)) {
+        throw runtimeIdentityMismatchError(existing, runtimeIdentity);
+      }
+      let pairingToken;
+      try {
+        pairingToken = await requestExistingPairing({
+          port: existing.port,
+          instanceId: existing.instanceId,
+          internalSecret: existing.internalSecret,
+          resetAccess,
+          challenge
+        });
+      } catch (error) {
+        throw new Error("The existing listener failed authenticated Web UI pairing. Close it and restart the Web UI.", { cause: error });
+      }
       const url = `http://127.0.0.1:${existing.port}`;
       const pairingUrl = `${url}/#pair=${encodeURIComponent(pairingToken)}`;
       const browserOpened = openBrowser && canOpenLocalUrl(platform, environment)
@@ -680,8 +1091,6 @@ export async function startWebUi({
         browserOpened,
         close: async () => {}
       };
-    } catch {
-      await fs.rm(resolvedRuntimeFile, { force: true }).catch(() => {});
     }
   }
 
@@ -691,7 +1100,8 @@ export async function startWebUi({
   });
   await stateStore.initialize({ resetAccess });
   const internalSecret = randomSecret();
-  const handle = createWebUiServer({ webRoot, services, stateStore, internalSecret });
+  const instanceId = randomSecret();
+  const handle = createWebUiServer({ webRoot, services, stateStore, internalSecret, instanceId, platform, environment });
   try {
     await new Promise((resolve, reject) => {
       handle.server.once("error", reject);
@@ -709,7 +1119,7 @@ export async function startWebUi({
   handle.setBaseUrl(url);
   const pairingUrl = `${url}/#pair=${encodeURIComponent(handle.issuePairing())}`;
   await fs.mkdir(path.dirname(resolvedRuntimeFile), { recursive: true });
-  await fs.writeFile(resolvedRuntimeFile, `${JSON.stringify({ port: actualPort, internalSecret, pid: process.pid, sqliteHome: normalizeExplicitSqliteHome(sqliteHome) })}\n`, { encoding: "utf8", mode: 0o600 });
+  await fs.writeFile(resolvedRuntimeFile, `${JSON.stringify({ protocolVersion: INTERNAL_PROTOCOL_VERSION, instanceId, port: actualPort, internalSecret, pid: process.pid, ...runtimeIdentity })}\n`, { encoding: "utf8", mode: 0o600 });
   await fs.chmod(resolvedRuntimeFile, 0o600).catch(() => {});
   const browserOpened = openBrowser && canOpenLocalUrl(platform, environment)
     ? await openUrl(pairingUrl, platform)

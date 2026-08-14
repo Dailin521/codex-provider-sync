@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
@@ -8,6 +9,18 @@ import { SESSION_DIRS } from "./constants.js";
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 100;
 const DEFAULT_MESSAGE_LIMIT = 200;
+
+function normalizedRolloutPath(rolloutPath) {
+  const absolutePath = path.resolve(rolloutPath);
+  return process.platform === "win32" ? absolutePath.toLowerCase() : absolutePath;
+}
+
+function fallbackSessionId(rolloutPath) {
+  const digest = crypto.createHash("sha256")
+    .update(normalizedRolloutPath(rolloutPath), "utf8")
+    .digest("base64url");
+  return `rollout:${digest}`;
+}
 
 function normalizeText(value) {
   if (typeof value !== "string") return "";
@@ -39,18 +52,19 @@ function messageFromRecord(record) {
   if (record.type === "event_msg" && (eventType === "user_message" || eventType === "assistant_message")) {
     const role = eventType === "user_message" ? "user" : "assistant";
     const text = firstText(record.payload?.message, record.payload?.text);
-    return text ? { role, text, timestamp } : null;
+    return text ? { role, text, timestamp, canonicalUser: role === "user" } : null;
   }
 
   for (const key of ["payload", "item", "msg"]) {
     const value = record[key];
     if (!value || typeof value !== "object" || !["user", "assistant"].includes(value.role)) continue;
     const text = firstText(contentText(value.content), value.message, value.text);
-    return text ? { role: value.role, text, timestamp } : null;
+    return text ? { role: value.role, text, timestamp, canonicalUser: false } : null;
   }
   if (record.type === "user_message" || record.type === "assistant_message") {
     const text = firstText(record.message, record.text, record.payload?.message, record.payload?.text);
-    return text ? { role: record.type === "user_message" ? "user" : "assistant", text, timestamp } : null;
+    const role = record.type === "user_message" ? "user" : "assistant";
+    return text ? { role, text, timestamp, canonicalUser: role === "user" } : null;
   }
   return null;
 }
@@ -90,7 +104,7 @@ async function readRollout(filePath, archived) {
       if (!meta && record.type === "session_meta" && record.payload && typeof record.payload === "object") {
         const payload = record.payload;
         meta = {
-          id: typeof payload.id === "string" ? payload.id : null,
+          threadId: typeof payload.id === "string" && payload.id ? payload.id : null,
           title: firstText(payload.title, payload.name),
           cwd: firstText(payload.cwd),
           provider: firstText(payload.model_provider) || "(missing)",
@@ -105,9 +119,24 @@ async function readRollout(filePath, archived) {
     lines.close();
     stream.destroy();
   }
-  if (!meta?.id) return null;
-  const updatedAt = messages.at(-1)?.timestamp ?? stat.mtime.toISOString();
-  return { ...meta, updatedAt, archived, messages, messageCount: messages.length, filePath, mtimeMs: stat.mtimeMs };
+  if (!meta) return null;
+  const hasCanonicalUserMessages = messages.some((message) => message.canonicalUser);
+  const visibleMessages = messages
+    .filter((message) => message.role !== "user" || !hasCanonicalUserMessages || message.canonicalUser)
+    .map(({ canonicalUser: _canonicalUser, sequence: _sequence, ...message }, index) => ({ ...message, sequence: index + 1 }));
+  const rolloutPath = path.resolve(filePath);
+  const updatedAt = visibleMessages.at(-1)?.timestamp ?? stat.mtime.toISOString();
+  return {
+    ...meta,
+    id: meta.threadId ?? fallbackSessionId(rolloutPath),
+    rolloutPath,
+    updatedAt,
+    archived,
+    messages: visibleMessages,
+    messageCount: visibleMessages.length,
+    filePath,
+    mtimeMs: stat.mtimeMs
+  };
 }
 
 async function collectHistory(codexHome) {
@@ -115,14 +144,23 @@ async function collectHistory(codexHome) {
   for (const dirName of SESSION_DIRS) {
     const files = await listRolloutFiles(path.join(codexHome, dirName));
     for (const filePath of files) {
-      const session = await readRollout(filePath, dirName === "archived_sessions");
+      let session;
+      try {
+        session = await readRollout(filePath, dirName === "archived_sessions");
+      } catch (error) {
+        if (error?.code === "ENOENT") continue;
+        throw error;
+      }
       if (session) sessions.push(session);
     }
   }
   const byId = new Map();
   for (const session of sessions) {
-    const existing = byId.get(session.id);
-    if (!existing || session.mtimeMs >= existing.mtimeMs) byId.set(session.id, session);
+    const key = session.threadId
+      ? `thread:${session.threadId}`
+      : `path:${normalizedRolloutPath(session.rolloutPath)}`;
+    const existing = byId.get(key);
+    if (!existing || session.mtimeMs >= existing.mtimeMs) byId.set(key, session);
   }
   return [...byId.values()].sort((a, b) => Date.parse(b.updatedAt || 0) - Date.parse(a.updatedAt || 0) || b.mtimeMs - a.mtimeMs);
 }
@@ -131,6 +169,7 @@ function publicSession(session) {
   const firstUserMessage = session.messages.find((message) => message.role === "user")?.text ?? "";
   return {
     id: session.id,
+    rolloutPath: session.rolloutPath,
     title: session.title || firstUserMessage.slice(0, 80) || "未命名会话",
     cwd: session.cwd,
     provider: session.provider,

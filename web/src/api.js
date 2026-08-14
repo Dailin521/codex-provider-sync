@@ -7,6 +7,15 @@ export class PairingRequiredError extends Error {
   }
 }
 
+export class ProfileRevisionError extends Error {
+  constructor(code, message, profile) {
+    super(message || "配置已变更，请重新确认。");
+    this.name = "ProfileRevisionError";
+    this.code = code;
+    this.profile = profile;
+  }
+}
+
 export function hasDeviceCredential() {
   return Boolean(window.localStorage.getItem(DEVICE_STORAGE_KEY));
 }
@@ -33,6 +42,18 @@ function deviceHeaders() {
   return { "X-Codex-Provider-Device": window.localStorage.getItem(DEVICE_STORAGE_KEY) ?? "" };
 }
 
+export function toRequestError(payload, status, fallback) {
+  if (status === 409 && [
+    "PROFILE_REVISION_REQUIRED",
+    "PROFILE_CHANGED",
+    "STORAGE_REVISION_REQUIRED",
+    "STORAGE_CHANGED"
+  ].includes(payload.code)) {
+    return new ProfileRevisionError(payload.code, payload.error, payload.profile);
+  }
+  return new Error(payload.error ?? fallback);
+}
+
 async function parseResponse(response, fallback) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -40,7 +61,7 @@ async function parseResponse(response, fallback) {
       window.dispatchEvent(new CustomEvent("cps:pairing-required", { detail: payload.error }));
       throw new PairingRequiredError(payload.error);
     }
-    throw new Error(payload.error ?? fallback);
+    throw toRequestError(payload, response.status, fallback);
   }
   return payload;
 }
