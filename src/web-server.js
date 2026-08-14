@@ -164,11 +164,12 @@ function comparableStoragePath(value, platform) {
   return platform === "win32" ? value.toLowerCase() : value;
 }
 
-function storageRevision(profile, storage, platform) {
+function storageRevision(profile, storage, configText, platform) {
   const canonical = JSON.stringify({
-    version: 1,
+    version: 2,
     profileId: profile.profileId ?? profile.id,
     profileRevision: profile.profileRevision ?? profile.revision,
+    configRevision: crypto.createHash("sha256").update(configText, "utf8").digest("base64url"),
     codexHome: comparableStoragePath(storage.codexHome, platform),
     sqliteHome: comparableStoragePath(storage.sqliteHome, platform),
     sqliteHomeSource: storage.sqliteHomeSource,
@@ -524,9 +525,9 @@ export function createWebUiServer({
       return null;
     }
     const prepared = await resolveOperationStorage(profile);
-    if (input.storageRevision !== storageRevision(profile, prepared.storage, platform)) {
+    if (input.storageRevision !== storageRevision(profile, prepared.storage, prepared.configText, platform)) {
       sendJson(response, 409, {
-        error: "The effective SQLite storage changed after this operation was prepared. Refresh and confirm again.",
+        error: "The configuration or effective SQLite storage changed after this operation was prepared. Refresh and confirm again.",
         code: "STORAGE_CHANGED",
         profile
       });
@@ -709,7 +710,7 @@ export function createWebUiServer({
           status.pathComparisonCaseInsensitive = platform === "win32";
           status.profileId = profile.profileId;
           status.profileRevision = profile.profileRevision;
-          status.storageRevision = storageRevision(profile, prepared.storage, platform);
+          status.storageRevision = storageRevision(profile, prepared.storage, prepared.configText, platform);
           record("info", "Status refreshed", status.codexHome, null);
           sendJson(response, 200, { status });
           return;

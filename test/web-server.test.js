@@ -385,6 +385,71 @@ test("Web UI rejects an operation when config changes the effective SQLite targe
   }
 });
 
+test("Web UI binds confirmed operations to config contents even when storage is unchanged", async () => {
+  let configText = 'model_provider = "openai"\nmodel = "gpt-5"\n';
+  const syncCalls = [];
+  const handle = await startFixture({
+    readConfigText: async () => configText,
+    readRootModelFromConfigText: (text) => /^model = "([^"]+)"$/m.exec(text)?.[1] ?? null,
+    getStatus: async ({ storage }) => statusFixture({
+      codexHome: storage.codexHome,
+      sqliteHome: storage.sqliteHome,
+      sqliteHomeSource: storage.sqliteHomeSource,
+      sqliteAccess: storage.sqliteAccess,
+      stateDbLocation: storage.stateDbLocation,
+      checkedStateDbPaths: storage.stateDbCandidates.map((candidate) => candidate.path)
+    }),
+    runSync: async (options) => { syncCalls.push(options); return {}; }
+  });
+  try {
+    const { credential } = await handle.pair();
+    const profile = handle.stateStore.getProfile("default");
+    const confirmed = await api(handle, "/api/status", { profileId: "default" }, credential);
+    assert.equal(confirmed.status, 200);
+
+    configText = 'model_provider = "openai"\nmodel = "gpt-5.2"\n';
+    const changed = await request({
+      origin: handle.origin,
+      pathname: "/api/sync",
+      method: "POST",
+      body: {
+        profileId: "default",
+        profileRevision: profile.revision,
+        storageRevision: confirmed.payload.status.storageRevision,
+        provider: "openai",
+        keepCount: 5
+      },
+      headers: { Origin: handle.origin, "X-Codex-Provider-Device": credential }
+    });
+    assert.equal(changed.status, 409);
+    assert.equal(changed.payload.code, "STORAGE_CHANGED");
+    assert.match(changed.payload.error, /configuration or effective SQLite storage changed/);
+    assert.equal(syncCalls.length, 0);
+
+    const refreshed = await api(handle, "/api/status", { profileId: "default" }, credential);
+    assert.notEqual(refreshed.payload.status.storageRevision, confirmed.payload.status.storageRevision);
+    const accepted = await request({
+      origin: handle.origin,
+      pathname: "/api/sync",
+      method: "POST",
+      body: {
+        profileId: "default",
+        profileRevision: profile.revision,
+        storageRevision: refreshed.payload.status.storageRevision,
+        provider: "openai",
+        keepCount: 5
+      },
+      headers: { Origin: handle.origin, "X-Codex-Provider-Device": credential }
+    });
+    assert.equal(accepted.status, 200);
+    assert.equal(syncCalls.length, 1);
+    assert.equal(syncCalls[0].expectedConfigText, configText);
+    assert.equal(syncCalls[0].model, "gpt-5.2");
+  } finally {
+    await handle.close();
+  }
+});
+
 test("Web UI restore only accepts managed backups for the selected profile", async () => {
   let restored = false;
   const handle = await startFixture({
@@ -515,7 +580,7 @@ test("startWebUi listens only on IPv4 loopback and reuses its existing instance"
   }
 });
 
-test("startWebUi never discloses its runtime secret to an unauthenticated listener", async () => {
+test("startWebUi never discloses its runtime secret and preserves unverifiable descriptors", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-provider-sync-runtime-auth-"));
   const webRoot = path.join(root, "web");
   const stateFile = path.join(root, "state.json");
@@ -524,6 +589,7 @@ test("startWebUi never discloses its runtime secret to an unauthenticated listen
   const instanceId = "I".repeat(43);
   const captured = [];
   let fakePort = null;
+  let rejectChallenge = false;
   await fs.mkdir(webRoot);
   await fs.writeFile(path.join(webRoot, "index.html"), "<!doctype html><title>fixture</title>");
   const fake = http.createServer(async (incoming, response) => {
@@ -531,6 +597,12 @@ test("startWebUi never discloses its runtime secret to an unauthenticated listen
     for await (const chunk of incoming) chunks.push(chunk);
     const text = Buffer.concat(chunks).toString("utf8");
     captured.push({ headers: incoming.headers, text });
+    if (rejectChallenge) {
+      const payload = JSON.stringify({ error: "not found" });
+      response.writeHead(404, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) });
+      response.end(payload);
+      return;
+    }
     const body = JSON.parse(text || "{}");
     const payload = JSON.stringify(incoming.url === "/api/internal/challenge"
       ? {
@@ -572,6 +644,14 @@ test("startWebUi never discloses its runtime secret to an unauthenticated listen
     );
     assert.equal(captured.length, 2);
     assert.ok(captured.every((entry) => entry.headers["x-codex-provider-internal"] === undefined));
+    assert.doesNotMatch(JSON.stringify(captured), new RegExp(internalSecret));
+    assert.equal(JSON.parse(await fs.readFile(runtimeFile, "utf8")).internalSecret, internalSecret);
+
+    rejectChallenge = true;
+    await assert.rejects(
+      startWebUi({ port: 0, openBrowser: false, codexHome: root, stateFile, runtimeFile, webRoot }),
+      /could not complete secure Web UI authentication/
+    );
     assert.doesNotMatch(JSON.stringify(captured), new RegExp(internalSecret));
     assert.equal(JSON.parse(await fs.readFile(runtimeFile, "utf8")).internalSecret, internalSecret);
   } finally {
