@@ -839,14 +839,14 @@ export default function App() {
   }, [refresh, refreshProfiles]);
 
   const openProfileOperation = useCallback((operation) => {
-    const captured = captureProfileOperation(selectedProfile, operation);
+    const captured = captureProfileOperation(selectedProfile, operation, status);
     if (!captured) {
       setToast({ tone: "warning", title: "配置需要刷新", message: "没有可用的配置版本，请刷新后重新确认操作。" });
       refreshProfiles().catch(() => {});
       return;
     }
     setModal(captured);
-  }, [refreshProfiles, selectedProfile]);
+  }, [refreshProfiles, selectedProfile, status]);
 
   useEffect(() => {
     let cancelled = false;
@@ -905,7 +905,7 @@ export default function App() {
     setBusy(true);
     setView("activity");
     try {
-      const common = { ...storagePayload(targetProfileId), profileRevision: modal.profileRevision, provider: modal.selectedProvider, keepCount: plan.keepCount };
+      const common = { ...storagePayload(targetProfileId), profileRevision: modal.profileRevision, storageRevision: modal.storageRevision, provider: modal.selectedProvider, keepCount: plan.keepCount };
       const payload = plan.mode === "switch"
         ? await apiRequest("/api/switch", { ...common, model: plan.modelMode === "custom" ? plan.model : undefined, keepRootModel: plan.modelMode === "keep" })
         : await apiRequest("/api/sync", common);
@@ -933,7 +933,7 @@ export default function App() {
     setBusy(true);
     setView("activity");
     try {
-      const payload = await apiRequest("/api/restore", { ...storagePayload(targetProfileId), profileRevision: modal.profileRevision, backupId: backup.id, ...options });
+      const payload = await apiRequest("/api/restore", { ...storagePayload(targetProfileId), profileRevision: modal.profileRevision, storageRevision: modal.storageRevision, backupId: backup.id, ...options });
       setToast(operationToast(payload, { successTitle: "备份恢复完成", partialTitle: "备份恢复部分完成", message: backup.id }));
       await refresh({ quiet: true });
     } catch (error) {
@@ -953,7 +953,7 @@ export default function App() {
     setModal(null);
     setBusy(true);
     try {
-      const payload = await apiRequest("/api/prune", { ...storagePayload(targetProfileId), profileRevision: modal.profileRevision, keepCount });
+      const payload = await apiRequest("/api/prune", { ...storagePayload(targetProfileId), profileRevision: modal.profileRevision, storageRevision: modal.storageRevision, keepCount });
       setToast(operationToast(payload, {
         successTitle: "旧备份清理完成",
         partialTitle: "旧备份清理部分完成",
@@ -1029,8 +1029,8 @@ export default function App() {
         {view === "backups" ? <BackupsView backups={backups} status={status} busy={busy} onRestore={(backup) => openProfileOperation({ type: "restore", backup })} onPrune={(keepCount) => openProfileOperation({ type: "prune", keepCount })} /> : null}
         {view === "activity" ? <ActivityView activity={activity} activeOperation={activeOperation} /> : null}
       </main>
-      {modal?.type === "execute" ? <ExecuteModal plan={modal.plan} status={status} selectedProvider={selectedProvider} onCancel={() => setModal(null)} onConfirm={execute} /> : null}
-      {modal?.type === "restore" ? <RestoreModal backup={modal.backup} status={status} profile={modal.profile} onCancel={() => setModal(null)} onConfirm={restore} /> : null}
+      {modal?.type === "execute" ? <ExecuteModal plan={modal.plan} status={modal.status} selectedProvider={modal.selectedProvider} onCancel={() => setModal(null)} onConfirm={execute} /> : null}
+      {modal?.type === "restore" ? <RestoreModal backup={modal.backup} status={modal.status} profile={modal.profile} onCancel={() => setModal(null)} onConfirm={restore} /> : null}
       {modal?.type === "prune" ? <PruneModal keepCount={modal.keepCount} backups={backups} onCancel={() => setModal(null)} onConfirm={prune} /> : null}
       {modal?.type === "profile" ? <ProfileModal onCancel={() => setModal(null)} onConfirm={saveProfile} /> : null}
       <Toast toast={toast} onClose={closeToast} />

@@ -43,7 +43,12 @@ function deviceHeaders() {
 }
 
 export function toRequestError(payload, status, fallback) {
-  if (status === 409 && ["PROFILE_REVISION_REQUIRED", "PROFILE_CHANGED"].includes(payload.code)) {
+  if (status === 409 && [
+    "PROFILE_REVISION_REQUIRED",
+    "PROFILE_CHANGED",
+    "STORAGE_REVISION_REQUIRED",
+    "STORAGE_CHANGED"
+  ].includes(payload.code)) {
     return new ProfileRevisionError(payload.code, payload.error, payload.profile);
   }
   return new Error(payload.error ?? fallback);

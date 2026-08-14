@@ -53,6 +53,34 @@ function publicProfile(profile) {
   return { ...profile, revision: profileRevision(profile) };
 }
 
+export class ProfileRevisionConflictError extends Error {
+  constructor(code, profile = null) {
+    const message = code === "PROFILE_REVISION_REQUIRED"
+      ? "This profile update requires the current profile revision. Refresh and try again."
+      : "The storage profile changed before the update was saved. Refresh and try again.";
+    super(message);
+    this.name = "ProfileRevisionConflictError";
+    this.code = code;
+    this.profile = profile;
+  }
+}
+
+function assertSaveRevision(currentProfile, expectedRevision) {
+  const hasExpectedRevision = typeof expectedRevision === "string" && expectedRevision.length > 0;
+  if (currentProfile) {
+    if (!hasExpectedRevision) {
+      throw new ProfileRevisionConflictError("PROFILE_REVISION_REQUIRED", currentProfile);
+    }
+    if (expectedRevision !== currentProfile.revision) {
+      throw new ProfileRevisionConflictError("PROFILE_CHANGED", currentProfile);
+    }
+    return;
+  }
+  if (hasExpectedRevision) {
+    throw new ProfileRevisionConflictError("PROFILE_CHANGED", null);
+  }
+}
+
 async function assertDirectoryWhenPresent(value, label) {
   if (!value) {
     return;
@@ -78,7 +106,7 @@ function emptyState(defaultProfile) {
 }
 
 export class WebUiStateStore {
-  constructor({ filePath, defaultProfile }) {
+  constructor({ filePath, defaultProfile, validateDirectory = assertDirectoryWhenPresent }) {
     if (!filePath) {
       throw new Error("Web UI state file path is required.");
     }
@@ -90,6 +118,7 @@ export class WebUiStateStore {
     });
     this.state = emptyState(this.defaultProfile);
     this.writeQueue = Promise.resolve();
+    this.validateDirectory = validateDirectory;
   }
 
   async initialize({ resetAccess = false } = {}) {
@@ -141,14 +170,15 @@ export class WebUiStateStore {
     return publicProfile(profile);
   }
 
-  async saveProfile(input) {
+  async saveProfile(input, { expectedRevision } = {}) {
     const profile = normalizeProfile(input);
     if (profile.id === DEFAULT_PROFILE_ID) {
       throw new Error("The default storage profile is controlled by Web UI startup flags.");
     }
-    await assertDirectoryWhenPresent(profile.codexHome, "Codex Home");
-    await assertDirectoryWhenPresent(profile.sqliteHome, "SQLite Home");
+    await this.validateDirectory(profile.codexHome, "Codex Home");
+    await this.validateDirectory(profile.sqliteHome, "SQLite Home");
     const index = this.state.profiles.findIndex((entry) => entry.id === profile.id);
+    assertSaveRevision(index >= 0 ? publicProfile(this.state.profiles[index]) : null, expectedRevision);
     if (index >= 0) {
       this.state.profiles[index] = profile;
     } else {
@@ -226,10 +256,11 @@ export function createMemoryWebUiState(defaultProfile) {
       if (!profile) throw new Error(`Unknown storage profile: ${profileId}`);
       return publicProfile(profile);
     },
-    async saveProfile(input) {
+    async saveProfile(input, { expectedRevision } = {}) {
       const profile = normalizeProfile(input);
       if (profile.id === DEFAULT_PROFILE_ID) throw new Error("The default storage profile is controlled by Web UI startup flags.");
       const index = profiles.findIndex((entry) => entry.id === profile.id);
+      assertSaveRevision(index >= 0 ? publicProfile(profiles[index]) : null, expectedRevision);
       if (index >= 0) profiles[index] = profile;
       else profiles.push(profile);
       return publicProfile(profile);

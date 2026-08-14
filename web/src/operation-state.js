@@ -1,10 +1,16 @@
-export function captureProfileOperation(profile, operation) {
-  if (!profile?.id || !profile?.revision) return null;
+export function captureProfileOperation(profile, operation, status) {
+  if (!profile?.id
+      || !profile?.revision
+      || status?.profileId !== profile.id
+      || status?.profileRevision !== profile.revision
+      || !status?.storageRevision) return null;
   return {
     ...operation,
     profile: { ...profile },
     profileId: profile.id,
-    profileRevision: profile.revision
+    profileRevision: profile.revision,
+    storageRevision: status.storageRevision,
+    status: { ...status }
   };
 }
 
