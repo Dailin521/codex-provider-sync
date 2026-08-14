@@ -71,9 +71,9 @@ codex-provider web --no-open
 
 命令会输出可点击的一次性配对链接。无桌面或纯 SSH 环境不会强制调用 `xdg-open`；即使浏览器打开失败，服务也会继续运行并输出配对链接。
 
-## 与旧版 Desktop GUI 的对应关系
+## 与 Desktop GUI 的对应关系
 
-Desktop GUI 已弃用。下表仅用于帮助旧用户理解 Web UI 与原操作名称的对应关系：
+Windows 桌面用户默认推荐原生 GUI；Web UI 适合需要浏览器界面或跨平台使用的场景。下表用于说明两种界面的操作对应关系：
 
 | Desktop GUI | Web UI |
 | --- | --- |
