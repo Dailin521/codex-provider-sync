@@ -45,6 +45,53 @@ public sealed class CoreWritePlanningTests
     }
 
     [Fact]
+    public async Task ContentFingerprintHint_DoesNotOverrideReparseFingerprint_OnUnix()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        string root = Path.Combine(Path.GetTempPath(), $"codex-provider-reparse-hint-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        string targetPath = Path.Combine(root, "rollout-target.jsonl");
+        string linkPath = Path.Combine(root, "rollout-link.jsonl");
+        await File.WriteAllTextAsync(targetPath, "{\"type\":\"session_meta\"}\n");
+        File.CreateSymbolicLink(linkPath, targetPath);
+        try
+        {
+            FileInfo linkInfo = new(linkPath);
+            string contentDigest = "sha256:" + Convert.ToHexString(
+                    SHA256.HashData(await File.ReadAllBytesAsync(linkPath)))
+                .ToLowerInvariant()
+                + $":{linkInfo.Length}:{linkInfo.LastWriteTimeUtc.Ticks}";
+            CoreWritePlanSnapshot hinted = await CoreWriteSnapshotBuilder.BuildAsync(
+                "sync",
+                "hinted-reparse",
+                [new CoreWriteTargetSpec(linkPath, "replace")],
+                contentFingerprintHints:
+                [
+                    new CoreWriteContentFingerprintHint(
+                        linkPath,
+                        contentDigest,
+                        linkInfo.Length,
+                        linkInfo.LastWriteTimeUtc.Ticks)
+                ]);
+            CoreWritePlanSnapshot fresh = await CoreWriteSnapshotBuilder.BuildAsync(
+                "sync",
+                "hinted-reparse",
+                [new CoreWriteTargetSpec(linkPath, "replace")]);
+
+            CoreWriteSnapshotBuilder.AssertExactMatch(hinted, fresh);
+            Assert.NotEqual(contentDigest, Assert.Single(hinted.Targets).Fingerprint);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task CheckedSync_RejectsDriftBeforeBackupOrMutation()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();

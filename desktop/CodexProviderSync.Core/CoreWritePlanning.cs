@@ -88,6 +88,10 @@ internal static class CoreWriteSnapshotBuilder
             {
                 throw new CoreWritePlanStaleException();
             }
+            if ((File.GetAttributes(fullPath) & FileAttributes.ReparsePoint) != 0)
+            {
+                continue;
+            }
             fingerprintCache[(fullPath, CoreWriteFingerprintMode.Content)] = hint.Fingerprint;
         }
         IReadOnlyList<CoreWritePlanTarget> capturedTargets = await CaptureTargetsAsync(
