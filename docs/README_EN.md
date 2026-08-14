@@ -2,79 +2,69 @@
 
 # codex-provider-sync
 
-### Keep Codex history visible after switching Providers
+### Make Codex history visible again after switching providers
 
 [![CI](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Dailin521/codex-provider-sync)](https://github.com/Dailin521/codex-provider-sync/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
 [![Community](https://img.shields.io/badge/community-LINUX%20DO-2ea043.svg)](https://linux.do/)
 
-[Web UI](../README.md) · [中文](README_ZH.md) · [日本語](README_JA.md) · [한국어](README_KO.md) · English
+[Download Windows GUI](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [中文](../README.md) · English · [日本語](README_JA.md) · [한국어](README_KO.md)
 
 </div>
 
-> The repository root [README](../README.md) is the canonical English documentation and now focuses on the Web UI. This file is retained as a longer legacy reference.
+## What it solves
 
-## When You Need It
+After switching `model_provider`, older sessions may disappear from Codex Desktop or `/resume`. The data usually remains on disk, but provider information in session files and the SQLite index is no longer synchronized.
 
-After switching `model_provider`, older Codex sessions may disappear from Desktop or `/resume`. The sessions are usually still present, but their rollout, SQLite, or project-visibility metadata still points to the previous Provider.
-
-Use this tool when:
-
-- switching between an official subscription (whose internal Provider is `openai`) and a custom relay;
-- switching configurations that must use different `model_provider` IDs;
-- rollout and SQLite Provider or model metadata has become inconsistent; or
-- you want changes to `config.toml`, SQLite, or its WAL to trigger synchronization automatically.
-
-If all of your relays can reliably reuse one `model_provider` ID and history remains visible, using that shared ID is simpler and no synchronization is needed. This project is mainly useful when Provider IDs cannot be unified or when switching between official and custom Providers.
-
-The tool does not sign in, manage accounts, or switch authentication. Switch Provider using your normal workflow first, then synchronize history.
-
-## Relationship to Provider Switchers
-
-Provider managers, including cc-switch, primarily switch accounts, API keys, `auth.json`, or `config.toml`; some also provide their own history handling. codex-provider-sync deliberately leaves authentication alone and focuses on post-switch visibility metadata, rollout files, SQLite state, managed backups, and restoration.
-
-If your current switcher already keeps all history visible, you do not need to run another synchronization. This project remains useful when several switching workflows have split existing history, rollout and SQLite need to be reconciled together, SQLite Home is separate from Codex Home, or backup-backed transactional repair is required.
-
-## What It Updates
-
-- Rollout metadata under `~/.codex/sessions` and `~/.codex/archived_sessions`.
-- Codex SQLite thread records, including layouts where SQLite is stored outside Codex Home.
-- Project-visibility path information and related model metadata when required.
-- Managed backups before each synchronization, with restore and pruning support.
-- Large rollout files in place when safe, with automatic fallback to a full safe rewrite.
-- Automatic CLI synchronization after `config.toml`, SQLite, or WAL changes.
+This tool synchronizes session files and the SQLite index, restoring session visibility and creating a backup before writing. It does not sign in, switch accounts, or modify `auth.json` or message content.
 
 ## Quick Start
 
-### Desktop GUI (deprecated)
+| Scenario | Recommended interface |
+| --- | --- |
+| Windows desktop | [Native Windows GUI](#windows-gui) |
+| macOS desktop | [Local Web UI](#local-web-ui); [native GUI build guide](README_MAC_GUI_EN.md) |
+| Browser interface or cross-platform use | [Local Web UI](#local-web-ui) |
+| Scripts, CI, or WSL | [CLI](#cli) |
 
-The Desktop GUI is deprecated and is not the recommended interface. Use the local Web UI described in the root README instead.
+### Windows GUI
 
-For normal Windows use, download the standalone GUI from [Releases](https://github.com/Dailin521/codex-provider-sync/releases/latest):
+Download `CodexProviderSync.exe` from [Releases](https://github.com/Dailin521/codex-provider-sync/releases/latest):
 
-| Use case | Release asset | Update method |
-| --- | --- | --- |
-| Windows GUI only | `CodexProviderSync.exe` | Built-in updates supported |
-| Scripts, CI, or AI agents | `codex-provider-sync-v<version>-automation-win-x64.zip` | Manual update |
-| GUI and Automation together | `codex-provider-sync-v<version>-win-x64.zip` | Manual update |
+1. Click Refresh.
+2. Select the target provider.
+3. Click Sync Now.
 
-1. Open `CodexProviderSync.exe`.
-2. Click `刷新` (Refresh).
-3. Select the target Provider.
-4. Click `立即同步` (Sync Now).
+The application is not code-signed, so Windows may show a security warning. Download only from this project's Releases.
 
-The GUI keeps backups and displays the synchronization result. It checks for a stable release in the background on the first launch of each local day, with a 10-second lookup deadline. Manual update checks remain available. Execution logs are stored under `%AppData%\codex-provider-sync\logs`.
+[Full Windows GUI guide](README_GUI_ZH.md)
 
-The Windows GUI supports a separate SQLite Home on the Windows filesystem for each Codex Home. WSL UNC paths such as `\\wsl.localhost\...` and `\\wsl$\...` are diagnostic-only; the GUI reports the safety boundary and disables synchronization and restore. Run the CLI inside WSL for a Windows Codex Home plus WSL SQLite Home layout.
+### Local Web UI
 
-The Windows executable is currently unsigned, so browser downloads may trigger a SmartScreen warning. Download it only from this project's Releases and verify the matching SHA-256 when needed.
+With the CLI installed, run:
 
-See [README_GUI_ZH.md](README_GUI_ZH.md) for the full Windows guide. A self-built Avalonia macOS app is also available; see the [English macOS GUI guide](README_MAC_GUI_EN.md).
+```bash
+codex-provider web
+```
+
+![Web UI overview](../images/README/2026-08-05T03-53-48.708Z.png)
+
+Common options:
+
+```bash
+codex-provider web --no-open       # Do not open a browser automatically
+codex-provider web --port 8792     # Use a specific port
+codex-provider web --reset-access  # Pair a browser again
+```
+
+The Web UI listens on `127.0.0.1` by default and opens a browser to pair automatically. Storage paths are managed by profiles, write operations require confirmation, and confirmation is required again if a profile changes.
+
+[Full Web UI guide](README_WEB_UI_ZH.md)
 
 ### CLI
 
-The CLI requires Node.js `>=16.20.2`:
+The CLI supports Node.js `16.20.2+`. If it is not installed, run:
 
 ```bash
 npm install -g git+https://github.com/Dailin521/codex-provider-sync.git
@@ -82,106 +72,69 @@ codex-provider status
 codex-provider sync
 ```
 
-Common commands:
-
 | Command | Purpose |
 | --- | --- |
-| `codex-provider status` | Inspect the current Provider, rollout files, SQLite, and project visibility |
-| `codex-provider sync` | Synchronize history to the current Provider without changing authentication |
-| `codex-provider switch <provider-id>` | Change the root `model_provider`, then synchronize |
-| `codex-provider restore <backup-dir>` | Restore a selected backup |
-| `codex-provider prune-backups --keep 5` | Keep only the five newest managed backups |
-| `codex-provider watch` | Watch config, SQLite, and WAL changes and synchronize automatically |
-| `codex-provider watch --once` | Exit after the first change is synchronized successfully |
+| `codex-provider status` | Inspect provider, rollout, and SQLite state |
+| `codex-provider sync` | Synchronize to the current provider |
+| `codex-provider switch <provider-id>` | Switch provider, then synchronize |
+| `codex-provider restore <backup-dir>` | Restore a backup |
+| `codex-provider watch` | Watch configuration and SQLite changes |
 
-`switch` accepts `--model <NAME>` to set the root model explicitly, or `--keep-root-model` to change only the Provider. All main commands accept `--codex-home <PATH>` and `--sqlite-home <PATH>`.
+SQLite Home resolution order: `--sqlite-home` → root-level `sqlite_home` in `config.toml` → `CODEX_SQLITE_HOME` → `<Codex Home>/sqlite`. Only the default layout falls back to `<Codex Home>/state_5.sqlite`.
 
-SQLite Home precedence is: CLI override, root-level `sqlite_home` in `config.toml`, `CODEX_SQLITE_HOME`, then `<Codex Home>/sqlite`. The legacy `<Codex Home>/state_5.sqlite` fallback is enabled only for the default layout. An explicit SQLite Home never falls back to a stale database under Codex Home.
+## Current Architecture
 
-For a Windows Codex Home with app-server and SQLite running in WSL, invoke the CLI from WSL:
+```mermaid
+flowchart LR
+    Browser["Browser Web UI"] --> WebServer["Local Node Web Server<br/>127.0.0.1"]
+    WebServer --> NodeService["Node Service"]
+    CLI["Node CLI"] --> NodeService
 
-```bash
-codex-provider status --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/you/.codex/sqlite
-codex-provider sync --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/you/.codex/sqlite
+    DesktopGUI["Desktop GUI<br/>Windows / macOS"] --> Application[".NET Application"]
+    Application --> DotNetCore[".NET Core"]
+
+    NodeService --> Storage["Codex Storage"]
+    DotNetCore --> Storage
+
+    Storage --> Config["config.toml"]
+    Storage --> Rollouts["sessions / archived_sessions"]
+    Storage --> SQLite["state_5.sqlite"]
+    Storage --> Backups["managed backups"]
 ```
 
-`status` reports the effective SQLite Home and its source. If an explicit location has no `state_5.sqlite`, read-only status reports the diagnostic while write operations fail. If a database is deleted from the default layout, `restore` can rebuild it at its original default location from backup metadata. New metadata v2 backups record the separate SQLite Home. Restoring a v2 backup to a different SQLite Home is rejected unless relocation is explicitly confirmed; the CLI requires `--sqlite-home`, `--allow-sqlite-home-relocation`, and `--no-config` so the restored config cannot point Codex back to the source SQLite Home.
+- The Web UI and CLI share the same Node service logic.
+- The Windows and macOS GUIs call .NET Core through the Application layer.
+- Both paths enforce the same configuration, rollout, SQLite, and backup safety boundaries.
 
-Node.js 24+ uses the built-in `node:sqlite` module. Older supported Node.js releases use the optional `better-sqlite3` dependency.
+## Safety boundaries
 
-### Automation API (experimental v0.4)
-
-Releases provide a separate Windows Automation package containing `CodexProviderSync.Automation.exe`, `automation-protocol-v0.4.schema.json`, and a Chinese quick start. The complete Windows package contains the same files. This one-shot process interface uses the same Application use cases as the Windows GUI. Each invocation emits exactly one protocol `0.4` JSON document on stdout and sends diagnostics to stderr. Normal desktop users do not need the Automation package.
-
-| Command | Purpose |
-| --- | --- |
-| `describe` | Describe protocol capabilities and safety requirements |
-| `status` | Read status and diagnostics |
-| `plan --operation sync\|switch\|restore\|prune` | Create a plan for a selected write operation |
-| `sync` | Plan or explicitly apply synchronization |
-| `switch` | Plan or explicitly apply a Provider/model switch and synchronization |
-| `restore` | Plan or explicitly apply backup restoration |
-| `prune` | Plan or explicitly prune managed backups |
-
-Every write command is dry-run by default and returns a plan without modifying a target. Mutation requires `--apply`, a plan file containing only the `data` object from the `plan` response, and that object's exact lowercase SHA-256 `digest`:
-
-```powershell
-.\CodexProviderSync.Automation.exe describe
-.\CodexProviderSync.Automation.exe status --codex-home C:\isolated\.codex
-.\CodexProviderSync.Automation.exe sync --codex-home C:\isolated\.codex --provider openai
-$planResponse = .\CodexProviderSync.Automation.exe plan --operation sync --codex-home C:\isolated\.codex --provider openai | ConvertFrom-Json
-$planResponse.data | ConvertTo-Json -Depth 100 -Compress | Set-Content -LiteralPath C:\isolated\sync-plan.json -Encoding utf8NoBOM
-$planDigest = $planResponse.data.digest
-.\CodexProviderSync.Automation.exe sync --codex-home C:\isolated\.codex --provider openai --apply --plan C:\isolated\sync-plan.json --plan-digest $planDigest
-```
-
-Plans expire, bind normalized inputs and target state, and are single-use through a durable ledger. The default ledger is `<Codex Home>\tmp\provider-sync-automation-ledger`. Every path argument must be absolute and may not traverse a symbolic link or reparse point. Automation also rejects direct access to `auth.json`. The protocol remains experimental before 1.0; compatibility is not promised outside protocol family `0.4`.
-
-## Safety and Limitations
-
-Before each `sync` or `switch`, the tool creates a backup under:
-
-```text
-~/.codex/backups_state/provider-sync/<timestamp>
-```
-
-- It does not modify messages, session titles, authentication, `auth.json`, or `updated_at`.
-- It does not copy configuration or session files between devices; it only repairs metadata in the current Codex Home.
-- If SQLite is in use, close Codex, Codex App, and app-server before retrying.
-- A Windows process that resolves SQLite Home through a WSL UNC path reports a dedicated safety diagnostic and stops immediately. Continue inside that WSL distribution with the Linux `/home/...` path.
-- If a live session locks a rollout file, the tool skips that file and continues. Run sync again after the session ends for a complete update.
-- Sessions containing `encrypted_content` may become visible across Providers/accounts but still fail to continue or compact with `invalid_encrypted_content`.
-- Codex Desktop currently shows only the latest 50 sessions on its first page. If `/resume` can see a session but the project view cannot, inspect the `first page` / `ranks` diagnostics. This tool does not alter timestamps to bypass that upstream limit.
+- Before every `sync` or `switch`, a backup is created at `~/.codex/backups_state/provider-sync/<timestamp>`.
+- Does not modify message content, session titles, authentication data, `auth.json`, or `updated_at`.
+- If SQLite is in use, close Codex, Codex App, and app-server, then retry.
+- If an active session locks rollout files, other files continue; sync again after that session ends.
+- Across providers or accounts, `encrypted_content` may restore list visibility only.
+- Windows cannot write directly to a WSL UNC SQLite Home; enter WSL and run the CLI with Linux paths.
 
 ## Documentation
 
-- [Windows GUI guide](README_GUI_ZH.md)
-- [macOS GUI guide](README_MAC_GUI_EN.md)
-- [v0.4.1 Chinese release announcement](release-notes/v0.4.1-zh.md)
-- [v0.4.0 Chinese release announcement](release-notes/v0.4.0-zh.md)
-- [v0.4.0 technical release notes](RELEASE_NOTES_V0.4.0.md)
-- [Changelog](../CHANGELOG.md)
-- [Chinese Automation quick start](AUTOMATION_QUICKSTART_ZH.md)
-- [v0.4 Automation execution plan](V0.4_AUTOMATION_PLAN.md)
-- [中文说明](../README.md)
-- [AI / Agent guide](../AGENTS.md)
-- [Contributing guide](../CONTRIBUTING.md#english-quick-guide)
+- [AI / Agent Guide](../AGENTS.md)
+
+- [Windows GUI](README_GUI_ZH.md)
+- [Web UI](README_WEB_UI_ZH.md)
+- [中文](../README.md) · [日本語](README_JA.md) · [한국어](README_KO.md)
+- [macOS GUI: 中文](README_MAC_GUI_ZH.md) · [English](README_MAC_GUI_EN.md)
+- [How it works](WORKING_PRINCIPLE_ZH.md) · [Changelog](../CHANGELOG.md) · [Contributing](../CONTRIBUTING.md)
 
 ## Development
 
 ```bash
-git clone https://github.com/Dailin521/codex-provider-sync.git
-cd codex-provider-sync
+npm ci
+npm run web:build
+npm run web:start
 npm test
 dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj
-./scripts/test-wsl-unc-safety.sh
-pwsh ./scripts/publish-gui.ps1
-pwsh ./scripts/run-windows-gui-e2e.ps1
-./scripts/publish-gui-macos.sh
 ```
-
-Run `test-wsl-unc-safety.sh` from WSL. It invokes Windows `dotnet.exe` to verify the safety guard against a real SQLite database on WSL ext4. Run `run-windows-gui-e2e.ps1` only on a visible, interactive Windows desktop. The v0.4 implementation commit `7545b5d` passed this gate with 40/40 manifest entries covered, 53/53 required scenarios passed, and zero errors or blockers; the evidence gate also verified the published EXE hash, real control events, native dialogs, file/SQLite effects, restart persistence, and GUI-to-Application traces. Relevant later implementation changes require another run. Hidden, skipped, or direct-Application runs are not substitutes.
 
 ## License
 
-MIT
+[MIT](../LICENSE)
