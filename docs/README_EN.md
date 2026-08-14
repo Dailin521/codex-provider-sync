@@ -22,11 +22,11 @@ After switching `model_provider`, older sessions may disappear from Codex Deskto
 
 This tool synchronizes session files and the SQLite index, restoring session visibility and creating a backup before writing. It does not sign in, switch accounts, or modify `auth.json` or message content.
 
-> **When is synchronization needed?**
->
-> - **Typical case:** Switching between official OpenAI and a custom relay. Official OpenAI always uses `openai`, so the Provider ID changes and history needs to be synchronized.
-> - **Existing mixed history:** Older sessions already contain different Provider IDs and need to be aligned with the current provider.
-> - **No synchronization needed:** Switching only among custom relays that share one Provider ID, or when CCSwitch or another tool has already synchronized history.
+### When is synchronization needed?
+
+- **Typical case:** Switching between official OpenAI and a custom relay. Official OpenAI always uses `openai`, so the Provider ID changes and history needs to be synchronized.
+- **Existing mixed history:** Older sessions already contain different Provider IDs and need to be aligned with the current provider.
+- **No synchronization needed:** Switching only among custom relays that share one Provider ID, or when CCSwitch or another tool has already synchronized history.
 
 ## Quick Start
 
