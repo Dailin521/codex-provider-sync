@@ -10,7 +10,7 @@ npm 包只包含 Node CLI、Web UI 和相关文档。它与 Windows GUI 的 GitH
 
 ## 首次发布
 
-首次发布需要 npm 用户 `codexsync` 拥有 `dailin521` 组织，并在本机完成 npm 登录和双重验证：
+首次发布需要 npm 用户 `dailin521` 是同名组织的 owner，并在本机完成 npm 登录和双重验证：
 
 ```bash
 npm login
