@@ -1,0 +1,49 @@
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import { getHistorySession, listHistory } from "../src/history.js";
+
+async function fixture() {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "codex-history-"));
+  const file = path.join(home, "sessions", "2026", "08", "04", "rollout-one.jsonl");
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const lines = [
+    { type: "session_meta", timestamp: "2026-08-04T08:00:00.000Z", payload: { id: "thread-one", title: "测试会话", cwd: "/work/demo", model_provider: "openai", model: "gpt-5" } },
+    { type: "event_msg", timestamp: "2026-08-04T08:01:00.000Z", payload: { type: "user_message", message: "请总结这个项目" } },
+    { type: "event_msg", timestamp: "2026-08-04T08:02:00.000Z", payload: { type: "assistant_message", message: "这是项目总结。" } },
+    { type: "response_item", timestamp: "2026-08-04T08:03:00.000Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Agent 的详细回答。" }] } },
+    { type: "event_msg", payload: { type: "tool_call", arguments: "secret" } },
+    { type: "event_msg", payload: { encrypted_content: "gAAA" } }
+  ];
+  await fs.writeFile(file, lines.map((line) => JSON.stringify(line)).join("\n") + "\n", "utf8");
+  return { home, file };
+}
+
+test("history lists readable sessions and filters message text", async () => {
+  const { home } = await fixture();
+  try {
+    const result = await listHistory(home, { page: 1, pageSize: 50, query: "总结" });
+    assert.equal(result.total, 1);
+    assert.equal(result.sessions[0].id, "thread-one");
+    assert.equal(result.sessions[0].messageCount, 3);
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test("history detail returns only safe messages with a limit", async () => {
+  const { home } = await fixture();
+  try {
+    const result = await getHistorySession(home, "thread-one", { messageLimit: 1 });
+    assert.equal(result.returnedMessageCount, 1);
+    assert.equal(result.truncated, true);
+    assert.equal(result.messages[0].role, "assistant");
+    assert.equal(result.messages[0].text, "Agent 的详细回答。");
+    assert.doesNotMatch(JSON.stringify(result), /encrypted_content|tool_call|secret/);
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});

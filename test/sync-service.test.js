@@ -3852,11 +3852,13 @@ test("cli rejects non-integer keep values", async () => {
   assert.match(result.stderr, /Invalid --keep value: 1\.5/);
 });
 
-test("node version guard allows Node 16 and rejects older releases", () => {
-  assert.equal(getUnsupportedNodeVersionMessage("16.0.0"), null);
+test("node version guard requires Node 16.20.2 or newer", () => {
+  assert.equal(getUnsupportedNodeVersionMessage("16.20.2"), null);
+  assert.equal(getUnsupportedNodeVersionMessage("18.0.0"), null);
+  assert.match(getUnsupportedNodeVersionMessage("16.20.1"), /requires Node\.js 16\.20\.2/);
   assert.match(
     getUnsupportedNodeVersionMessage("14.21.3"),
-    /requires Node\.js 16\+/
+    /requires Node\.js 16\.20\.2/
   );
 });
 

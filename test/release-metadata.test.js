@@ -53,10 +53,10 @@ test("reads the current repository Chinese release metadata", () => {
   const testDirectory = path.dirname(fileURLToPath(import.meta.url));
   const rootDir = path.resolve(testDirectory, "..");
 
-  const result = readReleaseMetadata({ rootDir, tag: "v0.4.0" });
+  const result = readReleaseMetadata({ rootDir, tag: "v0.5.0" });
 
-  assert.equal(result.title, "v0.4.0 - 更安全的事务化同步与自动化支持");
-  assert.equal(result.relativeBodyPath, "docs/release-notes/v0.4.0-zh.md");
+  assert.equal(result.title, "v0.5.0 - Web UI 自动配对与本地访问边界加固");
+  assert.equal(result.relativeBodyPath, "docs/release-notes/v0.5.0-zh.md");
 });
 
 test("reads one validated release title and body path", () =>

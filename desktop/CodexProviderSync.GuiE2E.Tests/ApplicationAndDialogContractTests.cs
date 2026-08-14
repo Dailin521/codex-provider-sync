@@ -100,7 +100,7 @@ public sealed class DialogContractVerifierTests
             "update-no-update",
             "#32770",
             "Codex Provider Sync",
-            ["当前已是最新版本（v0.4.0）。", "确定"]);
+            ["当前已是最新版本（v0.5.0）。", "确定"]);
 
         Assert.True(sync.Passed, sync.Error);
         Assert.True(noUpdate.Passed, noUpdate.Error);

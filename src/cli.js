@@ -19,6 +19,7 @@ Usage:
   codex-provider sync [--provider ID] [--keep N] [--codex-home PATH] [--sqlite-home PATH]
   codex-provider switch <provider-id> [--model NAME] [--keep-root-model] [--keep N] [--codex-home PATH] [--sqlite-home PATH]
   codex-provider watch [--codex-home PATH] [--sqlite-home PATH] [--debounce-ms N] [--once] [--no-state-db]
+  codex-provider web [--port N] [--no-open] [--reset-access] [--codex-home PATH] [--sqlite-home PATH]
   codex-provider prune-backups [--keep N] [--codex-home PATH]
   codex-provider restore <backup-dir> [--no-config] [--no-db] [--no-sessions] [--allow-sqlite-home-relocation] [--codex-home PATH] [--sqlite-home PATH]
   codex-provider install-windows-launcher [--dir PATH] [--codex-home PATH] [--sqlite-home PATH]
@@ -33,6 +34,13 @@ watch flags:
   --debounce-ms N      wait N milliseconds after a change before syncing (default 750)
   --once               exit after the first successful sync
   --no-state-db        only watch config.toml, ignore SQLite state events
+
+web flags:
+  --port N             bind the local Web UI to 127.0.0.1:N (default 8791)
+  --no-open            do not open the system browser automatically
+  --reset-access       invalidate all paired browsers before creating a new pairing
+  --codex-home PATH    set the default server-managed storage profile
+  --sqlite-home PATH   set the default profile SQLite Home override
 `);
 }
 
@@ -196,6 +204,8 @@ async function main() {
     return;
   }
 
+  assertSupportedNodeVersion();
+
   if (command === "status") {
     const { getStatus, renderStatus } = await loadService();
     const status = await getStatus({
@@ -309,6 +319,41 @@ async function main() {
       }
       process.once("SIGINT", () => finish("SIGINT"));
       process.once("SIGTERM", () => finish("SIGTERM"));
+    });
+    return;
+  }
+
+  if (command === "web") {
+    const { startWebUi } = await import("./web-server.js");
+    const port = flags.port === undefined ? 8791 : parseKeepCount(flags.port, { allowZero: true });
+    const handle = await startWebUi({
+      port,
+      openBrowser: !flags["no-open"],
+      resetAccess: Boolean(flags["reset-access"]),
+      codexHome: flags["codex-home"],
+      sqliteHome: flags["sqlite-home"]
+    });
+    console.log(`Codex Provider Sync Web UI: ${handle.url}`);
+    if (flags["no-open"] || !handle.browserOpened) {
+      console.log(`One-time pairing link: ${handle.pairingUrl}`);
+    }
+    if (handle.reused) {
+      console.log("Opened the existing Codex Provider Sync Web UI instance.");
+      return;
+    }
+    console.log("The server only listens on 127.0.0.1. Press Ctrl+C to stop it.");
+    await new Promise((resolve) => {
+      let closing = false;
+      const close = async () => {
+        if (closing) {
+          return;
+        }
+        closing = true;
+        await handle.close().catch(() => {});
+        resolve();
+      };
+      process.once("SIGINT", close);
+      process.once("SIGTERM", close);
     });
     return;
   }
