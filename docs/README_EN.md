@@ -5,7 +5,8 @@
 ### Make Codex history visible again after switching providers
 
 [![CI](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/Dailin521/codex-provider-sync)](https://github.com/Dailin521/codex-provider-sync/releases/latest)
+[![CLI / Web](https://img.shields.io/npm/v/%40dailin521%2Fcodex-provider-sync?label=CLI%20%2F%20Web)](https://www.npmjs.com/package/@dailin521/codex-provider-sync)
+[![Windows GUI](https://img.shields.io/github/v/release/Dailin521/codex-provider-sync?label=Windows%20GUI)](https://github.com/Dailin521/codex-provider-sync/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
 [![Community](https://img.shields.io/badge/community-LINUX%20DO-2ea043.svg)](https://linux.do/)
 
@@ -17,9 +18,15 @@ Language: [中文](../README.md) · **English** · [日本語](README_JA.md) · 
 
 ## What it solves
 
-After switching `model_provider`, older sessions may disappear from Codex Desktop or `/resume`. The data usually remains on disk, but provider information in session files and the SQLite index is no longer synchronized.
+After switching `model_provider`, older sessions may disappear from Codex Desktop or `/resume`. **The data usually remains on disk**; only the provider information in session files and the SQLite index is out of sync.
 
 This tool synchronizes session files and the SQLite index, restoring session visibility and creating a backup before writing. It does not sign in, switch accounts, or modify `auth.json` or message content.
+
+> **When is synchronization needed?**
+>
+> - **Typical case:** Switching between official OpenAI and a custom relay. Official OpenAI always uses `openai`, so the Provider ID changes and history needs to be synchronized.
+> - **Existing mixed history:** Older sessions already contain different Provider IDs and need to be aligned with the current provider.
+> - **No synchronization needed:** Switching only among custom relays that share one Provider ID, or when CCSwitch or another tool has already synchronized history.
 
 ## Quick Start
 
@@ -63,7 +70,16 @@ codex-provider web --port 8792     # Use a specific port
 codex-provider web --reset-access  # Pair a browser again
 ```
 
-The Web UI listens on `127.0.0.1` by default and opens a browser to pair automatically. Storage paths are managed by the storage configuration (profile) at the top of the page. Write operations require confirmation, and confirmation is required again if that configuration changes.
+The Web UI listens on `127.0.0.1` by default and opens a browser to pair automatically. Storage paths are managed by the storage configuration (profile) at the top of the page. Write operations require confirmation; press `Ctrl+C` to stop the service.
+
+#### Synchronize history after switching providers
+
+1. Switch providers with CCSwitch or your usual tool.
+2. Click `读取状态` (Read Status) in the Web UI if needed (optional).
+3. Keep `仅同步元数据` (Metadata Only), select the target provider, and confirm the sync.
+4. You are done when the page shows `Provider 元数据已对齐` (Provider Metadata Aligned).
+
+> **Note:** Metadata sync restores history visibility only. When continuing an old session across providers, the target backend may be unable to decrypt its `encrypted_content` reasoning data, causing continuation or compaction to fail.
 
 [Full Web UI guide (Chinese)](README_WEB_UI_ZH.md)
 
@@ -120,7 +136,7 @@ flowchart LR
 - Does not modify message content, session titles, authentication data, `auth.json`, or `updated_at`.
 - If SQLite is in use, close Codex, Codex App, and app-server, then retry.
 - If an active session locks rollout files, other files continue; sync again after that session ends.
-- Across providers or accounts, `encrypted_content` may restore list visibility only.
+- When continuing an old session across providers or accounts, the target backend may be unable to decrypt `encrypted_content`, causing continuation or compaction to fail. Return to the original provider/account or start a new session.
 - Windows cannot write directly to a WSL UNC SQLite Home; enter WSL and run the CLI with Linux paths.
 
 ## Documentation
