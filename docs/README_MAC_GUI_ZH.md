@@ -6,7 +6,7 @@
 
 ## 构建
 
-需要 .NET 10 SDK。
+需要 .NET 10 SDK 和 macOS 12 或更高版本。
 
 ```bash
 ./scripts/publish-gui-macos.sh

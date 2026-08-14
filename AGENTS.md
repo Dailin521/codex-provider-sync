@@ -1,215 +1,75 @@
-# AI Operator Guide
+# AI / Agent Operator Guide
 
-This file is for AI assistants, coding agents, and automation tools.
+This file is for AI assistants and automation working in this repository. User-facing setup and usage belong in [README.md](README.md) and `docs/`.
 
 ## Goal
 
-Help the user make historical Codex sessions visible again after switching `model_provider`.
+Restore Codex session visibility after `model_provider` changes by keeping rollout metadata and the resolved SQLite thread index aligned. Do not treat this as an authentication or account-management tool.
 
-For normal Windows users, prefer the GUI app when it is available. Use the CLI when:
+## Choose the interface
 
-- the user explicitly wants commands
-- the task is automated
-- the GUI EXE is unavailable
+- Prefer the Windows GUI for users who want a double-click tool and do not want Node.js.
+- Prefer the Local Web UI for browser-based or cross-platform use: `codex-provider web`.
+- Use the CLI for explicit command requests, automation, diagnostics, WSL paths, or when a GUI is unavailable.
+- Use `CodexProviderSync.Automation.exe` only for repository development or explicit Automation work. It ships with the v0.4 Windows Release, but protocol 0.4 is experimental and is not a stable public API or a production GUI control port.
 
-The tool works by updating both:
+## Safe operating flow
 
-- rollout metadata under `~/.codex/sessions` and `~/.codex/archived_sessions`
-- SQLite thread metadata in the resolved Codex state database
+1. Inspect with the UI status action or `codex-provider status`.
+2. Confirm the current Provider, effective SQLite Home/database, and rollout/SQLite Provider distributions.
+3. Choose `sync`, `switch`, or `restore` from the rules below.
+4. Execute once; do not manually edit rollout files or SQLite when the tool can perform the operation.
+5. Report the final Provider alignment, backup location, and any skipped or blocked data.
 
-## Architecture Direction
+## Choose the operation
 
-`docs/AUTOMATION_DESIGN_NOTES.md` records the experimental 0.x direction.
-It is not a public compatibility contract. No Automation executable, stable
-JSONL protocol, or UI probe is currently shipped.
+- `sync`: the user already changed Provider/account with CCSwitch or another tool, and `config.toml` already contains the intended root `model_provider`.
+- `switch <provider-id>`: the user explicitly wants this tool to change the root Provider and synchronize history. Custom providers must already exist in `config.toml`; built-in `openai` is always valid.
+- `switch <provider-id> --keep-root-model`: preserve the root `model`.
+- `switch <provider-id> --model <name>`: explicitly set the root `model`.
+- `restore <backup-dir>`: roll back a mistaken operation. Cross-SQLite-Home restore requires an explicit target, relocation confirmation, and no config restore.
+- `prune-backups --keep <n>`: remove only older managed backups.
 
-For Windows GUI work:
+`sync` uses the current root `model_provider`, falling back to `openai` when it is absent. Sync and switch create a backup before writing and prune only tool-managed backups according to retention.
 
-- move UI-independent state, validation, and Core request construction into the
-  Application/controller layer incrementally
-- keep Core authoritative for config, rollout, SQLite, backup, restore, and
-  storage-safety behavior
-- keep WinForms handlers focused on presentation and platform interaction
-- preserve observable behavior and add controller tests for each migrated slice
-- prefer controller tests over adding new reflection-based MainForm business tests
+## Storage and path rules
 
-Resolve SQLite Home in this order: explicit CLI/GUI override, root `sqlite_home` in `config.toml`, `CODEX_SQLITE_HOME`, then `<codex-home>/sqlite`. Only the default layout may fall back to `<codex-home>/state_5.sqlite`. Never fall back when an explicit/config/environment SQLite Home is missing.
+Resolve SQLite Home in this order:
 
-On Windows, `\\wsl.localhost\...` and `\\wsl$\...` SQLite Homes are diagnostic-only. SQLite operations for these paths run inside WSL and use the corresponding Linux path.
+1. explicit CLI, desktop GUI, or Web profile override
+2. root `sqlite_home` in `config.toml`
+3. `CODEX_SQLITE_HOME`
+4. `<Codex Home>/sqlite`
 
-Do not solve this by manually editing rollout files only unless the user explicitly asks for manual intervention.
+Only the default layout may fall back to legacy `<Codex Home>/state_5.sqlite`. A missing explicit, config, or environment SQLite Home is an error; never silently fall back elsewhere.
 
-## Preferred Flow
+On Windows, `\\wsl.localhost\...` and `\\wsl$\...` SQLite Homes are diagnostic-only. Run SQLite operations inside the matching WSL distribution, using Linux paths. Metadata v2 backups record `sqliteHome` and `sqliteDbFiles`; do not bypass relocation checks.
 
-Use this order by default:
+## Safety boundaries
 
-1. If the GUI is available and the user is not asking for terminal commands, open `CodexProviderSync.exe`
-2. Refresh and inspect the current provider plus rollout/SQLite distribution
-3. Decide whether the user needs sync, switch-like behavior, or restore
-4. Execute the action
-5. Report whether the result is complete or partially skipped due to locked files
+- Never read, copy, log, or modify `auth.json`, credentials, or tokens. Do not copy, log, modify, or expose message bodies outside the Web UI's explicit read-only History view.
+- Do not change thread `updated_at` or reorder history to force visibility.
+- Preserve backup-first, locking, transaction, rollback, WSL, and path-boundary behavior.
+- Rollout/SQLite counts may differ briefly because of an active session; Provider distributions are the alignment signal.
+- Metadata synchronization restores visibility only. Another Provider/account may be unable to decrypt existing `encrypted_content`; advise the user to return to the original Provider/account or start a new session if continuation or compact fails.
+- Tests and reproduction scripts must use temporary directories or fixtures, never a real user Codex Home.
 
-CLI fallback flow:
+## Handle common outcomes
 
-1. Run `codex-provider status`
-2. Read `Current provider`, the displayed SQLite database path, and compare rollout/SQLite distribution
-3. Decide whether the user needs `sync`, `switch`, or `restore`
-4. Run the command
-5. Report whether the result is complete or partially skipped due to locked files
+- SQLite in use: stop before rollout mutation; ask the user to close Codex CLI, Codex App, app-server, and retry.
+- Skipped locked rollout files: classify as partial success. List the skipped files and recommend another sync after the active session ends.
+- Missing custom Provider: define it in `config.toml` or switch with the user's normal Provider tool, then run `sync`.
+- Missing explicit SQLite database: keep the explicit path authoritative and report the error; do not use the legacy database.
+- WSL UNC diagnostic: run the CLI in WSL with the Windows Codex Home under `/mnt/<drive>/...` and a Linux SQLite Home such as `/home/...`.
 
-## Command Selection
+## Engineering direction
 
-Use `codex-provider sync` when:
+- Node CLI and Web UI share the service layer in `src/`; do not duplicate sync logic in the browser.
+- .NET Core remains authoritative for config, rollout, SQLite, backup, restore, and storage safety.
+- Windows GUI routes UI-independent work through the Application/controller layer; WinForms owns presentation and native platform interaction.
+- macOS currently calls Core directly. Do not document an Application-layer dependency that does not exist.
+- Add focused tests for behavior changes. Prefer controller tests over new reflection-based WinForms business tests.
 
-- the user already switched auth/provider using another tool
-- the current `config.toml` root `model_provider` is already correct
-- the user says things like:
-  - "make my old sessions visible again"
-  - "resync my Codex history"
-  - "I already switched provider"
+## Reporting
 
-Use `codex-provider switch <provider-id>` when:
-
-- the user wants to change the root `model_provider`
-- the user wants one command to both switch provider and resync history
-
-By default `switch` also aligns the root-level `model` with the new
-provider section's `model`. Use `switch <provider-id> --keep-root-model`
-to leave the root-level `model` untouched, or
-`switch <provider-id> --model <name>` to set it explicitly (e.g. when
-the new provider section has no `model` field of its own, or when the
-user wants to call a non-default model through a relay provider).
-
-Use `codex-provider restore <backup-dir>` when:
-
-- the user wants to roll back a previous sync
-- the user synced to the wrong provider
-
-Use `codex-provider status` only when:
-
-- the user asks for inspection only
-- you need a safe first step before deciding what to do
-
-## GUI Selection
-
-Use the GUI app when:
-
-- the user wants a double-click tool
-- the user does not want to install Node/npm
-- the user wants to visually inspect providers and backups
-
-GUI mapping:
-
-- `Refresh` = inspect current status
-- `Execute` without config checkbox = `sync --provider <selected>`
-- `Execute` with config checkbox = switch-like behavior
-- `Restore Backup` = restore a previous backup
-- backup retention defaults to 5 and can be customized in the GUI
-- SQLite Home overrides are stored per Codex Home in app settings and are passed to refresh, sync, switch, and restore
-- Windows GUI refresh reports WSL UNC SQLite Homes as diagnostic-only paths; Execute and Restore are disabled for that layout
-- restoring a metadata v2 backup to a different SQLite Home requires a second confirmation showing source and target
-- `Clean Old Backups` = prune managed backups down to the selected retention count
-
-## Important Behavior
-
-- `sync` uses the current root `model_provider` from `~/.codex/config.toml`
-- if root `model_provider` is missing, `sync` falls back to `openai`
-- `switch` changes root `model_provider`, then runs a sync
-- built-in `openai` is always valid
-- custom providers must already exist in `config.toml`
-- the tool does not log the user in and does not manage `auth.json`
-- sync and switch create a backup first, then automatically prune older managed backups
-- backup pruning only touches backups created by this tool under `backups_state/provider-sync`
-
-## Error Handling
-
-If the output says `state_5.sqlite is currently in use`:
-
-- tell the user to close Codex, Codex App, and app-server
-- then rerun the same command
-
-If the output says Windows cannot safely access SQLite through a WSL UNC path:
-
-- identify the message as a WSL UNC path safety diagnostic
-- open the corresponding WSL distribution
-- run the CLI there with the Windows Codex Home mounted under `/mnt/<drive>/...` and SQLite Home expressed as a Linux `/home/...` path
-
-If sync reports `Skipped locked rollout files`:
-
-- treat the sync as mostly successful
-- explain that an active session either still holds one or more rollout files open, or appended to one while it was being scanned
-- tell the user to rerun `codex-provider sync` after that session ends if they want a full rewrite
-
-If `switch <provider-id>` fails because the provider is missing:
-
-- tell the user to define it in `config.toml` or switch via their existing provider tool first
-- then run `codex-provider sync`
-
-## Safe Defaults
-
-- default Codex home: `~/.codex`
-- detect the SQLite DB before reasoning about SQLite counts; recent Codex uses
-  `~/.codex/sqlite/state_5.sqlite`, while older layouts may use
-  `~/.codex/state_5.sqlite`
-- prefer `status` before destructive-looking operations, even though this tool only edits metadata
-- by default the tool keeps the most recent 5 managed backups
-- use GUI retention settings or CLI `--keep <n>` when the user wants a different retention count
-- do not edit `state_5.sqlite` or rollout files manually if the tool can do it
-- classify WSL UNC messages as path safety diagnostics and route SQLite operations through WSL with Linux paths
-- metadata v2 backups record `sqliteHome` and `sqliteDbFiles`; a missing default-layout database may be rebuilt from a valid backup, but a missing explicit/config/environment database remains an error
-- CLI restore to a different SQLite Home requires `--sqlite-home`, `--allow-sqlite-home-relocation`, and `--no-config`; desktop apps must reject relocation while config restore is selected
-- GUI settings live in `%AppData%\codex-provider-sync\settings.json`
-
-## Recommended Commands
-
-```bash
-codex-provider status
-codex-provider sync
-codex-provider sync --keep 5
-codex-provider sync --provider openai
-codex-provider switch apigather
-codex-provider switch apigather --model "MiniMax-M3"
-codex-provider switch apigather --keep-root-model
-codex-provider prune-backups --keep 5
-codex-provider restore C:\Users\you\.codex\backups_state\provider-sync\20260319T042708906Z
-```
-
-With an explicit Codex home:
-
-```bash
-codex-provider status --codex-home C:\Users\you\.codex
-codex-provider sync --codex-home C:\Users\you\.codex
-codex-provider switch openai --codex-home C:\Users\you\.codex
-```
-
-From WSL when Codex Home is on Windows and SQLite Home is in WSL:
-
-```bash
-codex-provider status --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/you/.codex/sqlite
-codex-provider sync --codex-home /mnt/c/Users/you/.codex --sqlite-home /home/you/.codex/sqlite
-```
-
-## One-Shot Prompt Template
-
-Use this prompt in another AI tool if the user wants one-step handling:
-
-```text
-I use codex-provider-sync. Please help me fix Codex session visibility under my current provider.
-
-Steps:
-1. Run `codex-provider status`.
-2. If my current provider is already correct, run `codex-provider sync`.
-3. If I explicitly tell you to switch provider, run `codex-provider switch <provider-id>` instead.
-4. If SQLite is locked, tell me to close Codex / Codex App / app-server and retry.
-5. If rollout files are skipped because they are locked, tell me which ones were skipped and remind me to rerun sync later.
-6. Summarize the final state of rollout files and SQLite after the command finishes.
-```
-
-## User-Facing Summary Style
-
-When reporting results back to the user:
-
-- state the current provider
-- state whether rollout files and SQLite are aligned
-- mention backup location if a sync or switch was executed
-- call out partial success clearly if locked rollout files were skipped
+State the current Provider, whether rollout and SQLite metadata are aligned, the resolved database path, the backup created by a write operation, and whether the result was complete, partial, or blocked. Distinguish automated tests from real-machine validation and list anything not run.

@@ -10,9 +10,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
 [![Community](https://img.shields.io/badge/community-LINUX%20DO-2ea043.svg)](https://linux.do/)
 
-[**Windows GUI 다운로드**](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [로컬 Web UI 사용 (CLI 필요)](#로컬-web-ui)
-
-언어: [中文](../README.md) · [English](README_EN.md) · [日本語](README_JA.md) · **한국어**
+[中文](../README.md) · [English](README_EN.md) · [日本語](README_JA.md) · **한국어**
 
 </div>
 
@@ -22,15 +20,21 @@
 
 이 도구는 세션 파일과 SQLite 인덱스를 동기화하여 세션 표시를 복원하고, 쓰기 전에 백업을 만듭니다. 로그인이나 계정 전환은 처리하지 않으며 `auth.json`이나 메시지 본문도 수정하지 않습니다.
 
-> **언제 동기화가 필요한가요?**
->
-> - **일반적인 경우:** 공식 OpenAI와 사용자 지정 릴레이 사이에서 전환합니다. 공식 OpenAI는 항상 `openai`를 사용하므로 Provider ID가 바뀌며 기록을 동기화해야 합니다.
-> - **기존 기록에 ID가 섞인 경우:** 이전 세션에 서로 다른 Provider ID가 기록되어 있으므로 현재 Provider에 맞춰야 합니다.
-> - **동기화가 필요 없는 경우:** 같은 Provider ID를 공유하는 사용자 지정 릴레이 사이에서만 전환하거나 CCSwitch 같은 도구가 이미 기록을 동기화한 경우입니다.
+<p align="center">
+  <img src="../images/README/provider-metadata-sync-flow.png" alt="Provider 메타데이터 동기화 전후" width="760">
+</p>
+
+### 언제 동기화가 필요한가요?
+
+- **일반적인 경우:** 공식 OpenAI와 사용자 지정 릴레이 사이에서 전환합니다. 공식 OpenAI는 항상 `openai`를 사용하므로 Provider ID가 바뀌며 기록을 동기화해야 합니다.
+- **기존 기록에 ID가 섞인 경우:** 이전 세션에 서로 다른 Provider ID가 기록되어 있으므로 현재 Provider에 맞춰야 합니다.
+- **동기화가 필요 없는 경우:** 같은 Provider ID를 공유하는 사용자 지정 릴레이 사이에서만 전환하거나 CCSwitch 같은 도구가 이미 기록을 동기화한 경우입니다.
 
 ## 빠른 시작
 
 > Windows GUI와 로컬 Web UI의 화면 언어는 현재 중국어 간체만 지원합니다.
+>
+> CLI/Web과 Windows GUI는 별도로 릴리스되므로 버전 번호가 다를 수 있습니다.
 
 | 상황 | 권장 방법 |
 | --- | --- |
@@ -60,7 +64,9 @@ npm install -g @dailin521/codex-provider-sync
 codex-provider web
 ```
 
-![Web UI 개요](../images/README/2026-08-05T03-53-48.708Z.png)
+<p align="center">
+  <a href="../images/README/2026-08-05T03-53-48.708Z.png"><img src="../images/README/2026-08-05T03-53-48.708Z.png" alt="Web UI 개요" width="760"></a>
+</p>
 
 자주 쓰는 옵션:
 
@@ -70,7 +76,7 @@ codex-provider web --port 8792     # 포트 지정
 codex-provider web --reset-access  # 브라우저 재페어링
 ```
 
-Web UI는 기본적으로 `127.0.0.1`에서만 수신하며, 브라우저를 자동으로 열어 페어링을 진행합니다. 저장 경로는 페이지 상단의 저장 구성(Profile)에서 관리하며 쓰기 작업에는 확인이 필요합니다. 서비스는 `Ctrl+C`로 종료합니다.
+Web UI는 기본적으로 `127.0.0.1`에서만 수신하며, 브라우저를 자동으로 열어 페어링을 진행합니다. 저장 경로는 페이지 상단의 저장 구성(Profile)에서 관리하며 쓰기 작업에는 확인이 필요합니다.
 
 #### Provider 전환 후 기록 동기화
 
@@ -142,7 +148,6 @@ flowchart LR
 ## 문서
 
 - [AI / Agent 가이드](../AGENTS.md)
-
 - [Windows GUI (중국어)](README_GUI_ZH.md)
 - [Web UI (중국어)](README_WEB_UI_ZH.md)
 - [中文](../README.md) · [English](README_EN.md) · [日本語](README_JA.md)
@@ -160,6 +165,12 @@ dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.cs
 ```
 
 유지관리자는 Windows GUI Release와 별도로 CLI/Web 패키지를 게시할 수 있습니다. [npm 게시 안내(중국어)](NPM_PUBLISHING.md)를 참조하세요.
+
+## 감사의 말
+
+로컬 Web UI를 제안하고 구현했으며, 채팅 기록 탐색과 다국어 문서의 기반을 기여하고 [PR #80](https://github.com/Dailin521/codex-provider-sync/pull/80)을 통해 v0.5.0에 도입한 [@tangquanwei](https://github.com/tangquanwei), 그리고 코드, 문서, 테스트와 문제 조사에 기여한 모든 분께 감사드립니다.
+
+[기여자 목록](../CONTRIBUTORS.md) · [GitHub Contributors](https://github.com/Dailin521/codex-provider-sync/graphs/contributors)
 
 ## License
 

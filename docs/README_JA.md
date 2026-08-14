@@ -10,9 +10,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
 [![Community](https://img.shields.io/badge/community-LINUX%20DO-2ea043.svg)](https://linux.do/)
 
-[**Windows GUI をダウンロード**](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [ローカル Web UI を使う（CLI が必要）](#ローカル-web-ui)
-
-言語：[中文](../README.md) · [English](README_EN.md) · **日本語** · [한국어](README_KO.md)
+[中文](../README.md) · [English](README_EN.md) · **日本語** · [한국어](README_KO.md)
 
 </div>
 
@@ -22,15 +20,21 @@
 
 このツールはセッションファイルと SQLite インデックスを同期してセッションの可視性を復元し、書き込み前にバックアップを作成します。ログイン、アカウント切り替え、`auth.json`、メッセージ本文は扱いません。
 
-> **同期が必要なのはいつですか？**
->
-> - **通常のケース：**公式 OpenAI とカスタム中継先を切り替える場合。公式 OpenAI は常に `openai` を使用するため Provider ID が変わり、履歴の同期が必要です。
-> - **既存履歴で ID が混在している場合：**旧セッションに異なる Provider ID が記録されているため、現在の Provider に揃える必要があります。
-> - **同期が不要なケース：**同じ Provider ID を共有するカスタム中継先だけを切り替える場合、または CCSwitch などがすでに履歴を同期している場合です。
+<p align="center">
+  <img src="../images/README/provider-metadata-sync-flow.png" alt="Provider メタデータ同期の前後" width="760">
+</p>
+
+### 同期が必要なのはいつですか？
+
+- **通常のケース：**公式 OpenAI とカスタム中継先を切り替える場合。公式 OpenAI は常に `openai` を使用するため Provider ID が変わり、履歴の同期が必要です。
+- **既存履歴で ID が混在している場合：**旧セッションに異なる Provider ID が記録されているため、現在の Provider に揃える必要があります。
+- **同期が不要なケース：**同じ Provider ID を共有するカスタム中継先だけを切り替える場合、または CCSwitch などがすでに履歴を同期している場合です。
 
 ## クイックスタート
 
 > Windows GUI とローカル Web UI の画面表示は現在、簡体字中国語のみです。
+>
+> CLI/Web と Windows GUI は別々にリリースされるため、バージョン番号が異なる場合があります。
 
 | 利用場面 | 推奨する入口 |
 | --- | --- |
@@ -60,7 +64,9 @@ npm install -g @dailin521/codex-provider-sync
 codex-provider web
 ```
 
-![Web UI 概要](../images/README/2026-08-05T03-53-48.708Z.png)
+<p align="center">
+  <a href="../images/README/2026-08-05T03-53-48.708Z.png"><img src="../images/README/2026-08-05T03-53-48.708Z.png" alt="Web UI 概要" width="760"></a>
+</p>
 
 よく使うオプション:
 
@@ -70,7 +76,7 @@ codex-provider web --port 8792     # ポートを指定する
 codex-provider web --reset-access  # ブラウザを再ペアリングする
 ```
 
-Web UI はデフォルトで `127.0.0.1` のみで待ち受け、ブラウザを自動で開いてペアリングします。保存先はページ上部の保存設定（Profile）で管理します。書き込み操作には確認が必要です。サービスは `Ctrl+C` で停止します。
+Web UI はデフォルトで `127.0.0.1` のみで待ち受け、ブラウザを自動で開いてペアリングします。保存先はページ上部の保存設定（Profile）で管理します。書き込み操作には確認が必要です。
 
 #### Provider 切り替え後に履歴を同期する
 
@@ -142,7 +148,6 @@ flowchart LR
 ## ドキュメント
 
 - [AI / Agent ガイド](../AGENTS.md)
-
 - [Windows GUI（中国語）](README_GUI_ZH.md)
 - [Web UI（中国語）](README_WEB_UI_ZH.md)
 - [中文](../README.md) · [English](README_EN.md) · 日本語 · [한국어](README_KO.md)
@@ -160,6 +165,12 @@ dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.cs
 ```
 
 メンテナーは、Windows GUI の Release とは独立して CLI/Web パッケージを公開できます。[npm 公開ガイド（中国語）](NPM_PUBLISHING.md)を参照してください。
+
+## 謝辞
+
+ローカル Web UI を提案・実装し、履歴閲覧機能と多言語ドキュメントの基盤を提供するとともに、[PR #80](https://github.com/Dailin521/codex-provider-sync/pull/80) を通じて v0.5.0 に導入した [@tangquanwei](https://github.com/tangquanwei)、そしてコード、ドキュメント、テスト、問題調査に貢献したすべての方に感謝します。
+
+[コントリビューター一覧](../CONTRIBUTORS.md) · [GitHub Contributors](https://github.com/Dailin521/codex-provider-sync/graphs/contributors)
 
 ## License
 

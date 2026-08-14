@@ -1,7 +1,7 @@
 # `main` 分支保护方案
 
-> 状态：`ci-gate` 已通过 PR #63 合并到 `main`；`main-protection`
-> Ruleset 已启用，等待测试 PR 验证。
+> 状态：`main-protection` Ruleset 已启用并由后续 PR 验证；`main` 要求通过
+> PR、解决所有审查对话并通过来源为 GitHub Actions 的 `ci-gate`。
 >
 > 适用仓库：`Dailin521/codex-provider-sync`
 
@@ -23,7 +23,7 @@
 
 ## 2. 当前状态
 
-截至 2026-08-03：
+当前治理基线：
 
 - `main` 没有重复配置旧式 Branch Protection Rule
 - [`main-protection`](https://github.com/Dailin521/codex-provider-sync/rules/20265235)
@@ -35,15 +35,16 @@
 - Restrict deletions 和 Block force pushes 已开启，Strict / Up-to-date 已关闭
 - [PR #63](https://github.com/Dailin521/codex-provider-sync/pull/63) 已把稳定的
   `ci-gate` 合并到 `main`
-- PR #63 的七项检查全部成功；合并后的 `main` push 工作流也成功运行
-- GitHub Actions 工作流 `ci` 当前包含六个实际检查：
-  - `test (windows-latest, 16)`
+- PR #63 已验证 `ci-gate`；合并后的 `main` push 工作流也成功运行
+- GitHub Actions 工作流 `ci` 当前覆盖：
+  - `test (windows-latest, 16.20.2)`
   - `test (windows-latest, 24)`
-  - `test (ubuntu-latest, 16)`
+  - `test (ubuntu-latest, 16.20.2)`
   - `test (ubuntu-latest, 24)`
   - `desktop-test`
   - `desktop-macos`
-- 六项实际检查由第七个稳定检查 `ci-gate` 汇总
+  - `desktop-linux-lock`
+- 这些检查由稳定的 `ci-gate` 汇总；具体矩阵和 Job 以 [ci.yml](../.github/workflows/ci.yml) 为准
 - 工作流顶层权限已限制为 `contents: read`
 - Secret scanning 和 Push protection 已开启
 - 仓库仍以单一主要维护者为主
@@ -100,14 +101,14 @@ Strict 模式要求 PR 分支在合并前包含最新 `main`。当 `main` 有新
 当前阶段暂时关闭，原因是：
 
 - 单人维护时间有限
-- 六项 CI 有一定运行成本
+- 完整 CI 矩阵有一定运行成本
 - 外部贡献者不应因为无关 PR 先合并而频繁重跑
 
 当并发 PR 明显增加、CI 时间稳定且 Merge Queue 已准备好时，再开启 Strict。
 
 ## 4. 使用稳定的 `ci-gate`
 
-不要长期把六个具体检查名称全部写入分支保护规则。
+不要长期把具体检查名称全部写入分支保护规则。
 
 矩阵操作系统、Node 版本或 Job 名称以后可能变化。如果 Ruleset 仍要求一个已经
 删除或改名的检查，GitHub 会一直等待它，导致所有 PR 无法正常合并。
@@ -122,6 +123,7 @@ PR #63 已在 `.github/workflows/ci.yml` 增加名称固定的汇总 Job：
       - test
       - desktop-test
       - desktop-macos
+      - desktop-linux-lock
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
@@ -129,10 +131,12 @@ PR #63 已在 `.github/workflows/ci.yml` 增加名称固定的汇总 Job：
           NODE_TEST_RESULT: ${{ needs.test.result }}
           DESKTOP_TEST_RESULT: ${{ needs.desktop-test.result }}
           MACOS_TEST_RESULT: ${{ needs.desktop-macos.result }}
+          LINUX_LOCK_RESULT: ${{ needs.desktop-linux-lock.result }}
         run: |
           if [ "$NODE_TEST_RESULT" != "success" ] ||
              [ "$DESKTOP_TEST_RESULT" != "success" ] ||
-             [ "$MACOS_TEST_RESULT" != "success" ]; then
+             [ "$MACOS_TEST_RESULT" != "success" ] ||
+             [ "$LINUX_LOCK_RESULT" != "success" ]; then
             echo "One or more required CI jobs did not succeed."
             exit 1
           fi
@@ -143,6 +147,7 @@ PR #63 已在 `.github/workflows/ci.yml` 增加名称固定的汇总 Job：
 - `test` 的四个矩阵实例全部成功后，其汇总结果才是成功
 - Windows Desktop 测试必须成功
 - macOS 构建和 Core 测试必须成功
+- Linux 文件锁测试必须成功
 - 任一依赖失败、取消或跳过，`ci-gate` 都失败
 - Ruleset 只绑定名称稳定的 `ci-gate`
 
@@ -187,7 +192,7 @@ Bypass mode 选择 `For pull requests only`，不要选择 `Always allow`。
 必须按以下顺序操作，避免提前把 `main` 锁住：
 
 1. [已完成] 在独立 PR 中向 CI 添加 `ci-gate`。
-2. [已完成] 确认该 PR 的六项现有检查和 `ci-gate` 全部通过。
+2. [已完成] 确认该 PR 的所有依赖检查和 `ci-gate` 全部通过。
 3. [已完成] 合并 CI PR。
 4. [已完成] 确认 `main` push 工作流中也出现成功的 `ci-gate`。
 5. [已完成] 打开仓库 `Settings → Rules → Rulesets`。
@@ -198,7 +203,7 @@ Bypass mode 选择 `For pull requests only`，不要选择 `Always allow`。
    status check。
 9. [已完成] 启用 PR、对话解决、禁止删除和禁止强推。
 10. [已完成] 把 Enforcement status 设为 `Active` 并创建 Ruleset。
-11. [待完成] 使用一个无风险测试 PR 验证规则。
+11. [已完成] 使用后续正常 PR 验证规则。
 
 不要在 `ci-gate` 进入 `main` 之前就把它设为 Required check，否则 GitHub 没有
 可运行该检查的默认分支工作流，可能导致 PR 卡住。

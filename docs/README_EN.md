@@ -10,9 +10,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
 [![Community](https://img.shields.io/badge/community-LINUX%20DO-2ea043.svg)](https://linux.do/)
 
-[**Download Windows GUI**](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [Use the Local Web UI (CLI required)](#local-web-ui)
-
-Language: [中文](../README.md) · **English** · [日本語](README_JA.md) · [한국어](README_KO.md)
+[中文](../README.md) · **English** · [日本語](README_JA.md) · [한국어](README_KO.md)
 
 </div>
 
@@ -22,15 +20,21 @@ After switching `model_provider`, older sessions may disappear from Codex Deskto
 
 This tool synchronizes session files and the SQLite index, restoring session visibility and creating a backup before writing. It does not sign in, switch accounts, or modify `auth.json` or message content.
 
-> **When is synchronization needed?**
->
-> - **Typical case:** Switching between official OpenAI and a custom relay. Official OpenAI always uses `openai`, so the Provider ID changes and history needs to be synchronized.
-> - **Existing mixed history:** Older sessions already contain different Provider IDs and need to be aligned with the current provider.
-> - **No synchronization needed:** Switching only among custom relays that share one Provider ID, or when CCSwitch or another tool has already synchronized history.
+<p align="center">
+  <img src="../images/README/provider-metadata-sync-flow.png" alt="Provider metadata before and after synchronization" width="760">
+</p>
+
+### When is synchronization needed?
+
+- **Typical case:** Switching between official OpenAI and a custom relay. Official OpenAI always uses `openai`, so the Provider ID changes and history needs to be synchronized.
+- **Existing mixed history:** Older sessions already contain different Provider IDs and need to be aligned with the current provider.
+- **No synchronization needed:** Switching only among custom relays that share one Provider ID, or when CCSwitch or another tool has already synchronized history.
 
 ## Quick Start
 
 > The Windows GUI and Local Web UI currently use a Simplified Chinese interface.
+>
+> CLI/Web and the Windows GUI are released independently, so their version numbers may differ.
 
 | Scenario | Recommended interface |
 | --- | --- |
@@ -60,7 +64,9 @@ npm install -g @dailin521/codex-provider-sync
 codex-provider web
 ```
 
-![Web UI overview](../images/README/2026-08-05T03-53-48.708Z.png)
+<p align="center">
+  <a href="../images/README/2026-08-05T03-53-48.708Z.png"><img src="../images/README/2026-08-05T03-53-48.708Z.png" alt="Web UI overview" width="760"></a>
+</p>
 
 Common options:
 
@@ -70,7 +76,7 @@ codex-provider web --port 8792     # Use a specific port
 codex-provider web --reset-access  # Pair a browser again
 ```
 
-The Web UI listens on `127.0.0.1` by default and opens a browser to pair automatically. Storage paths are managed by the storage configuration (profile) at the top of the page. Write operations require confirmation; press `Ctrl+C` to stop the service.
+The Web UI listens on `127.0.0.1` by default and opens a browser to pair automatically. Storage paths are managed by the storage configuration (profile) at the top of the page. Write operations require confirmation.
 
 #### Synchronize history after switching providers
 
@@ -142,7 +148,6 @@ flowchart LR
 ## Documentation
 
 - [AI / Agent Guide](../AGENTS.md)
-
 - [Windows GUI guide (Chinese)](README_GUI_ZH.md)
 - [Web UI guide (Chinese)](README_WEB_UI_ZH.md)
 - [中文](../README.md) · [日本語](README_JA.md) · [한국어](README_KO.md)
@@ -160,6 +165,12 @@ dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.cs
 ```
 
 Maintainers can publish the CLI/Web package independently of Windows GUI releases. See the [npm publishing guide (Chinese)](NPM_PUBLISHING.md).
+
+## Acknowledgements
+
+Thanks to [@tangquanwei](https://github.com/tangquanwei) for proposing and implementing the Local Web UI, contributing history browsing and the multilingual documentation foundation, and bringing it into v0.5.0 through [PR #80](https://github.com/Dailin521/codex-provider-sync/pull/80), and to everyone who has contributed code, documentation, testing, and investigation.
+
+[Contributor list](../CONTRIBUTORS.md) · [GitHub Contributors](https://github.com/Dailin521/codex-provider-sync/graphs/contributors)
 
 ## License
 

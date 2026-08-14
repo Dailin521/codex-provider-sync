@@ -1,5 +1,7 @@
 # codex-provider-sync 工作原理与落盘机制
 
+> 本文是实现与数据边界的技术参考。普通安装和使用请先阅读项目 [README](../README.md)。
+
 ## 1. 项目定位
 
 `codex-provider-sync` 不是用于恢复已经被删除的聊天内容，也不负责登录、认证或切换账号。它是一个 Codex 会话元数据一致性修复工具。
@@ -431,7 +433,7 @@ D:\GitHubProject\demo
 ~/.codex/.codex-global-state.json.bak
 ```
 
-`status` 还会计算每个项目的会话数量、全局排序 rank、前 50 条首屏命中数和路径精确匹配情况。工具不会修改 `updated_at` 将旧会话强行顶到首屏。
+`status` 还会计算每个项目的会话数量、全局排序 rank、诊断窗口中前 50 条的命中数和路径精确匹配情况。这用于解释 Desktop 可能未展示窗口范围外旧会话的现象；工具不会修改 `updated_at` 将旧会话强行顶到前面。
 
 相关实现位于 [`src/workspace-roots.js`](../src/workspace-roots.js)。
 
@@ -440,7 +442,7 @@ D:\GitHubProject\demo
 每次 `sync` 或 `switch` 在正式修改前都会创建备份：
 
 ```text
-~/.codex/backups_state/provider-sync/<timestamp>/
+<Codex Home>/backups_state/provider-sync/<timestamp>/
 ```
 
 典型内容如下：
@@ -554,7 +556,7 @@ rollout 并发快照检查
 
 因此它不是一个理论上的全局原子事务，而是“SQLite 原子事务 + 普通文件补偿恢复”。
 
-## 11. `sync`、`switch`、`restore` 和 `watch`
+## 11. CLI 操作
 
 ### 11.1 `status`
 
@@ -636,14 +638,24 @@ codex-provider watch
 
 实现位于 [`src/watch.js`](../src/watch.js)。
 
-## 12. GUI 与 CLI 架构
+### 11.6 `web` 与 `prune-backups`
 
-仓库包含两套用户入口：
+```bash
+codex-provider web
+codex-provider prune-backups --keep 5
+```
+
+`web` 启动只监听本机回环地址的 Local Web UI，并复用 Node service 的状态、同步、备份和恢复逻辑。`prune-backups` 只清理由本工具管理的旧备份。
+
+## 12. 用户入口与核心架构
+
+仓库包含三类用户入口：
 
 - Node.js CLI
+- CLI 提供的 Local Web UI
 - Windows/macOS 桌面 GUI
 
-CLI 入口是 [`src/cli.js`](../src/cli.js)，主要业务逻辑位于 [`src/service.js`](../src/service.js)。
+CLI 入口是 [`src/cli.js`](../src/cli.js)，Web 服务位于 [`src/web-server.js`](../src/web-server.js)，二者的主要业务逻辑位于 [`src/service.js`](../src/service.js)。
 
 桌面 GUI 不是简单启动 Node CLI，而是在 `desktop/CodexProviderSync.Core` 中用 C# 实现了相同的核心流程，包括：
 

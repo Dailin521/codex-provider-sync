@@ -9,6 +9,8 @@
 > published on 2026-08-04. Protocol `0.4` remains a pre-1.0 compatibility
 > boundary.
 
+For basic command usage, start with the [Automation quickstart](AUTOMATION_QUICKSTART_ZH.md). This document is the detailed historical and technical reference.
+
 ## Motivation
 
 Business scripting and GUI regression tests must exercise the same behavior as
