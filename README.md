@@ -10,9 +10,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Community](https://img.shields.io/badge/community-LINUX%20DO-2ea043.svg)](https://linux.do/)
 
-[**下载 Windows GUI**](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [使用本地 Web UI（需 CLI）](#本地-web-ui)
-
-语言：**中文** · [English](docs/README_EN.md) · [日本語](docs/README_JA.md) · [한국어](docs/README_KO.md)
+**中文** · [English](docs/README_EN.md) · [日本語](docs/README_JA.md) · [한국어](docs/README_KO.md)
 
 </div>
 
@@ -22,6 +20,10 @@
 
 本工具会同步会话文件和 SQLite 索引，恢复会话可见性，并在写入前创建备份。它不负责登录、账号切换，也不修改 `auth.json` 或消息正文。
 
+<p align="center">
+  <img src="images/README/provider-metadata-sync-flow.png" alt="Provider 元数据同步前后效果" width="760">
+</p>
+
 ### 什么时候需要同步？
 
 - **通常情况：**在官方 OpenAI 与自定义中转之间切换。官方固定使用 `openai`，Provider ID 会发生变化，需要同步历史。
@@ -29,6 +31,8 @@
 - **无需同步：**只在共用同一 Provider ID 的自定义中转之间切换，或者 CCSwitch 等工具已经同步了历史。
 
 ## 快速开始
+
+> CLI/Web 与 Windows GUI 独立发布，版本号可能不同。
 
 | 场景 | 推荐入口 |
 | --- | --- |
@@ -58,7 +62,9 @@ npm install -g @dailin521/codex-provider-sync
 codex-provider web
 ```
 
-![Web UI 概览](images/README/2026-08-05T03-53-48.708Z.png)
+<p align="center">
+  <a href="images/README/2026-08-05T03-53-48.708Z.png"><img src="images/README/2026-08-05T03-53-48.708Z.png" alt="Web UI 概览" width="760"></a>
+</p>
 
 常用选项：
 
@@ -68,7 +74,7 @@ codex-provider web --port 8792     # 指定端口
 codex-provider web --reset-access  # 重新配对浏览器
 ```
 
-Web UI 默认只监听 `127.0.0.1`，并自动打开浏览器完成配对。存储路径由页面顶部的存储配置（Profile）管理，写操作需要确认；按 `Ctrl+C` 停止服务。
+Web UI 默认只监听 `127.0.0.1`，并自动打开浏览器完成配对。存储路径由页面顶部的存储配置（Profile）管理，写操作需要确认。
 
 #### 切换 Provider 后同步历史
 
@@ -140,7 +146,6 @@ flowchart LR
 ## 文档
 
 - [AI / Agent 操作指南](AGENTS.md)
-
 - [Windows GUI](docs/README_GUI_ZH.md)
 - [Web UI](docs/README_WEB_UI_ZH.md)
 - [English](docs/README_EN.md) · [日本語](docs/README_JA.md) · [한국어](docs/README_KO.md)
@@ -161,7 +166,9 @@ npm 包发布维护流程见 [npm 发布维护指南](docs/NPM_PUBLISHING.md)。
 
 ## 致谢
 
-感谢 [@tangquanwei](https://github.com/tangquanwei) 提出并实现本地 Web UI，贡献聊天记录浏览和多语言文档基础，并通过 [PR #80](https://github.com/Dailin521/codex-provider-sync/pull/80) 将其带入 v0.5.0；最初提案见 [PR #73](https://github.com/Dailin521/codex-provider-sync/pull/73)。
+感谢 [@tangquanwei](https://github.com/tangquanwei) 提出并实现本地 Web UI，贡献聊天记录浏览和多语言文档基础，并通过 [PR #80](https://github.com/Dailin521/codex-provider-sync/pull/80) 将其带入 v0.5.0；也感谢所有参与代码、文档、测试和问题调查的贡献者。
+
+[贡献者名单](CONTRIBUTORS.md) · [GitHub Contributors](https://github.com/Dailin521/codex-provider-sync/graphs/contributors)
 
 ## License
 

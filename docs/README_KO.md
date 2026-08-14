@@ -10,9 +10,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
 [![Community](https://img.shields.io/badge/community-LINUX%20DO-2ea043.svg)](https://linux.do/)
 
-[**Windows GUI 다운로드**](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [로컬 Web UI 사용 (CLI 필요)](#로컬-web-ui)
-
-언어: [中文](../README.md) · [English](README_EN.md) · [日本語](README_JA.md) · **한국어**
+[中文](../README.md) · [English](README_EN.md) · [日本語](README_JA.md) · **한국어**
 
 </div>
 
@@ -21,6 +19,10 @@
 `model_provider`를 전환하면 이전 세션이 Codex Desktop 또는 `/resume`에서 사라질 수 있습니다. **데이터는 보통 디스크에 그대로 남아 있으며**, 세션 파일과 SQLite 인덱스의 Provider 정보만 동기화되지 않은 상태입니다.
 
 이 도구는 세션 파일과 SQLite 인덱스를 동기화하여 세션 표시를 복원하고, 쓰기 전에 백업을 만듭니다. 로그인이나 계정 전환은 처리하지 않으며 `auth.json`이나 메시지 본문도 수정하지 않습니다.
+
+<p align="center">
+  <img src="../images/README/provider-metadata-sync-flow.png" alt="Provider 메타데이터 동기화 전후" width="760">
+</p>
 
 ### 언제 동기화가 필요한가요?
 
@@ -31,6 +33,8 @@
 ## 빠른 시작
 
 > Windows GUI와 로컬 Web UI의 화면 언어는 현재 중국어 간체만 지원합니다.
+>
+> CLI/Web과 Windows GUI는 별도로 릴리스되므로 버전 번호가 다를 수 있습니다.
 
 | 상황 | 권장 방법 |
 | --- | --- |
@@ -60,7 +64,9 @@ npm install -g @dailin521/codex-provider-sync
 codex-provider web
 ```
 
-![Web UI 개요](../images/README/2026-08-05T03-53-48.708Z.png)
+<p align="center">
+  <a href="../images/README/2026-08-05T03-53-48.708Z.png"><img src="../images/README/2026-08-05T03-53-48.708Z.png" alt="Web UI 개요" width="760"></a>
+</p>
 
 자주 쓰는 옵션:
 
@@ -70,7 +76,7 @@ codex-provider web --port 8792     # 포트 지정
 codex-provider web --reset-access  # 브라우저 재페어링
 ```
 
-Web UI는 기본적으로 `127.0.0.1`에서만 수신하며, 브라우저를 자동으로 열어 페어링을 진행합니다. 저장 경로는 페이지 상단의 저장 구성(Profile)에서 관리하며 쓰기 작업에는 확인이 필요합니다. 서비스는 `Ctrl+C`로 종료합니다.
+Web UI는 기본적으로 `127.0.0.1`에서만 수신하며, 브라우저를 자동으로 열어 페어링을 진행합니다. 저장 경로는 페이지 상단의 저장 구성(Profile)에서 관리하며 쓰기 작업에는 확인이 필요합니다.
 
 #### Provider 전환 후 기록 동기화
 
@@ -142,7 +148,6 @@ flowchart LR
 ## 문서
 
 - [AI / Agent 가이드](../AGENTS.md)
-
 - [Windows GUI (중국어)](README_GUI_ZH.md)
 - [Web UI (중국어)](README_WEB_UI_ZH.md)
 - [中文](../README.md) · [English](README_EN.md) · [日本語](README_JA.md)
@@ -163,7 +168,9 @@ dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.cs
 
 ## 감사의 말
 
-로컬 Web UI를 제안하고 구현했으며, 채팅 기록 탐색과 다국어 문서의 기반을 기여하고 [PR #80](https://github.com/Dailin521/codex-provider-sync/pull/80)을 통해 v0.5.0에 도입한 [@tangquanwei](https://github.com/tangquanwei)에게 감사드립니다. 최초 제안은 [PR #73](https://github.com/Dailin521/codex-provider-sync/pull/73)을 참조하세요.
+로컬 Web UI를 제안하고 구현했으며, 채팅 기록 탐색과 다국어 문서의 기반을 기여하고 [PR #80](https://github.com/Dailin521/codex-provider-sync/pull/80)을 통해 v0.5.0에 도입한 [@tangquanwei](https://github.com/tangquanwei), 그리고 코드, 문서, 테스트와 문제 조사에 기여한 모든 분께 감사드립니다.
+
+[기여자 목록](../CONTRIBUTORS.md) · [GitHub Contributors](https://github.com/Dailin521/codex-provider-sync/graphs/contributors)
 
 ## License
 

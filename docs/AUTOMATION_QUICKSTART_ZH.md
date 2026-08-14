@@ -67,4 +67,4 @@ $planDigest = $planResponse.data.digest
 | `restore` | 恢复托管备份 |
 | `prune` | 清理旧的托管备份 |
 
-完整参数、安全限制和返回结构见项目 [README](../README.md) 与 `automation-protocol-v0.4.schema.json`。协议 `0.4` 仍处于 1.0 之前的实验阶段，未来可能发生不兼容变更。
+完整参数和返回结构见 `automation-protocol-v0.4.schema.json`；架构、安全限制和兼容边界见 [Automation Design Notes](AUTOMATION_DESIGN_NOTES.md)。协议 `0.4` 仍处于 1.0 之前的实验阶段，未来可能发生不兼容变更。

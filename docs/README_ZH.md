@@ -9,6 +9,12 @@
 - [工作原理与落盘机制](WORKING_PRINCIPLE_ZH.md)
 - macOS GUI：[中文](README_MAC_GUI_ZH.md) · [English](README_MAC_GUI_EN.md)
 
+开发与维护：
+
+- [贡献指南](../CONTRIBUTING.md) · [AI / Agent 操作指南](../AGENTS.md)
+- [npm 发布维护指南](NPM_PUBLISHING.md)
+- Automation：[快速开始](AUTOMATION_QUICKSTART_ZH.md) · [设计说明](AUTOMATION_DESIGN_NOTES.md)
+
 其他语言：
 
 - [English](README_EN.md)

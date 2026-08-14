@@ -18,11 +18,14 @@ This project welcomes issues, pull requests, documentation, and tests in either 
 
 | 路径 | 内容 |
 | --- | --- |
-| `src/` | Node.js CLI 和同步逻辑 |
+| `src/` | Node.js CLI、Web 服务和共享同步逻辑 |
+| `web/` | Local Web UI 前端 |
 | `test/` | Node.js 自动化测试 |
-| `desktop/CodexProviderSync.Core/` | Windows 与 macOS GUI 共用的 .NET 应用逻辑 |
+| `desktop/CodexProviderSync.Core/` | Windows 与 macOS GUI 共用的 .NET 核心逻辑 |
+| `desktop/CodexProviderSync.Application/` | Windows GUI 与 Automation 共用的应用用例 |
 | `desktop/CodexProviderSync.App/` | Windows WinForms GUI |
 | `desktop/CodexProviderSync.Mac/` | macOS Avalonia GUI |
+| `desktop/CodexProviderSync.Automation/` | 实验性的 Windows Automation 接口 |
 | `desktop/*Tests/` | .NET 自动化测试 |
 | `scripts/` | GUI 构建和 WSL 安全验证脚本 |
 | `docs/` | 用户文档和维护文档 |
@@ -32,7 +35,7 @@ This project welcomes issues, pull requests, documentation, and tests in either 
 基础开发需要：
 
 - Git
-- Node.js 16 或更高版本；CI 同时验证 Node.js 16 和 24
+- Node.js 16.20.2 或更高版本；CI 验证最低版本和当前发布矩阵
 - npm
 - .NET 10 SDK（修改 .NET Core 或 GUI 时）
 - PowerShell 7（修改或验证 Windows 打包脚本时）
@@ -42,6 +45,7 @@ This project welcomes issues, pull requests, documentation, and tests in either 
 ```bash
 npm ci
 npm test
+npm run web:build
 ```
 
 运行共享 Core 和 Windows GUI 测试：
@@ -80,6 +84,7 @@ dotnet build desktop/CodexProviderSync.Mac/CodexProviderSync.Mac.csproj --config
 | --- | --- |
 | 文档 | 检查链接、路径和命令；同一内容有多个语言版本时保持一致 |
 | Node.js CLI | `npm test` |
+| Local Web UI | `npm run web:build`、`npm test`；界面改动附浏览器截图或说明未手测原因 |
 | 共享 .NET Core | Core Tests；涉及 CLI 时同时运行 `npm test` |
 | Windows GUI | Core Tests、App Tests；布局改动附 Windows 截图或说明未手测原因 |
 | macOS GUI | Core Tests、macOS Release build；真实 macOS GUI 手测无法完成时，在 PR 中明确记录 |
@@ -108,6 +113,14 @@ PR 中请特别说明：
 
 ## 准备发布
 
+CLI/Web npm 包和 Windows GitHub Release 独立发布，版本号可能不同。
+
+### CLI / Web npm 包
+
+按 [npm 发布维护指南](docs/NPM_PUBLISHING.md) 更新 `package.json` 与 `package-lock.json`、完成构建和测试，并从 `main` 手动运行受信发布工作流。仅发布 CLI/Web 时不创建 Git tag 或 Windows Release。
+
+### Windows GitHub Release
+
 发布 tag 前需要：
 
 1. 将 [中文发布说明模板](docs/release-notes/TEMPLATE-zh.md) 复制为 `docs/release-notes/v<版本>-zh.md`。
@@ -122,13 +135,14 @@ PR 中请特别说明：
 
 - Small fixes, tests, and documentation updates can be submitted directly as a PR. Please open an Issue before starting a large feature, behavior change, or refactor.
 - If you do not have write access, fork the repository, push your branch to your fork, and open a PR against this repository's `main` branch.
-- Use Node.js 16 or later and run `npm ci` followed by `npm test`. Changes to shared .NET or desktop code also require the relevant .NET 10 tests listed above.
+- Use Node.js 16.20.2 or later and run `npm ci`, `npm test`, and `npm run web:build`. Changes to shared .NET or desktop code also require the relevant .NET 10 tests listed above.
 - Automated tests and reproduction scripts must use temporary directories or fixtures and must not depend on, read, or modify a real user's `~/.codex`. Prefer a dedicated test Codex Home for manual validation and describe its scope in the PR.
 - Never include unredacted credentials, `auth.json`, Codex sessions, SQLite databases, backups, logs, tokens, or personal data.
 - Keep each PR focused. Explain why the change is needed, what it writes, which platforms it affects, what was tested, and what was not tested.
 - GUI changes should include screenshots and the platform and display scaling used. If real macOS GUI testing is unavailable, say so clearly; it is not automatically a reason to reject the contribution.
 - Update affected documentation when user-visible behavior, command options, or safety boundaries change.
 - All changes go through a PR and must pass `ci-gate`.
+- The CLI/Web npm package and Windows GitHub Release are independent release channels; follow `docs/NPM_PUBLISHING.md` for npm releases.
 
 ## License
 

@@ -38,9 +38,9 @@ macOS 桌面版说明见 [README_MAC_GUI_ZH.md](README_MAC_GUI_ZH.md)。
 - 含 `encrypted_content` 的旧会话不能由本工具重新加密到另一个 provider / account
 - 如果 CLI 能看到历史会话但 Desktop 项目侧仍不显示，请优先复制并反馈“刷新”后的完整状态文本
 
-## Codex Desktop 最近 50 条限制
+## 项目可见性诊断
 
-Codex Desktop 当前首屏只拉取最近 `50` 条会话。如果某个项目的旧会话排在全局最近 50 条之后，CLI `/resume` 可能能看到，但 Desktop 项目侧仍显示“暂无对话”。
+工具会诊断全局排序中的前 `50` 条会话。某个项目的旧会话如果不在这段范围内，CLI `/resume` 可能能看到，但 Desktop 项目侧仍可能暂时不显示。
 
 GUI“刷新”会显示项目可见性诊断，例如 `first page 0/50`、`ranks 64-77`。这表示会话存在，但没有进入 Desktop 首屏最近 50 条。本工具不会修改 `updated_at` 或历史排序来绕过这个限制。
 
@@ -65,21 +65,9 @@ Windows GUI 将 `\\wsl.localhost\<发行版>\...` 和 `\\wsl$\<发行版>\...` �
 
 对于受支持的 Windows 本地路径，显式位置缺少 `state_5.sqlite` 时，“刷新”会显示缺库诊断，写操作会停止，并保持此显式路径作为唯一目标。默认布局中的数据库被删除时，可以从有效备份恢复到原默认位置。从 metadata v2 备份恢复到不同 SQLite Home 时，必须取消勾选“恢复配置文件”；GUI 随后会显示来源与目标并要求二次确认。
 
-## v0.4 Application 与 GUI Automation（开发者）
+## 开发与 Automation
 
-Windows GUI 的状态、同步、切换、恢复和备份清理入口通过共享的 Application 用例调用 Core；同一组用例也供 `CodexProviderSync.Automation.exe` 的 Business API 使用。WinForms 仍负责控件状态、原生文件夹选择器、确认框、更新提示和其它 Windows 平台交互。
-
-测试专用 GUI Automation 为全部交互入口分配稳定 Automation ID，并由 `Automation/gui-automation-manifest.v0.4.json` 声明控件、动作、风险和场景。桥接器只在带 sentinel 的隔离启动中启用，通过 current-user-only 随机 named pipe 和一次性 token 接受 `ui.describe`、`ui.snapshot`、`ui.get`、`ui.set`、`ui.invoke`、`ui.wait`、`ui.shutdown`。`ui.set` / `ui.invoke` 操作真实控件并触发真实 WinForms 事件，不允许绕过 GUI 直接调用 Application 后冒充控件覆盖；trace schema 2 会关联 Automation ID、GUI 事件和 Application operation/lifecycle。
-
-普通启动不会创建 Automation listener。隔离环境拒绝真实 Codex Home、`auth.json`、越界路径、符号链接或 reparse point；原生对话框由外部 Headful 驱动器在可见桌面上操作，不提供生产控制接口。
-
-真实 Windows Release GUI 全入口 E2E 的运行入口是：
-
-```powershell
-pwsh ./scripts/run-windows-gui-e2e.ps1
-```
-
-它必须在可见、可交互的 Windows 桌面中运行。Release gate 的验收条件包括：发布后的真实 `CodexProviderSync.exe`、manifest 全入口/动作覆盖、真实控件与事件、原生对话框、状态与 busy 行为、独立文件/SQLite 差异、重启持久化，以及 GUI → Application 因果 trace。v0.4 的实现提交 `7545b5d` 已在真实可见桌面通过：40/40 manifest 入口覆盖、53/53 必需场景通过、0 error、0 blocker；prune 证据还逐目录确认旧 managed backup 消失并校验 unmanaged sentinel 哈希未变。单元测试、隐藏窗口、mock 或直接调用 Application 都不能记作真实 GUI PASS，相关实现变更后必须重跑。
+Windows Release 包含实验性的 `CodexProviderSync.Automation.exe`，仅用于隔离测试和开发，不是生产 GUI 控制接口。快速使用见 [Automation Quickstart](AUTOMATION_QUICKSTART_ZH.md)，协议、安全边界和真实 GUI E2E 要求见 [Automation Design Notes](AUTOMATION_DESIGN_NOTES.md)。
 
 ## 更新与日志
 
@@ -94,7 +82,7 @@ Windows GUI 每天首次启动会在后台检查一次最新的稳定版 GitHub 
 - GUI 设置：`%AppData%\codex-provider-sync\settings.json`
 - 每日执行日志：`%AppData%\codex-provider-sync\logs\execution-YYYY-MM-DD.log`
 - 启动失败日志：`%AppData%\codex-provider-sync\startup-error.log`
-- 备份目录：`%USERPROFILE%\.codex\backups_state\provider-sync\`
+- 备份目录：`<Codex Home>\backups_state\provider-sync\`；默认 Codex Home 时为 `%USERPROFILE%\.codex\backups_state\provider-sync\`
 
 ## 注意事项
 

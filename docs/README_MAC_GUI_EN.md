@@ -43,6 +43,7 @@ open artifacts/osx-arm64/CodexProviderSync.app
 ## Features
 
 - Select or enter a Codex Home; the default is `~/.codex`.
+- Set a separate SQLite Home for each Codex Home, or leave it empty for automatic resolution.
 - Use `Refresh` to inspect the current Provider, rollout and SQLite Provider
   counts, managed backups, project visibility, and `encrypted_content` risks.
 - See where each Provider was discovered: `config`, `rollout`, `SQLite`, or
@@ -62,7 +63,11 @@ open artifacts/osx-arm64/CodexProviderSync.app
 - The app asks for confirmation before write operations.
 - The Core creates a managed backup before `sync` or `switch` changes metadata.
   Backups are stored under
-  `~/.codex/backups_state/provider-sync/<timestamp>`.
+  `<Codex Home>/backups_state/provider-sync/<timestamp>`; with the default
+  Codex Home this is `~/.codex/backups_state/provider-sync/<timestamp>`.
+- Restoring a metadata v2 backup to a different SQLite Home shows the source
+  and target and requires another confirmation. Configuration restore must be
+  disabled for relocation.
 - The app does not manage `auth.json`, sign in, authenticate, change
   conversation content, or modify `updated_at`.
 - `encrypted_content` is reported as a risk; the app does not promise to repair
@@ -80,6 +85,12 @@ Before using `Sync Metadata Only`, `Switch config.toml and sync`,
 
 If the app reports `state_5.sqlite is currently in use`, close those processes
 and retry.
+
+SQLite Home resolution order is: GUI override → root `sqlite_home` in
+`config.toml` → `CODEX_SQLITE_HOME` → `<Codex Home>/sqlite`. Overrides are
+stored per Codex Home in app settings and are not written to `config.toml`.
+A missing explicit database remains an error and never falls back to another
+location; only the default layout may use the legacy database path.
 
 If the log reports skipped locked rollout files, an active session usually
 still holds those files open. Most of the synchronization may already be

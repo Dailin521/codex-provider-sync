@@ -6,8 +6,11 @@
   "files": [
     "README.md",
     "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "CONTRIBUTORS.md",
     "AGENTS.md",
     "docs",
+    "images/README",
     "src",
     "web/dist"
   ],
