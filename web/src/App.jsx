@@ -12,6 +12,7 @@ import {
 } from "./api.js";
 import { usePersistentState } from "./hooks.js";
 import { createLatestRequestGate, scheduleDebounced } from "./history-requests.js";
+import { createProfileRefresh, storagePayload } from "./profile-refresh.js";
 import {
   ActivityIcon,
   AlertIcon,
@@ -81,10 +82,6 @@ function SafeMarkdown({ text }) {
     }
     return block.split("\n").map((line, lineIndex, lines) => <React.Fragment key={`line-${index}-${lineIndex}`}>{renderInlineMarkdown(line, `${index}-${lineIndex}`)}{lineIndex < lines.length - 1 ? <br /> : null}</React.Fragment>);
   });
-}
-
-function storagePayload(profileId) {
-  return { profileId: profileId || "default" };
 }
 
 function getTargetSqliteHome(status) {
@@ -190,14 +187,14 @@ function Sidebar({ view, setView, status, onForgetBrowser }) {
   );
 }
 
-function StorageBar({ profiles, profileId, setProfileId, status, onAddProfile, onDeleteProfile, onRefresh, loading }) {
+function StorageBar({ profiles, profileId, setProfileId, status, onAddProfile, onDeleteProfile, onRefresh, loading, profileSwitchDisabled }) {
   return (
     <section className="storage-bar" aria-label="存储位置">
       <label className="path-field path-field--wide">
         <span>存储配置</span>
         <div className="path-input-wrap">
           <FolderIcon size={16} />
-          <select value={profileId} onChange={(event) => setProfileId(event.target.value)}>
+          <select value={profileId} onChange={(event) => setProfileId(event.target.value)} disabled={profileSwitchDisabled}>
             {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
           </select>
         </div>
@@ -764,24 +761,34 @@ export default function App() {
     ];
   }, [status, manualProviders]);
 
+  const profileRefreshRef = useRef(null);
+  if (!profileRefreshRef.current) {
+    profileRefreshRef.current = createProfileRefresh({
+      fetchStatus: (storage, options) => apiRequest("/api/status", storage, options),
+      fetchBackups: (storage, options) => apiRequest("/api/backups", storage, options)
+    });
+  }
+
+  // Only the latest request for the current profile may update status,
+  // backups, selectedProvider, loading, and error toasts. Switching profiles
+  // starts a newer request, which aborts and invalidates the older one even
+  // if the older one finishes last.
   const refresh = useCallback(async ({ quiet = false } = {}) => {
-    if (!quiet) setLoading(true);
-    try {
-      const storage = storagePayload(profileId);
-      const [statusPayload, backupPayload] = await Promise.all([
-        apiRequest("/api/status", storage),
-        apiRequest("/api/backups", storage)
-      ]);
-      setStatus(statusPayload.status);
-      setBackups(backupPayload);
-      setSelectedProvider((current) => current && providersFromStatus(statusPayload.status).some((provider) => provider.id === current)
-        ? current
-        : statusPayload.status.currentProvider);
-    } catch (error) {
-      setToast({ tone: "error", title: "状态读取失败", message: error.message });
-    } finally {
-      if (!quiet) setLoading(false);
-    }
+    await profileRefreshRef.current({
+      profileId,
+      showLoading: !quiet,
+      onLoading: setLoading,
+      onResult: ({ status: nextStatus, backups: nextBackups }) => {
+        setStatus(nextStatus);
+        setBackups(nextBackups);
+        setSelectedProvider((current) => current && providersFromStatus(nextStatus).some((provider) => provider.id === current)
+          ? current
+          : nextStatus.currentProvider);
+      },
+      onError: (error) => {
+        setToast({ tone: "error", title: "状态读取失败", message: error.message });
+      }
+    });
   }, [profileId]);
 
   const refreshProfiles = useCallback(async () => {
@@ -842,11 +849,12 @@ export default function App() {
 
   const execute = useCallback(async () => {
     const plan = modal.plan;
+    const targetProfileId = modal.profileId;
     setModal(null);
     setBusy(true);
     setView("activity");
     try {
-      const common = { ...storagePayload(profileId), provider: selectedProvider, keepCount: plan.keepCount };
+      const common = { ...storagePayload(targetProfileId), provider: selectedProvider, keepCount: plan.keepCount };
       const payload = plan.mode === "switch"
         ? await apiRequest("/api/switch", { ...common, model: plan.modelMode === "custom" ? plan.model : undefined, keepRootModel: plan.modelMode === "keep" })
         : await apiRequest("/api/sync", common);
@@ -861,11 +869,12 @@ export default function App() {
 
   const restore = useCallback(async (options) => {
     const backup = modal.backup;
+    const targetProfileId = modal.profileId;
     setModal(null);
     setBusy(true);
     setView("activity");
     try {
-      await apiRequest("/api/restore", { ...storagePayload(profileId), backupId: backup.id, ...options });
+      await apiRequest("/api/restore", { ...storagePayload(targetProfileId), backupId: backup.id, ...options });
       setToast({ tone: "success", title: "备份恢复完成", message: backup.id });
       await refresh({ quiet: true });
     } catch (error) {
@@ -877,10 +886,11 @@ export default function App() {
 
   const prune = useCallback(async () => {
     const keepCount = modal.keepCount;
+    const targetProfileId = modal.profileId;
     setModal(null);
     setBusy(true);
     try {
-      const payload = await apiRequest("/api/prune", { ...storagePayload(profileId), keepCount });
+      const payload = await apiRequest("/api/prune", { ...storagePayload(targetProfileId), keepCount });
       setToast({ tone: "success", title: "旧备份清理完成", message: `删除 ${payload.result.deletedCount} 份，释放 ${formatBytes(payload.result.freedBytes)}` });
       await refresh({ quiet: true });
     } catch (error) {
@@ -934,10 +944,10 @@ export default function App() {
       <AppHeader status={status} busy={busy || Boolean(activeOperation)} onRefresh={() => refresh()} />
       <Sidebar view={view} setView={setView} status={status} onForgetBrowser={forgetBrowser} />
       <main className="main-area">
-      <StorageBar profiles={profiles} profileId={profileId} setProfileId={setProfileId} status={status} onAddProfile={() => setModal({ type: "profile" })} onDeleteProfile={deleteProfile} onRefresh={() => refresh()} loading={loading} />
-        {view === "overview" ? <Overview status={status} backups={backups} providers={providers} selectedProvider={selectedProvider} setSelectedProvider={setSelectedProvider} onAddManualProvider={addManualProvider} onRemoveManualProvider={removeManualProvider} onExecute={(plan) => setModal({ type: "execute", plan })} onRestore={(backup) => setModal({ type: "restore", backup })} setView={setView} busy={busy} loading={loading} /> : null}
+      <StorageBar profiles={profiles} profileId={profileId} setProfileId={setProfileId} status={status} onAddProfile={() => setModal({ type: "profile" })} onDeleteProfile={deleteProfile} onRefresh={() => refresh()} loading={loading} profileSwitchDisabled={busy || Boolean(modal)} />
+        {view === "overview" ? <Overview status={status} backups={backups} providers={providers} selectedProvider={selectedProvider} setSelectedProvider={setSelectedProvider} onAddManualProvider={addManualProvider} onRemoveManualProvider={removeManualProvider} onExecute={(plan) => setModal({ type: "execute", plan, profileId })} onRestore={(backup) => setModal({ type: "restore", backup, profileId })} setView={setView} busy={busy} loading={loading} /> : null}
         {view === "history" ? <HistoryView profileId={profileId} status={status} /> : null}
-        {view === "backups" ? <BackupsView backups={backups} status={status} busy={busy} onRestore={(backup) => setModal({ type: "restore", backup })} onPrune={(keepCount) => setModal({ type: "prune", keepCount })} /> : null}
+        {view === "backups" ? <BackupsView backups={backups} status={status} busy={busy} onRestore={(backup) => setModal({ type: "restore", backup, profileId })} onPrune={(keepCount) => setModal({ type: "prune", keepCount, profileId })} /> : null}
         {view === "activity" ? <ActivityView activity={activity} activeOperation={activeOperation} /> : null}
       </main>
       {modal?.type === "execute" ? <ExecuteModal plan={modal.plan} status={status} selectedProvider={selectedProvider} onCancel={() => setModal(null)} onConfirm={execute} /> : null}

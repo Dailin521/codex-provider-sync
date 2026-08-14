@@ -313,6 +313,48 @@ test("startWebUi listens only on IPv4 loopback and reuses its existing instance"
   }
 });
 
+test("startWebUi refuses to reuse an instance launched with a different SQLite home", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-provider-sync-sqlite-home-"));
+  const webRoot = path.join(root, "web");
+  const stateFile = path.join(root, "state.json");
+  const runtimeFile = path.join(root, "runtime.json");
+  const homeA = path.join(root, "sqlite-a");
+  const homeB = path.join(root, "sqlite-b");
+  await fs.mkdir(webRoot);
+  await fs.writeFile(path.join(webRoot, "index.html"), "<!doctype html><title>fixture</title>");
+  let first;
+  try {
+    first = await startWebUi({ port: 0, openBrowser: false, codexHome: root, sqliteHome: homeA, stateFile, runtimeFile, webRoot });
+
+    // Launching with a different SQLite home must not silently reuse instance A.
+    await assert.rejects(
+      startWebUi({ port: 0, openBrowser: false, codexHome: root, sqliteHome: homeB, stateFile, runtimeFile, webRoot }),
+      /already running.*SQLite home/
+    );
+
+    // The rejection must leave the original instance and its runtime descriptor intact.
+    const health = await request({ origin: first.url, pathname: "/api/health" });
+    assert.equal(health.status, 200);
+    assert.equal(JSON.parse(await fs.readFile(runtimeFile, "utf8")).port, new URL(first.url).port * 1);
+
+    // Relaunching with the same normalized SQLite home still reuses the instance.
+    const relaunched = await startWebUi({
+      port: 0,
+      openBrowser: false,
+      codexHome: root,
+      sqliteHome: path.join(homeA, "."),
+      stateFile,
+      runtimeFile,
+      webRoot
+    });
+    assert.equal(relaunched.reused, true);
+    assert.equal(relaunched.url, first.url);
+  } finally {
+    await first?.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("startWebUi reports occupied ports clearly and handles unavailable or headless browser openers", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-provider-sync-port-"));
   const webRoot = path.join(root, "web");

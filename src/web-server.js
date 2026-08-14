@@ -612,6 +612,26 @@ async function removeOwnedRuntimeDescriptor(runtimeFile, internalSecret) {
   }
 }
 
+function normalizeExplicitSqliteHome(value) {
+  return typeof value === "string" && value.trim() ? path.resolve(value.trim()) : null;
+}
+
+function comparableSqliteHome(value, platform) {
+  const resolved = normalizeExplicitSqliteHome(value);
+  return resolved && platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function sqliteHomeMismatchError(existing, requestedSqliteHome) {
+  const existingLabel = existing.sqliteHome ?? "<default>";
+  const requestedLabel = requestedSqliteHome ?? "<default>";
+  return new Error(
+    `A Web UI instance is already running on port ${existing.port} with SQLite home "${existingLabel}", `
+    + `but this launch requested "${requestedLabel}". `
+    + "Close the existing Web UI instance and restart with the new --sqlite-home, "
+    + "or relaunch with the same SQLite home to reuse it."
+  );
+}
+
 export async function startWebUi({
   port = DEFAULT_PORT,
   openBrowser = true,
@@ -638,6 +658,10 @@ export async function startWebUi({
   const resolvedRuntimeFile = path.resolve(runtimeFile ?? path.join(controlCodexHome, RUNTIME_FILENAME));
   const existing = await readRuntimeDescriptor(resolvedRuntimeFile);
   if (existing) {
+    const requestedSqliteHome = comparableSqliteHome(sqliteHome, platform);
+    if (comparableSqliteHome(existing.sqliteHome, platform) !== requestedSqliteHome) {
+      throw sqliteHomeMismatchError(existing, normalizeExplicitSqliteHome(sqliteHome));
+    }
     try {
       const pairingToken = await requestExistingPairing({
         port: existing.port,
@@ -685,7 +709,7 @@ export async function startWebUi({
   handle.setBaseUrl(url);
   const pairingUrl = `${url}/#pair=${encodeURIComponent(handle.issuePairing())}`;
   await fs.mkdir(path.dirname(resolvedRuntimeFile), { recursive: true });
-  await fs.writeFile(resolvedRuntimeFile, `${JSON.stringify({ port: actualPort, internalSecret, pid: process.pid })}\n`, { encoding: "utf8", mode: 0o600 });
+  await fs.writeFile(resolvedRuntimeFile, `${JSON.stringify({ port: actualPort, internalSecret, pid: process.pid, sqliteHome: normalizeExplicitSqliteHome(sqliteHome) })}\n`, { encoding: "utf8", mode: 0o600 });
   await fs.chmod(resolvedRuntimeFile, 0o600).catch(() => {});
   const browserOpened = openBrowser && canOpenLocalUrl(platform, environment)
     ? await openUrl(pairingUrl, platform)
