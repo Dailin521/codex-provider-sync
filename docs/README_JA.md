@@ -5,7 +5,8 @@
 ### Provider 切り替え後も Codex の過去セッションを再表示する
 
 [![CI](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/Dailin521/codex-provider-sync)](https://github.com/Dailin521/codex-provider-sync/releases/latest)
+[![CLI / Web](https://img.shields.io/npm/v/%40dailin521%2Fcodex-provider-sync?label=CLI%20%2F%20Web)](https://www.npmjs.com/package/@dailin521/codex-provider-sync)
+[![Windows GUI](https://img.shields.io/github/v/release/Dailin521/codex-provider-sync?label=Windows%20GUI)](https://github.com/Dailin521/codex-provider-sync/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
 [![Community](https://img.shields.io/badge/community-LINUX%20DO-2ea043.svg)](https://linux.do/)
 
@@ -17,9 +18,15 @@
 
 ## 解決すること
 
-`model_provider` を切り替えた後、既存セッションが Codex Desktop や `/resume` から消えることがあります。データ自体は通常ディスク上に残っていますが、セッションファイルと SQLite インデックス内の Provider 情報が同期されていません。
+`model_provider` を切り替えた後、既存セッションが Codex Desktop や `/resume` から消えることがあります。**データ自体は通常ディスク上に残っています**。セッションファイルと SQLite インデックス内の Provider 情報だけが同期されていません。
 
 このツールはセッションファイルと SQLite インデックスを同期してセッションの可視性を復元し、書き込み前にバックアップを作成します。ログイン、アカウント切り替え、`auth.json`、メッセージ本文は扱いません。
+
+> **同期が必要なのはいつですか？**
+>
+> - **通常のケース：**公式 OpenAI とカスタム中継先を切り替える場合。公式 OpenAI は常に `openai` を使用するため Provider ID が変わり、履歴の同期が必要です。
+> - **既存履歴で ID が混在している場合：**旧セッションに異なる Provider ID が記録されているため、現在の Provider に揃える必要があります。
+> - **同期が不要なケース：**同じ Provider ID を共有するカスタム中継先だけを切り替える場合、または CCSwitch などがすでに履歴を同期している場合です。
 
 ## クイックスタート
 
@@ -63,7 +70,16 @@ codex-provider web --port 8792     # ポートを指定する
 codex-provider web --reset-access  # ブラウザを再ペアリングする
 ```
 
-Web UI はデフォルトで `127.0.0.1` のみで待ち受け、ブラウザを自動で開いてペアリングします。保存先はページ上部の保存設定（Profile）で管理します。書き込み操作には確認が必要で、保存設定が変更された場合は再確認が必要です。
+Web UI はデフォルトで `127.0.0.1` のみで待ち受け、ブラウザを自動で開いてペアリングします。保存先はページ上部の保存設定（Profile）で管理します。書き込み操作には確認が必要です。サービスは `Ctrl+C` で停止します。
+
+#### Provider 切り替え後に履歴を同期する
+
+1. CCSwitch など普段使用しているツールで Provider を切り替えます。
+2. 必要に応じて Web UI で「读取状态」（Read Status）をクリックします（省略可）。
+3. 「仅同步元数据」（Metadata Only）のまま対象 Provider を選択し、同期の実行を確認します。
+4. 「Provider 元数据已对齐」（Provider Metadata Aligned）が表示されれば完了です。
+
+> **注意：** メタデータ同期で復元されるのは履歴の可視性だけです。Provider をまたいで旧セッションを続行すると、切り替え先のバックエンドが `encrypted_content` の推論内容を復号できず、続行や compact に失敗する場合があります。
 
 [Web UI の詳細（中国語）](README_WEB_UI_ZH.md)
 
@@ -120,7 +136,7 @@ flowchart LR
 - メッセージ本文、セッションタイトル、認証情報、`auth.json`、`updated_at` は変更しません。
 - SQLite が使用中の場合は、Codex、Codex App、app-server を閉じてから再試行してください。
 - アクティブなセッションが rollout をロックしている場合、他のファイルは続行します。セッション終了後にもう一度同期してください。
-- Provider またはアカウントをまたぐ `encrypted_content` は、一覧の可視性しか復元できない場合があります。
+- Provider またはアカウントをまたいで旧セッションを続行すると、切り替え先のバックエンドが `encrypted_content` を復号できず、続行や compact に失敗する場合があります。その場合は元の Provider／アカウントに戻すか、新しいセッションを開始してください。
 - Windows から WSL UNC SQLite Home に直接書き込むことはできません。WSL に入り、Linux パスで CLI を実行してください。
 
 ## ドキュメント

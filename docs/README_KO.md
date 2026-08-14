@@ -5,7 +5,8 @@
 ### Provider 전환 후 Codex의 이전 세션을 다시 표시합니다
 
 [![CI](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/Dailin521/codex-provider-sync)](https://github.com/Dailin521/codex-provider-sync/releases/latest)
+[![CLI / Web](https://img.shields.io/npm/v/%40dailin521%2Fcodex-provider-sync?label=CLI%20%2F%20Web)](https://www.npmjs.com/package/@dailin521/codex-provider-sync)
+[![Windows GUI](https://img.shields.io/github/v/release/Dailin521/codex-provider-sync?label=Windows%20GUI)](https://github.com/Dailin521/codex-provider-sync/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
 [![Community](https://img.shields.io/badge/community-LINUX%20DO-2ea043.svg)](https://linux.do/)
 
@@ -17,9 +18,15 @@
 
 ## 해결하는 문제
 
-`model_provider`를 전환하면 이전 세션이 Codex Desktop 또는 `/resume`에서 사라질 수 있습니다. 데이터는 보통 디스크에 남아 있지만 세션 파일과 SQLite 인덱스의 Provider 정보가 동기화되지 않은 상태입니다.
+`model_provider`를 전환하면 이전 세션이 Codex Desktop 또는 `/resume`에서 사라질 수 있습니다. **데이터는 보통 디스크에 그대로 남아 있으며**, 세션 파일과 SQLite 인덱스의 Provider 정보만 동기화되지 않은 상태입니다.
 
 이 도구는 세션 파일과 SQLite 인덱스를 동기화하여 세션 표시를 복원하고, 쓰기 전에 백업을 만듭니다. 로그인이나 계정 전환은 처리하지 않으며 `auth.json`이나 메시지 본문도 수정하지 않습니다.
+
+> **언제 동기화가 필요한가요?**
+>
+> - **일반적인 경우:** 공식 OpenAI와 사용자 지정 릴레이 사이에서 전환합니다. 공식 OpenAI는 항상 `openai`를 사용하므로 Provider ID가 바뀌며 기록을 동기화해야 합니다.
+> - **기존 기록에 ID가 섞인 경우:** 이전 세션에 서로 다른 Provider ID가 기록되어 있으므로 현재 Provider에 맞춰야 합니다.
+> - **동기화가 필요 없는 경우:** 같은 Provider ID를 공유하는 사용자 지정 릴레이 사이에서만 전환하거나 CCSwitch 같은 도구가 이미 기록을 동기화한 경우입니다.
 
 ## 빠른 시작
 
@@ -63,7 +70,16 @@ codex-provider web --port 8792     # 포트 지정
 codex-provider web --reset-access  # 브라우저 재페어링
 ```
 
-Web UI는 기본적으로 `127.0.0.1`에서만 수신하며, 브라우저를 자동으로 열어 페어링을 진행합니다. 저장 경로는 페이지 상단의 저장 구성(Profile)에서 관리합니다. 쓰기 작업에는 확인이 필요하며, 저장 구성이 변경되면 다시 확인해야 합니다.
+Web UI는 기본적으로 `127.0.0.1`에서만 수신하며, 브라우저를 자동으로 열어 페어링을 진행합니다. 저장 경로는 페이지 상단의 저장 구성(Profile)에서 관리하며 쓰기 작업에는 확인이 필요합니다. 서비스는 `Ctrl+C`로 종료합니다.
+
+#### Provider 전환 후 기록 동기화
+
+1. CCSwitch 등 평소 사용하는 도구로 Provider를 전환합니다.
+2. 필요한 경우 Web UI에서 `读取状态`(상태 읽기)를 클릭합니다(생략 가능).
+3. `仅同步元数据`(메타데이터만 동기화)를 유지한 채 대상 Provider를 선택하고 동기화 실행을 확인합니다.
+4. `Provider 元数据已对齐`(Provider 메타데이터 정렬 완료)가 표시되면 완료입니다.
+
+> **주의:** 메타데이터 동기화는 기록의 표시만 복원합니다. Provider를 바꾼 뒤 이전 세션을 계속하면 대상 백엔드가 `encrypted_content`의 추론 내용을 복호화하지 못해 대화 계속 또는 compact가 실패할 수 있습니다.
 
 [Web UI 전체 안내 (중국어)](README_WEB_UI_ZH.md)
 
@@ -120,7 +136,7 @@ flowchart LR
 - 메시지 본문, 세션 제목, 인증 정보, `auth.json`, `updated_at`은 수정하지 않습니다.
 - SQLite가 사용 중이면 Codex, Codex App, app-server를 닫은 뒤 다시 시도하세요.
 - 활성 세션이 rollout을 잠그면 나머지 파일은 계속 처리합니다. 세션 종료 후 다시 동기화하면 됩니다.
-- Provider/account 간 `encrypted_content`는 목록 표시만 복원할 수 있습니다.
+- Provider 또는 계정을 바꾼 뒤 이전 세션을 계속하면 대상 백엔드가 `encrypted_content`를 복호화하지 못해 대화 계속 또는 compact가 실패할 수 있습니다. 이 경우 원래 Provider/계정으로 돌아가거나 새 세션을 시작하세요.
 - Windows에서는 WSL UNC SQLite Home에 직접 쓸 수 없습니다. WSL에서 Linux 경로로 CLI를 실행하세요.
 
 ## 문서

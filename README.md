@@ -5,7 +5,8 @@
 ### 切换 Provider 后，让 Codex 历史会话重新可见
 
 [![CI](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/Dailin521/codex-provider-sync)](https://github.com/Dailin521/codex-provider-sync/releases/latest)
+[![CLI / Web](https://img.shields.io/npm/v/%40dailin521%2Fcodex-provider-sync?label=CLI%20%2F%20Web)](https://www.npmjs.com/package/@dailin521/codex-provider-sync)
+[![Windows GUI](https://img.shields.io/github/v/release/Dailin521/codex-provider-sync?label=Windows%20GUI)](https://github.com/Dailin521/codex-provider-sync/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Community](https://img.shields.io/badge/community-LINUX%20DO-2ea043.svg)](https://linux.do/)
 
@@ -17,9 +18,15 @@
 
 ## 它解决什么
 
-切换 `model_provider` 后，旧会话可能从 Codex Desktop 或 `/resume` 中消失。数据通常仍在磁盘上，只是会话文件和 SQLite 索引中的 Provider 信息没有同步。
+切换 `model_provider` 后，旧会话可能从 Codex Desktop 或 `/resume` 中消失。**数据通常仍在磁盘上**，只是会话文件和 SQLite 索引中的 Provider 信息没有同步。
 
 本工具会同步会话文件和 SQLite 索引，恢复会话可见性，并在写入前创建备份。它不负责登录、账号切换，也不修改 `auth.json` 或消息正文。
+
+> **什么时候需要同步？**
+>
+> - **通常情况：**在官方 OpenAI 与自定义中转之间切换。官方固定使用 `openai`，Provider ID 会发生变化，需要同步历史。
+> - **已有历史混用：**旧会话已经记录为不同的 Provider ID，需要同步到当前 Provider。
+> - **无需同步：**只在共用同一 Provider ID 的自定义中转之间切换，或者 CCSwitch 等工具已经同步了历史。
 
 ## 快速开始
 
@@ -61,7 +68,16 @@ codex-provider web --port 8792     # 指定端口
 codex-provider web --reset-access  # 重新配对浏览器
 ```
 
-Web UI 默认只监听 `127.0.0.1`，并自动打开浏览器完成配对。存储路径由页面顶部的存储配置（Profile）管理，写操作需要确认；存储配置发生变化时必须重新确认。
+Web UI 默认只监听 `127.0.0.1`，并自动打开浏览器完成配对。存储路径由页面顶部的存储配置（Profile）管理，写操作需要确认；按 `Ctrl+C` 停止服务。
+
+#### 切换 Provider 后同步历史
+
+1. 使用 CCSwitch 等常用工具切换 Provider。
+2. 在 Web UI 点击“读取状态”（可跳过）。
+3. 保持“仅同步元数据”，选择目标 Provider（供应商），确认执行同步。
+4. 显示“Provider 元数据已对齐”即完成。
+
+> **注意：** 元数据同步只能恢复历史可见性。跨供应商继续旧会话时，目标后端可能无法解密会话中的 `encrypted_content` 推理内容，导致继续对话或压缩（compact）失败。
 
 [Web UI 完整说明](docs/README_WEB_UI_ZH.md)
 
@@ -118,7 +134,7 @@ flowchart LR
 - 不修改消息正文、会话标题、认证信息、`auth.json` 或 `updated_at`。
 - SQLite 被占用时，请关闭 Codex、Codex App 和 app-server 后重试。
 - 活跃会话锁住 rollout 时，其余文件继续处理；结束会话后再次同步即可。
-- 跨 Provider/account 的 `encrypted_content` 可能只能恢复列表可见性。
+- 跨 Provider/account 继续旧会话时，目标后端可能无法解密 `encrypted_content`，导致继续对话或 compact 失败；遇到这种情况请切回原 Provider/account，或新建会话。
 - Windows 不能直接写入 WSL UNC SQLite Home；请进入 WSL 并使用 Linux 路径运行 CLI。
 
 ## 文档

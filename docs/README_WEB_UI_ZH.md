@@ -26,6 +26,12 @@ codex-provider web --reset-access
 codex-provider web --codex-home /path/to/.codex --sqlite-home /path/to/sqlite
 ```
 
+运行中的服务按 `Ctrl+C` 停止。升级已安装的 CLI/Web UI：
+
+```bash
+npm install -g @dailin521/codex-provider-sync@latest
+```
+
 从仓库开发时也可以运行：
 
 ```bash
@@ -33,6 +39,21 @@ npm install
 npm run web:build
 npm run web:start
 ```
+
+## 典型同步流程
+
+本工具只同步本地元数据，不负责登录或切换账号。已经通过其他工具切换 Provider 时：
+
+1. 使用 CCSwitch 等常用工具切换 Provider，并确认 Codex 可以正常对话。
+2. 在 Web UI 点击“读取状态”（可跳过）。
+3. 在“执行同步”中保持“仅同步元数据”，选择目标 Provider（供应商）。
+4. 核对确认页中的 Codex Home、SQLite Home 和目标 Provider，然后点击“确认执行同步”。
+5. 完成后再次读取状态。两侧元数据都归到当前 Provider，并显示“Provider 元数据已对齐”即为成功。
+6. 以后切回原 Provider 时重复相同步骤；`openai → 自定义 Provider → openai` 两个方向没有区别。
+
+rollout 与 SQLite 的会话总数可能因活动会话写入和索引时序短暂相差 1；这不表示 Provider 元数据未对齐。以两侧的 Provider 分布和页面对齐状态为准。
+
+> **注意：** 元数据同步只能恢复历史可见性。跨供应商继续旧会话时，目标后端可能无法解密会话中的 `encrypted_content` 推理内容，导致继续对话或压缩（compact）失败。遇到这种情况请切回原 Provider/account，或新建会话。
 
 ## 页面功能
 
@@ -89,6 +110,4 @@ Windows 桌面用户默认推荐原生 GUI；Web UI 适合需要浏览器界面�
 
 ## 注意事项
 
-Web UI 不能替代操作系统级关闭 Codex 的要求。执行同步或恢复前仍应关闭 Codex CLI、Codex App、app-server 和相关终端。
-
-如果输出报告锁定的 rollout，操作属于部分成功；会话结束后再次执行同步即可。如果 SQLite 正在使用，核心服务会在修改 rollout 前停止。
+建议在同步或恢复前关闭 Codex CLI、Codex App、app-server 和相关终端。保持会话运行时，未锁定的数据仍可正常同步；如果报告跳过锁定的 rollout，操作属于部分成功，请在该会话结束后再次同步。SQLite 正在使用时，核心服务会在修改 rollout 前停止，此时必须关闭占用进程后重试。
