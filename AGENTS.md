@@ -2,6 +2,12 @@
 
 This file is for AI assistants and automation working in this repository. User-facing setup and usage belong in [README.md](README.md) and `docs/`.
 
+## vNext architecture baseline
+
+The accepted target architecture and staged migration plan is [vNext Electron + Node architecture](docs/VNEXT_ELECTRON_NODE_ARCHITECTURE_ZH.md). Read it before any Electron, shared Node Core, repository restructuring, desktop replacement, or other vNext work.
+
+It defines the target, not the current implementation. Existing code, tests, and released compatibility contracts remain authoritative until the relevant migration-stage exit criteria pass. Do not delete the .NET implementation, break the CLI/Web contract, or perform a big-bang rewrite ahead of those gates.
+
 ## Goal
 
 Restore Codex session visibility after `model_provider` changes by keeping rollout metadata and the resolved SQLite thread index aligned. Do not treat this as an authentication or account-management tool.
@@ -62,10 +68,11 @@ On Windows, `\\wsl.localhost\...` and `\\wsl$\...` SQLite Homes are diagnostic-o
 - Missing explicit SQLite database: keep the explicit path authoritative and report the error; do not use the legacy database.
 - WSL UNC diagnostic: run the CLI in WSL with the Windows Codex Home under `/mnt/<drive>/...` and a Linux SQLite Home such as `/home/...`.
 
-## Engineering direction
+## Current implementation and migration direction
 
 - Node CLI and Web UI share the service layer in `src/`; do not duplicate sync logic in the browser.
-- .NET Core remains authoritative for config, rollout, SQLite, backup, restore, and storage safety.
+- vNext Electron, repository restructuring, and Core extraction work follows the accepted architecture baseline; the shared Node Core is the target single business authority.
+- .NET Core remains authoritative for current desktop behavior during the staged migration. Do not add new duplicate business capabilities; transfer authority only after the corresponding parity, safety, and release gates pass.
 - Windows GUI routes UI-independent work through the Application/controller layer; WinForms owns presentation and native platform interaction.
 - macOS currently calls Core directly. Do not document an Application-layer dependency that does not exist.
 - Add focused tests for behavior changes. Prefer controller tests over new reflection-based WinForms business tests.
