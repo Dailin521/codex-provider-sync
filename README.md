@@ -146,6 +146,7 @@ flowchart LR
 ## 文档
 
 - [vNext 架构基线（Electron + Node 单核心）](docs/VNEXT_ELECTRON_NODE_ARCHITECTURE_ZH.md)
+- [vNext 分阶段迁移执行索引](docs/migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md)
 - [AI / Agent 操作指南](AGENTS.md)
 - [Windows GUI](docs/README_GUI_ZH.md)
 - [Web UI](docs/README_WEB_UI_ZH.md)

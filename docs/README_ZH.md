@@ -12,6 +12,9 @@
 开发与维护：
 
 - [vNext 架构基线（Electron + Node 单核心）](VNEXT_ELECTRON_NODE_ARCHITECTURE_ZH.md)
+- [vNext 迁移执行索引](migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md) · [行为 Fixtures](migration/BEHAVIOR_FIXTURES_ZH.md)
+- vNext 合同：[Core 外部行为](architecture/contracts/CORE_EXTERNAL_BEHAVIOR_ZH.md) · [CLI](architecture/contracts/CLI_CONTRACT_ZH.md) · [错误码](architecture/contracts/ERROR_CODES_ZH.md)
+- vNext ADR：[0001 Electron](adr/0001-electron-over-tauri.md) · [0002 Node Core](adr/0002-node-core-as-single-authority.md) · [0003 CLI](adr/0003-preserve-node-cli-contract.md) · [0004 Renderer](adr/0004-renderer-has-no-node-access.md) · [0005 Utility Process](adr/0005-run-core-in-electron-utility-process.md) · [0006 无应用数据库](adr/0006-no-application-database.md) · [0007 CoreClient](adr/0007-shared-ui-through-core-client.md) · [0008 渐进迁移](adr/0008-incremental-migration-no-big-bang-rewrite.md) · [0009 Plan/Apply](adr/0009-plan-confirm-apply-for-writes.md) · [0010 构建工具](adr/0010-electron-vite-and-electron-builder.md)
 - [贡献指南](../CONTRIBUTING.md) · [AI / Agent 操作指南](../AGENTS.md)
 - [npm 发布维护指南](NPM_PUBLISHING.md)
 - Automation：[快速开始](AUTOMATION_QUICKSTART_ZH.md) · [设计说明](AUTOMATION_DESIGN_NOTES.md)
