@@ -1,5 +1,14 @@
 const DEVICE_STORAGE_KEY = "cps.web.deviceCredential";
 
+// Resolve API endpoints relative to the page URL so the UI keeps working when
+// served under a path-based reverse proxy (e.g. notebook /proxy/<port>/).
+function apiUrl(path) {
+  const pathname = window.location.pathname.endsWith("/")
+    ? window.location.pathname
+    : `${window.location.pathname}/`;
+  return new URL(`.${path}`, `${window.location.origin}${pathname}`).toString();
+}
+
 export class PairingRequiredError extends Error {
   constructor(message = "此浏览器需要重新配对。请重新运行 codex-provider web。") {
     super(message);
@@ -25,7 +34,7 @@ export async function initializeAccess() {
   const pairingToken = fragment.get("pair");
   if (!pairingToken) return hasDeviceCredential();
 
-  const response = await fetch("/api/pair", {
+  const response = await fetch(apiUrl("/api/pair"), {
     method: "POST",
     headers: { "X-Codex-Provider-Pairing": pairingToken }
   });
@@ -67,7 +76,7 @@ async function parseResponse(response, fallback) {
 }
 
 export async function apiRequest(path, body = {}, { signal } = {}) {
-  const response = await fetch(path, {
+  const response = await fetch(apiUrl(path), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -80,14 +89,14 @@ export async function apiRequest(path, body = {}, { signal } = {}) {
 }
 
 export async function getActivity(after = 0) {
-  const response = await fetch(`/api/activity?after=${after}`, {
+  const response = await fetch(apiUrl(`/api/activity?after=${after}`), {
     headers: deviceHeaders()
   });
   return parseResponse(response, `Activity request failed with HTTP ${response.status}.`);
 }
 
 export async function getProfiles() {
-  const response = await fetch("/api/profiles", { headers: deviceHeaders() });
+  const response = await fetch(apiUrl("/api/profiles"), { headers: deviceHeaders() });
   return parseResponse(response, `Profile request failed with HTTP ${response.status}.`);
 }
 
