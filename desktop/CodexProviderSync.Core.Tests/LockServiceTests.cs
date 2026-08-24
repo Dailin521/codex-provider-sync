@@ -1,9 +1,13 @@
+using System.Diagnostics;
 using System.Text.Json;
 
 namespace CodexProviderSync.Core.Tests;
 
 public sealed class LockServiceTests
 {
+    private const int NodeBusyExitCode = 73;
+    private static readonly TimeSpan NodeProcessTimeout = TimeSpan.FromSeconds(15);
+
     [Fact]
     public async Task AcquireLockAsync_PublishesVersionedOwnerAndClaim_ThenReleasesOnlyItsGeneration()
     {
@@ -629,6 +633,109 @@ public sealed class LockServiceTests
     }
 
     [Fact]
+    public async Task AcquireLockAsync_RealNodeOwnerBlocksDotNetThenReleases_OnLinux()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            return;
+        }
+
+        string codexHome = CreateTempDirectory();
+        string lockPath = AppConstants.LockPath(codexHome);
+        Process? node = null;
+        try
+        {
+            node = StartNodeLockHelper("hold", codexHome);
+            using JsonDocument acquired = await ReadNodeEventAsync(node, "acquired");
+            Assert.Equal(node.Id, acquired.RootElement.GetProperty("pid").GetInt32());
+
+            string ownerBefore = await File.ReadAllTextAsync(Path.Combine(lockPath, "owner.json"));
+            string[] claimsBefore = SnapshotClaimFiles(lockPath);
+            using (JsonDocument owner = JsonDocument.Parse(ownerBefore))
+            {
+                Assert.Equal("node", owner.RootElement.GetProperty("runtime").GetString());
+                Assert.Equal(node.Id, owner.RootElement.GetProperty("pid").GetInt32());
+            }
+
+            InvalidOperationException blocked = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => new LockService().AcquireLockAsync(codexHome, "dotnet-contender"));
+
+            Assert.True(LockService.IsOperationBusy(blocked));
+            Assert.Equal(ownerBefore, await File.ReadAllTextAsync(Path.Combine(lockPath, "owner.json")));
+            Assert.Equal(claimsBefore, SnapshotClaimFiles(lockPath));
+
+            await node.StandardInput.WriteLineAsync("release");
+            node.StandardInput.Close();
+            NodeHelperResult released = await CompleteNodeHelperAsync(node);
+            AssertNodeExit(released, expectedExitCode: 0);
+            Assert.Contains("\"event\":\"released\"", released.Stdout);
+
+            await using (LockHandle dotnet = await new LockService().AcquireLockAsync(
+                codexHome,
+                "dotnet-after-node"))
+            {
+                Assert.True(Directory.Exists(lockPath));
+            }
+            Assert.False(Directory.Exists(lockPath));
+            Assert.Empty(SnapshotClaimFiles(lockPath));
+        }
+        finally
+        {
+            if (node is not null)
+            {
+                await StopNodeHelperAsync(node);
+                node.Dispose();
+            }
+            TryDeleteTempDirectory(codexHome);
+        }
+    }
+
+    [Fact]
+    public async Task AcquireLockAsync_RealDotNetOwnerBlocksNodeThenReleases_OnLinux()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            return;
+        }
+
+        string codexHome = CreateTempDirectory();
+        string lockPath = AppConstants.LockPath(codexHome);
+        try
+        {
+            await using (LockHandle dotnet = await new LockService().AcquireLockAsync(
+                codexHome,
+                "dotnet-holder"))
+            {
+                string ownerBefore = await File.ReadAllTextAsync(Path.Combine(lockPath, "owner.json"));
+                string[] claimsBefore = SnapshotClaimFiles(lockPath);
+                using (JsonDocument owner = JsonDocument.Parse(ownerBefore))
+                {
+                    Assert.Equal("dotnet", owner.RootElement.GetProperty("runtime").GetString());
+                    Assert.Equal(Environment.ProcessId, owner.RootElement.GetProperty("pid").GetInt32());
+                }
+
+                NodeHelperResult blocked = await RunNodeLockHelperAsync("attempt", codexHome);
+
+                AssertNodeExit(blocked, NodeBusyExitCode);
+                Assert.Contains("\"event\":\"busy\"", blocked.Stdout);
+                Assert.Equal(ownerBefore, await File.ReadAllTextAsync(Path.Combine(lockPath, "owner.json")));
+                Assert.Equal(claimsBefore, SnapshotClaimFiles(lockPath));
+            }
+
+            NodeHelperResult acquired = await RunNodeLockHelperAsync("attempt", codexHome);
+            AssertNodeExit(acquired, expectedExitCode: 0);
+            Assert.Contains("\"event\":\"acquired\"", acquired.Stdout);
+            Assert.Contains("\"event\":\"released\"", acquired.Stdout);
+            Assert.False(Directory.Exists(lockPath));
+            Assert.Empty(SnapshotClaimFiles(lockPath));
+        }
+        finally
+        {
+            TryDeleteTempDirectory(codexHome);
+        }
+    }
+
+    [Fact]
     public async Task CreateLockDirectoryAsync_RetriesTransientAccessDeniedErrors()
     {
         int attempts = 0;
@@ -746,6 +853,156 @@ public sealed class LockServiceTests
         Directory.CreateDirectory(path);
         return path;
     }
+
+    private static Process StartNodeLockHelper(string mode, string codexHome)
+    {
+        string helperPath = Path.Combine(FindRepositoryRoot(), "test", "helpers", "lock-contender.js");
+        ProcessStartInfo startInfo = new()
+        {
+            FileName = Environment.GetEnvironmentVariable("NODE_BINARY") ?? "node",
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        startInfo.ArgumentList.Add(helperPath);
+        startInfo.ArgumentList.Add(mode);
+        startInfo.ArgumentList.Add(codexHome);
+
+        Process process = new() { StartInfo = startInfo };
+        if (!process.Start())
+        {
+            process.Dispose();
+            throw new InvalidOperationException("Failed to start the Node lock contender helper.");
+        }
+        return process;
+    }
+
+    private static async Task<JsonDocument> ReadNodeEventAsync(Process process, string expectedEvent)
+    {
+        string? line = await process.StandardOutput.ReadLineAsync().WaitAsync(NodeProcessTimeout);
+        if (line is null)
+        {
+            string stderr = await process.StandardError.ReadToEndAsync();
+            throw new InvalidOperationException(
+                $"Node lock contender exited before event '{expectedEvent}'. stderr: {stderr}");
+        }
+
+        JsonDocument document = JsonDocument.Parse(line);
+        string? actualEvent = document.RootElement.GetProperty("event").GetString();
+        if (!string.Equals(actualEvent, expectedEvent, StringComparison.Ordinal))
+        {
+            document.Dispose();
+            throw new InvalidOperationException(
+                $"Expected Node lock event '{expectedEvent}', received '{actualEvent}': {line}");
+        }
+        return document;
+    }
+
+    private static async Task<NodeHelperResult> RunNodeLockHelperAsync(string mode, string codexHome)
+    {
+        using Process process = StartNodeLockHelper(mode, codexHome);
+        process.StandardInput.Close();
+        return await CompleteNodeHelperAsync(process);
+    }
+
+    private static async Task<NodeHelperResult> CompleteNodeHelperAsync(Process process)
+    {
+        Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+        Task<string> stderr = process.StandardError.ReadToEndAsync();
+        try
+        {
+            await process.WaitForExitAsync().WaitAsync(NodeProcessTimeout);
+        }
+        catch (TimeoutException)
+        {
+            await StopNodeHelperAsync(process);
+            throw new TimeoutException(
+                $"Node lock contender did not exit within {NodeProcessTimeout.TotalSeconds:F0} seconds.");
+        }
+        return new NodeHelperResult(process.ExitCode, await stdout, await stderr);
+    }
+
+    private static async Task StopNodeHelperAsync(Process process)
+    {
+        if (process.HasExited)
+        {
+            return;
+        }
+
+        try
+        {
+            await process.StandardInput.WriteLineAsync("release");
+            process.StandardInput.Close();
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(3));
+        }
+        catch
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(3));
+            }
+        }
+    }
+
+    private static string[] SnapshotClaimFiles(string lockPath)
+    {
+        string claimsPath = lockPath + ".claims";
+        return Directory.Exists(claimsPath)
+            ? Directory.EnumerateFiles(claimsPath, "*.json", SearchOption.TopDirectoryOnly)
+                .Select(Path.GetFileName)
+                .OfType<string>()
+                .Order(StringComparer.Ordinal)
+                .ToArray()
+            : [];
+    }
+
+    private static void AssertNodeExit(NodeHelperResult result, int expectedExitCode)
+    {
+        Assert.True(
+            result.ExitCode == expectedExitCode,
+            $"Expected Node helper exit code {expectedExitCode}, received {result.ExitCode}. "
+            + $"stdout: {result.Stdout} stderr: {result.Stderr}");
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        foreach (string start in new[] { Environment.CurrentDirectory, AppContext.BaseDirectory })
+        {
+            DirectoryInfo? directory = new(Path.GetFullPath(start));
+            while (directory is not null)
+            {
+                if (File.Exists(Path.Combine(directory.FullName, "package.json"))
+                    && File.Exists(Path.Combine(
+                        directory.FullName,
+                        "test",
+                        "helpers",
+                        "lock-contender.js")))
+                {
+                    return directory.FullName;
+                }
+                directory = directory.Parent;
+            }
+        }
+        throw new DirectoryNotFoundException(
+            "Could not locate the repository root for test/helpers/lock-contender.js.");
+    }
+
+    private static void TryDeleteTempDirectory(string path)
+    {
+        try
+        {
+            Directory.Delete(path, recursive: true);
+        }
+        catch
+        {
+            // Best-effort cleanup; assertions report any retained lock state first.
+        }
+    }
+
+    private sealed record NodeHelperResult(int ExitCode, string Stdout, string Stderr);
 
     private static Task WriteJsonAsync(string path, object value)
     {
