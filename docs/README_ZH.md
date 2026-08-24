@@ -11,6 +11,7 @@
 
 开发与维护：
 
+- [vNext 架构基线（Electron + Node 单核心）](VNEXT_ELECTRON_NODE_ARCHITECTURE_ZH.md)
 - [贡献指南](../CONTRIBUTING.md) · [AI / Agent 操作指南](../AGENTS.md)
 - [npm 发布维护指南](NPM_PUBLISHING.md)
 - Automation：[快速开始](AUTOMATION_QUICKSTART_ZH.md) · [设计说明](AUTOMATION_DESIGN_NOTES.md)
