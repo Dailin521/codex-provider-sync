@@ -120,7 +120,8 @@ export async function runWatch({
     if (typeof runSyncImpl === "function") {
       return runSyncImpl({ codexHome, sqliteHome: storage.sqliteHome, storage, reason, model: rootModel });
     }
-    // Lazy import to avoid pulling in the full service module until needed.
+    // Watch is part of the Core boundary itself. Keep its internal dependency
+    // pointed at the implementation so public-api.js does not form a cycle.
     const { runSync } = await import("./service.js");
     return runSync({
       codexHome,

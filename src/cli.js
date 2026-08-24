@@ -3,12 +3,13 @@
 import path from "node:path";
 
 import { DEFAULT_BACKUP_RETENTION_COUNT } from "./constants.js";
+import { renderStatus } from "./cli-presenter.js";
 import { installWindowsLauncher } from "./launcher.js";
 import { assertSupportedNodeVersion } from "./node-version.js";
 
-async function loadService() {
+async function loadPublicApi() {
   assertSupportedNodeVersion();
-  return import("./service.js");
+  return import("./public-api.js");
 }
 
 function printHelp() {
@@ -207,7 +208,7 @@ async function main() {
   assertSupportedNodeVersion();
 
   if (command === "status") {
-    const { getStatus, renderStatus } = await loadService();
+    const { getStatus } = await loadPublicApi();
     const status = await getStatus({
       codexHome: flags["codex-home"],
       sqliteHome: flags["sqlite-home"]
@@ -217,7 +218,7 @@ async function main() {
   }
 
   if (command === "sync") {
-    const { runSync } = await loadService();
+    const { runSync } = await loadPublicApi();
     const { defaultCodexHome } = await import("./constants.js");
     const { readConfigText, readRootModelFromConfigText } = await import("./config-file.js");
     const codexHome = path.resolve(
@@ -245,7 +246,7 @@ async function main() {
   }
 
   if (command === "switch") {
-    const { runSwitch } = await loadService();
+    const { runSwitch } = await loadPublicApi();
     const provider = positionals[1] ?? flags.provider;
     const result = await runSwitch({
       codexHome: flags["codex-home"],
@@ -271,7 +272,7 @@ async function main() {
   }
 
   if (command === "prune-backups") {
-    const { runPruneBackups } = await loadService();
+    const { runPruneBackups } = await loadPublicApi();
     const result = await runPruneBackups({
       codexHome: flags["codex-home"],
       keepCount: parseKeepCount(flags.keep, { allowZero: true })
@@ -281,7 +282,7 @@ async function main() {
   }
 
   if (command === "watch") {
-    const { runWatch } = await import("./watch.js");
+    const { runWatch } = await loadPublicApi();
     const debounceMs = flags["debounce-ms"] !== undefined
       ? parseKeepCount(flags["debounce-ms"], { allowZero: true })
       : undefined;
@@ -359,7 +360,7 @@ async function main() {
   }
 
   if (command === "restore") {
-    const { runRestore } = await loadService();
+    const { runRestore } = await loadPublicApi();
     const backupDir = positionals[1] ?? flags.backup;
     const result = await runRestore({
       codexHome: flags["codex-home"],

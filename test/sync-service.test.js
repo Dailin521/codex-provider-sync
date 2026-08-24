@@ -13,7 +13,8 @@ import {
   restoreBackup,
   updateSessionBackupManifest
 } from "../src/backup.js";
-import { getStatus, renderStatus, runRestore, runSwitch, runSync } from "../src/service.js";
+import { renderStatus } from "../src/cli-presenter.js";
+import { getStatus, runRestore, runSwitch, runSync } from "../src/public-api.js";
 import { DB_FILE_BASENAME, DEFAULT_BACKUP_RETENTION_COUNT, SQLITE_DIR_BASENAME } from "../src/constants.js";
 import { getUnsupportedNodeVersionMessage } from "../src/node-version.js";
 import {

@@ -5,11 +5,18 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { listBackups } from "./backup.js";
 import { readConfigText, readRootModelFromConfigText } from "./config-file.js";
 import { defaultCodexHome } from "./constants.js";
-import { getHistorySession, listHistory } from "./history.js";
-import { getStatus, runPruneBackups, runRestore, runSwitch, runSync } from "./service.js";
+import {
+  getHistorySession,
+  getStatus,
+  listBackups,
+  listHistory,
+  runPruneBackups,
+  runRestore,
+  runSwitch,
+  runSync
+} from "./public-api.js";
 import { detectStateDb } from "./sqlite-state.js";
 import { ensureCodexHome, resolveStorageLayout, withStateDbLocation } from "./storage-layout.js";
 import { createMemoryWebUiState, ProfileRevisionConflictError, WebUiStateStore } from "./web-state.js";
