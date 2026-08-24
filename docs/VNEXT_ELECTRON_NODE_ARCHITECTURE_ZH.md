@@ -7,7 +7,7 @@
 > **最后修订：2026-08-24**  
 > **适用仓库：`Dailin521/codex-provider-sync`**  
 > **目标版本：vNext / 1.0 架构演进**  
-> **配套 ADR：阶段 0 待落地**
+> **配套 ADR：vNext/ADR-0001～0010 已 Accepted；导航见 [迁移执行索引](migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md)**
 
 > 本文定义目标架构与分阶段迁移基线，不代表 `main` 已经完成该架构。迁移期间，当前代码、既有测试与已发布兼容合同仍是现状事实；只有达到对应阶段退出条件后，目标实现才能替代旧实现。
 
@@ -1436,7 +1436,7 @@ Core Runtime 使用 `OperationCoordinator`：
 - 状态读取在写操作完成后刷新；
 - Watch 触发的同步不能抢占用户主动操作；
 - Restore 优先于普通 Sync；
-- Recovery Required 时禁止所有非恢复写操作。
+- Recovery Required 时禁止 Sync、Switch、Watch 自动同步等普通业务写；允许执行 recovery-safe 的 Prune，但不得删除任何 Pending Journal 引用的备份。
 
 ### 18.2 跨进程锁
 

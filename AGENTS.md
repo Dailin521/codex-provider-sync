@@ -8,6 +8,10 @@ The accepted target architecture and staged migration plan is [vNext Electron + 
 
 It defines the target, not the current implementation. Existing code, tests, and released compatibility contracts remain authoritative until the relevant migration-stage exit criteria pass. Do not delete the .NET implementation, break the CLI/Web contract, or perform a big-bang rewrite ahead of those gates.
 
+Phase 0 decisions and frozen behavior are indexed in the [vNext migration execution index](docs/migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md). Before changing an external behavior, read the applicable [Core behavior contract](docs/architecture/contracts/CORE_EXTERNAL_BEHAVIOR_ZH.md), [CLI contract](docs/architecture/contracts/CLI_CONTRACT_ZH.md), [error-code contract](docs/architecture/contracts/ERROR_CODES_ZH.md), and [behavior fixture catalog](docs/migration/BEHAVIOR_FIXTURES_ZH.md), plus the Accepted ADRs in `docs/adr/`.
+
+An external behavior change must update its contract and add or update a fixture/test in the same PR. Target-state text is not proof that a feature exists: keep current behavior, transitional adapter behavior, and the vNext target explicitly separated.
+
 ## Goal
 
 Restore Codex session visibility after `model_provider` changes by keeping rollout metadata and the resolved SQLite thread index aligned. Do not treat this as an authentication or account-management tool.
