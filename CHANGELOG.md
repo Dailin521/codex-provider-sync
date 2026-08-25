@@ -2,6 +2,23 @@
 
 本文件记录面向用户和集成方的重要变化。完整的发布叙事、升级说明和下载入口见对应版本的中文发布说明；实现证据和测试门禁见技术发布说明。
 
+## [Unreleased]
+
+### 新增
+
+- 有限 CLI 命令新增 opt-in `--json`，stdout 固定为一个 schema v1 终态对象；帮助、输入失败、成功、partial、recovery、busy 和取消共享同一顶层结构。
+- JSON Mode 固化 `0/1/2/3/4/5/130` 退出码矩阵，并使用 Canonical Core Error Code。
+
+### 兼容性
+
+- 未传入 `--json` 时继续使用既有 Human 输出和 `0/1` 行为；partial sync 在 Human Mode 仍为成功退出。
+- `watch` 与 `web` 暂不提供单文档 JSON 模式，并在创建长运行资源前返回结构化 `INVALID_INPUT`；未来流式机器接口需要独立协议。
+
+### 安全
+
+- JSON 进度只写 stderr 且不报告 backup path；固定错误文案、命令级 result allowlist 和枚举化 details 会阻止非法参数值、未知异常、底层 warning、凭据样式字段、prompt 与消息正文进入 stdout。
+- stdout broken pipe 只尝试一次终态写入；stderr observer 失败不能改变已启动业务操作的结果。
+
 ## [0.5.0] - 2026-08-15
 
 ### 新增

@@ -1,10 +1,10 @@
 # CLI 命令兼容合同
 
-> 状态：Phase 0 兼容基线
+> 状态：Accepted（Phase 0 Human 兼容基线；C2 JSON 合同已实现）
 >
 > 基线版本：`@dailin521/codex-provider-sync` v0.5.0
 >
-> 冻结日期：2026-08-24
+> 冻结日期：2026-08-24；C2 增量：2026-08-25
 >
 > 适用入口：`codex-provider`
 
@@ -12,10 +12,11 @@
 
 本文冻结 vNext 迁移开始时已经存在的 Node CLI 外部行为，防止提取 Node Core、增加 Electron、重组仓库或迁移到 TypeScript 时无意破坏现有用户和自动化脚本。
 
-本文同时明确区分三类内容：
+本文同时明确区分四类内容：
 
 - **v0.5 当前合同**：当前已发布且迁移期间必须兼容的行为；
 - **legacy tolerated 行为**：当前宽松实现碰巧接受，但不升级为长期公开承诺的行为；
+- **vNext C2 当前合同**：V1 分支已实现并由真实子进程测试冻结、但尚未公开发布的 opt-in JSON 行为；
 - **vNext 目标**：需要后续独立设计、测试和发布说明才能生效的新增合同。
 
 目标架构文档中的建议不自动覆盖本文记录的 v0.5 事实。只有对应迁移阶段通过退出条件并更新合同测试后，才能修改当前合同。
@@ -105,6 +106,16 @@ codex-provider <command> --help
 ```
 
 当前没有稳定的 `--version` 或短选项 `-h` 合同。
+
+### 4.3 vNext C2 JSON 入口
+
+以下有限命令支持 opt-in `--json`：
+
+- `status`、`sync`、`switch`、`restore`；
+- `prune-backups`、`install-windows-launcher`；
+- 全局帮助或命令帮助。
+
+`--json` 可置于命令前或后。`watch` 与 `web` 是长运行接口，不适用“stdout 只写一个终态 JSON 文档”的合同；C2 在创建 watcher、server、runtime descriptor 或浏览器进程前，以结构化 `INVALID_INPUT` 拒绝二者。若未来需要流式机器接口，必须使用独立协议，不能把日志行混入本合同。
 
 ## 5. `status`
 
@@ -379,9 +390,9 @@ codex-provider install-windows-launcher [--dir PATH] [--codex-home PATH] [--sqli
 
 ## 13. stdout、stderr 与退出码
 
-### 13.1 v0.5 当前合同
+### 13.1 Human Mode 兼容合同
 
-当前 CLI 是人类可读接口，没有 `--json`。
+未传入 `--json` 时继续使用 v0.5 人类可读接口，并保持原有 `0/1` 退出行为。
 
 | 场景 | stdout | stderr | Exit Code |
 | --- | --- | --- | --- |
@@ -395,14 +406,58 @@ codex-provider install-windows-launcher [--dir PATH] [--codex-home PATH] [--sqli
 
 错误默认不输出 JavaScript stack。
 
-**当前不存在 `2`、`3`、`4`、`5`、`130` 的稳定退出码。** 目标架构中关于参数错误、partial、recovery、busy 和取消的细分退出码是 vNext 建议，不是 v0.5 事实。
+Human Mode 不采用 JSON 模式的 `2`、`3`、`4`、`5`、`130`；partial 仍为 `0`，其余既有失败仍为 `1`。这一区分防止现有脚本因 opt-in JSON 能力而改变行为。
 
-### 13.2 vNext 变更规则
+### 13.2 vNext C2 JSON 合同
 
-新增细分退出码前必须：
+JSON Mode 的 stdout 必须恰好包含一个 UTF-8 JSON 文档和结尾换行；进度、运行时 warning 与诊断只能进入 stderr。顶层字段始终全部存在、顺序固定，且不得增加未版本化字段：
+
+```json
+{
+  "schemaVersion": 1,
+  "command": "sync",
+  "ok": true,
+  "outcome": "completed",
+  "result": {},
+  "warnings": [],
+  "error": null
+}
+```
+
+字段合同：
+
+| 字段 | 合同 |
+| --- | --- |
+| `schemaVersion` | 固定为整数 `1` |
+| `command` | 规范化命令名；全局帮助为 `help` |
+| `ok` | 业务调用是否得到成功 Result；`partial` 仍为 `true` |
+| `outcome` | `completed`、`noop`、`partial`、`failed`、`failed_rolled_back`、`recovery_required`、`cancelled` 或 `stale` |
+| `result` | 成功时为命令结果对象，失败时为 `null` |
+| `warnings` | 字符串数组；没有 warning 时为空数组 |
+| `error` | 失败时为安全的 `CoreErrorDto`，成功时为 `null`；不得包含 stack、cause、凭据、Token 或消息正文 |
+
+所有 Canonical Error Code 在 JSON 中使用固定安全 message；未知异常统一输出稳定的 `INTERNAL_ERROR`，不回显参数值或底层 message。Error details 只允许经审计且枚举/格式受限的 scope、reason、SQLite source/cause 字段；operationId 只接受 UUID，suggestedAction 不直接透传。成功 result 按命令使用字段 allowlist，只保留产品 DTO 中已审计的状态、计数、Provider/model 与路径字段，并移除凭据、Token、secret、stack/cause、prompt 和消息正文；底层 warning message 归一为稳定摘要。JSON 参数解析为严格模式：未知 flag、重复 flag、缺值、多余位置参数、布尔 flag 带值和 `--json=<value>` 均以 `INVALID_INPUT` 失败；第 14 节的宽松行为只为 Human Mode 保留。
+
+JSON Mode 退出码固定为：
+
+| Exit Code | 含义 |
+| --- | --- |
+| `0` | 成功或 noop |
+| `1` | 普通失败，包含已安全回滚的失败 |
+| `2` | 输入无效、Plan 过期或状态漂移 |
+| `3` | partial success |
+| `4` | recovery required 或 pending transaction |
+| `5` | operation busy、SQLite busy 或 lock unverifiable |
+| `130` | cancelled |
+
+CLI Exit Code 与 Error Code 是两层合同：多个 Canonical Error Code 可以映射到同一退出码。`--help --json` 返回 `ok:true` 的 schema v1 帮助结果；不存在稳定的 `--version` JSON 合同。
+
+### 13.3 后续变更规则
+
+以后新增或重映射退出码前必须：
 
 1. 调查现有脚本是否依赖 `0/1`；
-2. 明确旧人类模式与新 `--json` 模式是否共享退出码；
+2. 明确 Human Mode 与 JSON Mode 是否改变各自退出码；
 3. 增加真实子进程 Contract Test；
 4. 在 CHANGELOG 和发布说明中声明；
 5. 不把 partial、busy 或 recovery 的退出码变化混入无关重构。
@@ -431,14 +486,12 @@ codex-provider install-windows-launcher [--dir PATH] [--codex-home PATH] [--sqli
 
 ## 15. vNext 目标合同
 
-以下内容是目标，不是 v0.5 当前合同：
+以下内容是 V1 后续目标；其中 C2 已实现的合同是后续阶段必须保持的不变量：
 
 - CLI、Local Web UI 与 Electron Desktop 调用同一个 Core Public API；
 - Desktop 不启动 CLI，也不解析 CLI 人类文本；
-- 新增 opt-in `--json`；
-- JSON stdout 使用稳定的 `schemaVersion`；
-- JSON 模式 stdout 只含一个结构化结果，日志和进度进入 stderr；
-- 建立明确的参数错误、partial、recovery required、busy 和取消退出码；
+- 保持 C2 已实现的 opt-in JSON schema、stdout/stderr 分工和退出码矩阵；
+- 在 Prepare/Apply 落地后，让 JSON 命令使用相同的 Plan/Result DTO，而不暴露内部适配器；
 - 使用稳定 Error Code，同时保留现有人类错误提示的核心语义；
 - 支持取消时使用安全取消点，而不是强制中止事务。
 
@@ -459,7 +512,11 @@ Phase 0 之后的 CLI 改造至少必须覆盖：
 - SQLite Home 优先级与 default-only legacy fallback；
 - Web 默认端口、回环绑定与复用；
 - Watch 默认 750 ms、once 成功退出与连续失败停止；
-- npm `bin`、`engines` 与发布包包含 CLI/Web 运行所需文件。
+- npm `bin`、`engines` 与发布包包含 CLI/Web 运行所需文件；
+- JSON help、输入错误、成功、noop、partial、rolled-back、stale、recovery、busy、lock unverifiable 与 cancelled 均为单一 stdout 文档；
+- JSON progress 只进入 stderr，未知异常、底层 warning 与序列化失败不泄漏 stack、cause、凭据、Token、secret 或消息正文；
+- `watch --json` 与 `web --json` 在任何长运行副作用前被拒绝；
+- Human Mode 的帮助、进度、partial 和 `0/1` 行为保持既有回归。
 
 ## 17. 变更控制
 

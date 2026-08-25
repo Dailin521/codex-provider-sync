@@ -71,7 +71,7 @@
 
 - 新增 `src/public-api.js`，CLI/Web 不再导入 Core 内部实现；
 - 展示逻辑与业务结果分离，现有用户可见语义不变；
-- C1～C3 均已完成：Public API/结构化错误、CLI `--json`、Prepare/Apply 与双层锁已分别落地；
+- 最终 PR 合入前，C1～C3 的 checkpoint 门槛必须全部通过：Public API/结构化错误、CLI `--json`、Prepare/Apply 与双层锁分别落地；
 - CLI `--json` 是 opt-in 加法；默认 Human Mode、命令语义和 v0.5 兼容行为保持不变；
 - 原 Node 测试全绿，新增 Public API Contract Test；
 - 真实 Node↔.NET 对同一 Codex Home 的 protocol v2 操作锁争用通过：恰有一个写者，败方无副作用；
@@ -162,7 +162,7 @@
 | --- | --- | --- | --- | --- |
 | C0 | 治理、基线与依赖安全 | 阶段 0 | ADR-0011～0013、合同导航、基线测试、Vite 审计告警清零 | In Progress（V1） |
 | C1 | Core Public API 与结构化错误 | C0 | CLI/Web 仅走 Public API；Canonical/Legacy Adapter；错误合同测试 | In Progress（V1，本地门禁通过） |
-| C2 | CLI `--json` | C1 | stdout 单一 JSON、stderr 日志、JSON Exit Code 与 Schema 合同 | Pending |
+| C2 | CLI `--json` | C1 | stdout 单一 JSON、stderr 日志、JSON Exit Code 与 Schema 合同 | In Progress（V1，本地门禁通过） |
 | C3 | Prepare/Apply、协调器与双层锁 | C1、C2 | Revision/Plan/Apply、Node/.NET 双层资源锁、真实争锁证据 | Pending |
 | C4 | Workspace、Core、Contracts、CoreClient | C1～C3（Phase 1 全部门槛已验证） | 不搬高风险算法；根 npm CLI tarball/Node 16 兼容 | Pending |
 | C5 | 共享 React UI 与 Web | C4 | AppShell/Features/HttpCoreClient；Web 安全与功能等价；阶段 2 门槛 | Pending |
@@ -217,4 +217,4 @@ Node 与 .NET 在同一 Fixture 上不一致时，PR 必须记录：
 
 ## 8. 本 PR 完成后的下一步
 
-V1 的下一项是 `C2`：在保持 Human 输出与 `0/1` 兼容的前提下实现严格单对象 CLI JSON 契约和退出码矩阵。C1 的本地证据见 [C1 Public API 与结构化错误证据](evidence/C1_PUBLIC_API_ERRORS_2026-08-25.md)；其验证不使 Phase 1 在最终 PR 合入前 Completed。
+V1 的下一项是 `C3`：实现统一 Prepare/Apply、10 分钟单次消费 Plan ledger、revision 复核、协调器与 Node/.NET 双层资源锁。C1 的本地证据见 [C1 Public API 与结构化错误证据](evidence/C1_PUBLIC_API_ERRORS_2026-08-25.md)，C2 证据见 [C2 CLI JSON 合同证据](evidence/C2_CLI_JSON_2026-08-25.md)；这些本地验证不使 Phase 1 在最终 PR 合入前 Completed。

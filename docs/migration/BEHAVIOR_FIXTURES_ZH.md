@@ -1,6 +1,6 @@
 # vNext 行为兼容 Fixture 清单
 
-> **状态：Accepted（阶段 0 语义清单；共享 Corpus 尚未创建）**
+> **状态：Accepted（阶段 0 语义清单；C2 动态 CLI Fixture 已实现，共享 Corpus 尚未创建）**
 >
 > **日期：2026-08-24**
 >
@@ -106,7 +106,22 @@ Fixture 不是用户数据样本，严禁从真实 `~/.codex`、认证文件或�
 | `workspace-roots` | global state、rollout cwd 与 SQLite cwd 不一致，含跨平台路径形式 | 只修复合同允许的 workspace/cwd 元数据；路径规范化一致；Backup/Restore 覆盖 global state |
 | `history-safe-content` | user/event/response-item 重复消息、无 thread id、同 id 多 rollout | 列表选择稳定会话；详情只在用户主动读取时返回安全消息；正文不进入日志、诊断包或应用数据库 |
 
-## 8. 未来 Corpus 建议结构
+## 8. CLI JSON 动态 Fixture
+
+C2 使用真实 Node 子进程和完全位于临时目录的最小 Core fixture 固化 JSON Mode；这些 harness 不含真实 Codex Home、凭据或消息正文。
+
+| Fixture ID | 运行方式 | 关键预期 |
+| --- | --- | --- |
+| `cli-json-envelope-v1` | 对所有有限命令启动真实 CLI/组合入口 | stdout 恰好一个 JSON 文档，顶层键固定为 schemaVersion/command/ok/outcome/result/warnings/error |
+| `cli-json-exit-matrix` | 子进程注入 success/noop/partial/rolled-back/stale/recovery/busy/lock/cancel | 退出码固定为 `0/1/2/3/4/5/130`，且与 Error Code 分层 |
+| `cli-json-progress-isolation` | 真实 Sync 与受控 progress observer | 进度仅进入 stderr；stdout 不含阶段文本或 backup path |
+| `cli-json-daemon-rejection` | `watch --json`、`web --json` | 在创建长运行状态、runtime descriptor 或浏览器进程前返回 `INVALID_INPUT`/exit 2 |
+| `cli-json-redaction` | 非法参数值、unknown/typed error、恶意 details、越权 result 字段、循环结果、stdout EPIPE | 固定错误文案与命令级字段 allowlist 不泄漏 stack/cause/secret/token/prompt/message body；terminal writer 最多尝试一次 stdout |
+| `cli-human-compat` | 不传 `--json` 运行既有 help/input/sync 路径 | Human 输出和既有 `0/1`、partial 行为不变 |
+
+这些用例当前由 `test/cli-json-contract.test.js`、`test/cli-json.test.js`、`test-support/cli-json-driver.js` 和真实 Core Sync 回归承载；未来迁入 `packages/test-fixtures` 时必须保持同一外部合同。
+
+## 9. 未来 Corpus 建议结构
 
 本节只定义目标，不表示目录已经存在：
 
@@ -126,7 +141,7 @@ packages/test-fixtures/
 
 SQLite live WAL、真实文件锁、跨进程 crash 和 WSL UNC 不能作为静态字节目录伪造，必须由受控 Builder/Harness 在临时目录创建。静态部分只保存最小、无敏感内容、可审计的源输入。
 
-## 9. Node / .NET 对照与差异登记
+## 10. Node / .NET 对照与差异登记
 
 每个双运行时 Fixture 使用两份相同输入副本：
 
@@ -136,6 +151,6 @@ SQLite live WAL、真实文件锁、跨进程 crash 和 WSL UNC 不能作为静�
 4. 差异必须记录“Node 行为 / .NET 行为 / 权威选择 / 安全理由 / 对应测试”；
 5. Node 是 vNext 目标核心，但不能以“新实现”为理由静默覆盖更安全的既有行为。
 
-## 10. 阶段 0 验收边界
+## 11. 阶段验收边界
 
 阶段 0 的完成标志是本文场景、预期和安全门槛获得确认。实际 Corpus、Schema、Builder、跨运行时 Harness 和 CI Matrix 均属于后续阶段；在它们真正通过之前，文档不得宣称行为等价。

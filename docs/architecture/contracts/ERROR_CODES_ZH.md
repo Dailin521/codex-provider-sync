@@ -1,8 +1,8 @@
 # vNext Error Code 合同
 
-> **状态：Accepted（阶段 0 合同；代码适配尚未实施）**
+> **状态：Accepted（阶段 0 合同；V1 C1 Core DTO 与 C2 CLI Adapter 已实施）**
 >
-> **日期：2026-08-24**
+> **日期：2026-08-24；实现增量：2026-08-25**
 >
 > **适用范围：Node Core、CLI、Local Web UI、Electron 与迁移期 .NET 适配层**
 >
@@ -12,7 +12,7 @@
 
 本文冻结 vNext 的错误分类、兼容映射和演进规则，使调用方依据稳定的 `code` 决策，而不是解析自然语言 `message`、异常类型名或堆栈。
 
-本文不表示当前代码已经完成统一。当前 Node、Web 与 .NET 仍存在不同大小写、命名和结构；这些现状被列为 Legacy Surface，由后续结构化错误 PR 通过 Adapter 渐进收口。
+V1 的 Node Public API 已实现 Canonical `CoreError`/DTO，CLI JSON Adapter 已按 Canonical Code 输出；Web 与迁移期 .NET 仍存在不同大小写、命名和结构，这些现状继续列为 Legacy Surface，并由后续 Adapter 渐进收口。
 
 ## 2. 稳定边界
 
@@ -156,8 +156,23 @@ Adapter 必须按 typed exception、明确属性和调用上下文映射。禁�
 ### CLI
 
 - 当前 Human Mode 保留现有人类提示兼容性。
-- 未来 `--json` 只输出 Canonical Code；stdout 为单一 JSON，日志进入 stderr。
+- C2 `--json` 只输出 Canonical Code；stdout 为单一 schema v1 JSON 文档，日志和进度进入 stderr。
 - CLI Exit Code 与 Error Code 是两层合同，不一一等同。
+- CLI JSON presenter 不透传 Core/系统原始 message：每个 Canonical Code 使用固定安全文案，details 使用枚举/格式 allowlist，suggestedAction 不直接透传，operationId 只接受 UUID。
+
+JSON Mode 的当前映射为：
+
+| Exit Code | Canonical Code / Result |
+| --- | --- |
+| `0` | completed 或 noop |
+| `1` | 其他普通失败，包括 `SYNC_FAILED_ROLLED_BACK` |
+| `2` | `INVALID_INPUT`、`PLAN_EXPIRED`、`PLAN_STALE`、`STALE_STATE` 及迁移期 revision 漂移码 |
+| `3` | partial Result |
+| `4` | `RECOVERY_REQUIRED`、`PENDING_TRANSACTION`，或 DTO 标记 `recoveryRequired:true` |
+| `5` | `OPERATION_BUSY`、`SQLITE_BUSY`、`LOCK_UNVERIFIABLE` |
+| `130` | `OPERATION_CANCELLED` |
+
+未知或不可信异常必须收口为稳定的 `INTERNAL_ERROR` 文案；CLI JSON 不回显 stack、cause 或任意未知异常 message。Human Mode 的既有 `0/1` 行为不随该表改变。
 
 ### Local Web UI
 
@@ -178,6 +193,6 @@ Adapter 必须按 typed exception、明确属性和调用上下文映射。禁�
 - 修改 `retryable` 或 `recoveryRequired`：视为合同变更，必须补充故障注入测试。
 - Legacy Adapter 可新增映射；不得让已知 Legacy Code 回退为字符串解析。
 
-## 8. 阶段 0 验收边界
+## 8. 阶段实现边界
 
-阶段 0 只冻结分类与映射，不修改异常类、CLI 退出码、Web 响应或 .NET protocol 0.4。统一实现、`--json` 与 Contract Test 分别在后续 PR 完成。
+阶段 0 冻结分类与映射；V1 C1 已实现 Node 异常类和安全 DTO，C2 已实现 opt-in CLI JSON/退出码与真实子进程 Contract Test。Web 响应和 .NET protocol 0.4 仍保持迁移期兼容，尚不能据此声称跨入口错误合同已经全部统一。

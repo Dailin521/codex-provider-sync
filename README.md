@@ -107,6 +107,16 @@ codex-provider sync
 
 `switch` 默认会在目标 Provider section 定义了 `model` 时同步根级 `model`。使用 `--keep-root-model` 保留当前值，或使用 `--model <name>` 显式指定。
 
+有限命令可使用 `--json` 供自动化读取。stdout 只输出一个 schema v1 终态对象，进度和运行时诊断进入 stderr；JSON Mode 使用 `0/1/2/3/4/5/130` 细分退出码，Human Mode 继续保持既有 `0/1` 行为。例如：
+
+```bash
+codex-provider status --json
+codex-provider sync --json
+codex-provider switch openai --json
+```
+
+`watch` 和 `web` 是长运行命令，当前不支持单文档 JSON Mode；传入 `--json` 会在启动 watcher/server 前返回结构化输入错误。完整合同见 [CLI 命令兼容合同](docs/architecture/contracts/CLI_CONTRACT_ZH.md)。
+
 SQLite Home 解析顺序：`--sqlite-home` → `config.toml` 根级 `sqlite_home` → `CODEX_SQLITE_HOME` → `<Codex Home>/sqlite`。只有默认布局会回退到 `<Codex Home>/state_5.sqlite`。
 
 ## 当前架构

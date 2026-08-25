@@ -3939,6 +3939,134 @@ test("cli sync prints stage progress and backup timing", async () => {
   assert.match(result.stdout, /Backup creation time: /);
 });
 
+test("real cli sync JSON keeps the terminal envelope on stdout and progress on stderr", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-json.jsonl");
+  await writeRollout(sessionPath, "thread-json", "apigather");
+  await writeStateDb(codexHome, [
+    { id: "thread-json", model_provider: "apigather", archived: false }
+  ]);
+
+  const result = await runCli(["sync", "--json", "--codex-home", codexHome]);
+  assert.equal(result.code, 0);
+  assert.equal((result.stdout.match(/\n/g) ?? []).length, 1);
+  const envelope = JSON.parse(result.stdout);
+  assert.deepEqual(Object.keys(envelope), [
+    "schemaVersion",
+    "command",
+    "ok",
+    "outcome",
+    "result",
+    "warnings",
+    "error"
+  ]);
+  assert.equal(envelope.command, "sync");
+  assert.equal(envelope.ok, true);
+  assert.equal(envelope.outcome, "completed");
+  assert.equal(envelope.result.changedSessionFiles, 1);
+  assert.equal(envelope.result.sqliteRowsUpdated, 1);
+  assert.equal(envelope.error, null);
+  assert.doesNotMatch(result.stdout, /\[1\/6\]/);
+  assert.match(result.stderr, /\[1\/6\] Scanning rollout files/);
+  assert.match(result.stderr, /\[6\/6\] Cleaning backups/);
+});
+
+test("real cli sync JSON returns exit 4 for an unfinished transaction without a new backup", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  await writeStateDb(codexHome, [{ id: "thread-json-pending", model_provider: "openai" }]);
+  const configPath = path.join(codexHome, "config.toml");
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: [],
+    configPath
+  });
+  await TransactionJournal.create(backupDir, {
+    codexHome,
+    targetProvider: "openai",
+    potentialTargets: [configPath]
+  });
+
+  const beforeBackups = await fs.readdir(backupRoot(codexHome));
+  const result = await runCli(["sync", "--json", "--codex-home", codexHome]);
+  assert.equal(result.code, 4);
+  assert.equal((result.stdout.match(/\n/g) ?? []).length, 1);
+  const envelope = JSON.parse(result.stdout);
+  assert.equal(envelope.ok, false);
+  assert.equal(envelope.outcome, "recovery_required");
+  assert.equal(envelope.error.code, "RECOVERY_REQUIRED");
+  assert.equal(envelope.error.recoveryRequired, true);
+  assert.deepEqual(await fs.readdir(backupRoot(codexHome)), beforeBackups);
+});
+
+test("real cli sync JSON returns exit 5 before backup when SQLite is busy", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-json-busy.jsonl");
+  await writeRollout(sessionPath, "thread-json-busy", "apigather");
+  await writeStateDb(codexHome, [
+    { id: "thread-json-busy", model_provider: "apigather", archived: false }
+  ]);
+  const rolloutBefore = await fs.readFile(sessionPath, "utf8");
+
+  const lockDb = await openDatabase(stateDbPath(codexHome));
+  let result;
+  try {
+    lockDb.exec("BEGIN IMMEDIATE");
+    result = await runCli(["sync", "--json", "--codex-home", codexHome]);
+  } finally {
+    try {
+      lockDb.exec("ROLLBACK");
+    } catch {
+      // Ignore cleanup failures in tests.
+    }
+    lockDb.close();
+  }
+
+  assert.equal(result.code, 5);
+  assert.equal((result.stdout.match(/\n/g) ?? []).length, 1);
+  const envelope = JSON.parse(result.stdout);
+  assert.equal(envelope.ok, false);
+  assert.equal(envelope.error.code, "SQLITE_BUSY");
+  assert.equal(await fs.readFile(sessionPath, "utf8"), rolloutBefore);
+  await assert.rejects(() => fs.access(backupRoot(codexHome)));
+});
+
+test("real cli sync JSON reports a locked rollout as partial", {
+  skip: process.platform !== "win32"
+}, async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-json-locked.jsonl");
+  await writeRollout(sessionPath, "thread-json-locked", "apigather");
+  await writeStateDb(codexHome, [
+    { id: "thread-json-locked", model_provider: "apigather", archived: false }
+  ]);
+
+  const lockProcess = await lockRolloutFile(sessionPath);
+  let result;
+  try {
+    result = await runCli(["sync", "--json", "--codex-home", codexHome]);
+  } finally {
+    lockProcess.kill();
+    if (lockProcess.exitCode === null) {
+      await new Promise((resolve) => lockProcess.once("exit", resolve));
+    }
+  }
+
+  assert.equal(result.code, 3);
+  assert.equal((result.stdout.match(/\n/g) ?? []).length, 1);
+  const envelope = JSON.parse(result.stdout);
+  assert.equal(envelope.ok, true);
+  assert.equal(envelope.outcome, "partial");
+  assert.deepEqual(envelope.result.skippedLockedRolloutFiles, [sessionPath]);
+  assert.equal(envelope.result.sqliteRowsUpdated, 1);
+  assert.match(result.stderr, /\[1\/6\] Scanning rollout files/);
+  assert.equal(await readProvider(codexHome, "thread-json-locked"), "openai");
+});
+
 test("syncDirectory only downgrades known unsupported flush errors on Windows", async () => {
   const permissionError = Object.assign(new Error("directory flush denied"), { code: "EPERM" });
   const unsupportedFs = {
