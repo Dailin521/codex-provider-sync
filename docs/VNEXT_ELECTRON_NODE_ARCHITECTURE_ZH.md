@@ -2576,7 +2576,7 @@ Electron 只开放：
 
 ## 35. ADR 清单
 
-本文件确认总方向；以下细分决策在阶段 0 建立并逐项 Accepted：
+本文件确认总方向；以下细分决策在阶段 0 和对应迁移 checkpoint 建立并逐项 Accepted：
 
 ```text
 docs/adr/
@@ -2592,7 +2592,8 @@ docs/adr/
 ├─ 0010-electron-vite-and-electron-builder.md
 ├─ 0011-v1-single-branch-single-final-pr.md
 ├─ 0012-dual-resource-lock-contract.md
-└─ 0013-restore-v2-recovery-state-machine.md
+├─ 0013-restore-v2-recovery-state-machine.md
+└─ 0014-npm-workspace-and-dependency-boundaries.md
 ```
 
 ADR 一旦 Accepted，不应通过普通重构 PR 静默推翻。

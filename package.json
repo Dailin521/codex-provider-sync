@@ -3,6 +3,10 @@
   "version": "0.5.0",
   "description": "Synchronize Codex session provider metadata across rollout files and SQLite state.",
   "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "files": [
     "README.md",
     "CHANGELOG.md",
@@ -19,8 +23,15 @@
   },
   "scripts": {
     "test": "node --test",
-    "web:build": "vite build --config web/vite.config.js",
+    "web:build": "npm run build --workspace @codex-provider-sync/web",
     "web:start": "node src/cli.js web",
+    "workspaces:build": "tsc -b tsconfig.workspaces.json && tsc -p packages/core/tsconfig.json",
+    "workspaces:test": "npm run test --workspaces --if-present",
+    "workspaces:check": "npm run workspaces:build && npm run workspaces:test && node scripts/verify-workspace-boundaries.js",
+    "package:smoke": "node scripts/smoke-root-tarball.js",
+    "package:smoke:lifecycle": "node scripts/smoke-root-tarball.js --install-lifecycle",
+    "package:verify-root-tree": "node scripts/verify-root-production-tree.js",
+    "runtime:verify-node16": "node scripts/verify-node16-runtime.js",
     "publish:npm": "node scripts/publish-npm.js"
   },
   "engines": {
@@ -48,13 +59,9 @@
   "optionalDependencies": {
     "better-sqlite3": "8.7.0"
   },
-  "dependencies": {
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
-  },
   "devDependencies": {
-    "@vitejs/plugin-react": "6.1.0",
-    "vite": "8.2.2"
+    "@types/node": "24.13.3",
+    "typescript": "7.0.2"
   },
   "overrides": {
     "node-releases": "2.0.18"

@@ -1,4 +1,8 @@
 node_modules/
+apps/*/dist/
+packages/*/dist/
+apps/*/*.tsbuildinfo
+packages/*/*.tsbuildinfo
 coverage/
 *.tgz
 artifacts/

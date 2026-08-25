@@ -1,0 +1,13 @@
+{
+  "name": "@codex-provider-sync/test-fixtures",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.js",
+  "scripts": {
+    "test": "node --test checks/runner.contract.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

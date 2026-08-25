@@ -54,6 +54,12 @@
 - 若未来提高最低 Node.js 版本，必须独立评估 SemVer、发布说明和安装失败体验。
 - npm 包仍应提供可直接运行的 JavaScript；CLI 用户不需要安装 TypeScript。
 
+### 2.3 vNext C4 安装入口兼容
+
+根 npm tarball 仍以 `src/cli.js` 作为 bin 目标。判断该模块是否为直接执行入口时，必须分别规范化 `process.argv[1]` 与 `import.meta.url` 对应文件的物理路径；Windows 比较不区分大小写。这样可兼容 npm shim、临时安装目录、8.3 短路径与符号链接解析后的长路径。
+
+该规范化只用于判断是否启动 CLI，不参与 Codex Home、SQLite Home 或任意业务目标解析。无法取得物理路径时可退回绝对词法路径，但不得因为两侧一种是短路径、另一种是长路径而静默跳过 CLI。已打包 tarball 的 `help` 和显式临时 Codex Home `status --json` 是该行为的可执行合同。
+
 ## 3. Codex Home 与 SQLite Home
 
 ### 3.1 Codex Home

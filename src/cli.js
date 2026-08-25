@@ -2,7 +2,7 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 import {
   cliJsonExitCode,
@@ -718,11 +718,20 @@ export async function runCli(argv, options = {}) {
 
 async function isDirectExecution() {
   if (!process.argv[1]) return false;
-  try {
-    return pathToFileURL(await fs.realpath(process.argv[1])).href === import.meta.url;
-  } catch {
-    return pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
-  }
+  const canonicalPath = async (value) => {
+    try {
+      return await fs.realpath(value);
+    } catch {
+      return path.resolve(value);
+    }
+  };
+  const [executedPath, modulePath] = await Promise.all([
+    canonicalPath(process.argv[1]),
+    canonicalPath(fileURLToPath(import.meta.url))
+  ]);
+  return process.platform === "win32"
+    ? executedPath.toLowerCase() === modulePath.toLowerCase()
+    : executedPath === modulePath;
 }
 
 if (await isDirectExecution()) {

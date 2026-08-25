@@ -1,0 +1,100 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const REQUIRED_WORKSPACES = [
+  "apps/cli",
+  "apps/web",
+  "apps/desktop",
+  "packages/core",
+  "packages/contracts",
+  "packages/core-client",
+  "packages/app-ui",
+  "packages/design-system",
+  "packages/test-fixtures"
+];
+const DEPENDENCY_FIELDS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"];
+
+async function readJson(relativePath) {
+  return JSON.parse(await fs.readFile(path.join(repositoryRoot, relativePath), "utf8"));
+}
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+function assertExactDependencies(manifest, label) {
+  for (const field of DEPENDENCY_FIELDS) {
+    for (const [name, specification] of Object.entries(manifest[field] ?? {})) {
+      assert(
+        typeof specification === "string"
+          && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(specification),
+        `${label} ${field}.${name} must use an exact version; found ${String(specification)}.`
+      );
+    }
+  }
+}
+
+async function sourceFiles(relativeRoot) {
+  const root = path.join(repositoryRoot, relativeRoot);
+  const result = [];
+  async function visit(directory) {
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) await visit(fullPath);
+      else if (/\.(?:js|mjs|ts|tsx)$/.test(entry.name)) result.push(fullPath);
+    }
+  }
+  await visit(root);
+  return result;
+}
+
+const rootManifest = await readJson("package.json");
+assert(rootManifest.name === "@dailin521/codex-provider-sync", "Root npm package name changed.");
+assert(rootManifest.bin?.["codex-provider"] === "src/cli.js", "Root CLI bin changed.");
+assert(rootManifest.engines?.node === ">=16.20.2", "Root Node 16 compatibility contract changed.");
+assert(Array.isArray(rootManifest.workspaces), "Root npm workspaces are not enabled.");
+assert(rootManifest.workspaces.includes("apps/*") && rootManifest.workspaces.includes("packages/*"), "Root workspace globs are incomplete.");
+assert(Object.keys(rootManifest.dependencies ?? {}).length === 0, "Root runtime dependencies must stay Core-only.");
+assertExactDependencies(rootManifest, "root package");
+
+for (const entry of rootManifest.files ?? []) {
+  assert(!entry.startsWith("apps") && !entry.startsWith("packages"), `Root tarball allowlist leaks workspace source: ${entry}`);
+}
+
+const manifests = new Map();
+for (const workspace of REQUIRED_WORKSPACES) {
+  const manifest = await readJson(`${workspace}/package.json`);
+  manifests.set(workspace, manifest);
+  assert(manifest.private === true, `${workspace} must remain private.`);
+  assertExactDependencies(manifest, workspace);
+}
+
+const coreSource = await fs.readFile(path.join(repositoryRoot, "packages/core/src/index.js"), "utf8");
+const rootImports = [...coreSource.matchAll(/from\s+["'](\.\.\/\.\.\/\.\.\/src\/[^"']+)["']/g)]
+  .map((match) => match[1]);
+assert(rootImports.length === 1 && rootImports[0] === "../../../src/public-api.js", "Core bridge may import only root src/public-api.js.");
+
+for (const boundary of [
+  "packages/contracts/src",
+  "packages/core-client/src",
+  "packages/app-ui/src",
+  "packages/design-system/src"
+]) {
+  for (const filePath of await sourceFiles(boundary)) {
+    const source = await fs.readFile(filePath, "utf8");
+    assert(!/from\s+["'](?:node:|electron)/.test(source), `${path.relative(repositoryRoot, filePath)} imports a forbidden platform module.`);
+    assert(!/\.\.\/.*src\//.test(source), `${path.relative(repositoryRoot, filePath)} deep-imports implementation source.`);
+  }
+}
+
+const desktopManifest = manifests.get("apps/desktop");
+const desktopDependencies = {
+  ...(desktopManifest.dependencies ?? {}),
+  ...(desktopManifest.devDependencies ?? {}),
+  ...(desktopManifest.optionalDependencies ?? {})
+};
+assert(!Object.keys(desktopDependencies).some((name) => name === "electron" || name.startsWith("electron-")), "C4 must not enable Electron dependencies before C6.");
+
+process.stdout.write("Workspace package, dependency, import and root publish boundaries are valid.\n");

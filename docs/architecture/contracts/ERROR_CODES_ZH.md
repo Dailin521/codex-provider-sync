@@ -1,6 +1,6 @@
 # vNext Error Code 合同
 
-> **状态：Accepted（阶段 0 合同；V1 C1 Core DTO 与 C2 CLI Adapter 已实施）**
+> **状态：Accepted（阶段 0 合同；V1 C1 Core DTO、C2 CLI Adapter 与 C4 CoreClient 公共净化已实施）**
 >
 > **日期：2026-08-24；实现增量：2026-08-25**
 >
@@ -27,15 +27,15 @@ interface CoreErrorDto {
   recoveryRequired: boolean;
   operationId?: string;
   details?: Record<string, unknown>;
-  suggestedAction?: string;
 }
 ```
 
 稳定性规则：
 
 - `code` 是程序判断依据；Canonical Code 使用大写蛇形命名。
-- `message`、`suggestedAction` 可以改进、翻译或因平台而不同，不是机器合同。
-- `details` 只承载结构化诊断，不得包含认证信息、Token、消息正文或未脱敏的敏感内容。
+- C4 CoreClient/HTTP/IPC 公共边界的 `message` 按 code 使用固定安全文案；UI 本地化只依据 code，不能回显内部异常原文。Core 内部异常仍可携带操作建议，但 `suggestedAction` 不进入公共 DTO。
+- 公共 `details` 只允许 `busyScope`、`lockScope`、`causeCode`、`reason`、`missing`、`sqliteHomeSource`、SQLite 整数错误码和 `operationKind` 的固定枚举/范围；未知 key、路径、认证信息、Token、消息正文或任意建议文本全部丢弃。
+- 公共 `operationId` 只接受 UUID；不可信值不得透传。
 - 普通用户默认不接收 Error Stack；诊断日志也必须遵守相同的隐私边界。
 - 一个失败只选择一个最能指导恢复动作的顶层 Canonical Code；底层 OS/SQLite Code 可放入安全的 `details.causeCode`。
 - Partial Result 可以携带 warning 级错误码，但不能把未完成写入伪装成完整成功。
@@ -150,6 +150,7 @@ Adapter 必须按 typed exception、明确属性和调用上下文映射。禁�
 ### Core / Core Runtime
 
 - 返回 Canonical Code 和稳定 DTO。
+- CoreClient transport 会重新验证固定文案、severity/retryable/recoveryRequired、UUID 与 details 白名单；畸形错误或成功 payload 统一收口为安全 `INTERNAL_ERROR`，protocolVersion 不兼容单独为 `PROTOCOL_VERSION_MISMATCH`。
 - Runtime Crash 与业务失败分开；重启后首先检查 Pending Journal。
 - Progress Event 失败不能替换最终业务错误。
 
@@ -195,4 +196,4 @@ JSON Mode 的当前映射为：
 
 ## 8. 阶段实现边界
 
-阶段 0 冻结分类与映射；V1 C1 已实现 Node 异常类和安全 DTO，C2 已实现 opt-in CLI JSON/退出码与真实子进程 Contract Test。Web 响应和 .NET protocol 0.4 仍保持迁移期兼容，尚不能据此声称跨入口错误合同已经全部统一。
+阶段 0 冻结分类与映射；V1 C1 已实现 Node 异常类和 DTO，C2 已实现 opt-in CLI JSON/退出码与真实子进程 Contract Test，C4 已实现 Contracts/CoreClient 的公共错误净化与 runtime guard。现有 Web 路由要到 C5 接入统一 envelope，.NET protocol 0.4 仍保持迁移期兼容，尚不能据此声称跨入口错误合同已经全部统一。

@@ -1,6 +1,6 @@
 # vNext 行为兼容 Fixture 清单
 
-> **状态：Accepted（阶段 0 语义清单；C2 动态 CLI Fixture 已实现，共享 Corpus 尚未创建）**
+> **状态：Accepted（阶段 0 语义清单；C2 动态 CLI Fixture 与 C4 安全 Runner/Schema 已实现，共享静态 Corpus 尚未创建）**
 >
 > **日期：2026-08-24**
 >
@@ -12,7 +12,7 @@
 
 本文冻结需要被共享 Fixture 表达的场景、输入语义和验收结果，用于迁移期间比较 Node 与 .NET，并为 Node 单核心提供长期回归证据。
 
-阶段 0 **不创建** `packages/test-fixtures/`，也不提交伪造的 SQLite、锁文件或平台专属二进制。当前 Node 测试使用临时目录动态构造输入，.NET 测试使用 `TestCodexHomeFixture` 和 GUI E2E `IsolatedFixture`；后续实现共享 Corpus 时应复用这些已验证的构造能力。
+阶段 0 没有创建 `packages/test-fixtures/`。C4 已建立私有 workspace、严格 schema 和只向临时目录复制的安全 Runner，但尚未检入共享静态 Corpus、SQLite 二进制、锁文件或平台专属二进制。当前 Node 测试继续使用临时目录动态构造输入，.NET 测试使用 `TestCodexHomeFixture` 和 GUI E2E `IsolatedFixture`；后续共享 Corpus 应复用这些已验证的构造能力。
 
 Fixture 不是用户数据样本，严禁从真实 `~/.codex`、认证文件或私人会话复制内容。
 
@@ -124,12 +124,13 @@ C2 使用真实 Node 子进程和完全位于临时目录的最小 Core fixture 
 | `cli-json-daemon-rejection` | `watch --json`、`web --json` | 在创建长运行状态、runtime descriptor 或浏览器进程前返回 `INVALID_INPUT`/exit 2 |
 | `cli-json-redaction` | 非法参数值、unknown/typed error、恶意 details、越权 result 字段、循环结果、stdout EPIPE | 固定错误文案与命令级字段 allowlist 不泄漏 stack/cause/secret/token/prompt/message body；terminal writer 最多尝试一次 stdout |
 | `cli-human-compat` | 不传 `--json` 运行既有 help/input/sync 路径 | Human 输出和既有 `0/1`、partial 行为不变 |
+| `installed-root-entrypoint` | 从真实根 npm tarball 安装后，经 npm bin shim/Windows 规范化路径运行 `help` 与临时 Home `status --json` | CLI 必须实际执行并返回合同输出；不得因 `process.argv[1]` 与模块 URL 的短/长路径、大小写或链接形式不同而静默退出 |
 
 这些用例当前由 `test/cli-json-contract.test.js`、`test/cli-json.test.js`、`test-support/cli-json-driver.js` 和真实 Core Sync 回归承载；未来迁入 `packages/test-fixtures` 时必须保持同一外部合同。
 
 ## 9. 未来 Corpus 建议结构
 
-本节只定义目标，不表示目录已经存在：
+目录骨架、Schema 和安全 Runner 已在 C4 存在；`static/` 与 `builders/` 仍是目标，不表示共享 Corpus 已经检入：
 
 ```text
 packages/test-fixtures/

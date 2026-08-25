@@ -1,0 +1,23 @@
+{
+  "name": "@codex-provider-sync/desktop",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "node --test checks/ownership.contract.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@codex-provider-sync/contracts": "0.0.0",
+    "@codex-provider-sync/core-client": "0.0.0"
+  }
+}

@@ -13,6 +13,7 @@
 
 - 未传入 `--json` 时继续使用既有 Human 输出和 `0/1` 行为；partial sync 在 Human Mode 仍为成功退出。
 - `watch` 与 `web` 暂不提供单文档 JSON 模式，并在创建长运行资源前返回结构化 `INVALID_INPUT`；未来流式机器接口需要独立协议。
+- npm tarball 或 Windows npm shim 使用短路径、长路径或符号链接形式启动 CLI 时，会对入口两侧做物理路径规范化，避免已安装的 `codex-provider` 被误判为模块导入而静默退出。
 
 ### 安全
 

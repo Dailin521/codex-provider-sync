@@ -57,7 +57,7 @@
 
 退出门槛：
 
-- ADR-0001～ADR-0013 均为 Accepted，历史 v0.4 ADR 不与 vNext 编号混淆；
+- 阶段 0 的 ADR-0001～ADR-0013 均为 Accepted，后续 checkpoint ADR 不追溯改变该冻结证据，历史 v0.4 ADR 不与 vNext 编号混淆；
 - Core 外部行为、CLI、Error Code、Fixture 和本索引可互相导航；
 - 每份文档明确“当前已实现”与“vNext 目标”；
 - 本阶段不修改运行代码、CLI 输出、Error Class 或运行代码目录结构；
@@ -164,7 +164,7 @@
 | C1 | Core Public API 与结构化错误 | C0 | CLI/Web 仅走 Public API；Canonical/Legacy Adapter；错误合同测试 | In Progress（V1，本地门禁通过） |
 | C2 | CLI `--json` | C1 | stdout 单一 JSON、stderr 日志、JSON Exit Code 与 Schema 合同 | In Progress（V1，本地门禁通过） |
 | C3 | Prepare/Apply、协调器与双层锁 | C1、C2 | Revision/Plan/Apply、Node/.NET 双层资源锁、真实争锁证据 | In Progress（V1，本地门禁通过） |
-| C4 | Workspace、Core、Contracts、CoreClient | C1～C3（Phase 1 全部门槛已验证） | 不搬高风险算法；根 npm CLI tarball/Node 16 兼容 | Pending |
+| C4 | Workspace、Core、Contracts、CoreClient | C1～C3（Phase 1 全部门槛已验证） | 不搬高风险算法；根 npm CLI tarball/Node 16 兼容 | In Progress（V1，本地门禁通过） |
 | C5 | 共享 React UI 与 Web | C4 | AppShell/Features/HttpCoreClient；Web 安全与功能等价；阶段 2 门槛 | Pending |
 | C6 | Electron 安全骨架、Utility Runtime、只读能力 | C5（Phase 2 全部门槛已验证） | 安全窗口/IPC、握手、crash recovery、三平台只读 smoke | Pending |
 | C7 | Electron Sync/Switch | C6（Phase 3 全部门槛已验证） | Prepare/Apply、Busy/Partial/Cancel、Backup/Restore 回环 | Pending |
@@ -217,4 +217,4 @@ Node 与 .NET 在同一 Fixture 上不一致时，PR 必须记录：
 
 ## 8. 本 PR 完成后的下一步
 
-V1 的下一项是 `C4`：建立 Workspace、Contracts/CoreClient 与包边界，同时保持根 npm CLI 的 Node 16 合同。C1 的本地证据见 [C1 Public API 与结构化错误证据](evidence/C1_PUBLIC_API_ERRORS_2026-08-25.md)，C2 证据见 [C2 CLI JSON 合同证据](evidence/C2_CLI_JSON_2026-08-25.md)，C3 证据见 [C3 Plan/Apply 与双层锁证据](evidence/C3_PLAN_APPLY_DUAL_LOCK_2026-08-25.md)；这些本地验证不使 Phase 1 在最终 PR 合入前 Completed。
+V1 的下一项是 `C5`：把现有 Web 迁入共享 React AppShell/Feature 边界并实际接入 `HttpCoreClient`，同时闭合阶段 2 的跨运行时 Fixture 门槛。C1 的本地证据见 [C1 Public API 与结构化错误证据](evidence/C1_PUBLIC_API_ERRORS_2026-08-25.md)，C2 证据见 [C2 CLI JSON 合同证据](evidence/C2_CLI_JSON_2026-08-25.md)，C3 证据见 [C3 Plan/Apply 与双层锁证据](evidence/C3_PLAN_APPLY_DUAL_LOCK_2026-08-25.md)，C4 证据见 [C4 Workspace、Core 与 CoreClient 证据](evidence/C4_WORKSPACE_CORE_CLIENT_2026-08-25.md)；这些本地验证不使对应 Phase 在最终 PR 合入前 Completed。

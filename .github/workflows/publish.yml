@@ -45,8 +45,27 @@ jobs:
           dotnet-version: "10.0.x"
 
       - run: npm ci
+      - run: npm run workspaces:check
       - run: npm run web:build
       - run: npm test
+      - run: npm run package:smoke
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "16.20.2"
+          cache: npm
+
+      - run: npm ci --workspaces=false --omit=dev
+      - run: npm run runtime:verify-node16
+      - run: npm run package:verify-root-tree
+      - run: npm run package:smoke:lifecycle
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+
+      - run: npm ci
       - run: dotnet build CodexProviderSync.sln --configuration Release
       - run: dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj --configuration Release --no-build
       - run: dotnet test desktop/CodexProviderSync.Application.Tests/CodexProviderSync.Application.Tests.csproj --configuration Release --no-build

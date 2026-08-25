@@ -924,6 +924,14 @@ V1/C3 已实现上述边界；`runSync/runSwitch/runRestore/runWatch` 仍作为 
 - Watch 保持单飞、合并重复事件，每次重新 Prepare/Apply 并获取双锁。遇到本进程人工操作时保留当前事件批次、等待 operation completion 后只运行一次合并 follow-up；外部 Busy/不可验证锁不轮询、不计入连续业务失败，并等待新的受保护文件事件。
 - Diagnostics 只返回有界安全元数据；不得读取、复制或序列化 `auth.json`、token、凭据或消息正文。
 
+### 16.3 C4 Trusted Profile Facade 与 CoreClient
+
+- `packages/core` 的模块导出仅为 `createCoreFacade({resolveProfile})`；factory 返回对象的业务方法集合精确等于本节 15 个目标方法。根 `src/public-api.js` 继续承载 CLI 与迁移适配器，不被描述为 Renderer 稳定 API。
+- `resolveProfile({profileId, profileRevision?})` 只能由 Local Web Host、Electron Main/Utility Host 或测试 Host 注入，返回可信的 `{id, revision, codexHome, sqliteHome?}`。Facade 必须验证 ID、revision 和绝对路径；selector revision 漂移时 fail closed，不能回退到 `CODEX_HOME` 或默认用户目录。
+- UI/HTTP/IPC 产品输入只包含 profile ID/revision、Provider/model mode、受管 backupId 等产品字段；不得携带 `codexHome`、`sqliteHome`、backup path 或底层 apply 参数。Apply 仍精确只收 schemaVersion/planId。
+- 备份列表在 facade 处移除 backup root、绝对 path 与 metadata 中的存储路径，只返回 `backupId`、size 和有界展示元数据；History 列表移除 rollout path 与首条消息预览，正文只能由用户明确调用详情方法后读取。
+- `TransportCoreClient` 对成功 payload 执行按方法的最小 runtime guard；协议版本不兼容映射为固定 `PROTOCOL_VERSION_MISMATCH`，其他畸形 envelope/result 收口为固定 `INTERNAL_ERROR`。HTTP 非 2xx 不得携带成功 envelope。
+
 ## 17. Phase 1 提取要求
 
 Phase 1 只提取边界，不改变算法或结果：
