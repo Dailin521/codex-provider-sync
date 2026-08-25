@@ -161,7 +161,7 @@
 | Checkpoint | 内容 | 依赖 | 最终合入前必须保留的证据 | V1 状态 |
 | --- | --- | --- | --- | --- |
 | C0 | 治理、基线与依赖安全 | 阶段 0 | ADR-0011～0013、合同导航、基线测试、Vite 审计告警清零 | In Progress（V1） |
-| C1 | Core Public API 与结构化错误 | C0 | CLI/Web 仅走 Public API；Canonical/Legacy Adapter；错误合同测试 | Pending |
+| C1 | Core Public API 与结构化错误 | C0 | CLI/Web 仅走 Public API；Canonical/Legacy Adapter；错误合同测试 | In Progress（V1，本地门禁通过） |
 | C2 | CLI `--json` | C1 | stdout 单一 JSON、stderr 日志、JSON Exit Code 与 Schema 合同 | Pending |
 | C3 | Prepare/Apply、协调器与双层锁 | C1、C2 | Revision/Plan/Apply、Node/.NET 双层资源锁、真实争锁证据 | Pending |
 | C4 | Workspace、Core、Contracts、CoreClient | C1～C3（Phase 1 全部门槛已验证） | 不搬高风险算法；根 npm CLI tarball/Node 16 兼容 | Pending |
@@ -217,4 +217,4 @@ Node 与 .NET 在同一 Fixture 上不一致时，PR 必须记录：
 
 ## 8. 本 PR 完成后的下一步
 
-V1 的下一项是 `C1`：新增 `src/public-api.js`，让 CLI 与 Web 经单一公开入口调用现有 Node 行为，并建立结构化错误边界。该 checkpoint 不移动 Core、不改同步算法，也不同时引入 `--json`、TypeScript 或 Electron；其验证不使 Phase 1 在最终 PR 合入前 Completed。
+V1 的下一项是 `C2`：在保持 Human 输出与 `0/1` 兼容的前提下实现严格单对象 CLI JSON 契约和退出码矩阵。C1 的本地证据见 [C1 Public API 与结构化错误证据](evidence/C1_PUBLIC_API_ERRORS_2026-08-25.md)；其验证不使 Phase 1 在最终 PR 合入前 Completed。

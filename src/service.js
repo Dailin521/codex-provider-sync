@@ -6,6 +6,7 @@ import {
   DEFAULT_PROVIDER,
   defaultBackupRoot
 } from "./constants.js";
+import { CoreError } from "./core-error.js";
 import {
   configDeclaresProvider,
   listConfiguredProviderIds,
@@ -81,7 +82,7 @@ function uniqueResolvedPaths(values) {
   return [...pathsByKey.values()];
 }
 
-export class SyncTransactionError extends Error {
+export class SyncTransactionError extends CoreError {
   constructor(
     originalError,
     rollbackErrors,
@@ -90,12 +91,19 @@ export class SyncTransactionError extends Error {
     uncompletedTargets,
     { rollbackStatus = "incomplete", recoveryRequired = true } = {}
   ) {
+    const code = recoveryRequired ? "RECOVERY_REQUIRED" : "SYNC_FAILED_ROLLED_BACK";
     const message = recoveryRequired
       ? `Failed to restore state after sync error. Original error: ${originalError.message}. Restore error: ${rollbackErrors.join("; ")}`
       : `Provider sync failed and all observed changes were rolled back. Original error: ${originalError.message}`;
-    super(message, { cause: originalError });
+    const recoveryInstructions = recoveryRequired
+      ? `Restore the managed backup at ${backupDir}, inspect the pending transaction journal, then retry.`
+      : "No manual recovery is required. Inspect the original error, correct its cause, and retry.";
+    super(code, message, {
+      cause: originalError,
+      recoveryRequired,
+      suggestedAction: recoveryInstructions
+    });
     this.name = "SyncTransactionError";
-    this.code = recoveryRequired ? "RECOVERY_REQUIRED" : "SYNC_FAILED_ROLLED_BACK";
     this.originalError = originalError;
     this.rollbackErrors = rollbackErrors;
     this.backupDir = backupDir;
@@ -103,9 +111,7 @@ export class SyncTransactionError extends Error {
     this.uncompletedTargets = uncompletedTargets;
     this.rollbackStatus = rollbackStatus;
     this.recoveryRequired = recoveryRequired;
-    this.recoveryInstructions = recoveryRequired
-      ? `Restore the managed backup at ${backupDir}, inspect the pending transaction journal, then retry.`
-      : "No manual recovery is required. Inspect the original error, correct its cause, and retry.";
+    this.recoveryInstructions = recoveryInstructions;
   }
 }
 
@@ -130,23 +136,6 @@ async function prepareStorage({ codexHome: explicitCodexHome, sqliteHome, config
     return withStateDbLocation(layout, null);
   }
   return withStateDbLocation(layout, await detectStateDb(layout));
-}
-
-function formatCounts(counts) {
-  return Object.entries(counts ?? {})
-    .map(([provider, count]) => `${provider}: ${count}`)
-    .join(", ") || "(none)";
-}
-
-function formatBytes(bytes) {
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let value = bytes;
-  let unitIndex = 0;
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
-    unitIndex += 1;
-  }
-  return unitIndex === 0 ? `${bytes} B` : `${value.toFixed(value >= 10 ? 1 : 2).replace(/\.0$/, "")} ${units[unitIndex]}`;
 }
 
 function emitProgress(onProgress, event) {
@@ -329,82 +318,7 @@ export async function getStatus({
   };
 }
 
-export function renderStatus(status) {
-  const lines = [
-    `Codex home: ${status.codexHome}`,
-    `SQLite home: ${status.sqliteHome} (source: ${status.sqliteHomeSource})`,
-    `Current provider: ${status.currentProvider}${status.currentProviderImplicit ? " (implicit default)" : ""}`,
-    `Configured providers: ${status.configuredProviders.join(", ")}`,
-    `Backups: ${status.backupSummary.count} (${formatBytes(status.backupSummary.totalBytes)})`,
-    `Backup root: ${status.backupRoot}`
-  ];
-
-  if (status.pendingTransactions?.length) {
-    lines.push("");
-    lines.push("Recovery required:");
-    for (const transaction of status.pendingTransactions) {
-      lines.push(`  ${transaction.state}: ${transaction.backupDir}`);
-    }
-    lines.push("  Run restore with the listed backup before the next write operation.");
-  }
-
-  lines.push("");
-  lines.push("Rollout files:");
-  lines.push(`  sessions: ${formatCounts(status.rolloutCounts.sessions)}`);
-  lines.push(`  archived_sessions: ${formatCounts(status.rolloutCounts.archived_sessions)}`);
-  if (status.encryptedContentCounts) {
-    lines.push(`  encrypted_content sessions: ${formatCounts(status.encryptedContentCounts.sessions)}`);
-    lines.push(`  encrypted_content archived_sessions: ${formatCounts(status.encryptedContentCounts.archived_sessions)}`);
-  }
-  if (status.encryptedContentWarning) {
-    lines.push(`  ${status.encryptedContentWarning}`);
-  }
-  if (status.lockedRolloutFiles?.length) {
-    lines.push(`  Locked rollout files skipped during status scan: ${status.lockedRolloutFiles.length}`);
-  }
-
-  lines.push("");
-  lines.push("SQLite state:");
-  if (!status.sqliteAccess?.supported) {
-    lines.push(`  ${status.sqliteAccess.message}`);
-    return lines.join("\n");
-  }
-  if (status.stateDbLocation) {
-    const legacyNote = status.stateDbLocation.source === "legacy-root" ? " (legacy root)" : "";
-    lines.push(`  database: ${status.stateDbLocation.path}${legacyNote}`);
-  } else {
-    lines.push(`  database: not found (checked ${status.checkedStateDbPaths.join(", ")})`);
-  }
-  if (status.sqliteCounts?.unreadable) {
-    lines.push(`  ${status.sqliteCounts.error ?? "state_5.sqlite is malformed or unreadable"}`);
-  } else if (!status.sqliteCounts) {
-    lines.push("  state_5.sqlite not found");
-  } else {
-    lines.push(`  sessions: ${formatCounts(status.sqliteCounts.sessions)}`);
-    lines.push(`  archived_sessions: ${formatCounts(status.sqliteCounts.archived_sessions)}`);
-    if (status.sqliteRepairStats?.userEventRowsNeedingRepair) {
-      lines.push(`  user-event flags needing repair: ${status.sqliteRepairStats.userEventRowsNeedingRepair}`);
-    }
-    if (status.sqliteRepairStats?.cwdRowsNeedingRepair) {
-      lines.push(`  cwd paths needing repair: ${status.sqliteRepairStats.cwdRowsNeedingRepair}`);
-    }
-  }
-
-  if (status.projectThreadVisibility?.length) {
-    lines.push("");
-    lines.push("Project visibility:");
-    for (const project of status.projectThreadVisibility) {
-      const providers = formatCounts(project.providerCounts);
-      const rankText = project.rankPreview || "(none)";
-      lines.push(
-        `  ${project.root}: interactive ${project.interactiveThreads}, first page ${project.firstPageThreads}/50, ranks ${rankText}, exact cwd ${project.exactCwdMatches}/${project.interactiveThreads}, verbatim cwd ${project.verbatimCwdRows}, providers ${providers}`
-      );
-    }
-  }
-
-  return lines.join("\n");
-}
-
+/** @deprecated Compatibility adapter. New transports must use prepareSync/applySync once available. */
 export async function runSync(options = {}) {
   return runSyncCore(options);
 }
@@ -425,7 +339,10 @@ async function runSyncCore({
   signal
 } = {}, { afterBackup } = {}) {
   if (!Number.isInteger(keepCount) || keepCount < 1) {
-    throw new Error(`Invalid automatic keep count: ${keepCount}. Expected an integer greater than or equal to 1.`);
+    throw new CoreError(
+      "INVALID_INPUT",
+      `Invalid automatic keep count: ${keepCount}. Expected an integer greater than or equal to 1.`
+    );
   }
 
   const codexHome = providedStorage?.codexHome ?? normalizeCodexHome(explicitCodexHome);
@@ -439,10 +356,16 @@ async function runSyncCore({
     throwIfAborted(signal);
     const configText = await readConfigText(configPath);
     if (expectedConfigText !== undefined && configText !== expectedConfigText) {
-      throw new Error("config.toml changed after the operation was confirmed. Refresh and retry.");
+      throw new CoreError(
+        "PLAN_STALE",
+        "config.toml changed after the operation was confirmed. Refresh and retry."
+      );
     }
     if (configBackupText !== undefined && configText !== configBackupText) {
-      throw new Error("config.toml changed before the switch operation acquired its lock. Refresh and retry.");
+      throw new CoreError(
+        "PLAN_STALE",
+        "config.toml changed before the switch operation acquired its lock. Refresh and retry."
+      );
     }
     const storage = await prepareStorage({ codexHome, sqliteHome, configText, storage: providedStorage, platform });
     assertSqliteAccessSupported(storage, "sync");
@@ -871,6 +794,7 @@ async function runSyncCore({
   }
 }
 
+/** @deprecated Compatibility adapter. New transports must use prepareSwitch/applySwitch once available. */
 export async function runSwitch({
   codexHome: explicitCodexHome,
   sqliteHome,
@@ -886,14 +810,20 @@ export async function runSwitch({
   signal
 }) {
   if (!provider) {
-    throw new Error("Missing provider id. Usage: codex-provider switch <provider-id>");
+    throw new CoreError(
+      "INVALID_INPUT",
+      "Missing provider id. Usage: codex-provider switch <provider-id>"
+    );
   }
 
   const codexHome = providedStorage?.codexHome ?? normalizeCodexHome(explicitCodexHome);
   const configPath = path.join(codexHome, "config.toml");
   const originalConfigText = await readConfigText(configPath);
   if (expectedConfigText !== undefined && originalConfigText !== expectedConfigText) {
-    throw new Error("config.toml changed after the operation was confirmed. Refresh and retry.");
+    throw new CoreError(
+      "PLAN_STALE",
+      "config.toml changed after the operation was confirmed. Refresh and retry."
+    );
   }
   const storage = await prepareStorage({ codexHome, sqliteHome, configText: originalConfigText, storage: providedStorage, platform });
   assertSqliteAccessSupported(storage, "switch");
@@ -901,11 +831,14 @@ export async function runSwitch({
     throw missingConfiguredStateDbError(storage);
   }
   if (!configDeclaresProvider(originalConfigText, provider)) {
-    throw new Error(`Provider "${provider}" is not available in config.toml. Configure it first or use one of: ${listConfiguredProviderIds(originalConfigText).join(", ")}`);
+    throw new CoreError(
+      "INVALID_INPUT",
+      `Provider "${provider}" is not available in config.toml. Configure it first or use one of: ${listConfiguredProviderIds(originalConfigText).join(", ")}`
+    );
   }
 
   if (model !== undefined && model !== null && keepRootModel) {
-    throw new Error("--model and --keep-root-model are mutually exclusive. Pick one.");
+    throw new CoreError("INVALID_INPUT", "--model and --keep-root-model are mutually exclusive. Pick one.");
   }
 
   let nextConfigText = setRootProviderInConfigText(originalConfigText, provider);
@@ -913,7 +846,10 @@ export async function runSwitch({
 
   if (model !== undefined && model !== null) {
     if (typeof model !== "string" || model.length === 0) {
-      throw new Error(`Invalid --model value: ${model}. Expected a non-empty string.`);
+      throw new CoreError(
+        "INVALID_INPUT",
+        `Invalid --model value: ${model}. Expected a non-empty string.`
+      );
     }
     nextConfigText = setRootModelInConfigText(nextConfigText, model);
     modelSync = { applied: true, source: "explicit", model, warning: null };
@@ -975,6 +911,7 @@ export async function runSwitch({
   };
 }
 
+/** @deprecated Compatibility adapter. New transports must use prepareRestore/applyRestore once available. */
 export async function runRestore({
   codexHome: explicitCodexHome,
   sqliteHome,
@@ -989,17 +926,26 @@ export async function runRestore({
   faultInjector
 }) {
   if (!backupDir) {
-    throw new Error("Missing backup path. Usage: codex-provider restore <backup-dir>");
+    throw new CoreError(
+      "INVALID_INPUT",
+      "Missing backup path. Usage: codex-provider restore <backup-dir>"
+    );
   }
   const codexHome = providedStorage?.codexHome ?? normalizeCodexHome(explicitCodexHome);
   if (allowSqliteHomeRelocation && !(typeof sqliteHome === "string" && sqliteHome.trim())) {
-    throw new Error("--allow-sqlite-home-relocation requires an explicit --sqlite-home path.");
+    throw new CoreError(
+      "INVALID_INPUT",
+      "--allow-sqlite-home-relocation requires an explicit --sqlite-home path."
+    );
   }
   const releaseLock = await acquireLock(codexHome, "restore");
   try {
     const configText = await readConfigText(path.join(codexHome, "config.toml"));
     if (expectedConfigText !== undefined && configText !== expectedConfigText) {
-      throw new Error("config.toml changed after the operation was confirmed. Refresh and retry.");
+      throw new CoreError(
+        "PLAN_STALE",
+        "config.toml changed after the operation was confirmed. Refresh and retry."
+      );
     }
     const storage = await prepareStorage({ codexHome, sqliteHome, configText, storage: providedStorage, platform });
     assertSqliteAccessSupported(storage, "restore");
@@ -1024,9 +970,16 @@ export async function runRestore({
         try {
           conservativeCoverage = await getBackupRecoveryCoverage(normalizedBackupDir, storage);
         } catch (coverageError) {
-          coverageError.code = "RECOVERY_REQUIRED";
-          coverageError.backupDir = normalizedBackupDir;
-          throw coverageError;
+          const recoveryError = new CoreError(
+            "RECOVERY_REQUIRED",
+            coverageError instanceof Error ? coverageError.message : String(coverageError),
+            {
+              cause: coverageError instanceof Error ? coverageError : undefined,
+              suggestedAction: "Restore the complete transaction-bound backup before retrying."
+            }
+          );
+          recoveryError.backupDir = normalizedBackupDir;
+          throw recoveryError;
         }
       }
       const missingKinds = [];
@@ -1047,10 +1000,11 @@ export async function runRestore({
         missingKinds.push("global state");
       }
       if (missingKinds.length > 0) {
-        const error = new Error(
-          `Partial restore would leave a pending transaction unresolved. Include: ${missingKinds.join(", ")}.`
+        const error = new CoreError(
+          "RECOVERY_REQUIRED",
+          `Partial restore would leave a pending transaction unresolved. Include: ${missingKinds.join(", ")}.`,
+          { suggestedAction: "Include every affected target kind in the explicit recovery restore." }
         );
-        error.code = "RECOVERY_REQUIRED";
         error.backupDir = normalizedBackupDir;
         error.missingRestoreKinds = missingKinds;
         throw error;
@@ -1085,7 +1039,10 @@ export async function runPruneBackups({
   keepCount = DEFAULT_BACKUP_RETENTION_COUNT
 } = {}) {
   if (!Number.isInteger(keepCount) || keepCount < 0) {
-    throw new Error(`Invalid keep count: ${keepCount}. Expected a non-negative integer.`);
+    throw new CoreError(
+      "INVALID_INPUT",
+      `Invalid keep count: ${keepCount}. Expected a non-negative integer.`
+    );
   }
 
   const codexHome = normalizeCodexHome(explicitCodexHome);

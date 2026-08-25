@@ -5,10 +5,21 @@ import path from "node:path";
 import readline from "node:readline";
 
 import { SESSION_DIRS } from "./constants.js";
+import { CoreError } from "./core-error.js";
 
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 100;
 const DEFAULT_MESSAGE_LIMIT = 200;
+
+function historyFileError(error, action) {
+  if (error?.code === "EACCES" || error?.code === "EPERM") {
+    return new CoreError("PERMISSION_DENIED", `Permission denied while ${action}.`, {
+      cause: error,
+      details: { causeCode: error.code }
+    });
+  }
+  return error;
+}
 
 function normalizedRolloutPath(rolloutPath) {
   const absolutePath = path.resolve(rolloutPath);
@@ -77,7 +88,7 @@ async function listRolloutFiles(root) {
       entries = await fs.readdir(directory, { withFileTypes: true });
     } catch (error) {
       if (error?.code === "ENOENT") return;
-      throw error;
+      throw historyFileError(error, "scanning history rollouts");
     }
     for (const entry of entries) {
       const fullPath = path.join(directory, entry.name);
@@ -149,7 +160,7 @@ async function collectHistory(codexHome) {
         session = await readRollout(filePath, dirName === "archived_sessions");
       } catch (error) {
         if (error?.code === "ENOENT") continue;
-        throw error;
+        throw historyFileError(error, "reading a history rollout");
       }
       if (session) sessions.push(session);
     }
@@ -185,8 +196,15 @@ function publicSession(session) {
 export function validateHistoryPage(pageValue, pageSizeValue = DEFAULT_PAGE_SIZE) {
   const page = pageValue === undefined ? 1 : Number(pageValue);
   const pageSize = pageSizeValue === undefined ? DEFAULT_PAGE_SIZE : Number(pageSizeValue);
-  if (!Number.isInteger(page) || page < 1) throw new Error("page must be a positive integer.");
-  if (!Number.isInteger(pageSize) || pageSize < 10 || pageSize > MAX_PAGE_SIZE) throw new Error(`pageSize must be an integer between 10 and ${MAX_PAGE_SIZE}.`);
+  if (!Number.isInteger(page) || page < 1) {
+    throw new CoreError("INVALID_INPUT", "page must be a positive integer.");
+  }
+  if (!Number.isInteger(pageSize) || pageSize < 10 || pageSize > MAX_PAGE_SIZE) {
+    throw new CoreError(
+      "INVALID_INPUT",
+      `pageSize must be an integer between 10 and ${MAX_PAGE_SIZE}.`
+    );
+  }
   return { page, pageSize };
 }
 
@@ -196,7 +214,9 @@ export async function listHistory(codexHome, options = {}) {
   const project = normalizeText(options.project).toLowerCase();
   const provider = normalizeText(options.provider);
   const archived = options.archived ?? "all";
-  if (!["all", "active", "archived"].includes(archived)) throw new Error("archived must be all, active, or archived.");
+  if (!["all", "active", "archived"].includes(archived)) {
+    throw new CoreError("INVALID_INPUT", "archived must be all, active, or archived.");
+  }
   const sessions = await collectHistory(codexHome);
   const filtered = sessions.filter((session) => {
     if (provider && session.provider !== provider) return false;
@@ -213,10 +233,17 @@ export async function listHistory(codexHome, options = {}) {
 }
 
 export async function getHistorySession(codexHome, sessionId, { messageLimit = DEFAULT_MESSAGE_LIMIT } = {}) {
-  if (typeof sessionId !== "string" || !sessionId.trim()) throw new Error("sessionId is required.");
+  if (typeof sessionId !== "string" || !sessionId.trim()) {
+    throw new CoreError("INVALID_INPUT", "sessionId is required.");
+  }
   const sessions = await collectHistory(codexHome);
   const session = sessions.find((item) => item.id === sessionId);
-  if (!session) throw new Error("The selected session was not found in this Codex Home.");
+  if (!session) {
+    throw new CoreError(
+      "INVALID_INPUT",
+      "The selected session was not found in this Codex Home."
+    );
+  }
   const safeLimit = Number.isInteger(messageLimit) && messageLimit > 0 ? Math.min(messageLimit, DEFAULT_MESSAGE_LIMIT) : DEFAULT_MESSAGE_LIMIT;
   const messages = session.messages.slice(-safeLimit);
   return { session: publicSession(session), messages, truncated: messages.length < session.messages.length, returnedMessageCount: messages.length };

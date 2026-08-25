@@ -14,6 +14,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
+import { CoreError } from "./core-error.js";
 import { detectStateDb } from "./sqlite-state.js";
 import { readConfigText, readRootModelFromConfigText } from "./config-file.js";
 import {
@@ -53,6 +54,7 @@ function makeDebouncer(delayMs, run) {
   };
 }
 
+/** @deprecated Compatibility adapter. New transports must use startWatch/stopWatch/getWatchStatus once available. */
 export async function runWatch({
   codexHome: explicitCodexHome,
   sqliteHome: explicitSqliteHome,
@@ -65,19 +67,40 @@ export async function runWatch({
   runSyncImpl,
   signal,
   sleepImpl,
-  platform
+  platform,
+  accessImpl = fsp.access
 } = {}) {
   if (!Number.isInteger(debounceMs) || debounceMs < 0) {
-    throw new Error(`Invalid --debounce-ms value: ${debounceMs}. Expected a non-negative integer.`);
+    throw new CoreError(
+      "INVALID_INPUT",
+      `Invalid --debounce-ms value: ${debounceMs}. Expected a non-negative integer.`
+    );
   }
 
   const codexHome = normalizeCodexHome(explicitCodexHome);
   const configPath = path.join(codexHome, "config.toml");
-  await fsp.access(codexHome).catch(() => {
-    throw new Error(`Codex home not found at ${codexHome}`);
+  await accessImpl(codexHome).catch((error) => {
+    if (error?.code === "EACCES" || error?.code === "EPERM") {
+      throw new CoreError("PERMISSION_DENIED", `Permission denied while accessing Codex home at ${codexHome}.`, {
+        cause: error,
+        details: { causeCode: error.code }
+      });
+    }
+    throw new CoreError("CODEX_HOME_NOT_FOUND", `Codex home not found at ${codexHome}`, {
+      cause: error
+    });
   });
-  await fsp.access(configPath).catch(() => {
-    throw new Error(`config.toml not found at ${configPath}`);
+  await accessImpl(configPath).catch((error) => {
+    if (error?.code === "EACCES" || error?.code === "EPERM") {
+      throw new CoreError("PERMISSION_DENIED", `Permission denied while accessing ${configPath}.`, {
+        cause: error,
+        details: { causeCode: error.code }
+      });
+    }
+    throw new CoreError("CODEX_HOME_NOT_FOUND", `config.toml not found at ${configPath}`, {
+      cause: error,
+      details: { missing: "config.toml" }
+    });
   });
 
   const log = (message) => {
@@ -120,8 +143,8 @@ export async function runWatch({
     if (typeof runSyncImpl === "function") {
       return runSyncImpl({ codexHome, sqliteHome: storage.sqliteHome, storage, reason, model: rootModel });
     }
-    // Lazy import to avoid pulling in the full service module until needed.
-    const { runSync } = await import("./service.js");
+    // Lazy import to avoid pulling in the public Core boundary until needed.
+    const { runSync } = await import("./public-api.js");
     return runSync({
       codexHome,
       storage,
@@ -197,7 +220,9 @@ export async function runWatch({
         const message = error instanceof Error ? error.message : String(error);
         // SQLite being in use is a normal transient condition while Codex
         // is actively writing. Don't crash; just retry on the next event.
-        if (/state_5\.sqlite is currently in use/i.test(message)) {
+        const isTypedSqliteBusy = error?.code === "SQLITE_BUSY";
+        const isLegacySqliteBusy = !error?.code && /state_5\.sqlite is currently in use/i.test(message);
+        if (isTypedSqliteBusy || isLegacySqliteBusy) {
           log(`[${new Date().toISOString()}] Sync skipped: ${message} (will retry on next change)`);
           // Busy is normal — reset the consecutive-failure counter
           // so a long-running Codex session that keeps the DB open

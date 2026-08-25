@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { CoreError } from "../src/public-api.js";
 import { createWebUiServer, startWebUi } from "../src/web-server.js";
 import { createMemoryWebUiState, WebUiStateStore } from "../src/web-state.js";
 
@@ -341,6 +342,7 @@ test("Web UI sync delegates only server-resolved storage to the shared service",
     const { credential } = await handle.pair();
     const invalid = await api(handle, "/api/sync", { profileId: "default", provider: "bad provider", keepCount: 5 }, credential);
     assert.equal(invalid.status, 400);
+    assert.equal(invalid.payload.coreError, undefined);
     const response = await api(handle, "/api/sync", { profileId: "default", provider: "openai", keepCount: 5 }, credential);
     assert.equal(response.status, 200);
     assert.equal(calls.length, 1);
@@ -349,6 +351,40 @@ test("Web UI sync delegates only server-resolved storage to the shared service",
     assert.equal(calls[0].storage.stateDbLocation.source, "legacy-root");
     assert.equal(calls[0].storage.stateDbLocation.path, path.join(handle.root, "state_5.sqlite"));
     assert.ok(handle.getActivity().some((entry) => entry.message === "Creating backup"));
+  } finally {
+    await handle.close();
+  }
+});
+
+test("Web UI appends a safe CoreError DTO without changing the legacy error shape", async () => {
+  const handle = await startFixture({
+    readConfigText: async () => 'model_provider = "openai"\n',
+    runSync: async () => {
+      throw new CoreError("SQLITE_BUSY", "The state database is busy.", {
+        details: { causeCode: "SQLITE_BUSY" }
+      });
+    }
+  });
+  try {
+    const { credential } = await handle.pair();
+    const response = await api(
+      handle,
+      "/api/sync",
+      { profileId: "default", provider: "openai", keepCount: 5 },
+      credential
+    );
+
+    assert.equal(response.status, 400);
+    assert.equal(response.payload.error, "The state database is busy.");
+    assert.equal(response.payload.code, undefined);
+    assert.deepEqual(response.payload.coreError, {
+      code: "SQLITE_BUSY",
+      message: "The state database is busy.",
+      severity: "warning",
+      retryable: true,
+      recoveryRequired: false,
+      details: { causeCode: "SQLITE_BUSY" }
+    });
   } finally {
     await handle.close();
   }
@@ -1015,6 +1051,8 @@ test("Web UI restore requires an explicit SQLite Home for relocation and rejects
     const rejected = await api(wslHandle, "/api/sync", { profileId: "default", provider: "openai", keepCount: 5 }, credential);
     assert.equal(rejected.status, 400);
     assert.match(rejected.payload.error, /Windows cannot safely access SQLite through the WSL UNC path/);
+    assert.equal(rejected.payload.coreError.code, "SQLITE_UNSUPPORTED_PATH");
+    assert.deepEqual(rejected.payload.coreError.details, { reason: "windows-wsl-unc" });
     assert.equal(restoreCalls, 0);
   } finally {
     await wslHandle.close();

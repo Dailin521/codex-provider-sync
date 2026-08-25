@@ -13,7 +13,8 @@ import {
   restoreBackup,
   updateSessionBackupManifest
 } from "../src/backup.js";
-import { getStatus, renderStatus, runRestore, runSwitch, runSync } from "../src/service.js";
+import { getStatus, runPruneBackups, runRestore, runSwitch, runSync } from "../src/service.js";
+import { renderStatus } from "../src/cli-presenter.js";
 import { DB_FILE_BASENAME, DEFAULT_BACKUP_RETENTION_COUNT, SQLITE_DIR_BASENAME } from "../src/constants.js";
 import { getUnsupportedNodeVersionMessage } from "../src/node-version.js";
 import {
@@ -30,6 +31,58 @@ import {
 import { syncDirectory, writeFileAtomic } from "../src/atomic-file.js";
 
 delete process.env.CODEX_SQLITE_HOME;
+
+test("public write adapters expose typed invalid-input errors", async () => {
+  const cases = [
+    () => runSync({ keepCount: 0 }),
+    () => runSwitch({}),
+    () => runRestore({}),
+    () => runPruneBackups({ keepCount: -1 })
+  ];
+
+  for (const invoke of cases) {
+    await assert.rejects(
+      invoke,
+      (error) => error?.code === "INVALID_INPUT"
+        && typeof error.toDto === "function"
+    );
+  }
+});
+
+test("public write adapters expose typed validation and stale-confirmation errors", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome);
+
+  await assert.rejects(
+    () => runSwitch({ codexHome, provider: "apigather", model: "" }),
+    (error) => error?.code === "INVALID_INPUT" && /Invalid --model value/.test(error.message)
+  );
+  await assert.rejects(
+    () => runRestore({
+      codexHome,
+      backupDir: path.join(codexHome, "unused-backup"),
+      allowSqliteHomeRelocation: true
+    }),
+    (error) => error?.code === "INVALID_INPUT"
+      && /requires an explicit --sqlite-home/.test(error.message)
+  );
+
+  const staleCalls = [
+    () => runSync({ codexHome, expectedConfigText: "stale" }),
+    () => runSwitch({ codexHome, provider: "apigather", expectedConfigText: "stale" }),
+    () => runRestore({
+      codexHome,
+      backupDir: path.join(codexHome, "unused-backup"),
+      expectedConfigText: "stale"
+    })
+  ];
+  for (const invoke of staleCalls) {
+    await assert.rejects(
+      invoke,
+      (error) => error?.code === "PLAN_STALE" && typeof error.toDto === "function"
+    );
+  }
+});
 
 test("runSync rolls back the first rollout when a later target fails (#69)", async () => {
   const { codexHome } = await makeTempCodexHome();
@@ -1153,6 +1206,7 @@ test("partial restore cannot clear a pending SQLite transaction", async () => {
       restoreSessions: false
     }),
     (error) => error?.code === "RECOVERY_REQUIRED"
+      && typeof error.toDto === "function"
       && error.missingRestoreKinds.includes("SQLite database")
   );
   assert.equal(await readProvider(codexHome, "thread-partial-restore"), "openai");
@@ -2448,7 +2502,8 @@ test("runSwitch rejects --model and --keep-root-model together", async () => {
 
   await assert.rejects(
     () => runSwitch({ codexHome, provider: "apigather", model: "X", keepRootModel: true }),
-    /--model and --keep-root-model are mutually exclusive/
+    (error) => error?.code === "INVALID_INPUT"
+      && /--model and --keep-root-model are mutually exclusive/.test(error.message)
   );
 
   // Confirm the file on disk was not mutated by the failed call.
@@ -3085,7 +3140,8 @@ test("runSwitch rejects unknown custom providers", async () => {
   await writeConfig(codexHome);
   await assert.rejects(
     () => runSwitch({ codexHome, provider: "missing" }),
-    /Provider "missing" is not available/
+    (error) => error?.code === "INVALID_INPUT"
+      && /Provider "missing" is not available/.test(error.message)
   );
 });
 
@@ -3937,6 +3993,7 @@ test("runRestore rejects all-disabled recovery when the first journal record is 
     }),
     (error) => {
       assert.equal(error.code, "RECOVERY_REQUIRED");
+      assert.equal(typeof error.toDto, "function");
       assert.deepEqual(
         new Set(error.missingRestoreKinds),
         new Set(["rollout sessions", "SQLite database", "config.toml", "global state"])

@@ -49,7 +49,8 @@ test("runWatch rejects invalid debounce-ms values", async () => {
   const { codexHome } = await makeTempCodexHome();
   await assert.rejects(
     () => runWatch({ codexHome, debounceMs: -1 }),
-    /Invalid --debounce-ms value/
+    (error) => error?.code === "INVALID_INPUT"
+      && /Invalid --debounce-ms value/.test(error.message)
   );
   await fs.rm(codexHome, { recursive: true, force: true });
 });
@@ -58,15 +59,30 @@ test("runWatch rejects when codex home or config.toml is missing", async () => {
   const root = await fs.mkdtemp(path.join(testTempDir, "codex-provider-sync-watch-"));
   await assert.rejects(
     () => runWatch({ codexHome: path.join(root, "does-not-exist") }),
-    /Codex home not found/
+    (error) => error?.code === "CODEX_HOME_NOT_FOUND"
+      && /Codex home not found/.test(error.message)
   );
   const codexHome = path.join(root, ".codex");
   await fs.mkdir(codexHome, { recursive: true });
   await assert.rejects(
     () => runWatch({ codexHome }),
-    /config\.toml not found/
+    (error) => error?.code === "CODEX_HOME_NOT_FOUND"
+      && /config\.toml not found/.test(error.message)
   );
   await fs.rm(root, { recursive: true, force: true });
+});
+
+test("runWatch distinguishes access denial from a missing Codex home", async () => {
+  const denied = new Error("permission denied fixture");
+  denied.code = "EACCES";
+  await assert.rejects(
+    () => runWatch({
+      codexHome: path.join(testTempDir, "permission-denied-codex-home"),
+      accessImpl: async () => { throw denied; }
+    }),
+    (error) => error?.code === "PERMISSION_DENIED"
+      && error.details?.causeCode === "EACCES"
+  );
 });
 
 test("runWatch blocks Windows WSL UNC SQLite homes before creating watchers", async () => {
@@ -133,7 +149,7 @@ test("runWatch invokes the injected sync handler when config.toml changes and st
   await fs.rm(codexHome, { recursive: true, force: true });
 });
 
-test("runWatch swallows 'sqlite in use' errors and keeps watching", async () => {
+test("runWatch uses the typed SQLITE_BUSY code and keeps watching", async () => {
   const { codexHome } = await makeTempCodexHome();
   const configPath = path.join(codexHome, "config.toml");
 
@@ -145,7 +161,9 @@ test("runWatch swallows 'sqlite in use' errors and keeps watching", async () => 
     includeStateDb: false,
     onSync: async () => {
       firstSyncCalls += 1;
-      throw new Error("state_5.sqlite is currently in use by another process");
+      const error = new Error("localized busy diagnostic");
+      error.code = "SQLITE_BUSY";
+      throw error;
     },
     onLog: (line) => logs.push(line)
   });
@@ -155,7 +173,7 @@ test("runWatch swallows 'sqlite in use' errors and keeps watching", async () => 
 
   assert.ok(firstSyncCalls >= 1, "first sync should have been attempted");
   assert.ok(
-    logs.some((line) => /state_5\.sqlite is currently in use/.test(line)),
+    logs.some((line) => /Sync skipped: localized busy diagnostic/.test(line)),
     "the locked-sqlite error should have been logged as a soft skip"
   );
 

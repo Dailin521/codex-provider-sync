@@ -66,7 +66,12 @@ test("acquireLock publishes a complete versioned owner and holds a unique claim"
   assert.equal(typeof owner.instanceId, "string");
   assert.deepEqual(await fs.readdir(claimsDir), [`${owner.instanceId}.json`]);
 
-  await assert.rejects(acquireLock(codexHome, "other", lockOptions()), /live claim|Lock already exists/);
+  await assert.rejects(
+    acquireLock(codexHome, "other", lockOptions()),
+    (error) => error?.code === "OPERATION_BUSY"
+      && error.details?.busyScope === "codex-home"
+      && /live claim|Lock already exists/.test(error.message)
+  );
   await release();
   await assert.rejects(fs.access(lockDir), { code: "ENOENT" });
   assert.deepEqual(await fs.readdir(claimsDir), []);
@@ -104,6 +109,30 @@ test("acquireLock retries transient candidate creation failures", async (t) => {
   assert.equal(candidateAttempts, 3);
   assert.deepEqual(sleepCalls, [25, 25]);
   await release();
+});
+
+test("lock storage permission failures are typed before ownership is published", async (t) => {
+  const codexHome = await makeLockHome(t);
+  const fsImpl = new Proxy(fs, {
+    get(target, property) {
+      if (property === "mkdir") {
+        return async () => {
+          const error = new Error("permission denied fixture");
+          error.code = "EACCES";
+          throw error;
+        };
+      }
+      const value = target[property];
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
+
+  await assert.rejects(
+    acquireLock(codexHome, "sync", lockOptions({ fsImpl })),
+    (error) => error?.code === "PERMISSION_DENIED"
+      && error.details?.lockScope === "codex-home"
+      && error.details?.causeCode === "EACCES"
+  );
 });
 
 test("owner publication failure removes its empty canonical reservation and claim", async (t) => {
@@ -215,7 +244,9 @@ test("link failure does not remove a swapped empty reservation and still release
 
   await assert.rejects(
     acquireLock(codexHome, "sync", lockOptions({ fsImpl })),
-    /cleanup was incomplete/
+    (error) => error?.code === "LOCK_UNVERIFIABLE"
+      && error.details?.lockScope === "codex-home"
+      && /cleanup was incomplete/.test(error.message)
   );
   assert.equal((await fs.lstat(lockDir)).isDirectory(), true);
   assert.equal((await fs.lstat(displacedReservation)).isDirectory(), true);
@@ -225,10 +256,17 @@ test("link failure does not remove a swapped empty reservation and still release
 test("acquirePathLock supports an arbitrary future SQLite resource path", async (t) => {
   const root = await makeLockHome(t);
   const lockPath = path.join(root, "resource-locks", "state-db.lock");
-  const release = await acquirePathLock(lockPath, "sqlite-resource", lockOptions());
+  const resourceOptions = lockOptions({ scope: "state-db" });
+  const release = await acquirePathLock(lockPath, "sqlite-resource", resourceOptions);
   const owner = JSON.parse(await fs.readFile(path.join(lockPath, "owner.json"), "utf8"));
   assert.equal(owner.label, "sqlite-resource");
+  assert.equal(owner.scope, "state-db");
   assert.deepEqual(await fs.readdir(`${lockPath}.claims`), [`${owner.instanceId}.json`]);
+  await assert.rejects(
+    acquirePathLock(lockPath, "sqlite-resource-2", resourceOptions),
+    (error) => error?.code === "OPERATION_BUSY"
+      && error.details?.busyScope === "state-db"
+  );
   await release();
   await assert.rejects(fs.access(lockPath), { code: "ENOENT" });
 });
@@ -240,8 +278,10 @@ test("acquirePathLock rejects a canonical file with an explicit diagnostic", asy
   await fs.writeFile(lockPath, "foreign", "utf8");
 
   await assert.rejects(
-    acquirePathLock(lockPath, "sqlite-resource", lockOptions()),
-    /canonical lock path is not a directory/
+    acquirePathLock(lockPath, "sqlite-resource", lockOptions({ scope: "state-db" })),
+    (error) => error?.code === "LOCK_UNVERIFIABLE"
+      && error.details?.lockScope === "state-db"
+      && /canonical lock path is not a directory/.test(error.message)
   );
   assert.equal(await fs.readFile(lockPath, "utf8"), "foreign");
   assert.deepEqual(await fs.readdir(`${lockPath}.claims`), []);
@@ -308,6 +348,38 @@ test("acquireLock recognizes a live version 2 .NET owner from UTC-second identit
   assert.equal(
     JSON.parse(await fs.readFile(path.join(lockDir, "owner.json"), "utf8")).instanceId,
     "dotnet-v2-live"
+  );
+  assert.deepEqual(await fs.readdir(`${lockDir}.claims`), []);
+});
+
+test("cross-runtime start-time uncertainty is LOCK_UNVERIFIABLE, not OPERATION_BUSY", async (t) => {
+  const codexHome = await makeLockHome(t);
+  let startTimeProbeCount = 0;
+  const lockDir = await writeCanonicalOwner(codexHome, {
+    protocolVersion: 2,
+    runtime: "dotnet",
+    pid: process.pid,
+    processId: process.pid,
+    processStartedAt: TEST_STARTED_AT,
+    instanceId: "dotnet-v2-unverifiable",
+    startedAt: TEST_STARTED_AT,
+    label: "dotnet",
+    cwd: codexHome
+  });
+
+  await assert.rejects(
+    acquireLock(codexHome, "node", lockOptions({
+      getProcessStartedAtIdentity: async () => {
+        startTimeProbeCount += 1;
+        if (startTimeProbeCount === 1) {
+          return TEST_STARTED_AT;
+        }
+        throw new Error("injected cross-runtime identity failure");
+      }
+    })),
+    (error) => error?.code === "LOCK_UNVERIFIABLE"
+      && error.details?.lockScope === "codex-home"
+      && /could not be verified/.test(error.message)
   );
   assert.deepEqual(await fs.readdir(`${lockDir}.claims`), []);
 });
@@ -571,7 +643,9 @@ test("acquireLock fails closed while a legacy canonical owner is missing", async
   await fs.mkdir(lockDir, { recursive: true });
   await assert.rejects(
     acquireLock(codexHome, "sync", lockOptions()),
-    /owner\.json is not visible yet/
+    (error) => error?.code === "LOCK_UNVERIFIABLE"
+      && error.details?.lockScope === "codex-home"
+      && /owner\.json is not visible yet/.test(error.message)
   );
   assert.deepEqual(await fs.readdir(`${lockDir}.claims`), []);
 });
@@ -604,7 +678,12 @@ test("acquireLock fails closed for future protocols and conflicting cross-runtim
     await t.test(fixture.name, async (subtest) => {
       const codexHome = await makeLockHome(subtest);
       const lockDir = await writeCanonicalOwner(codexHome, fixture.owner);
-      await assert.rejects(acquireLock(codexHome, "sync", lockOptions()), fixture.expected);
+      await assert.rejects(
+        acquireLock(codexHome, "sync", lockOptions()),
+        (error) => error?.code === "LOCK_UNVERIFIABLE"
+          && error.details?.lockScope === "codex-home"
+          && fixture.expected.test(error.message)
+      );
       assert.deepEqual(await fs.readdir(`${lockDir}.claims`), []);
       assert.deepEqual(
         JSON.parse(await fs.readFile(path.join(lockDir, "owner.json"), "utf8")),

@@ -5,13 +5,25 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { listBackups } from "./backup.js";
-import { readConfigText, readRootModelFromConfigText } from "./config-file.js";
 import { defaultCodexHome } from "./constants.js";
-import { getHistorySession, listHistory } from "./history.js";
-import { getStatus, runPruneBackups, runRestore, runSwitch, runSync } from "./service.js";
-import { detectStateDb } from "./sqlite-state.js";
-import { ensureCodexHome, resolveStorageLayout, withStateDbLocation } from "./storage-layout.js";
+import {
+  CoreError,
+  detectStateDb,
+  ensureCodexHome,
+  getHistorySession,
+  getStatus,
+  listBackups,
+  listHistory,
+  readConfigText,
+  readRootModelFromConfigText,
+  resolveStorageLayout,
+  runPruneBackups,
+  runRestore,
+  runSwitch,
+  runSync,
+  toCoreErrorDto,
+  withStateDbLocation
+} from "./public-api.js";
 import { createMemoryWebUiState, ProfileRevisionConflictError, WebUiStateStore } from "./web-state.js";
 
 const DEFAULT_PORT = 8791;
@@ -53,7 +65,11 @@ function sendJson(response, statusCode, value) {
 
 function sendError(response, statusCode, error, code) {
   const message = error instanceof Error ? error.message : String(error);
-  sendJson(response, statusCode, { error: message, ...(code ? { code } : {}) });
+  sendJson(response, statusCode, {
+    error: message,
+    ...(code ? { code } : {}),
+    ...(error instanceof CoreError ? { coreError: toCoreErrorDto(error) } : {})
+  });
 }
 
 async function readJsonBody(request) {
@@ -546,7 +562,11 @@ export function createWebUiServer({
 
   const assertWebOperationStorage = (storage, operation) => {
     if (storage.sqliteAccess.supported === false) {
-      throw new Error(`Cannot ${operation}: ${storage.sqliteAccess.message}`);
+      throw new CoreError(
+        "SQLITE_UNSUPPORTED_PATH",
+        `Cannot ${operation}: ${storage.sqliteAccess.message}`,
+        { details: storage.sqliteAccess.reason ? { reason: storage.sqliteAccess.reason } : undefined }
+      );
     }
     return storage;
   };

@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 
 import { defaultBackupRoot } from "./constants.js";
 import { writeFileAtomic, syncDirectory } from "./atomic-file.js";
+import { CoreError } from "./core-error.js";
 
 export const TRANSACTION_JOURNAL_BASENAME = "transaction-journal.jsonl";
 const TERMINAL_STATES = new Set(["committed", "rolledBack"]);
@@ -386,12 +387,15 @@ export async function findPendingTransactions(codexHome) {
   return pending.sort((left, right) => left.filePath.localeCompare(right.filePath));
 }
 
-export class RecoveryRequiredError extends Error {
+export class RecoveryRequiredError extends CoreError {
   constructor(pendingTransactions) {
     const backups = pendingTransactions.map((item) => item.backupDir).join(", ");
-    super(`An unfinished provider-sync transaction requires recovery before another write. Restore the bound backup, then retry. Backup(s): ${backups}`);
+    super(
+      "RECOVERY_REQUIRED",
+      `An unfinished provider-sync transaction requires recovery before another write. Restore the bound backup, then retry. Backup(s): ${backups}`,
+      { suggestedAction: "Restore the transaction-bound managed backup before starting another write." }
+    );
     this.name = "RecoveryRequiredError";
-    this.code = "RECOVERY_REQUIRED";
     this.pendingTransactions = pendingTransactions;
   }
 }

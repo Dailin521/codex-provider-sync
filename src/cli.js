@@ -3,12 +3,13 @@
 import path from "node:path";
 
 import { DEFAULT_BACKUP_RETENTION_COUNT } from "./constants.js";
+import { formatBytes, renderStatus } from "./cli-presenter.js";
 import { installWindowsLauncher } from "./launcher.js";
 import { assertSupportedNodeVersion } from "./node-version.js";
 
-async function loadService() {
+async function loadCore() {
   assertSupportedNodeVersion();
-  return import("./service.js");
+  return import("./public-api.js");
 }
 
 function printHelp() {
@@ -120,17 +121,6 @@ function summarizePrune(result) {
   ].join("\n");
 }
 
-function formatBytes(bytes) {
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let value = bytes;
-  let unitIndex = 0;
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
-    unitIndex += 1;
-  }
-  return unitIndex === 0 ? `${bytes} B` : `${value.toFixed(value >= 10 ? 1 : 2).replace(/\.0$/, "")} ${units[unitIndex]}`;
-}
-
 function formatDuration(durationMs) {
   if (!Number.isFinite(durationMs) || durationMs < 1000) {
     return `${Math.max(0, Math.round(durationMs ?? 0))} ms`;
@@ -207,7 +197,7 @@ async function main() {
   assertSupportedNodeVersion();
 
   if (command === "status") {
-    const { getStatus, renderStatus } = await loadService();
+    const { getStatus } = await loadCore();
     const status = await getStatus({
       codexHome: flags["codex-home"],
       sqliteHome: flags["sqlite-home"]
@@ -217,9 +207,8 @@ async function main() {
   }
 
   if (command === "sync") {
-    const { runSync } = await loadService();
+    const { runSync, readConfigText, readRootModelFromConfigText } = await loadCore();
     const { defaultCodexHome } = await import("./constants.js");
-    const { readConfigText, readRootModelFromConfigText } = await import("./config-file.js");
     const codexHome = path.resolve(
       flags["codex-home"] ?? process.env.CODEX_HOME ?? defaultCodexHome()
     );
@@ -245,7 +234,7 @@ async function main() {
   }
 
   if (command === "switch") {
-    const { runSwitch } = await loadService();
+    const { runSwitch } = await loadCore();
     const provider = positionals[1] ?? flags.provider;
     const result = await runSwitch({
       codexHome: flags["codex-home"],
@@ -271,7 +260,7 @@ async function main() {
   }
 
   if (command === "prune-backups") {
-    const { runPruneBackups } = await loadService();
+    const { runPruneBackups } = await loadCore();
     const result = await runPruneBackups({
       codexHome: flags["codex-home"],
       keepCount: parseKeepCount(flags.keep, { allowZero: true })
@@ -281,7 +270,7 @@ async function main() {
   }
 
   if (command === "watch") {
-    const { runWatch } = await import("./watch.js");
+    const { runWatch } = await loadCore();
     const debounceMs = flags["debounce-ms"] !== undefined
       ? parseKeepCount(flags["debounce-ms"], { allowZero: true })
       : undefined;
@@ -359,7 +348,7 @@ async function main() {
   }
 
   if (command === "restore") {
-    const { runRestore } = await loadService();
+    const { runRestore } = await loadCore();
     const backupDir = positionals[1] ?? flags.backup;
     const result = await runRestore({
       codexHome: flags["codex-home"],

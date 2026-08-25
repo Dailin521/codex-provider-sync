@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { syncDirectory } from "./atomic-file.js";
 import { DB_FILE_BASENAME, SESSION_DIRS, SQLITE_DIR_BASENAME } from "./constants.js";
+import { CoreError } from "./core-error.js";
 import { openDatabase } from "./sqlite.js";
 import { resolveStorageLayout } from "./storage-layout.js";
 
@@ -196,25 +197,43 @@ export function configureSqliteWriteDurability(db) {
   return { synchronous: "full", value: synchronous };
 }
 
+function sqlitePrimaryResultCode(error) {
+  return Number.isInteger(error?.errcode) ? error.errcode & 0xff : null;
+}
+
 function isSqliteBusyError(error) {
-  const message = `${error?.code ?? ""} ${error?.message ?? ""}`.toLowerCase();
-  return message.includes("database is locked") || message.includes("sqlite_busy") || message.includes("busy");
+  if (error instanceof CoreError) return error.code === "SQLITE_BUSY";
+  const primaryCode = sqlitePrimaryResultCode(error);
+  return error?.code === "SQLITE_BUSY"
+    || error?.code === "SQLITE_LOCKED"
+    || (error?.code === "ERR_SQLITE_ERROR" && (primaryCode === 5 || primaryCode === 6));
 }
 
 function isSqliteMalformedError(error) {
-  const message = `${error?.code ?? ""} ${error?.message ?? ""}`.toLowerCase();
-  return message.includes("database disk image is malformed")
-    || message.includes("sqlite_corrupt")
-    || message.includes("malformed")
-    || message.includes("not a database");
+  if (error instanceof CoreError) return error.code === "SQLITE_UNREADABLE";
+  const primaryCode = sqlitePrimaryResultCode(error);
+  return error?.code === "SQLITE_CORRUPT"
+    || error?.code === "SQLITE_NOTADB"
+    || (error?.code === "ERR_SQLITE_ERROR" && (primaryCode === 11 || primaryCode === 26));
+}
+
+function sqliteErrorDetails(error) {
+  const primaryCode = sqlitePrimaryResultCode(error);
+  return {
+    ...(typeof error?.code === "string" ? { causeCode: error.code } : {}),
+    ...(primaryCode !== null ? { sqlitePrimaryCode: primaryCode } : {})
+  };
 }
 
 export function wrapSqliteBusyError(error, action) {
   if (!isSqliteBusyError(error)) {
     return error;
   }
-  return new Error(
-    `Unable to ${action} because state_5.sqlite is currently in use. Close Codex and the Codex app, then retry. Original error: ${error.message}`
+  if (error instanceof CoreError) return error;
+  return new CoreError(
+    "SQLITE_BUSY",
+    `Unable to ${action} because state_5.sqlite is currently in use. Close Codex and the Codex app, then retry. Original error: ${error.message}`,
+    { cause: error, details: sqliteErrorDetails(error) }
   );
 }
 
@@ -222,8 +241,11 @@ export function wrapSqliteMalformedError(error, action) {
   if (!isSqliteMalformedError(error)) {
     return error;
   }
-  return new Error(
-    `Unable to ${action} because state_5.sqlite is malformed or unreadable. Close Codex, back up or repair the database, then retry. Original error: ${error.message}`
+  if (error instanceof CoreError) return error;
+  return new CoreError(
+    "SQLITE_UNREADABLE",
+    `Unable to ${action} because state_5.sqlite is malformed or unreadable. Close Codex, back up or repair the database, then retry. Original error: ${error.message}`,
+    { cause: error, details: sqliteErrorDetails(error) }
   );
 }
 

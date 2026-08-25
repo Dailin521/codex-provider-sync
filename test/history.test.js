@@ -6,6 +6,21 @@ import test from "node:test";
 
 import { getHistorySession, listHistory } from "../src/history.js";
 
+test("history public inputs fail with typed invalid-input errors", async () => {
+  await assert.rejects(
+    () => listHistory("unused", { page: 0 }),
+    (error) => error?.code === "INVALID_INPUT" && /page must/.test(error.message)
+  );
+  await assert.rejects(
+    () => listHistory("unused", { archived: "unknown" }),
+    (error) => error?.code === "INVALID_INPUT" && /archived must/.test(error.message)
+  );
+  await assert.rejects(
+    () => getHistorySession("unused", ""),
+    (error) => error?.code === "INVALID_INPUT" && /sessionId is required/.test(error.message)
+  );
+});
+
 async function fixture() {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "codex-history-"));
   const file = path.join(home, "sessions", "2026", "08", "04", "rollout-one.jsonl");
