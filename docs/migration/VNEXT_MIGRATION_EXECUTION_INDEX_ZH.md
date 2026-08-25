@@ -1,6 +1,6 @@
 # vNext 升级改造执行索引
 
-> **状态：阶段 0 交付完成（合入 `main` 后生效）**
+> **状态：受保护分支上的阶段 0 已完成；V1 的 C0 checkpoint 在单最终 PR 合入前不推进任何后续 Phase 状态。**
 >
 > **日期：2026-08-24**
 >
@@ -21,7 +21,7 @@
 5. [行为兼容 Fixture 清单](BEHAVIOR_FIXTURES_ZH.md)；
 6. 本执行索引中的阶段状态。
 
-发生冲突时必须先登记差异并裁决，不能让后提交的新实现自动成为权威。
+发生冲突时必须先登记差异并裁决，不能让后提交的新实现自动成为权威。ADR-0011 的 V1 合并拓扑例外只改变 checkpoint 的承载方式，不改变本权威顺序。
 
 ## 2. 总体状态
 
@@ -36,7 +36,15 @@
 | 6 | Electron Stable，替代 .NET | Pending | Electron 成为默认桌面产品，.NET 标记 Legacy |
 | 7 | 清理 Legacy | Pending | 移出重复 .NET 业务代码，保留历史标签、分支和迁移说明 |
 
-状态只能按 `Pending → In Progress → Completed` 前进。PR 分支可以把自身交付标为“合入后 Completed”，但受保护分支上的阶段只有在退出门槛全部满足并完成合并后才正式生效。
+状态只能按 `Pending → In Progress → Completed` 前进。V1 的 `C0`～`C10` 仅是内部 checkpoint：可记录“已验证”或“合入后 Completed”，但在最终 PR 合入受保护分支前，Phase 1～7 仍为 Pending 或 In Progress，不能标记 Completed。
+
+## 2.1 V1 单最终 PR checkpoint 治理
+
+- 本分支受 [ADR-0011](../adr/0011-v1-single-branch-single-final-pr.md) 约束：`C0`～`C10` 采用批准计划中的合并后编号；旧 PR 2～PR 10 只保留为依赖与安全意图来源。
+- 每个 checkpoint 必须记录 commit SHA、范围、适用测试/Fixture、真实平台证据、未满足 gate 和上一个可回退 commit；最终 PR 审查按 checkpoint 进行。
+- checkpoint 通过不自动开放下一阶段能力：Electron 写、Restore v2、Watch、默认桌面入口和 Legacy 清理由本索引的对应退出门槛继续阻断。
+- checkpoint 无法在同步 `main` 后重放或复验时，停止在最近已验证 checkpoint；不得以合并拓扑例外跳过差异登记、Fixture 或发布验证。
+- 在 V1 分支内，本索引中“进入条件：上一 Phase Completed”表示相应前序 checkpoint 的全部证据已验证；它不改变受保护分支上该 Phase 仍未 Completed 的状态。
 
 ## 3. 阶段门槛
 
@@ -49,7 +57,7 @@
 
 退出门槛：
 
-- ADR-0001～ADR-0010 均为 Accepted，历史 v0.4 ADR 不与 vNext 编号混淆；
+- ADR-0001～ADR-0013 均为 Accepted，历史 v0.4 ADR 不与 vNext 编号混淆；
 - Core 外部行为、CLI、Error Code、Fixture 和本索引可互相导航；
 - 每份文档明确“当前已实现”与“vNext 目标”；
 - 本阶段不修改运行代码、CLI 输出、Error Class 或运行代码目录结构；
@@ -63,7 +71,7 @@
 
 - 新增 `src/public-api.js`，CLI/Web 不再导入 Core 内部实现；
 - 展示逻辑与业务结果分离，现有用户可见语义不变；
-- PR 2～PR 5 均已完成：Public API、结构化错误、CLI `--json` 与 Prepare/Apply 已分别落地；
+- C1～C3 均已完成：Public API/结构化错误、CLI `--json`、Prepare/Apply 与双层锁已分别落地；
 - CLI `--json` 是 opt-in 加法；默认 Human Mode、命令语义和 v0.5 兼容行为保持不变；
 - 原 Node 测试全绿，新增 Public API Contract Test；
 - 真实 Node↔.NET 对同一 Codex Home 的 protocol v2 操作锁争用通过：恰有一个写者，败方无副作用；
@@ -148,33 +156,34 @@
 - 删除的只是重复业务实现，不删除 Node CLI；
 - 仓库文档、依赖图、发布脚本和安全说明不再引用已移除路径。
 
-## 4. 首批 PR 依赖
+## 4. V1 checkpoint 依赖
 
-| PR | 内容 | 依赖 | 关键合入门槛 | 状态 |
+| Checkpoint | 内容 | 依赖 | 最终合入前必须保留的证据 | V1 状态 |
 | --- | --- | --- | --- | --- |
-| PR 1 | 冻结架构合同和 ADR | 无 | 仅文档；阶段 0 退出门槛 | **Completed（合入 `main` 后）** |
-| PR 2 | Core Public API | PR 1 | CLI/Web 仅走 Public API；现有测试全绿；锁合同验证 | Pending |
-| PR 3 | 结构化错误 | PR 2 | Canonical/Legacy Adapter、`LOCK_UNVERIFIABLE`、错误合同测试 | Pending |
-| PR 4 | CLI `--json` | PR 2、PR 3 | stdout 单一 JSON、stderr 日志、Exit Code 与 Schema 合同 | Pending |
-| PR 5 | Prepare / Apply | PR 2、PR 3 | Revision/Plan/Apply 下沉；CLI Human Mode 兼容 | Pending |
-| PR 6 | Workspace 与 Core 骨架 | PR 2～PR 5（阶段 1 Completed） | workspaces/Core/Contracts/CoreClient 骨架；不搬 UI、不改算法 | Pending |
-| PR 7 | React UI 分解 | PR 6 | AppShell/Feature/HttpCoreClient；现有 Web UI 可用；阶段 2 退出门槛 | Pending |
-| PR 8 | Electron Skeleton | PR 7（阶段 2 Completed） | Main/Preload/Renderer 安全基线与版本握手；无业务写 | Pending |
-| PR 9 | Core Utility Process | PR 8 | Supervisor、Status、Crash/Protocol Test；Pending Journal 检查 | Pending |
-| PR 10 | Read-only Preview Release | PR 9 | 三平台 package、只读 smoke、使用说明和反馈模板；阶段 3 退出门槛 | Pending |
+| C0 | 治理、基线与依赖安全 | 阶段 0 | ADR-0011～0013、合同导航、基线测试、Vite 审计告警清零 | In Progress（V1） |
+| C1 | Core Public API 与结构化错误 | C0 | CLI/Web 仅走 Public API；Canonical/Legacy Adapter；错误合同测试 | Pending |
+| C2 | CLI `--json` | C1 | stdout 单一 JSON、stderr 日志、JSON Exit Code 与 Schema 合同 | Pending |
+| C3 | Prepare/Apply、协调器与双层锁 | C1、C2 | Revision/Plan/Apply、Node/.NET 双层资源锁、真实争锁证据 | Pending |
+| C4 | Workspace、Core、Contracts、CoreClient | C1～C3（Phase 1 全部门槛已验证） | 不搬高风险算法；根 npm CLI tarball/Node 16 兼容 | Pending |
+| C5 | 共享 React UI 与 Web | C4 | AppShell/Features/HttpCoreClient；Web 安全与功能等价；阶段 2 门槛 | Pending |
+| C6 | Electron 安全骨架、Utility Runtime、只读能力 | C5（Phase 2 全部门槛已验证） | 安全窗口/IPC、握手、crash recovery、三平台只读 smoke | Pending |
+| C7 | Electron Sync/Switch | C6（Phase 3 全部门槛已验证） | Prepare/Apply、Busy/Partial/Cancel、Backup/Restore 回环 | Pending |
+| C8 | Restore/Watch/Diagnostics/Update | C7（Phase 4 全部门槛已验证） | Restore v2 crash matrix、foreign pending、诊断隐私、Watch/Update | Pending |
+| C9 | 打包、CI 与发布工程 | C8（Phase 5 全部门槛已验证） | 四目标产物、native SQLite、packaged smoke、SBOM/checksums | Pending |
+| C10 | 最终证据与 Legacy 交接 | C9 | evidence bundle、README/Legacy、全量门禁；不自动发布 | Pending |
 
-PR 4 与 PR 5 可在 PR 2/3 后并行开发；两者都完成后才能进入 PR 6。PR 6～PR 10 按阶段门槛顺序推进，不能用“只搭骨架”绕过上一阶段的退出条件。
+`C0`～`C10` 按表中依赖和阶段门槛推进，不能用“只搭骨架”绕过上一阶段的退出条件。Checkpoint 内可以有若干小提交，但最终 evidence 必须绑定一个明确 commit。
 
-PR 到阶段的归属固定为：PR 1 完成阶段 0；PR 2～PR 5 完成阶段 1；PR 6～PR 7 完成阶段 2；PR 8～PR 10 完成阶段 3。阶段 4 之后的 PR 编号在 Read-only Preview 证据完成后确定。
+checkpoint 到阶段的归属固定为：C0 不推进运行 Phase；C1～C3 的完整证据在最终合入后可完成阶段 1；C4～C5 可完成阶段 2；C6 可完成阶段 3；C7 可完成阶段 4；C8 可完成阶段 5；C9～C10 只能形成阶段 6 的 release-ready 证据。阶段 6 仍需真实 Beta、签名/公证与单独授权的发布验证；阶段 7 不属于本 PR。
 
-阶段 4 之后的写入、Restore/Watch、Stable 与 Legacy 清理 PR，在 Read-only Preview 证据完成后再编号，避免提前承诺不可靠的拆分。
+任何 checkpoint 只有代码、合同、Fixture、CI 和适用真实平台证据同时闭合后才能标记已验证；分支内通过不等于公开发布或稳定用户验证完成。
 
 ## 5. 跨阶段安全门槛矩阵
 
 | 安全证据 | 最晚完成阶段 | 阻断内容 |
 | --- | --- | --- |
 | 真实 Node↔.NET 同 Codex Home 争锁 | 阶段 1 | 阻断“迁移期入口共享安全锁合同”的声明 |
-| Busy 与不可验证锁的结构化区分 | 阶段 1/PR 3 | 阻断自动重试、自动清锁和 Electron 写入 |
+| Busy 与不可验证锁的结构化区分 | 阶段 1/C3 | 阻断自动重试、自动清锁和 Electron 写入 |
 | 不同 Codex Home 共享 SQLite Home 的互斥 | 阶段 4 进入前 | 阻断所有 Electron 写能力 |
 | 双向 Backup Round-trip | 阶段 2 建证、阶段 5 全通过 | 阻断 .NET Legacy 替代 |
 | Foreign Pending Restore | 阶段 2 建证、阶段 5 全通过 | 阻断跨入口 Recovery 声明 |
@@ -208,4 +217,4 @@ Node 与 .NET 在同一 Fixture 上不一致时，PR 必须记录：
 
 ## 8. 本 PR 完成后的下一步
 
-阶段 0 合入并标记 Completed 后，下一项是 PR 2：新增 `src/public-api.js`，让 CLI 与 Web 经单一公开入口调用现有 Node 行为。该 PR 不移动 Core、不改同步算法，也不同时引入 `--json`、TypeScript 或 Electron。
+V1 的下一项是 `C1`：新增 `src/public-api.js`，让 CLI 与 Web 经单一公开入口调用现有 Node 行为，并建立结构化错误边界。该 checkpoint 不移动 Core、不改同步算法，也不同时引入 `--json`、TypeScript 或 Electron；其验证不使 Phase 1 在最终 PR 合入前 Completed。

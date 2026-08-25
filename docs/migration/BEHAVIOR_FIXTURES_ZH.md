@@ -69,14 +69,20 @@ Fixture 不是用户数据样本，严禁从真实 `~/.codex`、认证文件或�
 | Fixture ID | 运行方式 | 关键预期 / 安全门槛 |
 | --- | --- | --- |
 | `locked-rollout` | 平台真实文件锁 | 锁定文件不被写；其他安全目标可形成 Partial Result；返回 `ROLLOUT_LOCKED` 语义并可重试 |
-| `active-rollout-changing` | 扫描后、应用前改变目标 | 变化文件被跳过或 Plan 失效；不覆盖 Codex 新写入，使用 `ROLLOUT_CHANGED`/`PLAN_STALE` |
+| `active-rollout-changing` | 扫描后、应用前改变目标 | 变化文件被跳过或 Plan 失效；不覆盖 Codex 新写入；Prepare/Apply 返回 `STALE_STATE`（`details.reason=rollout`），旧直连入口可保留 `ROLLOUT_CHANGED` |
 | `sqlite-busy` | 真实 SQLite 写锁 | 在 rollout mutation 和 Backup 前阻断，返回 `SQLITE_BUSY`，全部原始 Hash 不变 |
 | `node-dotnet-lock-contention` | 启动真实 Node 与 .NET 进程争用同一 `<CodexHome>/tmp/provider-sync.lock` | 恰有一个写者获得 protocol v2 锁；另一方为 `OPERATION_BUSY`；败方不创建 Backup、不改任何目标 |
 | `shared-sqlite-home-contention` | 两个不同 Codex Home 指向同一 SQLite Home，并发写 | 不能因 Codex Home 锁不同而同时写同一 DB；阶段 1 必须验证/裁决共享资源锁，在通过前不得开放 Electron 写能力 |
+| `dual-resource-lock-order` | 两个 Codex Home 与一个 SQLite Home 由 Node/.NET 交叉并发写 | 两层 lock 路径和顺序一致；不死锁；恰有一个 SQLite writer；败方无 Backup、Journal 或业务 mutation |
+| `sqlite-resource-lock-unverifiable` | State DB resource lock 的 owner、协议、物理路径 identity 或 ABA 状态不可验证 | fail closed，返回 `LOCK_UNVERIFIABLE` 且范围为 state-db；不得自动删除或降级为 Busy |
 | `lock-unverifiable` | future protocol、损坏 owner、进程启动身份不可读、ABA/目录身份变化 | fail closed，返回 `LOCK_UNVERIFIABLE`；不得误报普通 Busy，不得自动删除不可证明归属的锁 |
 | `pending-journal` | Managed Backup 中存在未终结 Journal | Status 可读并暴露恢复证据；Sync/Switch 被 `PENDING_TRANSACTION`/`RECOVERY_REQUIRED` 阻断。Prune 仍可作为 recovery-safe maintenance 执行，但必须保护所有 Pending Journal 引用的备份 |
 | `foreign-pending-restore` | Node 创建 Pending Journal/Backup 后由 .NET Restore，及反方向 | 两个方向都只按受管清单恢复，清除 Pending 前必须落入合法 terminal；差异需显式裁决 |
 | `restore-mid-failure` | Restore 在某一目标已替换后注入失败 | 不能报告成功；必须完整补偿，或保留可操作证据并返回 `RECOVERY_REQUIRED`，不得留下无 Journal 的半恢复状态 |
+| `restore-v2-pre-snapshot-failure` | Restore v2 的恢复前 snapshot 在任何目标 mutation 前失败 | `BACKUP_FAILED` 或更具体失败；不创建 restore mutation，source backup 与原始目标 Hash 不变 |
+| `restore-v2-journal-crash-matrix` | Restore v2 在 prepared/applying/committing/committed-pending-ack/rollback-pending 和 ack 窗口终止 | 非 terminal 阻断普通写并可由 pre-restore snapshot 或目标 hash 显式收敛；completed/rolled-back/recovery-required 经重新读取确认，不能反向改写 terminal |
+| `restore-v2-foreign-pending` | Node 与 .NET 用对方 source backup 的 pending journal 触发 Restore v2 | 先验证 foreign manifest/journal 与目标边界；当前 Restore 仍创建自身 snapshot/journal；未知版本 fail closed |
+| `restore-v2-ack-reconciliation` | `committed-pending-ack` 已持久化但 API acknowledgement/observer 失败 | 不把已提交 Restore 报为可回滚失败；重新读取 journal 与目标 Hash 后收敛到 `completed` 或 `recovery-required` |
 | `bidirectional-backup-roundtrip` | Node Backup→.NET Restore；.NET Backup→Node Restore | 两个方向恢复到等价语义状态；正文和不应变化字段逐字节一致；Metadata v1/v2 兼容边界明确 |
 | `journal-crash-matrix` | 在 prepared/applying/applied/commit/rollback 及 ack 窗口真实终止进程 | durable terminal 优先；非 terminal 阻断后续写；不得对 committed 状态补回滚事件；显式 Restore 可收敛 |
 | `rollback-recovery-required` | mutation 后使自动 rollback 的一个或多个目标失败 | 原始错误与所有 rollback error 均保留；Backup、completed/uncompleted targets 和 `RECOVERY_REQUIRED` 可用于人工恢复 |

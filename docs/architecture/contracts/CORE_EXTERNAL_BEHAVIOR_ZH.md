@@ -103,6 +103,12 @@ Web Profile 虽然不是 CLI，其显式 SQLite Home 仍沿用现有来源值 `c
 - Windows WSL UNC SQLite Home 不允许安全读写，写操作必须在备份和其他 mutation 之前失败；
 - 不得因为某个候选 DB 存在，就同时改写多个数据库。
 
+### 3.4 vNext 目标：双层资源锁（未实现）
+
+v0.5 当前以 Codex Home operation lock 为现状事实；它尚未实现共享 State DB 的独立资源锁。vNext 的目标合同由 [ADR-0012](../../adr/0012-dual-resource-lock-contract.md) 冻结：会修改 SQLite 的操作在同一 Codex Home lock 之外还必须持有按物理 DB identity 计算的 State DB resource lock，并以固定顺序在锁内重新校验 storage、Revision、pending journal 和可写性。
+
+该目标不改变本节的 storage 优先级，也不授权当前入口扩展写入。双层 lock 的 Node/.NET 兼容、owner metadata、Busy/不可验证错误和 Hash 无副作用证据属于后续实现与 Fixture 门槛。
+
 ## 4. `getStatus`
 
 ### 4.1 当前输入
@@ -412,7 +418,13 @@ platform?
 - 当前恢复目标已落盘但 rolledBack terminal 标记失败时，调用方只会收到失败，不能据此证明目标未恢复或 Journal 已收敛；vNext 必须增加 commit/terminal acknowledgement reconciliation；
 - 补齐安全机制时必须继续兼容 v1/v2 旧备份格式和现有 restore 选项。
 
-### 7.4 当前结果
+### 7.4 vNext Restore v2 目标（未实现）
+
+[ADR-0013](../../adr/0013-restore-v2-recovery-state-machine.md) 冻结 Restore v2 的目标：在任何 restore mutation 前创建独立的恢复前 snapshot，并用独立 restore operation journal 记录 source backup、目标清单、每目标状态和 durable terminal。`prepared/applying/committing/rollback-pending` crash 必须由显式 recovery 依据该 snapshot 补偿；`committed-pending-ack` 必须按目标 Hash 前进到 `completed` 或 `recovery-required`，不得对已提交目标启动反向补偿。
+
+当前 `runRestore` 仍是 7.3 所述 v0.5 行为。source backup v1/v2、现有 restore options、relocation 双重授权和 foreign pending 处理必须保持兼容；未知 journal/schema 必须 fail closed，不能依赖 message 推断结果。
+
+### 7.5 当前结果
 
 成功时返回经过验证的备份 `metadata.json` payload。v2 托管备份通常包含：
 
@@ -600,10 +612,7 @@ firstUserMessage
 
 正式 operation lock 当前按 Codex Home 定位。因此，两个不同 Codex Home 如果显式解析到同一个 SQLite Home/同一个 `state_5.sqlite`，会获得不同的 operation lock，当前实现不能阻止它们并发修改同一数据库。
 
-该行为是已知并发盲区，不是允许并发的合同。vNext 在宣称多 Profile 安全前必须二选一并形成 ADR：
-
-- 对规范化后的 SQLite 资源增加跨 Codex Home 的 resource lock；或
-- 检测共享目标并 fail closed，要求用户串行处理。
+该行为是已知并发盲区，不是允许并发的合同。ADR-0012 已冻结 vNext 选择：对规范化后的 SQLite 资源增加跨 Codex Home 的 resource lock；在该合同完成真实跨运行时验证前，任何入口仍不得宣称多 Profile/shared SQLite 写入安全。
 
 在此问题解决前，测试和文档不得把“不同 Profile/Codex Home”直接等同于“不同存储资源”。
 

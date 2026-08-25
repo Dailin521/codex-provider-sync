@@ -28,8 +28,38 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: "npm"
       - run: npm ci
-      - run: npm run web:build
       - run: npm test
+
+  web-build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run web:build
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: "npm"
+      - run: npm ci
+      - name: Reject production moderate, high, and critical vulnerabilities
+        run: npm audit --omit=dev --audit-level=moderate
+      - name: Reject full-tree high and critical vulnerabilities
+        run: npm audit --audit-level=high
 
   desktop-test:
     runs-on: windows-latest
@@ -71,6 +101,8 @@ jobs:
     if: ${{ always() }}
     needs:
       - test
+      - web-build
+      - dependency-audit
       - desktop-test
       - desktop-macos
       - desktop-linux-lock
@@ -79,11 +111,15 @@ jobs:
       - name: Verify required jobs
         env:
           NODE_TEST_RESULT: ${{ needs.test.result }}
+          WEB_BUILD_RESULT: ${{ needs.web-build.result }}
+          DEPENDENCY_AUDIT_RESULT: ${{ needs.dependency-audit.result }}
           DESKTOP_TEST_RESULT: ${{ needs.desktop-test.result }}
           MACOS_TEST_RESULT: ${{ needs.desktop-macos.result }}
           LINUX_LOCK_RESULT: ${{ needs.desktop-linux-lock.result }}
         run: |
           if [ "$NODE_TEST_RESULT" != "success" ] ||
+             [ "$WEB_BUILD_RESULT" != "success" ] ||
+             [ "$DEPENDENCY_AUDIT_RESULT" != "success" ] ||
              [ "$DESKTOP_TEST_RESULT" != "success" ] ||
              [ "$MACOS_TEST_RESULT" != "success" ] ||
              [ "$LINUX_LOCK_RESULT" != "success" ]; then

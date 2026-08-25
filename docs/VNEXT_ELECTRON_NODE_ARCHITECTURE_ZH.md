@@ -353,10 +353,12 @@ window.sqlite
 ### 4.7 渐进迁移
 
 - `main` 始终可发布；
-- 每个 PR 都可独立审查；
+- 默认按 ADR-0008 使用可独立合入的小型 PR；
+- 经 ADR-0011 明确批准的 V1 例外使用单一 `V1` 分支和一个最终 PR，但 `C0`～`C10` 必须成为不可变、可独立审查和回退的内部 checkpoint；
+- 分支 checkpoint 的验证不等于受保护分支的阶段 Completed，最终合入前 Phase 保持 In Progress/Pending；
 - 旧 CLI 和旧 GUI 在迁移期间继续工作；
 - 新 Electron 先只读，再开放写入；
-- 不使用长期漂移的“大重写分支”承载全部开发。
+- 不使用该例外放宽 Fixture、兼容、发布或 .NET 保留门槛。
 
 ---
 
@@ -819,17 +821,13 @@ export interface SyncPlan {
 - 进程锁；
 - SQLite 可写性。
 
-若变化，返回：
+若任一绑定状态变化，Apply 返回统一的 Canonical Code：
 
 ```text
-PLAN_STALE
-PROFILE_CHANGED
-STORAGE_CHANGED
-CONFIG_CHANGED
-ROLLOUT_CHANGED
+STALE_STATE
 ```
 
-用户必须刷新并再次确认。
+安全的 `details.reason` 可区分 `profile/config/storage/rollout/state-db`；调用方不得据此绕过重新 Prepare。Plan 超过 TTL 则返回 `PLAN_EXPIRED`。用户必须刷新并再次确认。
 
 ### 9.4 Plan 存储
 
@@ -1440,7 +1438,7 @@ Core Runtime 使用 `OperationCoordinator`：
 
 ### 18.2 跨进程锁
 
-同一 Codex Home 的所有正式入口必须遵守兼容的跨进程锁合同：
+同一 Codex Home 的所有正式入口必须遵守兼容的跨进程锁合同；vNext 对共享 SQLite Home 的双层资源身份、路径、顺序和错误语义由 [ADR-0012](adr/0012-dual-resource-lock-contract.md) 冻结，当前代码尚未实现该目标合同：
 
 ```text
 CLI、Web UI、Electron、旧 GUI 同时运行
@@ -1490,7 +1488,8 @@ interface CoreErrorDto {
 INVALID_INPUT
 PROFILE_CHANGED
 STORAGE_CHANGED
-PLAN_STALE
+STALE_STATE
+PLAN_EXPIRED
 CODEX_HOME_NOT_FOUND
 STATE_DB_NOT_FOUND
 SQLITE_UNSUPPORTED_PATH
@@ -1505,6 +1504,7 @@ RECOVERY_REQUIRED
 RESTORE_VALIDATION_FAILED
 PERMISSION_DENIED
 OPERATION_BUSY
+LOCK_UNVERIFIABLE
 OPERATION_CANCELLED
 CORE_RUNTIME_CRASHED
 PROTOCOL_VERSION_MISMATCH
@@ -2378,9 +2378,18 @@ Electron 只开放：
 
 ---
 
-## 31. 首批 PR 拆分建议
+## 31. V1 内部 Checkpoint 序列
 
-### PR 1：冻结架构合同和 ADR
+在 ADR-0011 的单最终 PR 例外下，以下 `C0`～`C10` 是 V1 分支内的不可变 checkpoint，不是已经合入的独立 PR。旧 PR 2～PR 10 的依赖与安全意图按 ADR-0011 映射到这些 checkpoint。每个 checkpoint 必须保留 commit、测试证据和回退点；所有 Phase 状态仍以最终合入受保护分支为准。
+
+### C0：V1 交付治理、双层锁与 Restore v2 文档合同
+
+- 新增 ADR-0011～ADR-0013；
+- 使架构、执行索引、Core/Error/Fixture 合同对单最终 PR、共享 State DB 锁与 Restore v2 目标可互相导航；
+- 固化基线测试与依赖审计，并消除现有 Vite 链的 high/moderate 告警；
+- 不把目标合同描述为已经实现。
+
+### 已完成基线：PR 1（阶段 0 原合同）
 
 - 以本文件作为已确认的架构基线；
 - 新增 ADR-0001～ADR-0010；
@@ -2388,74 +2397,76 @@ Electron 只开放：
 - 更新 `AGENTS.md` 中的 ADR 入口；
 - 不改运行代码。
 
-### PR 2：Core Public API
+### C1：Core Public API 与结构化错误
 
 - 新增 `src/public-api.js`；
 - CLI 和 Web 改为只从 Public API 导入；
-- 不移动核心模块；
-- 原测试全绿。
-
-### PR 3：结构化错误
-
-- 统一 Error Code；
+- 不移动核心模块或改变事务顺序；
+- 统一 Canonical Error Code 与 Legacy Adapter；
 - 保持现有人类提示；
-- Web 与 CLI 映射；
-- 加错误合同测试。
+- 增加 Public API、错误合同和入口隔离测试。
 
-### PR 4：CLI `--json`
+### C2：CLI `--json`
 
-- Status JSON；
-- Sync JSON；
-- Exit Code 合同；
-- 文档；
-- 自动化测试。
+- Human Mode 保持 v0.5 兼容；
+- JSON Mode stdout 只输出一个版本化 envelope，进度与诊断进入 stderr；
+- 固定 JSON Mode Exit Code 并以真实子进程测试。
 
-### PR 5：Prepare / Apply
+### C3：Prepare / Apply、协调器与双层锁
 
-- 先把现有 Web 的 Revision 逻辑下沉；
-- `prepareSync`；
-- `applySync`；
+- 把 Web Revision 逻辑下沉为 Core Plan/Apply；
+- Sync、Switch、Restore 使用短期、单次、锁内重校验的 planId；
+- Node 与迁移期 .NET 实现 Codex Home → State DB resource 双层锁；
+- Watch 合并事件并让位于人工操作；
 - CLI 内部仍一次完成；
 - 兼容现有命令。
 
-### PR 6：Workspace 与 Core 骨架
+### C4：Workspace、Contracts 与 Core Client
 
 - npm workspaces；
 - `packages/core`，先包装阶段 1 的 `src/public-api.js`，不改变业务行为；
 - `packages/contracts`；
 - `packages/core-client`；
-- 不迁移 UI，不在同一 PR 搬迁 Core 内部模块。
+- 根 npm 包继续独立提供 Node 16 CLI，Electron 依赖不进入其 tarball。
 
-### PR 7：React UI 分解
+### C5：共享 React UI 与 Web 迁移
 
-- `AppShell`；
-- `OverviewFeature`；
-- `SyncFeature`；
-- `HttpCoreClient`；
-- Web UI 保持可用。
+- 建立 AppShell、Design System、九个 feature 页面、i18n 和主题；
+- Web 通过 `HttpCoreClient` 复用 `app-ui`；
+- 保留 pairing、Origin、Profile/Storage Revision、History 隐私边界。
 
-### PR 8：Electron Skeleton
+### C6：Electron 安全骨架、Utility Runtime 与只读能力
 
 - electron-vite；
 - electron-builder；
-- Main/Preload/Renderer；
-- 安全基线；
-- Hello/Version 握手。
+- Main/Preload/Renderer/Core Utility Process 边界；
+- 安全 BrowserWindow、白名单 IPC、Hello/Version 握手与 crash recovery；
+- 只开放 Profile、Status、Backup、Diagnostics 和按需 History。
 
-### PR 9：Core Utility Process
+### C7：Electron Sync / Switch
 
-- Supervisor；
-- Runtime Host；
-- Status；
-- Crash Test；
-- Protocol Test。
+- 只经 Prepare/Confirm/Apply 开放写入；
+- Provider 与三种 model 策略；
+- Progress、Cancel、Partial、Backup-first 与安全 Fixture。
 
-### PR 10：Read-only Preview Release
+### C8：Restore / Watch / Diagnostics / Update
 
-- Windows/macOS/Linux package；
-- GitHub prerelease；
-- 使用说明；
-- 反馈模板。
+- Restore v2 恢复前 snapshot、独立 journal、补偿与 ack reconciliation；
+- Foreign Pending、Prune 保护、Watch 优先级、脱敏诊断包；
+- Main-only 更新，写入或 Pending Recovery 时禁止安装。
+
+### C9：打包、CI 与发布工程
+
+- 四个目标平台产物、native SQLite、asar 审计、SBOM 与 checksums；
+- Electron integration 与 packaged smoke 纳入唯一 `ci-gate`；
+- CI 只生成候选 artifact，不自动发布。
+
+### C10：最终证据与 Legacy 交接
+
+- 同步最新 `main` 并重跑全部门禁；
+- README 默认推荐 Electron，.NET 保留并标记 Legacy；
+- 生成脱敏 evidence bundle；
+- tag、npm/GitHub Release、签名、公证和更新通道继续等待单独授权。
 
 ---
 
@@ -2542,7 +2553,7 @@ Electron 只开放：
 4. 不把业务规则写进 Renderer、Preload、IPC Handler；
 5. 不新增第二套同步实现；
 6. 不以“一次性翻译”为理由重写高风险 Core；
-7. 一个 PR 只解决一个主要架构目标；
+7. 默认一个 PR、或 ADR-0011 的一个内部 checkpoint，只解决一个主要架构目标；
 8. 修改外部合同必须更新 Contract Test；
 9. 修改安全流程必须补失败/回滚测试；
 10. 不读取或输出 `auth.json`、Token、消息正文；
@@ -2578,7 +2589,10 @@ docs/adr/
 ├─ 0007-shared-ui-through-core-client.md
 ├─ 0008-incremental-migration-no-big-bang-rewrite.md
 ├─ 0009-plan-confirm-apply-for-writes.md
-└─ 0010-electron-vite-and-electron-builder.md
+├─ 0010-electron-vite-and-electron-builder.md
+├─ 0011-v1-single-branch-single-final-pr.md
+├─ 0012-dual-resource-lock-contract.md
+└─ 0013-restore-v2-recovery-state-machine.md
 ```
 
 ADR 一旦 Accepted，不应通过普通重构 PR 静默推翻。

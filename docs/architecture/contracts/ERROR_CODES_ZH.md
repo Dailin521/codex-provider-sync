@@ -49,7 +49,7 @@ interface CoreErrorDto {
 | `INVALID_INPUT` | 输入缺失、互斥参数、格式或范围无效 | error | 修改输入后是 | 否 |
 | `PROFILE_CHANGED` | 已确认的 Profile Revision 已变化 | warning | 重新读取并确认后是 | 否 |
 | `STORAGE_CHANGED` | 已确认的存储解析结果或 Revision 已变化 | warning | 重新准备 Plan 后是 | 否 |
-| `PLAN_STALE` | Plan 绑定的文件、目标或指纹已变化 | warning | 重新准备 Plan 后是 | 否 |
+| `PLAN_STALE` | 现有/过渡入口用于表示 Plan 绑定的文件、目标或指纹已变化；vNext Prepare/Apply 统一映射为 `STALE_STATE` | warning | 重新准备 Plan 后是 | 否 |
 | `CODEX_HOME_NOT_FOUND` | Codex Home 不存在或不可解析 | error | 修正路径后是 | 否 |
 | `STATE_DB_NOT_FOUND` | 权威 SQLite Home 中缺少要求存在的 `state_5.sqlite` | error | 修复目标后是 | 否 |
 | `SQLITE_UNSUPPORTED_PATH` | 当前平台不能安全访问该 SQLite 路径，例如 Windows WSL UNC | error | 更换执行环境或路径后是 | 否 |
@@ -75,10 +75,17 @@ interface CoreErrorDto {
 
 | Code | 补充原因 | Severity | Retryable | Recovery Required |
 | --- | --- | --- | --- | --- |
-| `PLAN_EXPIRED` | Plan 已有明确的过期时间和重新准备动作；它与存储内容变化导致的 `PLAN_STALE` 不同 | warning | 重新准备 Plan 后是 | 否 |
+| `PLAN_EXPIRED` | Plan 已有明确的过期时间和重新准备动作；它与状态漂移导致的 `STALE_STATE` 不同 | warning | 重新准备 Plan 后是 | 否 |
+| `STALE_STATE` | Apply 加锁后发现 profile/config/rollout/state DB 或 storage revision 与 Plan 不一致 | warning | 重新准备 Plan 后是 | 否 |
 | `LOCK_UNVERIFIABLE` | 无法可靠验证锁所有者、进程启动身份、协议版本或锁目录身份；不能误判为普通 Busy，也不能冒险删除 | error | 消除不确定状态后是 | 否 |
 
 `LOCK_UNVERIFIABLE` 必须 fail closed。只有确认存在活跃冲突所有者时才使用 `OPERATION_BUSY`；未来协议、损坏 owner、身份读取失败或 ABA/目录身份不确定均使用 `LOCK_UNVERIFIABLE`。用户提示不得建议盲目删除锁目录。
+
+ADR-0012 的双层资源锁实现后，`OPERATION_BUSY.details.busyScope` 必须为 `codex-home` 或 `state-db`，`LOCK_UNVERIFIABLE.details.lockScope` 必须标示同一范围；SQLite 引擎在资源锁已获得后仍 busy 时继续使用 `SQLITE_BUSY`。这些字段是 vNext 目标，不表示当前入口已发出它们。
+
+vNext Prepare/Apply 对任何加锁后 revision 漂移只发出 `STALE_STATE`，并可用安全的 `details.reason=profile|config|storage|rollout|state-db` 说明维度。`PLAN_STALE`、`PROFILE_CHANGED` 与 `STORAGE_CHANGED` 在旧 Web/适配器完成迁移前仍可读取，但不得成为新 CoreClient/IPC 的稳定写操作结果。
+
+ADR-0013 的 Restore v2 实现后，非 terminal restore operation journal 使用 `PENDING_TRANSACTION` 或 `RECOVERY_REQUIRED`；`details` 可安全包含 `operationKind=restore`、operationId、source backup identity、pre-restore snapshot identity 和 completed/uncompleted target 摘要，但不得包含消息正文、认证信息或任意原始路径。
 
 ## 4. Legacy Surface 现状
 
@@ -125,12 +132,12 @@ interface CoreErrorDto {
 | `RECOVERY_REQUIRED`、`recovery_required` | `RECOVERY_REQUIRED` | 保留备份路径、operationId 与恢复要求 |
 | `SYNC_FAILED_ROLLED_BACK`、`sync_failed_rolled_back` | `SYNC_FAILED_ROLLED_BACK` | `recoveryRequired=false`，保留 rollback status |
 | `ABORT_ERR`、`cancelled` | `OPERATION_CANCELLED` | 映射前检查 Journal；不能仅凭取消认定无需恢复 |
-| `TARGET_BUSY`、`target_busy`、`operation_busy` | `OPERATION_BUSY` | 仅适用于已证明存在活跃竞争者；用 `details.busyScope` 区分 coordinator/target |
-| 锁 owner/协议/进程身份无法验证，未来协议或目录身份不确定 | `LOCK_UNVERIFIABLE` | 必须 fail closed，不得降级为 Busy 或自动清锁 |
-| `plan_stale` | `PLAN_STALE` | 调用方必须丢弃旧 Plan |
+| `TARGET_BUSY`、`target_busy`、`operation_busy` | `OPERATION_BUSY` | 仅适用于已证明存在活跃竞争者；vNext 用 `details.busyScope=codex-home|state-db` 区分资源范围 |
+| 锁 owner/协议/进程身份无法验证，未来协议或目录身份不确定 | `LOCK_UNVERIFIABLE` | 必须 fail closed；vNext 用 `details.lockScope=codex-home|state-db`；不得降级为 Busy 或自动清锁 |
+| `plan_stale`、`PLAN_STALE` | `STALE_STATE` | Prepare/Apply 调用方必须丢弃旧 Plan；旧直连 Web 入口迁移前可保留原码 |
 | `plan_expired` | `PLAN_EXPIRED` | 调用方必须重新生成 Plan |
-| `PROFILE_CHANGED` | `PROFILE_CHANGED` | Web/Client 刷新 Profile 后重新确认 |
-| `STORAGE_CHANGED` | `STORAGE_CHANGED` | 重新解析 Storage 与 Revision |
+| `PROFILE_CHANGED` | `STALE_STATE` | Prepare/Apply 使用 `details.reason=profile`；旧直连 Web 入口迁移前可保留原码 |
+| `STORAGE_CHANGED` | `STALE_STATE` | Prepare/Apply 使用 `details.reason=storage`；旧直连 Web 入口迁移前可保留原码 |
 | `operation_failed` | 优先映射具体码，否则 `INTERNAL_ERROR` | 禁止把所有失败永久折叠为 `INTERNAL_ERROR` |
 | Node/OS `ENOENT` | 由操作上下文映射 | Codex Home、State DB、Backup 的缺失必须分别分类 |
 | Node/OS `EACCES`、`EPERM` | `PERMISSION_DENIED` | 原始系统码可放入安全 details |
