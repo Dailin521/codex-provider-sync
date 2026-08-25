@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-08-25
-- Scope: vNext target lock contract; not implemented by v0.5
+- Scope: vNext lock contract; implemented by the V1/C3 checkpoint, not yet released or merged
 
 ## Context
 
@@ -40,11 +40,13 @@ Node、迁移期 .NET、CLI、Web、Electron Runtime 必须使用相同锁路径
 - 锁不是 backup 或 journal 的替代物；获得两锁不允许跳过 Plan、Revision、Backup-first、transaction journal 或验证。
 - 同一 State DB 的败方不得创建 backup、journal、config/rollout/SQLite/global-state mutation，且所有原始 Hash 保持不变。
 - 任一正式入口不得自行发明锁路径、只靠 UI 禁用按钮，或在持有 State DB resource lock 后再以相反顺序等待 Codex Home lock。
-- 当前 v0.5 单层行为仍是现状事实；本文不声称它已实现双层锁。
+- 已发布的 v0.5 仍是单层锁；V1/C3 的 Node 与迁移期 .NET 实现已采用双层锁，但在最终 PR 合入、完整 CI 与 release evidence 完成前不把它描述为已发布能力。
 
 ## Migration and Validation
 
-实现前必须完成 `node-dotnet-lock-contention`、`shared-sqlite-home-contention`、双层 lock-order/deadlock、`lock-unverifiable` 和 Windows UNC 无写入 Fixture。真实 Node/.NET 进程必须在同一临时资源上争锁；Mock 不足以证明兼容。任何旧协议的兼容读取或拒绝策略必须有独立 Fixture 和差异登记。
+V1/C3 已建立 `node-dotnet-lock-contention`、`shared-sqlite-home-contention`、双层 lock-order、`lock-unverifiable` 与跨进程 Status Fixture。真实 Node/.NET 进程在同一临时 State DB resource key 上完成双向争锁，Node/.NET 各自验证两个 Home 共享 DB 时败方零 Backup/零业务变更。Windows WSL UNC 全 Hash 门槛仍按执行索引在 Electron 写能力开放前继续保留。任何旧协议的兼容读取或拒绝策略必须有独立 Fixture 和差异登记。
+
+缺失数据库只在其物理父目录已经存在且能被 `realpath` 可靠证明时生成 resource identity；不得以 Codex Home lock 替代 State DB lock。Metadata v1 Restore 若目标父目录不存在，Node 与 .NET 均在任何 Backup、Journal 或目标 mutation 前返回 `LOCK_UNVERIFIABLE(state-db)`。
 
 ## Related
 

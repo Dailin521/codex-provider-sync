@@ -130,7 +130,7 @@ public sealed class AutomationHostTests
     }
 
     [Fact]
-    public async Task TimeoutAndConcurrentUse_HaveStableExitCodes()
+    public async Task TimeoutAndConcurrentStatus_HaveStableExitCodes()
     {
         using TemporaryDirectory temporary = new();
         string ledger = Path.Combine(temporary.Path, "ledger");
@@ -163,15 +163,16 @@ public sealed class AutomationHostTests
             "--provider", "relay", "--ledger-root", Path.Combine(temporary.Path, "busy-ledger")
         ]);
         await started.Task;
-        AutomationRunResult busy = await busyHost.RunAsync(
+        AutomationRunResult status = await busyHost.RunAsync(
             ["status", "--codex-home", temporary.Path]);
         pending.SetResult(busyFactory.Write.Preview(new SyncIntent(temporary.Path, null, "relay")));
         await active;
 
         Assert.Equal(AutomationExitCodes.CancelledOrTimedOut, timedOut.ExitCode);
         Assert.Equal("timeout", Assert.Single(timedOut.Response.Errors).Code);
-        Assert.Equal(AutomationExitCodes.Busy, busy.ExitCode);
-        Assert.Equal("operation_busy", Assert.Single(busy.Response.Errors).Code);
+        Assert.Equal(AutomationExitCodes.Success, status.ExitCode);
+        Assert.Equal("succeeded", status.Response.Lifecycle);
+        Assert.Empty(status.Response.Errors);
     }
 
     [Fact]

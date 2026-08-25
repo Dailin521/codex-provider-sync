@@ -178,6 +178,15 @@ public static class TextFormatter
             }
             lines.Insert(6, "Recovery required:");
         }
+        if (status.OperationInProgress is { } operation)
+        {
+            lines.Insert(
+                6,
+                $"Status read blocked; showing the last complete snapshot ({status.StatusReadBlocked?.Reason ?? "write-operation"}).");
+            lines.Insert(
+                6,
+                $"Operation in progress: {operation.Operation} (scope: {operation.BusyScope}; lock: {operation.LockState})");
+        }
 
         AppendSqliteStatus(lines, status, chinese: false);
         AppendProjectVisibility(lines, status, chinese: false);
@@ -229,6 +238,15 @@ public static class TextFormatter
                 lines.Insert(6, $"  {transaction.State}: {transaction.BackupDirectory}");
             }
             lines.Insert(6, "需要恢复:");
+        }
+        if (status.OperationInProgress is { } operation)
+        {
+            lines.Insert(
+                6,
+                $"状态读取已阻断；当前显示最后一次完整快照（{status.StatusReadBlocked?.Reason ?? "write-operation"}）。");
+            lines.Insert(
+                6,
+                $"进行中的操作: {operation.Operation}（范围: {operation.BusyScope}；锁状态: {operation.LockState}）");
         }
 
         AppendSqliteStatus(lines, status, chinese: true);

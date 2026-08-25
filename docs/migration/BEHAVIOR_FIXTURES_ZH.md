@@ -75,7 +75,11 @@ Fixture 不是用户数据样本，严禁从真实 `~/.codex`、认证文件或�
 | `shared-sqlite-home-contention` | 两个不同 Codex Home 指向同一 SQLite Home，并发写 | 不能因 Codex Home 锁不同而同时写同一 DB；阶段 1 必须验证/裁决共享资源锁，在通过前不得开放 Electron 写能力 |
 | `dual-resource-lock-order` | 两个 Codex Home 与一个 SQLite Home 由 Node/.NET 交叉并发写 | 两层 lock 路径和顺序一致；不死锁；恰有一个 SQLite writer；败方无 Backup、Journal 或业务 mutation |
 | `sqlite-resource-lock-unverifiable` | State DB resource lock 的 owner、协议、物理路径 identity 或 ABA 状态不可验证 | fail closed，返回 `LOCK_UNVERIFIABLE` 且范围为 state-db；不得自动删除或降级为 Busy |
+| `restore-missing-state-db-parent` | Metadata v1/v2 Restore 指向缺失 DB，且其物理父目录也不存在 | Node/.NET 都在任何 Backup、Journal、config/rollout/DB mutation 前返回 `LOCK_UNVERIFIABLE(state-db)`；不得用 Home lock 代替资源锁 |
 | `lock-unverifiable` | future protocol、损坏 owner、进程启动身份不可读、ABA/目录身份变化 | fail closed，返回 `LOCK_UNVERIFIABLE`；不得误报普通 Busy，不得自动删除不可证明归属的锁 |
+| `external-write-status-snapshot` | 真实第二进程持有 Home→State 双锁，或另一 Home 只持共享 State DB 锁，并在锁内改变 config/SQLite | Core 与 Local Web 不扫描中间态；有缓存时逐字段保留最后完整 snapshot 并附 operation，无缓存时 `rolloutScanComplete:false`；不可验证锁不得显示 aligned/healthy |
+| `plan-ledger-replay-expiry` | Plan 过期、重放、跨 operation、重启失效、篡改 apply payload | 只允许当前进程内 10 分钟单次消费；失效返回 `PLAN_EXPIRED`，附加字段返回 `INVALID_INPUT`，均无 Backup/Journal/mutation |
+| `watch-manual-priority` | 单一文件事件触发 Watch，但人工 Apply 已持有本进程协调器；等待期间继续产生重复事件 | Watch 不并发、不计失败；保留并合并 reasons，人工 operation completion 后恰运行一次 follow-up；stop 后 callback 不再 Apply |
 | `pending-journal` | Managed Backup 中存在未终结 Journal | Status 可读并暴露恢复证据；Sync/Switch 被 `PENDING_TRANSACTION`/`RECOVERY_REQUIRED` 阻断。Prune 仍可作为 recovery-safe maintenance 执行，但必须保护所有 Pending Journal 引用的备份 |
 | `foreign-pending-restore` | Node 创建 Pending Journal/Backup 后由 .NET Restore，及反方向 | 两个方向都只按受管清单恢复，清除 Pending 前必须落入合法 terminal；差异需显式裁决 |
 | `restore-mid-failure` | Restore 在某一目标已替换后注入失败 | 不能报告成功；必须完整补偿，或保留可操作证据并返回 `RECOVERY_REQUIRED`，不得留下无 Journal 的半恢复状态 |
@@ -88,6 +92,8 @@ Fixture 不是用户数据样本，严禁从真实 `~/.codex`、认证文件或�
 | `rollback-recovery-required` | mutation 后使自动 rollback 的一个或多个目标失败 | 原始错误与所有 rollback error 均保留；Backup、completed/uncompleted targets 和 `RECOVERY_REQUIRED` 可用于人工恢复 |
 
 真实跨运行时测试不能用 Mock 代替进程争锁。Node 与 .NET 必须在同一临时目标上运行，并以文件/SQLite 最终效果作为独立证据。
+
+V1/C3 的 executable mapping：Plan/revision 见 `test/plan-ledger.test.js`、`test/operation-revision.test.js`、`test/plan-apply.test.js`；Node 锁与外部 Status 见 `test/state-db-lock.test.js`、`test/status-coordination.test.js`；Watch 见 `test/watch.test.js`；Web transport 见 `test/web-server.test.js`；.NET 与跨运行时锁见 `StateDbLockResourceTests`、`DualResourceLockIntegrationTests`、`CrossRuntimeStateDbLockTests`、`LockServiceTests`。完整命令与结果记录在 `evidence/C3_PLAN_APPLY_DUAL_LOCK_2026-08-25.md`。
 
 ## 6. Restore、Backup 与 Prune
 

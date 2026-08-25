@@ -158,7 +158,8 @@ public sealed class BackupService
     public async Task<RestoreResult> RestoreBackupAsync(
         string backupDir,
         CodexStorageLayout storage,
-        RestoreBackupOptions? options = null)
+        RestoreBackupOptions? options = null,
+        string? expectedStateDbTargetPath = null)
     {
         storage.EnsureSqliteAccessSupported("restore");
         options ??= new RestoreBackupOptions();
@@ -264,6 +265,13 @@ public sealed class BackupService
                     databaseRestorePlan = (sourcePath, targetPath);
                 }
             }
+            if (expectedStateDbTargetPath is not null
+                && (databaseRestorePlan is null
+                    || !PathsEqual(databaseRestorePlan.Value.TargetPath, expectedStateDbTargetPath)))
+            {
+                throw new InvalidOperationException(
+                    "The resolved State DB restore target changed after its resource lock was selected.");
+            }
         }
 
         if (options.RestoreConfig)
@@ -295,6 +303,67 @@ public sealed class BackupService
             CreatedAt = metadata.CreatedAt,
             ChangedSessionFiles = metadata.ChangedSessionFiles
         };
+    }
+
+    internal async Task<string> ResolveRestoreStateDbTargetPathAsync(
+        string backupDir,
+        CodexStorageLayout storage,
+        RestoreBackupOptions options)
+    {
+        storage.EnsureSqliteAccessSupported("restore");
+        string normalizedBackupDir = Path.GetFullPath(backupDir);
+        string metadataPath = Path.Combine(normalizedBackupDir, "metadata.json");
+        BackupMetadataFile metadata = JsonSerializer.Deserialize<BackupMetadataFile>(
+            await File.ReadAllTextAsync(metadataPath),
+            JsonOptions()) ?? throw new InvalidOperationException($"Backup metadata is invalid: {backupDir}");
+        if (!string.Equals(metadata.Namespace, AppConstants.BackupNamespace, StringComparison.Ordinal)
+            || metadata.Version is not (1 or 2))
+        {
+            throw new InvalidOperationException($"Unsupported backup metadata in {metadataPath}.");
+        }
+        if (!PathsEqual(metadata.CodexHome, storage.CodexHome))
+        {
+            throw new InvalidOperationException(
+                $"Backup was created for {metadata.CodexHome}, not {storage.CodexHome}.");
+        }
+
+        StateDbLocation? stateDb = storage.StateDbLocation ?? _sqliteStateService.DetectStateDb(storage);
+        if (stateDb is null && storage.HasConfiguredSqliteHome)
+        {
+            throw new InvalidOperationException(
+                $"state_5.sqlite not found in SQLite home {storage.SqliteHome}.");
+        }
+        string targetSqliteHome = ResolveRestoreSqliteHome(storage, metadata, stateDb);
+        bool sqliteHomeRelocation = metadata.Version >= 2
+            && !string.IsNullOrWhiteSpace(metadata.SqliteHome)
+            && !PathsEqual(metadata.SqliteHome, targetSqliteHome);
+        if (sqliteHomeRelocation && !options.AllowSqliteHomeRelocation)
+        {
+            throw new InvalidOperationException(
+                $"Backup SQLite home is {metadata.SqliteHome}, but the current target is {targetSqliteHome}. "
+                + "Confirm SQLite Home relocation before restoring to a different location.");
+        }
+        if (sqliteHomeRelocation && options.RestoreConfig)
+        {
+            throw new InvalidOperationException(
+                "Cannot restore config.toml while relocating SQLite home. "
+                + "Disable config restore to preserve the current target configuration.");
+        }
+
+        IReadOnlyList<string> databaseFiles = metadata.Version >= 2
+            ? metadata.SqliteDbFiles ?? []
+            : metadata.DbFiles ?? [];
+        string[] mainFiles = databaseFiles
+            .Where(static fileName => Path.GetFileName(fileName) == AppConstants.DbFileBasename)
+            .ToArray();
+        if (mainFiles.Length != 1)
+        {
+            throw new InvalidOperationException(
+                "Backup must contain exactly one state_5.sqlite restore source.");
+        }
+        return metadata.Version >= 2
+            ? RestoreSqliteTargetPath(targetSqliteHome, mainFiles[0])
+            : RestoreDbTargetPath(storage.CodexHome, mainFiles[0]);
     }
 
     public async Task UpdateSessionBackupManifestAsync(string backupDir, IReadOnlyList<SessionChange> sessionChanges)

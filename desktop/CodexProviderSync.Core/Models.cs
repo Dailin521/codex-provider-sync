@@ -18,6 +18,9 @@ public sealed class ProviderCounts
 
 public sealed class StatusSnapshot
 {
+    public int SchemaVersion { get; init; } = 1;
+    public DateTimeOffset SnapshotAt { get; init; } = DateTimeOffset.UtcNow;
+    public string StorageRevision { get; init; } = string.Empty;
     public required string CodexHome { get; init; }
     public string SqliteHome { get; init; } = string.Empty;
     public string SqliteHomeSource { get; init; } = "default";
@@ -37,9 +40,27 @@ public sealed class StatusSnapshot
     public required string BackupRoot { get; init; }
     public required BackupSummary BackupSummary { get; init; }
     public IReadOnlyList<TransactionRecoveryInfo> PendingTransactions { get; init; } = [];
+    public StatusOperationInfo? OperationInProgress { get; init; }
+    public StatusReadBlockedInfo? StatusReadBlocked { get; init; }
+    public bool RolloutScanComplete { get; init; } = true;
     [JsonIgnore]
     public StatusPerformanceMetrics PerformanceMetrics { get; init; } = new();
 }
+
+public sealed record StatusOperationInfo(
+    string? OperationId,
+    string Operation,
+    string Actor,
+    string? Runtime,
+    string? StartedAt,
+    string BusyScope,
+    string LockState,
+    string? ErrorCode = null);
+
+public sealed record StatusReadBlockedInfo(
+    string Reason,
+    string LockState,
+    string? Revision = null);
 
 public sealed class StatusPerformanceMetrics
 {

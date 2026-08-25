@@ -13,8 +13,10 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 import { CoreError } from "./core-error.js";
+import { sharedOperationCoordinator } from "./operation-coordinator.js";
 import { detectStateDb } from "./sqlite-state.js";
 import { readConfigText, readRootModelFromConfigText } from "./config-file.js";
 import {
@@ -26,32 +28,14 @@ import {
   withStateDbLocation
 } from "./storage-layout.js";
 
+const watchRegistry = new Map();
+
 function defaultDebounceMs() {
   return 750;
 }
 
 function describeEvent(eventType, filename) {
   return `${eventType ?? "change"}${filename ? `:${filename}` : ""}`;
-}
-
-function makeDebouncer(delayMs, run) {
-  let timer = null;
-  let pending = null;
-
-  const fire = () => {
-    timer = null;
-    const args = pending;
-    pending = null;
-    run(...args);
-  };
-
-  return function schedule(...args) {
-    pending = args;
-    if (timer) {
-      clearTimeout(timer);
-    }
-    timer = setTimeout(fire, delayMs);
-  };
 }
 
 /** @deprecated Compatibility adapter. New transports must use startWatch/stopWatch/getWatchStatus once available. */
@@ -68,6 +52,7 @@ export async function runWatch({
   signal,
   sleepImpl,
   platform,
+  manualOperationWaiter,
   accessImpl = fsp.access
 } = {}) {
   if (!Number.isInteger(debounceMs) || debounceMs < 0) {
@@ -123,7 +108,7 @@ export async function runWatch({
     return withStateDbLocation(layout, await detectStateDb(layout));
   };
 
-  const invokeSync = async (reason, storage) => {
+  const invokeSync = async (reason, reasons, storage) => {
     // Read the current root-level model on every fire so the per-thread
     // model rewrite picks up the latest value the user has in config.toml.
     // We only consider the top-level (root) `model = "..."` line — anything
@@ -138,23 +123,38 @@ export async function runWatch({
       // Missing/unreadable config; carry on with a null model.
     }
     if (typeof onSync === "function") {
-      return onSync({ reason, codexHome, sqliteHome: storage.sqliteHome, storage, model: rootModel });
+      return onSync({ reason, reasons, codexHome, sqliteHome: storage.sqliteHome, storage, model: rootModel });
     }
     if (typeof runSyncImpl === "function") {
-      return runSyncImpl({ codexHome, sqliteHome: storage.sqliteHome, storage, reason, model: rootModel });
+      return runSyncImpl({ codexHome, sqliteHome: storage.sqliteHome, storage, reason, reasons, model: rootModel });
     }
     // Lazy import to avoid pulling in the public Core boundary until needed.
-    const { runSync } = await import("./public-api.js");
-    return runSync({
+    const { prepareSync, applySync } = await import("./public-api.js");
+    const plan = await prepareSync({
       codexHome,
       storage,
       model: rootModel,
+      __actor: "watch",
       onProgress: (event) => {
         if (event?.stage && event.status === "start") {
           log(`  · ${event.stage}`);
         }
       }
     });
+    // Yield one event-loop turn after the read-only plan so an already queued
+    // user confirmation can declare the manual Apply first.
+    await new Promise((resolve) => setImmediate(resolve));
+    return (await applySync({ schemaVersion: 1, planId: plan.planId })).result;
+  };
+
+  const getManualOperationWait = async () => {
+    if (typeof manualOperationWaiter === "function") {
+      return manualOperationWaiter({ codexHome, platform });
+    }
+    return sharedOperationCoordinator.waitForManualOperation(
+      codexHome,
+      platform ?? process.platform
+    );
   };
 
   let stopped = false;
@@ -163,6 +163,11 @@ export async function runWatch({
   let stateWatchGeneration = 0;
   let stateDbInfo = null;
   let activeStorage = null;
+  let debounceTimer = null;
+  const pendingReasons = new Set();
+  let rerunRequested = false;
+  let busyWaitTicket = null;
+  let waitingForExternalChange = false;
   // Track the currently-running sync (if any) so that stop()/SIGINT can
   // wait for it to drain instead of yanking the watcher out from under
   // a half-written SQLite transaction.
@@ -189,15 +194,35 @@ export async function runWatch({
     resolveDone = resolve;
   });
 
-  const debouncedSync = makeDebouncer(debounceMs, (reason) => {
+  const scheduleSync = (reason) => {
     if (stopped) {
       return;
     }
+    pendingReasons.add(reason);
+    if (busyWaitTicket) return;
+    waitingForExternalChange = false;
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      void launchPendingSync();
+    }, debounceMs);
+  };
+
+  const launchPendingSync = () => {
+    if (stopped || pendingReasons.size === 0) return;
+    if (inFlight) {
+      rerunRequested = true;
+      return;
+    }
+    const reasons = [...pendingReasons].sort();
+    pendingReasons.clear();
+    rerunRequested = false;
+    const reason = reasons.includes("config.toml") ? "config.toml" : reasons[0];
     log(`[${new Date().toISOString()}] Detected change (${reason}); running sync...`);
     const task = (async () => {
       try {
         const nextStorage = await resolveCurrentStorage();
-        if (includeStateDb && reason === "config.toml") {
+        if (includeStateDb && reasons.includes("config.toml")) {
           await rebindStateWatchers(nextStorage);
         } else {
           activeStorage = nextStorage;
@@ -207,7 +232,7 @@ export async function runWatch({
           consecutiveNonBusyFailures = 0;
           return;
         }
-        const result = await invokeSync(reason, nextStorage);
+        const result = await invokeSync(reason, reasons, nextStorage);
         log(`[${new Date().toISOString()}] Sync complete: provider=${result.targetProvider}, rollout_files=${result.changedSessionFiles}, sqlite_rows=${result.sqliteRowsUpdated}${result.skippedLockedRolloutFiles?.length ? `, skipped_locked=${result.skippedLockedRolloutFiles.length}` : ""}`);
         // A successful sync resets the consecutive-failure counter
         // so a transient error followed by recovery does not
@@ -221,9 +246,39 @@ export async function runWatch({
         // SQLite being in use is a normal transient condition while Codex
         // is actively writing. Don't crash; just retry on the next event.
         const isTypedSqliteBusy = error?.code === "SQLITE_BUSY";
+        const isOperationBusy = error?.code === "OPERATION_BUSY";
+        const isLockUnverifiable = error?.code === "LOCK_UNVERIFIABLE";
         const isLegacySqliteBusy = !error?.code && /state_5\.sqlite is currently in use/i.test(message);
-        if (isTypedSqliteBusy || isLegacySqliteBusy) {
-          log(`[${new Date().toISOString()}] Sync skipped: ${message} (will retry on next change)`);
+        if (isTypedSqliteBusy || isLegacySqliteBusy || isOperationBusy || isLockUnverifiable) {
+          const disposition = isOperationBusy
+            ? "yielded to an active manual operation"
+            : (isLockUnverifiable ? "lock ownership could not be verified" : "SQLite is busy");
+          log(`[${new Date().toISOString()}] Sync skipped: ${message} (${disposition}; will retry on the next change)`);
+          for (const retainedReason of reasons) pendingReasons.add(retainedReason);
+          if (isOperationBusy) {
+            const ticket = await getManualOperationWait();
+            if (ticket?.promise && typeof ticket.promise.then === "function") {
+              busyWaitTicket = ticket;
+              void ticket.promise.then(() => {
+                if (busyWaitTicket !== ticket) return;
+                busyWaitTicket = null;
+                if (stopped || pendingReasons.size === 0 || debounceTimer) return;
+                debounceTimer = setTimeout(() => {
+                  debounceTimer = null;
+                  void launchPendingSync();
+                }, debounceMs);
+              }).catch(() => {
+                if (busyWaitTicket === ticket) {
+                  busyWaitTicket = null;
+                  waitingForExternalChange = true;
+                }
+              });
+            } else {
+              waitingForExternalChange = true;
+            }
+          } else {
+            waitingForExternalChange = true;
+          }
           // Busy is normal — reset the consecutive-failure counter
           // so a long-running Codex session that keeps the DB open
           // for many seconds does not push us toward the auto-shutdown
@@ -250,10 +305,21 @@ export async function runWatch({
         if (inFlight === task) {
           inFlight = null;
         }
+        if (!stopped
+            && !busyWaitTicket
+            && !waitingForExternalChange
+            && (rerunRequested || pendingReasons.size > 0)
+            && !debounceTimer) {
+          rerunRequested = false;
+          debounceTimer = setTimeout(() => {
+            debounceTimer = null;
+            void launchPendingSync();
+          }, debounceMs);
+        }
       }
     })();
     inFlight = task;
-  });
+  };
 
   const initialStorage = await resolveCurrentStorage();
 
@@ -262,7 +328,7 @@ export async function runWatch({
       return;
     }
     log(`[${new Date().toISOString()}] config.toml ${describeEvent(eventType, filename)}`);
-    debouncedSync("config.toml");
+    scheduleSync("config.toml");
   });
   watchers.push(configWatcher);
 
@@ -283,6 +349,15 @@ export async function runWatch({
       return;
     }
     stopped = true;
+    pendingReasons.clear();
+    rerunRequested = false;
+    waitingForExternalChange = false;
+    busyWaitTicket?.cancel?.();
+    busyWaitTicket = null;
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
     stateWatchGeneration += 1;
     for (const watcher of watchers) {
       try {
@@ -413,7 +488,7 @@ export async function runWatch({
           // re-opened. Either way a sync should run.
           void filename;
           log(`[${new Date().toISOString()}] ${reasonLabel} change${filename ? `:${filename}` : ""}`);
-          debouncedSync(reasonLabel);
+          scheduleSync(reasonLabel);
         });
       } catch (error) {
         // Path may have gone away. Wait a moment and try again;
@@ -443,4 +518,71 @@ export async function runWatch({
     signalPromise,
     done: donePromise
   };
+}
+
+function watchSnapshot(entry) {
+  return {
+    schemaVersion: 1,
+    watchId: entry.watchId,
+    status: entry.status,
+    startedAt: entry.startedAt,
+    stoppedAt: entry.stoppedAt,
+    stopReason: entry.stopReason,
+    includeStateDb: entry.includeStateDb,
+    once: entry.once
+  };
+}
+
+export async function startWatch(options = {}) {
+  const handle = await runWatch(options);
+  const entry = {
+    watchId: randomUUID(),
+    status: "running",
+    startedAt: new Date().toISOString(),
+    stoppedAt: null,
+    stopReason: null,
+    includeStateDb: options.includeStateDb !== false,
+    once: Boolean(options.once),
+    handle
+  };
+  watchRegistry.set(entry.watchId, entry);
+  void handle.done.then((reason) => {
+    entry.status = "stopped";
+    entry.stoppedAt = new Date().toISOString();
+    entry.stopReason = typeof reason === "string" ? reason : "unknown";
+  });
+  return watchSnapshot(entry);
+}
+
+function requireWatchEntry(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)
+      || Object.keys(input).length !== 1 || typeof input.watchId !== "string") {
+    throw new CoreError("INVALID_INPUT", "Expected exactly { watchId } for this Watch operation.");
+  }
+  const entry = watchRegistry.get(input.watchId);
+  if (!entry) {
+    throw new CoreError("INVALID_INPUT", "The requested Watch operation is unavailable.");
+  }
+  return entry;
+}
+
+export async function stopWatch(input) {
+  const entry = requireWatchEntry(input);
+  if (entry.status === "running") {
+    entry.status = "stopping";
+    await entry.handle.stop();
+  } else if (entry.status === "stopping") {
+    await entry.handle.done;
+  }
+  return watchSnapshot(entry);
+}
+
+export function getWatchStatus(input = null) {
+  if (input === null || input === undefined) {
+    return {
+      schemaVersion: 1,
+      watches: [...watchRegistry.values()].map(watchSnapshot)
+    };
+  }
+  return watchSnapshot(requireWatchEntry(input));
 }

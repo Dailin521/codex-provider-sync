@@ -16,7 +16,7 @@ test("captures the profile revision used by a confirmation", () => {
 
   assert.deepEqual(operation.profileId, "work");
   assert.deepEqual(operation.profileRevision, "rev-1");
-  assert.equal(operation.storageRevision, "storage-1");
+  assert.equal(Object.hasOwn(operation, "storageRevision"), false);
   assert.equal(operation.selectedProvider, "provider-a");
   assert.equal(operation.profile.revision, "rev-1");
   assert.equal(operation.profile.sqliteHome, "/data/sqlite");
@@ -34,6 +34,21 @@ test("marks locked rollout results as partial instead of success", () => {
   assert.equal(toast.tone, "warning");
   assert.match(toast.message, /1 个/);
   assert.match(toast.message, /live\.jsonl/);
+});
+
+test("reads locked rollout details from the C3 OperationResult envelope", () => {
+  const toast = operationToast({
+    result: {
+      outcome: "partial",
+      result: { skippedLockedRolloutFiles: ["/sessions/c3-live.jsonl"] }
+    }
+  }, {
+    successTitle: "同步完成",
+    partialTitle: "同步部分完成",
+    message: "备份已创建"
+  });
+  assert.equal(toast.tone, "warning");
+  assert.match(toast.message, /c3-live\.jsonl/);
 });
 
 test("requires an explicit profile SQLite home for relocation", () => {

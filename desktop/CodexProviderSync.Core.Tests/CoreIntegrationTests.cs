@@ -2746,7 +2746,7 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
-    public async Task RestoreVersionOne_RebuildsMissingDefaultSqliteDatabase()
+    public async Task RestoreVersionOne_MissingDefaultSqliteParentFailsBeforeMutation()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
         await fixture.WriteConfigAsync("model_provider = \"openai\"");
@@ -2769,18 +2769,29 @@ public sealed class CoreIntegrationTests
         });
         await File.WriteAllTextAsync(Path.Combine(backupDir, "metadata.json"), metadata);
 
-        CodexSyncService service = new();
-        await service.RunRestoreAsync(
-            fixture.CodexHome,
-            backupDir,
-            new RestoreBackupOptions
-            {
-                RestoreConfig = false,
-                RestoreDatabase = true,
-                RestoreSessions = false
-            });
+        string configPath = Path.Combine(fixture.CodexHome, "config.toml");
+        string configBefore = await File.ReadAllTextAsync(configPath);
+        string metadataBefore = await File.ReadAllTextAsync(Path.Combine(backupDir, "metadata.json"));
 
-        Assert.Equal("custom", await ReadProviderAsync(fixture.StateDbPath(), "thread-v1-missing"));
+        CodexSyncService service = new();
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.RunRestoreAsync(
+                fixture.CodexHome,
+                backupDir,
+                new RestoreBackupOptions
+                {
+                    RestoreConfig = false,
+                    RestoreDatabase = true,
+                    RestoreSessions = false
+                }));
+
+        Assert.True(LockService.IsLockUnverifiable(error));
+        Assert.Equal("state-db", error.Data["codex-provider-sync/lock-scope"]);
+        Assert.False(File.Exists(fixture.StateDbPath()));
+        Assert.False(Directory.Exists(Path.GetDirectoryName(fixture.StateDbPath())));
+        Assert.Equal(configBefore, await File.ReadAllTextAsync(configPath));
+        Assert.Equal(metadataBefore, await File.ReadAllTextAsync(Path.Combine(backupDir, "metadata.json")));
+        Assert.Empty(Directory.EnumerateFiles(backupDir, "transaction.json", SearchOption.AllDirectories));
     }
 
     [Fact]

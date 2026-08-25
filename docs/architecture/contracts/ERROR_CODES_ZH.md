@@ -71,7 +71,7 @@ interface CoreErrorDto {
 
 ### 3.2 阶段 0 补充项
 
-以下代码补充了架构基线已经描述、但初始错误码列表没有单独命名的语义。它们从本合同起属于 vNext Canonical Code；当前实现尚未统一发出这些代码。
+以下代码补充了架构基线已经描述、但初始错误码列表没有单独命名的语义。它们属于 vNext Canonical Code；V1/C1～C3 的 Node 边界及迁移期 .NET 锁入口已经统一发出这些代码，但尚未作为已发布版本合同对外宣称。
 
 | Code | 补充原因 | Severity | Retryable | Recovery Required |
 | --- | --- | --- | --- | --- |
@@ -81,7 +81,7 @@ interface CoreErrorDto {
 
 `LOCK_UNVERIFIABLE` 必须 fail closed。只有确认存在活跃冲突所有者时才使用 `OPERATION_BUSY`；未来协议、损坏 owner、身份读取失败或 ABA/目录身份不确定均使用 `LOCK_UNVERIFIABLE`。用户提示不得建议盲目删除锁目录。
 
-ADR-0012 的双层资源锁实现后，`OPERATION_BUSY.details.busyScope` 必须为 `codex-home` 或 `state-db`，`LOCK_UNVERIFIABLE.details.lockScope` 必须标示同一范围；SQLite 引擎在资源锁已获得后仍 busy 时继续使用 `SQLITE_BUSY`。这些字段是 vNext 目标，不表示当前入口已发出它们。
+V1/C3 的双层资源锁已要求 `OPERATION_BUSY.details.busyScope` 为 `codex-home` 或 `state-db`，`LOCK_UNVERIFIABLE.details.lockScope` 标示同一范围；SQLite 引擎在资源锁已获得后仍 busy 时继续使用 `SQLITE_BUSY`。Lock owner protocol v2 可带 `scope/resourceKey`，旧 Home-lock owner 仍按兼容读取规则处理。
 
 vNext Prepare/Apply 对任何加锁后 revision 漂移只发出 `STALE_STATE`，并可用安全的 `details.reason=profile|config|storage|rollout|state-db` 说明维度。`PLAN_STALE`、`PROFILE_CHANGED` 与 `STORAGE_CHANGED` 在旧 Web/适配器完成迁移前仍可读取，但不得成为新 CoreClient/IPC 的稳定写操作结果。
 
@@ -97,7 +97,7 @@ ADR-0013 的 Restore v2 实现后，非 terminal restore operation journal 使�
 | `SYNC_FAILED_ROLLED_BACK` | `SyncTransactionError` | 已与 Canonical 同名 |
 | `ABORT_ERR` | Node 取消路径 | Node 习惯码，不作为 vNext Canonical Code |
 | Node/OS `ENOENT`、`EACCES`、`EPERM` 等 | 普通 `Error` 或系统调用 | 只能作为底层 cause；当前大量错误还没有稳定业务码 |
-| 无稳定 code 的锁错误 | Node `locking.js` | 后续必须按“已证明 Busy”或“不可验证”结构化，禁止解析 message |
+| `OPERATION_BUSY` / `LOCK_UNVERIFIABLE` | Node `locking.js`、State DB resource lock | V1/C3 已按“已证明 Busy”或“不可验证”结构化，并携带 scope；禁止解析 message |
 
 当前 CLI 只把错误 `message` 写入 stderr 并以 `1` 退出。本文不把当前人类提示提升为机器协议。
 

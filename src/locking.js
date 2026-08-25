@@ -162,6 +162,24 @@ function ownerMatchesExpected(actual, expected) {
     && actual.processStartedAt === expected.processStartedAt;
 }
 
+function assertOwnerResource(owner, lockDir, lockScope, resourceKey = null) {
+  if (owner.scope !== undefined && owner.scope !== lockScope) {
+    throw lockExistsError(
+      lockDir,
+      `owner.json declares scope ${String(owner.scope)} instead of ${lockScope}.`,
+      { lockScope }
+    );
+  }
+  if (lockScope === "state-db"
+      && (owner.scope !== "state-db" || owner.resourceKey !== resourceKey)) {
+    throw lockExistsError(
+      lockDir,
+      "owner.json is missing the expected State DB scope/resourceKey identity.",
+      { lockScope }
+    );
+  }
+}
+
 async function readLockOwner(ownerPath, fsImpl, lockScope = "codex-home") {
   let text;
   try {
@@ -513,7 +531,8 @@ async function establishUniqueClaim({
   getProcessStartedAtIdentity,
   syncDirectoryImpl,
   platform,
-  lockScope
+  lockScope,
+  resourceKey
 }) {
   for (let scan = 0; scan < 2; scan += 1) {
     const entries = await fsImpl.readdir(claimsDir, { withFileTypes: true });
@@ -527,6 +546,7 @@ async function establishUniqueClaim({
         continue;
       }
       const otherOwner = await readLockOwner(otherPath, fsImpl, lockScope);
+      assertOwnerResource(otherOwner, otherPath, lockScope, resourceKey);
       if (!otherOwner.instanceId || entry.name !== `${otherOwner.instanceId}.json`) {
         throw lockExistsError(
           claimsDir,
@@ -617,11 +637,16 @@ export async function acquirePathLock(lockPath, label = "codex-provider-sync", o
     onCandidateReady,
     onBeforeStaleReclaim,
     platform = process.platform,
-    scope = "codex-home"
+    scope = "codex-home",
+    resourceKey = null
   } = options;
   const lockDir = path.resolve(lockPath);
   if (!LOCK_SCOPES.has(scope)) {
     throw new TypeError(`scope must be one of: ${[...LOCK_SCOPES].join(", ")}.`);
+  }
+  if (resourceKey !== null
+      && (scope !== "state-db" || typeof resourceKey !== "string" || !/^[a-f0-9]{64}$/.test(resourceKey))) {
+    throw new TypeError("resourceKey must be a lowercase SHA-256 hex string for a state-db lock.");
   }
   if (!Number.isInteger(staleReclaimAttemptLimit) || staleReclaimAttemptLimit < 0) {
     throw new TypeError("staleReclaimAttemptLimit must be a non-negative integer.");
@@ -691,6 +716,7 @@ export async function acquirePathLock(lockPath, label = "codex-provider-sync", o
     instanceId: randomUUID(),
     startedAt: new Date().toISOString(),
     scope,
+    ...(resourceKey ? { resourceKey } : {}),
     label,
     cwd: process.cwd(),
     currentDirectory: process.cwd()
@@ -717,7 +743,8 @@ export async function acquirePathLock(lockPath, label = "codex-provider-sync", o
       getProcessStartedAtIdentity,
       syncDirectoryImpl,
       platform,
-      lockScope: scope
+      lockScope: scope,
+      resourceKey
     });
     await createCandidateDirectory(
       candidateDir,
@@ -769,6 +796,7 @@ export async function acquirePathLock(lockPath, label = "codex-provider-sync", o
         const existingDirectoryIdentity = await inspectCanonicalDirectory(lockDir, fsImpl, scope);
         if (existingDirectoryIdentity !== null) {
           const existingOwner = await readLockOwner(ownerPath, fsImpl, scope);
+          assertOwnerResource(existingOwner, lockDir, scope, resourceKey);
           let live;
           try {
             live = await isOwnerLive(
@@ -916,4 +944,111 @@ export async function acquirePathLock(lockPath, label = "codex-provider-sync", o
     );
     released = true;
   };
+}
+
+/**
+ * Read-only inspection of a protocol lock. This never reclaims or removes a
+ * stale/ambiguous owner: callers use it to avoid observing protected state
+ * while another runtime may be mutating it.
+ */
+export async function inspectPathLock(lockPath, options = {}) {
+  const {
+    fsImpl = fs,
+    getProcessIdentity = getProcessStartMarker,
+    getProcessStartedAtIdentity = getProcessStartedAt,
+    scope = "codex-home",
+    resourceKey = null
+  } = options;
+  if (!LOCK_SCOPES.has(scope)) {
+    throw new TypeError(`scope must be one of: ${[...LOCK_SCOPES].join(", ")}.`);
+  }
+  if (scope === "state-db"
+      && (typeof resourceKey !== "string" || !/^[a-f0-9]{64}$/.test(resourceKey))) {
+    throw new TypeError("resourceKey must be a lowercase SHA-256 hex string for a state-db lock.");
+  }
+
+  const lockDir = path.resolve(lockPath);
+  const claimsDir = `${lockDir}.claims`;
+  const inspectOwner = async (ownerPath) => {
+    const owner = await readLockOwner(ownerPath, fsImpl, scope);
+    assertOwnerResource(owner, lockDir, scope, resourceKey);
+    let live;
+    try {
+      live = await isOwnerLive(owner, getProcessIdentity, getProcessStartedAtIdentity);
+    } catch (error) {
+      throw lockExistsError(
+        lockDir,
+        `The recorded owner could not be verified (${error.message}).`,
+        { lockScope: scope }
+      );
+    }
+    if (!live) {
+      throw lockExistsError(
+        lockDir,
+        "The recorded owner is stale; read-only inspection preserves it fail-closed.",
+        { lockScope: scope }
+      );
+    }
+    return owner;
+  };
+
+  const canonicalIdentity = await inspectCanonicalDirectory(lockDir, fsImpl, scope);
+  if (canonicalIdentity !== null) {
+    const owner = await inspectOwner(path.join(lockDir, "owner.json"));
+    const verifiedIdentity = await inspectCanonicalDirectory(lockDir, fsImpl, scope);
+    if (!sameDirectoryIdentity(canonicalIdentity, verifiedIdentity)) {
+      throw lockExistsError(
+        lockDir,
+        "The canonical lock identity changed during read-only inspection.",
+        { lockScope: scope }
+      );
+    }
+    const verifiedOwner = await readLockOwner(path.join(lockDir, "owner.json"), fsImpl, scope);
+    assertOwnerResource(verifiedOwner, lockDir, scope, resourceKey);
+    if (!ownerMatchesExpected(verifiedOwner, owner)) {
+      throw lockExistsError(
+        lockDir,
+        "The canonical owner identity changed during read-only inspection.",
+        { lockScope: scope }
+      );
+    }
+    return Object.freeze({ state: "active", scope, resourceKey, owner });
+  }
+
+  let entries = [];
+  try {
+    entries = await fsImpl.readdir(claimsDir, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw lockExistsError(
+        claimsDir,
+        "The claims directory cannot be inspected safely.",
+        { cause: error, causeCode: error?.code, lockScope: scope }
+      );
+    }
+  }
+  const claims = entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+    .sort((left, right) => left.name.localeCompare(right.name));
+  if (claims.length > 0) {
+    const owner = await inspectOwner(path.join(claimsDir, claims[0].name));
+    if (!owner.instanceId || claims[0].name !== `${owner.instanceId}.json`) {
+      throw lockExistsError(
+        claimsDir,
+        "A live claim has no matching immutable instance identity.",
+        { lockScope: scope }
+      );
+    }
+    return Object.freeze({ state: "active", scope, resourceKey, owner });
+  }
+
+  const finalIdentity = await inspectCanonicalDirectory(lockDir, fsImpl, scope);
+  if (finalIdentity !== null) {
+    throw lockExistsError(
+      lockDir,
+      "A lock appeared during read-only inspection.",
+      { lockScope: scope }
+    );
+  }
+  return Object.freeze({ state: "absent", scope, resourceKey, owner: null });
 }

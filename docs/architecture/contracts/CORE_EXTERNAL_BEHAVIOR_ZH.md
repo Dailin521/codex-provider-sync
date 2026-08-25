@@ -890,6 +890,9 @@ pruneBackups
 listHistory
 getHistorySession
 startWatch
+stopWatch
+getWatchStatus
+getDiagnostics
 ```
 
 目标原则：
@@ -903,7 +906,23 @@ startWatch
 - `--json` 是外部自动化合同，不是 Electron IPC；
 - Public API 可以新增 schemaVersion，但迁移适配器必须保持本文中的 v0.5 用户行为。
 
-这些目标在对应实现和测试完成前，不得用来否认当前一次性 `runSync/runSwitch/runRestore` 接口的兼容责任。
+V1/C3 已实现上述边界；`runSync/runSwitch/runRestore/runWatch` 仍作为 CLI 和旧调用方的弃用兼容适配器保留，不得供 Renderer 或新的 HTTP/IPC transport 使用。实现完成不等于已发布：已发布版本的兼容责任持续到对应迁移门槛和最终 PR 合入完成。
+
+### 16.1 C3 Plan / Apply 合同
+
+- `prepareSync/prepareSwitch/prepareRestore` 返回不可变 `PlanSummary` schema v1。`planId` 为 32-byte 随机不透明标识；TTL 固定 10 分钟；ledger 仅驻留当前进程并单次消费，重启、过期、重放和跨 operation 使用均返回 `PLAN_EXPIRED`。
+- `applySync/applySwitch/applyRestore` 只接受精确的 `{schemaVersion: 1, planId}`。任何附加路径、Provider、model、backupId 或 mutation 参数都返回 `INVALID_INPUT`，且不消费合法 Plan。
+- Apply 在 Home→State DB 双锁内重新读取可信 Profile、config、rollout inventory、State DB main/WAL/SHM 与 Restore source backup revision；任一漂移统一返回 `STALE_STATE`，且在 Backup/Journal/mutation 前停止。
+- Web 只公开 `*/prepare` 与 `*/apply`。旧 `/api/sync`、`/api/switch`、`/api/restore` 固定返回 `410 PLAN_REQUIRED`，不得调用兼容 `run*` 写入口。
+- Switch Plan 固定表达 `provider-default`、`keep-root-model`、`explicit` 三种 model intent；Apply 不再接收 model 参数。
+
+### 16.2 协调、Status 与 Watch
+
+- 本进程协调器为同一 Codex Home 生成 operationId，并缓存最近一次完整 Status。写操作期间 Status 返回该完整 snapshot 加 `operationInProgress`；无缓存时返回 `rolloutScanComplete:false` 的保守快照。
+- Status 不获取写锁，而是只读检查 Home 与解析后的 State DB protocol lock，并在扫描前后核对 config/rollout/State DB revision。外部 Node/.NET 写者活跃或锁不可验证时不得扫描业务中间态；`LOCK_UNVERIFIABLE` 状态不得显示 aligned/healthy。Pending Journal 仍可作为恢复证据读取。
+- `ProgressEvent` observer 的异常不能改变 transaction result。成功 OperationResult 的 `outcome` 为 `completed` 或 locked-rollout `partial`；失败通过结构化 Core Error/transport envelope 返回。
+- Watch 保持单飞、合并重复事件，每次重新 Prepare/Apply 并获取双锁。遇到本进程人工操作时保留当前事件批次、等待 operation completion 后只运行一次合并 follow-up；外部 Busy/不可验证锁不轮询、不计入连续业务失败，并等待新的受保护文件事件。
+- Diagnostics 只返回有界安全元数据；不得读取、复制或序列化 `auth.json`、token、凭据或消息正文。
 
 ## 17. Phase 1 提取要求
 

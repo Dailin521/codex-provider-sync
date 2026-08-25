@@ -652,7 +652,23 @@ function Modal({ title, children, confirmLabel, onConfirm, onCancel, tone = "pri
   );
 }
 
-function ExecuteModal({ plan, status, selectedProvider, onCancel, onConfirm }) {
+function CorePlanDetails({ plan }) {
+  if (!plan) return null;
+  const impact = plan.impact ?? {};
+  return (
+    <>
+      <dl className="operation-scope">
+        <div><dt>计划有效期</dt><dd>{formatDate(plan.expiresAt)}</dd></div>
+        <div><dt>Rollout 变更</dt><dd>{impact.rolloutFilesToChange ?? 0}</dd></div>
+        <div><dt>SQLite 行变更</dt><dd>{impact.sqliteRowsToChange ?? 0}</dd></div>
+        <div><dt>当前锁定 Rollout</dt><dd>{Array.isArray(impact.lockedRolloutFiles) ? impact.lockedRolloutFiles.length : (impact.lockedRolloutFiles ?? 0)}</dd></div>
+      </dl>
+      {plan.warnings?.map((warning) => <div className="modal-callout modal-callout--warning" key={warning}><AlertIcon size={18} /><div><strong>计划警告</strong><span>{warning}</span></div></div>)}
+    </>
+  );
+}
+
+function ExecuteModal({ plan, corePlan, status, selectedProvider, onCancel, onConfirm }) {
   return (
     <Modal title={plan.mode === "switch" ? "确认切换并同步" : "确认同步元数据"} confirmLabel={plan.mode === "switch" ? "确认切换并同步" : "确认执行同步"} onCancel={onCancel} onConfirm={onConfirm}>
       <div className="modal-callout"><AlertIcon size={18} /><div><strong>请确认 Codex 已完全关闭</strong><span>关闭 Codex CLI、Codex App、app-server 及相关终端，避免 SQLite 或 rollout 被占用。</span></div></div>
@@ -665,6 +681,7 @@ function ExecuteModal({ plan, status, selectedProvider, onCancel, onConfirm }) {
         <div><dt>Model 策略</dt><dd>{plan.mode !== "switch" ? "跟随当前根级 model" : plan.modelMode === "auto" ? "跟随目标 Provider 配置" : plan.modelMode === "keep" ? "保留当前根级 model" : `设置为 ${plan.model}`}</dd></div>
         <div><dt>备份策略</dt><dd>修改前创建备份，保留最近 {plan.keepCount} 份</dd></div>
       </dl>
+      <CorePlanDetails plan={corePlan} />
     </Modal>
   );
 }
@@ -702,6 +719,16 @@ function RestoreModal({ backup, status, profile, onCancel, onConfirm }) {
       {status?.sqliteAccess?.supported === false ? <div className="modal-callout modal-callout--danger"><AlertIcon size={18} /><div><strong>当前 SQLite 路径仅供诊断</strong><span>{status.sqliteAccess.message || "不能从 Web UI 执行恢复。"}</span></div></div> : null}
       {relocation.requiresRelocation ? <div className={`modal-callout ${relocation.missingExplicitTarget || relocation.configRestoreConflict ? "modal-callout--danger" : "modal-callout--warning"}`}><AlertIcon size={18} /><div><strong>SQLite Home 与备份来源不同</strong><span>来源：{backup.metadata.sqliteHome}<br />目标：{targetSqliteHome}<br />{relocation.missingExplicitTarget ? "当前 Profile 未明确配置 SQLite Home，不能提交数据库迁移恢复。" : relocation.configRestoreConflict ? "迁移数据库时不能同时恢复旧 config.toml。" : "确认后数据库将恢复到当前 Profile 明确配置的目标位置。"}</span></div></div> : null}
       <div className="modal-callout"><AlertIcon size={18} /><div><strong>恢复前请关闭 Codex</strong><span>该操作将覆盖所选的当前元数据；请确认 Codex CLI、App 和 app-server 已关闭。</span></div></div>
+    </Modal>
+  );
+}
+
+function RestoreApplyModal({ backup, corePlan, onCancel, onConfirm }) {
+  return (
+    <Modal title="确认恢复计划" confirmLabel="按计划恢复" tone="danger" onCancel={onCancel} onConfirm={onConfirm}>
+      <div className="restore-summary"><HistoryIcon size={20} /><div><strong>{formatDate(backup.metadata.createdAt)} · {backup.metadata.targetProvider}</strong><code>{backup.id}</code></div></div>
+      <div className="modal-callout modal-callout--danger"><AlertIcon size={18} /><div><strong>Apply 仅使用一次性 planId</strong><span>任何 Profile、配置、Rollout、SQLite 或备份漂移都会使本计划失效，且不会创建新写入。</span></div></div>
+      <CorePlanDetails plan={corePlan} />
     </Modal>
   );
 }
@@ -824,15 +851,47 @@ export default function App() {
     setToast({ tone: "warning", title: "配置已变更，请重新确认", message: "已刷新存储配置和当前状态；未自动重试原操作。" });
   }, [refresh, refreshProfiles]);
 
-  const openProfileOperation = useCallback((operation) => {
+  const openProfileOperation = useCallback(async (operation) => {
     const captured = captureProfileOperation(selectedProfile, operation, status);
     if (!captured) {
       setToast({ tone: "warning", title: "配置需要刷新", message: "没有可用的配置版本，请刷新后重新确认操作。" });
       refreshProfiles().catch(() => {});
       return;
     }
-    setModal(captured);
-  }, [refreshProfiles, selectedProfile, status]);
+    if (operation.type !== "execute") {
+      setModal(captured);
+      return;
+    }
+    setBusy(true);
+    try {
+      const common = {
+        ...storagePayload(captured.profileId),
+        profileRevision: captured.profileRevision,
+        provider: captured.selectedProvider,
+        keepCount: captured.plan.keepCount
+      };
+      const endpoint = captured.plan.mode === "switch" ? "/api/switch/prepare" : "/api/sync/prepare";
+      const request = captured.plan.mode === "switch"
+        ? {
+            ...common,
+            modelMode: captured.plan.modelMode === "auto"
+              ? "provider-default"
+              : (captured.plan.modelMode === "keep" ? "keep-root-model" : "explicit"),
+            model: captured.plan.modelMode === "custom" ? captured.plan.model : undefined
+          }
+        : common;
+      const payload = await apiRequest(endpoint, request);
+      setModal({ ...captured, corePlan: payload.plan });
+    } catch (error) {
+      if (error instanceof ProfileRevisionError) {
+        await handleProfileConflict();
+        return;
+      }
+      setToast({ tone: "error", title: "计划生成失败", message: error.message });
+    } finally {
+      setBusy(false);
+    }
+  }, [handleProfileConflict, refreshProfiles, selectedProfile, status]);
 
   useEffect(() => {
     let cancelled = false;
@@ -886,19 +945,19 @@ export default function App() {
 
   const execute = useCallback(async () => {
     const plan = modal.plan;
-    const targetProfileId = modal.profileId;
+    const corePlan = modal.corePlan;
     setModal(null);
     setBusy(true);
     setView("activity");
     try {
-      const common = { ...storagePayload(targetProfileId), profileRevision: modal.profileRevision, storageRevision: modal.storageRevision, provider: modal.selectedProvider, keepCount: plan.keepCount };
-      const payload = plan.mode === "switch"
-        ? await apiRequest("/api/switch", { ...common, model: plan.modelMode === "custom" ? plan.model : undefined, keepRootModel: plan.modelMode === "keep" })
-        : await apiRequest("/api/sync", common);
+      const payload = await apiRequest(
+        plan.mode === "switch" ? "/api/switch/apply" : "/api/sync/apply",
+        { schemaVersion: corePlan.schemaVersion, planId: corePlan.planId }
+      );
       setToast(operationToast(payload, {
         successTitle: plan.mode === "switch" ? "切换并同步完成" : "同步完成",
         partialTitle: plan.mode === "switch" ? "切换并同步部分完成" : "同步部分完成",
-        message: `备份：${payload.result?.backupDir ?? "已创建"}`
+        message: `备份：${payload.result?.backup?.path ?? payload.result?.result?.backupDir ?? "已创建"}`
       }));
       await refresh({ quiet: true });
     } catch (error) {
@@ -912,14 +971,40 @@ export default function App() {
     }
   }, [handleProfileConflict, modal, refresh]);
 
-  const restore = useCallback(async (options) => {
+  const prepareRestoreOperation = useCallback(async (options) => {
     const backup = modal.backup;
     const targetProfileId = modal.profileId;
+    setBusy(true);
+    try {
+      const payload = await apiRequest("/api/restore/prepare", {
+        ...storagePayload(targetProfileId),
+        profileRevision: modal.profileRevision,
+        backupId: backup.id,
+        ...options
+      });
+      setModal({ ...modal, type: "restoreApply", restoreOptions: options, corePlan: payload.plan });
+    } catch (error) {
+      if (error instanceof ProfileRevisionError) {
+        await handleProfileConflict();
+        return;
+      }
+      setToast({ tone: "error", title: "恢复计划生成失败", message: error.message });
+    } finally {
+      setBusy(false);
+    }
+  }, [handleProfileConflict, modal]);
+
+  const applyRestoreOperation = useCallback(async () => {
+    const backup = modal.backup;
+    const corePlan = modal.corePlan;
     setModal(null);
     setBusy(true);
     setView("activity");
     try {
-      const payload = await apiRequest("/api/restore", { ...storagePayload(targetProfileId), profileRevision: modal.profileRevision, storageRevision: modal.storageRevision, backupId: backup.id, ...options });
+      const payload = await apiRequest("/api/restore/apply", {
+        schemaVersion: corePlan.schemaVersion,
+        planId: corePlan.planId
+      });
       setToast(operationToast(payload, { successTitle: "备份恢复完成", partialTitle: "备份恢复部分完成", message: backup.id }));
       await refresh({ quiet: true });
     } catch (error) {
@@ -1015,8 +1100,9 @@ export default function App() {
         {view === "backups" ? <BackupsView backups={backups} status={status} busy={busy} onRestore={(backup) => openProfileOperation({ type: "restore", backup })} onPrune={(keepCount) => openProfileOperation({ type: "prune", keepCount })} /> : null}
         {view === "activity" ? <ActivityView activity={activity} activeOperation={activeOperation} /> : null}
       </main>
-      {modal?.type === "execute" ? <ExecuteModal plan={modal.plan} status={modal.status} selectedProvider={modal.selectedProvider} onCancel={() => setModal(null)} onConfirm={execute} /> : null}
-      {modal?.type === "restore" ? <RestoreModal backup={modal.backup} status={modal.status} profile={modal.profile} onCancel={() => setModal(null)} onConfirm={restore} /> : null}
+      {modal?.type === "execute" ? <ExecuteModal plan={modal.plan} corePlan={modal.corePlan} status={modal.status} selectedProvider={modal.selectedProvider} onCancel={() => setModal(null)} onConfirm={execute} /> : null}
+      {modal?.type === "restore" ? <RestoreModal backup={modal.backup} status={modal.status} profile={modal.profile} onCancel={() => setModal(null)} onConfirm={prepareRestoreOperation} /> : null}
+      {modal?.type === "restoreApply" ? <RestoreApplyModal backup={modal.backup} corePlan={modal.corePlan} onCancel={() => setModal(null)} onConfirm={applyRestoreOperation} /> : null}
       {modal?.type === "prune" ? <PruneModal keepCount={modal.keepCount} backups={backups} onCancel={() => setModal(null)} onConfirm={prune} /> : null}
       {modal?.type === "profile" ? <ProfileModal onCancel={() => setModal(null)} onConfirm={saveProfile} /> : null}
       <Toast toast={toast} onClose={closeToast} />

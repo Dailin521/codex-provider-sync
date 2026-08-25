@@ -294,5 +294,12 @@ public sealed class CoreApplicationWritePort : IApplicationWritePort
                 error.Message,
                 innerException: error);
         }
+        catch (InvalidOperationException error) when (LockService.IsLockUnverifiable(error))
+        {
+            throw new ApplicationPortException(
+                "lock_unverifiable",
+                error.Message,
+                innerException: error);
+        }
     }
 }

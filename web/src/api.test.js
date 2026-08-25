@@ -25,3 +25,13 @@ test("turns storage revision conflicts into the same refresh-required error", ()
   assert.ok(error instanceof ProfileRevisionError);
   assert.equal(error.code, "STORAGE_CHANGED");
 });
+
+test("turns Core stale plans into the same refresh-required error", () => {
+  const error = toRequestError({
+    error: "Protected state changed.",
+    coreError: { code: "STALE_STATE" }
+  }, 409, "fallback");
+
+  assert.ok(error instanceof ProfileRevisionError);
+  assert.equal(error.code, "STALE_STATE");
+});

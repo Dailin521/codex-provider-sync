@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 
 import {
   DEFAULT_BACKUP_RETENTION_COUNT,
+  DEFAULT_LOCK_NAME,
   DEFAULT_PROVIDER,
   defaultBackupRoot
 } from "./constants.js";
@@ -22,12 +23,24 @@ import {
   createBackup,
   getBackupRecoveryCoverage,
   getBackupSummary,
-  pruneBackups,
+  listBackups,
+  pruneBackups as pruneManagedBackups,
   refreshBackupInventory,
+  resolveRestoreStateDbTargetPath,
   restoreBackup,
   restoreGlobalStateFilesFromBackup
 } from "./backup.js";
-import { acquireLock } from "./locking.js";
+import { acquireLock, inspectPathLock } from "./locking.js";
+import { acquireStateDbLock, resolveStateDbLockResource } from "./state-db-lock.js";
+import { PlanLedger } from "./plan-ledger.js";
+import { sharedOperationCoordinator as operationCoordinator } from "./operation-coordinator.js";
+import {
+  captureOperationRevisions,
+  captureStorageRevision,
+  revisionMismatch,
+  sha256Revision,
+  stableStringify
+} from "./operation-revision.js";
 import {
   applySessionChanges,
   collectSessionChanges,
@@ -64,6 +77,8 @@ import {
   readTransactionJournal,
   markBackupTransactionRolledBack
 } from "./transaction-journal.js";
+
+const planLedger = new PlanLedger();
 
 function pathComparisonKey(value) {
   const resolved = path.resolve(value);
@@ -136,6 +151,26 @@ async function prepareStorage({ codexHome: explicitCodexHome, sqliteHome, config
     return withStateDbLocation(layout, null);
   }
   return withStateDbLocation(layout, await detectStateDb(layout));
+}
+
+async function releaseWriteLocks(releaseStateDbLock, releaseHomeLock) {
+  const failures = [];
+  if (releaseStateDbLock) {
+    try {
+      await releaseStateDbLock();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  try {
+    await releaseHomeLock();
+  } catch (error) {
+    failures.push(error);
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) {
+    throw new AggregateError(failures, "Failed to release one or more write-operation locks.");
+  }
 }
 
 function emitProgress(onProgress, event) {
@@ -241,6 +276,68 @@ function sumCounts(counts) {
   return Object.values(counts ?? {}).reduce((total, value) => total + value, 0);
 }
 
+function normalizeProfileId(value) {
+  const profileId = value ?? "default";
+  if (typeof profileId !== "string" || !/^[A-Za-z0-9._-]{1,80}$/.test(profileId)) {
+    throw new CoreError("INVALID_INPUT", "The storage profile id is invalid.");
+  }
+  return profileId;
+}
+
+function comparableProfilePath(value, platform) {
+  if (typeof value !== "string" || !value) return null;
+  const resolved = path.resolve(value);
+  return platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function createProfileSnapshot({
+  profileId,
+  suppliedRevision,
+  codexHome,
+  sqliteHome,
+  platform = process.platform
+}) {
+  if (suppliedRevision !== undefined && suppliedRevision !== null
+      && (typeof suppliedRevision !== "string" || !suppliedRevision || suppliedRevision.length > 512)) {
+    throw new CoreError("INVALID_INPUT", "The storage profile revision is invalid.");
+  }
+  const id = normalizeProfileId(profileId);
+  const revision = sha256Revision(stableStringify({
+    schemaVersion: 1,
+    id,
+    suppliedRevision: suppliedRevision ?? null,
+    codexHome: comparableProfilePath(codexHome, platform),
+    sqliteHome: comparableProfilePath(sqliteHome, platform)
+  }));
+  return Object.freeze({
+    id,
+    revision,
+    suppliedRevision: suppliedRevision ?? null,
+    codexHome: path.resolve(codexHome),
+    sqliteHome: typeof sqliteHome === "string" && sqliteHome ? path.resolve(sqliteHome) : null
+  });
+}
+
+function profileFromOptions(options, codexHome, sqliteHome, platform) {
+  return createProfileSnapshot({
+    profileId: options.profile?.id ?? options.profileId,
+    suppliedRevision: options.profile?.revision ?? options.profileRevision,
+    codexHome,
+    sqliteHome,
+    platform
+  });
+}
+
+function explicitSqliteHomeFromOptions(options) {
+  if (typeof options.sqliteHome === "string" && options.sqliteHome.trim()) return options.sqliteHome;
+  if (options.storage?.sqliteHomeSource !== "default"
+      && typeof options.storage?.sqliteHome === "string"
+      && options.storage.sqliteHome.trim()) {
+    return options.storage.sqliteHome;
+  }
+  return undefined;
+}
+
 function buildEncryptedContentWarning(encryptedContentCounts, targetProvider) {
   const riskyProviders = new Set();
   for (const scope of ["sessions", "archived_sessions"]) {
@@ -257,11 +354,14 @@ function buildEncryptedContentWarning(encryptedContentCounts, targetProvider) {
   return `Encrypted content warning: ${total} rollout file(s) contain encrypted_content from provider(s) ${[...riskyProviders].sort().join(", ")}. Visibility metadata can be synchronized to ${targetProvider}, but continuing or compacting those histories may fail with invalid_encrypted_content. Return to the original provider/account or start a new session if you need reliable continuation.`;
 }
 
-export async function getStatus({
+async function scanStatus({
   codexHome: explicitCodexHome,
   sqliteHome,
   storage: providedStorage,
   configText: providedConfigText,
+  profile,
+  profileId,
+  profileRevision,
   platform
 } = {}) {
   const codexHome = providedStorage?.codexHome ?? normalizeCodexHome(explicitCodexHome);
@@ -284,13 +384,46 @@ export async function getStatus({
   const sqliteRepairStats = sqliteCounts && !sqliteCounts.unreadable
     ? await readSqliteRepairStats(storage, { userEventThreadIds, threadCwdById })
     : null;
-  const projectThreadVisibility = !storage.sqliteAccess.supported || sqliteCounts?.unreadable
-    ? []
-    : await readProjectThreadVisibility(storage);
+  let projectThreadVisibility = [];
+  let projectThreadVisibilityAvailable = storage.sqliteAccess.supported && !sqliteCounts?.unreadable;
+  if (storage.sqliteAccess.supported && !sqliteCounts?.unreadable) {
+    try {
+      projectThreadVisibility = await readProjectThreadVisibility(storage);
+    } catch {
+      // Project visibility is an optional diagnostic projection. Older/minimal
+      // Codex schemas may not expose every column it needs; that must not block
+      // Status, Plan preparation, or a safe provider sync.
+      projectThreadVisibility = [];
+      projectThreadVisibilityAvailable = false;
+    }
+  }
   const backupSummary = await getBackupSummary(codexHome);
   const pendingTransactions = await findPendingTransactions(codexHome);
+  const trustedProfile = createProfileSnapshot({
+    profileId: profile?.id ?? profileId,
+    suppliedRevision: profile?.revision ?? profileRevision,
+    codexHome,
+    // Profile identity is the trusted caller/server selection. Effective
+    // config-derived SQLite storage belongs in storageRevision, not here.
+    sqliteHome,
+    platform
+  });
+  const configRevision = sha256Revision(Buffer.from(configText, "utf8"));
+  const resolvedStorageRevision = captureStorageRevision({
+    profileRevision: trustedProfile.revision,
+    configRevision,
+    storage,
+    platform
+  });
 
   return {
+    schemaVersion: 1,
+    snapshotAt: new Date().toISOString(),
+    storageRevision: resolvedStorageRevision,
+    profile: { id: trustedProfile.id, revision: trustedProfile.revision },
+    profileId: trustedProfile.id,
+    profileRevision: trustedProfile.suppliedRevision ?? trustedProfile.revision,
+    pathComparisonCaseInsensitive: (platform ?? process.platform) === "win32",
     codexHome,
     sqliteHome: storage.sqliteHome,
     sqliteHomeSource: storage.sqliteHomeSource,
@@ -307,8 +440,12 @@ export async function getStatus({
     stateDbLocation,
     sqliteRepairStats,
     projectThreadVisibility,
+    projectThreadVisibilityAvailable,
     backupRoot: defaultBackupRoot(codexHome),
     backupSummary,
+    pendingRecovery: pendingTransactions.length > 0,
+    operationInProgress: null,
+    rolloutScanComplete: lockedPaths.length === 0,
     pendingTransactions: pendingTransactions.map((transaction) => ({
       operationId: transaction.operationId ?? null,
       state: transaction.state,
@@ -318,9 +455,311 @@ export async function getStatus({
   };
 }
 
-/** @deprecated Compatibility adapter. New transports must use prepareSync/applySync once available. */
-export async function runSync(options = {}) {
-  return runSyncCore(options);
+function publicProfileMetadata(profile) {
+  return {
+    id: profile.id,
+    publicRevision: profile.suppliedRevision ?? profile.revision
+  };
+}
+
+function externalOperationFromLock({ inspection = null, error = null, scope }) {
+  const owner = inspection?.owner ?? null;
+  return {
+    operationId: owner?.instanceId ?? null,
+    operation: typeof owner?.label === "string" && owner.label ? owner.label : "unknown",
+    actor: "external",
+    runtime: typeof owner?.runtime === "string" ? owner.runtime : null,
+    startedAt: typeof owner?.startedAt === "string" ? owner.startedAt : null,
+    busyScope: scope,
+    lockState: inspection?.state === "active" ? "active" : "unverifiable",
+    ...(error?.code ? { errorCode: error.code } : {})
+  };
+}
+
+async function inspectStatusLock(lockPath, options) {
+  try {
+    return { inspection: await inspectPathLock(lockPath, options), error: null };
+  } catch (error) {
+    if (error?.code === "LOCK_UNVERIFIABLE"
+        || error?.code === "OPERATION_BUSY"
+        || error?.code === "PERMISSION_DENIED") {
+      return { inspection: null, error };
+    }
+    throw error;
+  }
+}
+
+async function blockedStatus(codexHome, profile, operation, platform, details = null) {
+  const status = operationCoordinator.statusForBlockedWrite(
+    codexHome,
+    operation,
+    platform,
+    publicProfileMetadata(profile)
+  );
+  if (!status.profile) {
+    status.profile = { id: profile.id, revision: profile.revision };
+    status.profileId = profile.id;
+    status.profileRevision = profile.suppliedRevision ?? profile.revision;
+    status.pathComparisonCaseInsensitive = (platform ?? process.platform) === "win32";
+  }
+  status.statusReadBlocked = details ?? { reason: "write-operation" };
+  if (operation.lockState === "unverifiable") {
+    status.rolloutScanComplete = false;
+    try {
+      const pendingTransactions = await findPendingTransactions(codexHome);
+      status.pendingTransactions = pendingTransactions.map((transaction) => ({
+        operationId: transaction.operationId ?? null,
+        state: transaction.state,
+        backupDir: transaction.backupDir,
+        journalPath: transaction.filePath
+      }));
+      status.pendingRecovery = pendingTransactions.length > 0;
+    } catch {
+      status.pendingTransactions ??= [];
+      status.pendingRecovery = true;
+    }
+  }
+  return status;
+}
+
+export async function getStatus(options = {}) {
+  const codexHome = options.storage?.codexHome ?? normalizeCodexHome(options.codexHome);
+  const platform = options.platform ?? process.platform;
+  const sqliteHome = explicitSqliteHomeFromOptions(options);
+  const profile = profileFromOptions(options, codexHome, sqliteHome, platform);
+  const activeSnapshot = operationCoordinator.statusDuringWrite(
+    codexHome,
+    platform,
+    publicProfileMetadata(profile)
+  );
+  if (activeSnapshot) return activeSnapshot;
+
+  const homeLockPath = path.join(codexHome, "tmp", DEFAULT_LOCK_NAME);
+  const homeBefore = await inspectStatusLock(homeLockPath, { scope: "codex-home", platform });
+  if (homeBefore.error || homeBefore.inspection.state !== "absent") {
+    const operation = externalOperationFromLock({
+      inspection: homeBefore.inspection,
+      error: homeBefore.error,
+      scope: "codex-home"
+    });
+    return blockedStatus(codexHome, profile, operation, platform, {
+      reason: "codex-home-lock",
+      lockState: operation.lockState
+    });
+  }
+
+  const configPath = path.join(codexHome, "config.toml");
+  const configText = options.configText ?? await readConfigText(configPath);
+  const storage = await prepareStorage({
+    codexHome,
+    sqliteHome,
+    configText,
+    storage: options.storage,
+    platform
+  });
+  let stateResource = null;
+  if (storage.stateDbLocation?.path) {
+    stateResource = await resolveStateDbLockResource(storage.stateDbLocation.path, { platform });
+    const stateBefore = await inspectStatusLock(stateResource.lockPath, {
+      scope: "state-db",
+      resourceKey: stateResource.resourceKey,
+      platform
+    });
+    if (stateBefore.error || stateBefore.inspection.state !== "absent") {
+      const operation = externalOperationFromLock({
+        inspection: stateBefore.inspection,
+        error: stateBefore.error,
+        scope: "state-db"
+      });
+      return blockedStatus(codexHome, profile, operation, platform, {
+        reason: "state-db-lock",
+        lockState: operation.lockState
+      });
+    }
+  }
+
+  let beforeRevision;
+  try {
+    beforeRevision = await captureOperationRevisions({
+      codexHome,
+      profileRevision: profile.revision,
+      configText,
+      storage,
+      platform
+    });
+  } catch (error) {
+    return blockedStatus(
+      codexHome,
+      profile,
+      externalOperationFromLock({ error, scope: "codex-home" }),
+      platform,
+      { reason: "revision-unverifiable" }
+    );
+  }
+
+  let snapshot = await scanStatus({
+    ...options,
+    codexHome,
+    sqliteHome,
+    storage,
+    configText,
+    profileId: profile.id,
+    profileRevision: profile.suppliedRevision,
+    platform
+  });
+
+  const homeAfter = await inspectStatusLock(homeLockPath, { scope: "codex-home", platform });
+  let stateAfter = { inspection: { state: "absent" }, error: null };
+  if (!homeAfter.error && homeAfter.inspection.state === "absent" && stateResource) {
+    stateAfter = await inspectStatusLock(stateResource.lockPath, {
+      scope: "state-db",
+      resourceKey: stateResource.resourceKey,
+      platform
+    });
+  }
+  if (homeAfter.error || homeAfter.inspection.state !== "absent"
+      || stateAfter.error || stateAfter.inspection.state !== "absent") {
+    const source = homeAfter.error || homeAfter.inspection.state !== "absent"
+      ? { ...homeAfter, scope: "codex-home" }
+      : { ...stateAfter, scope: "state-db" };
+    const operation = externalOperationFromLock(source);
+    return blockedStatus(codexHome, profile, operation, platform, {
+      reason: `${source.scope}-lock`,
+      lockState: operation.lockState
+    });
+  }
+
+  let afterRevision;
+  try {
+    const latestConfigText = await readConfigText(configPath);
+    afterRevision = await captureOperationRevisions({
+      codexHome,
+      profileRevision: profile.revision,
+      configText: latestConfigText,
+      storage,
+      platform
+    });
+  } catch (error) {
+    return blockedStatus(
+      codexHome,
+      profile,
+      externalOperationFromLock({ error, scope: "codex-home" }),
+      platform,
+      { reason: "revision-unverifiable" }
+    );
+  }
+  let driftReason = revisionMismatch(beforeRevision, afterRevision);
+  if (driftReason === "state-db" || driftReason === "rollout") {
+    // Opening a WAL database for read-only Status can legitimately create or
+    // refresh its SHM sidecar. Retry once from that new complete baseline; a
+    // real concurrent writer will either expose its lock or drift again.
+    snapshot = await scanStatus({
+      ...options,
+      codexHome,
+      sqliteHome,
+      storage,
+      configText,
+      profileId: profile.id,
+      profileRevision: profile.suppliedRevision,
+      platform
+    });
+    const retryConfigText = await readConfigText(configPath);
+    const retryRevision = await captureOperationRevisions({
+      codexHome,
+      profileRevision: profile.revision,
+      configText: retryConfigText,
+      storage,
+      platform
+    });
+    driftReason = revisionMismatch(afterRevision, retryRevision);
+    afterRevision = retryRevision;
+  }
+  if (driftReason) {
+    return blockedStatus(
+      codexHome,
+      profile,
+      externalOperationFromLock({ scope: driftReason === "state-db" ? "state-db" : "codex-home" }),
+      platform,
+      { reason: "state-changed-during-status", revision: driftReason }
+    );
+  }
+
+  const homeFinal = await inspectStatusLock(homeLockPath, { scope: "codex-home", platform });
+  if (homeFinal.error || homeFinal.inspection.state !== "absent") {
+    const operation = externalOperationFromLock({
+      inspection: homeFinal.inspection,
+      error: homeFinal.error,
+      scope: "codex-home"
+    });
+    return blockedStatus(codexHome, profile, operation, platform, {
+      reason: "codex-home-lock",
+      lockState: operation.lockState
+    });
+  }
+  if (stateResource) {
+    const stateFinal = await inspectStatusLock(stateResource.lockPath, {
+      scope: "state-db",
+      resourceKey: stateResource.resourceKey,
+      platform
+    });
+    if (stateFinal.error || stateFinal.inspection.state !== "absent") {
+      const operation = externalOperationFromLock({
+        inspection: stateFinal.inspection,
+        error: stateFinal.error,
+        scope: "state-db"
+      });
+      return blockedStatus(codexHome, profile, operation, platform, {
+        reason: "state-db-lock",
+        lockState: operation.lockState
+      });
+    }
+  }
+
+  operationCoordinator.cacheStatus(codexHome, snapshot, platform);
+  return snapshot;
+}
+
+async function verifyExpectedPlanState({
+  expectedPlanState,
+  codexHome,
+  configText,
+  storage,
+  platform,
+  backupDir = null
+}) {
+  if (!expectedPlanState) return;
+  let currentProfile = expectedPlanState.profile;
+  if (typeof expectedPlanState.profileResolver === "function") {
+    try {
+      const resolved = await expectedPlanState.profileResolver(expectedPlanState.profile.id);
+      currentProfile = createProfileSnapshot({
+        profileId: resolved?.id,
+        suppliedRevision: resolved?.revision,
+        codexHome: resolved?.codexHome,
+        sqliteHome: resolved?.sqliteHome,
+        platform
+      });
+    } catch (error) {
+      throw new CoreError("STALE_STATE", "The selected storage profile changed after preparation.", {
+        cause: error instanceof Error ? error : undefined,
+        details: { reason: "profile" }
+      });
+    }
+  }
+  const actual = await captureOperationRevisions({
+    codexHome,
+    profileRevision: currentProfile.revision,
+    configText,
+    storage,
+    backupDir,
+    platform
+  });
+  const reason = revisionMismatch(expectedPlanState.revisions, actual);
+  if (reason) {
+    throw new CoreError("STALE_STATE", "Protected state changed after the operation was prepared.", {
+      details: { reason }
+    });
+  }
 }
 
 async function runSyncCore({
@@ -336,7 +775,8 @@ async function runSyncCore({
   model = null,
   platform,
   faultInjector,
-  signal
+  signal,
+  expectedPlanState
 } = {}, { afterBackup } = {}) {
   if (!Number.isInteger(keepCount) || keepCount < 1) {
     throw new CoreError(
@@ -348,20 +788,20 @@ async function runSyncCore({
   const codexHome = providedStorage?.codexHome ?? normalizeCodexHome(explicitCodexHome);
   const configPath = path.join(codexHome, "config.toml");
   const releaseLock = await acquireLock(codexHome, "sync");
+  let releaseStateDbLock = null;
   let backupDir = null;
   let journal = null;
   let backupDurationMs = 0;
   try {
-    await assertNoPendingTransactions(codexHome);
     throwIfAborted(signal);
     const configText = await readConfigText(configPath);
-    if (expectedConfigText !== undefined && configText !== expectedConfigText) {
+    if (!expectedPlanState && expectedConfigText !== undefined && configText !== expectedConfigText) {
       throw new CoreError(
         "PLAN_STALE",
         "config.toml changed after the operation was confirmed. Refresh and retry."
       );
     }
-    if (configBackupText !== undefined && configText !== configBackupText) {
+    if (!expectedPlanState && configBackupText !== undefined && configText !== configBackupText) {
       throw new CoreError(
         "PLAN_STALE",
         "config.toml changed before the switch operation acquired its lock. Refresh and retry."
@@ -372,6 +812,21 @@ async function runSyncCore({
     if (!storage.stateDbLocation && isConfiguredSqliteHome(storage)) {
       throw missingConfiguredStateDbError(storage);
     }
+    if (storage.stateDbLocation?.path) {
+      ({ release: releaseStateDbLock } = await acquireStateDbLock(
+        storage.stateDbLocation.path,
+        "sync",
+        { platform }
+      ));
+    }
+    await assertNoPendingTransactions(codexHome);
+    await verifyExpectedPlanState({
+      expectedPlanState,
+      codexHome,
+      configText,
+      storage,
+      platform
+    });
     const current = readCurrentProviderFromConfigText(configText);
     const targetProvider = provider ?? current.provider ?? DEFAULT_PROVIDER;
     emitProgress(onProgress, { stage: "scan_rollout_files", status: "start" });
@@ -610,7 +1065,7 @@ async function runSyncCore({
         keepCount
       });
       try {
-        autoPruneResult = await pruneBackups(codexHome, keepCount);
+        autoPruneResult = await pruneManagedBackups(codexHome, keepCount);
       } catch (pruneError) {
         autoPruneWarning = `Automatic backup cleanup failed: ${pruneError instanceof Error ? pruneError.message : String(pruneError)}`;
       }
@@ -790,60 +1245,23 @@ async function runSyncCore({
       );
     }
   } finally {
-    await releaseLock();
+    await releaseWriteLocks(releaseStateDbLock, releaseLock);
   }
 }
 
-/** @deprecated Compatibility adapter. New transports must use prepareSwitch/applySwitch once available. */
-export async function runSwitch({
-  codexHome: explicitCodexHome,
-  sqliteHome,
-  storage: providedStorage,
-  expectedConfigText,
-  provider,
-  model,
-  keepRootModel = false,
-  keepCount = DEFAULT_BACKUP_RETENTION_COUNT,
-  onProgress,
-  platform,
-  faultInjector,
-  signal
-}) {
-  if (!provider) {
-    throw new CoreError(
-      "INVALID_INPUT",
-      "Missing provider id. Usage: codex-provider switch <provider-id>"
-    );
-  }
-
-  const codexHome = providedStorage?.codexHome ?? normalizeCodexHome(explicitCodexHome);
-  const configPath = path.join(codexHome, "config.toml");
-  const originalConfigText = await readConfigText(configPath);
-  if (expectedConfigText !== undefined && originalConfigText !== expectedConfigText) {
-    throw new CoreError(
-      "PLAN_STALE",
-      "config.toml changed after the operation was confirmed. Refresh and retry."
-    );
-  }
-  const storage = await prepareStorage({ codexHome, sqliteHome, configText: originalConfigText, storage: providedStorage, platform });
-  assertSqliteAccessSupported(storage, "switch");
-  if (!storage.stateDbLocation && isConfiguredSqliteHome(storage)) {
-    throw missingConfiguredStateDbError(storage);
-  }
+function buildSwitchIntent(originalConfigText, provider, model, keepRootModel) {
   if (!configDeclaresProvider(originalConfigText, provider)) {
     throw new CoreError(
       "INVALID_INPUT",
       `Provider "${provider}" is not available in config.toml. Configure it first or use one of: ${listConfiguredProviderIds(originalConfigText).join(", ")}`
     );
   }
-
   if (model !== undefined && model !== null && keepRootModel) {
     throw new CoreError("INVALID_INPUT", "--model and --keep-root-model are mutually exclusive. Pick one.");
   }
 
   let nextConfigText = setRootProviderInConfigText(originalConfigText, provider);
   let modelSync = { applied: false, source: "none", model: null, warning: null };
-
   if (model !== undefined && model !== null) {
     if (typeof model !== "string" || model.length === 0) {
       throw new CoreError(
@@ -867,26 +1285,71 @@ export async function runSwitch({
       };
     }
   }
+  const modelForThreads = modelSync.applied && modelSync.model
+    ? modelSync.model
+    : readRootModelFromConfigText(nextConfigText);
+  return { nextConfigText, modelSync, modelForThreads };
+}
 
-  // `nextConfigText` has the final root-level `model` value. Use that to
-  // drive the per-thread rewrite so old sessions match new sessions.
-  let modelForThreads = null;
-  if (modelSync.applied && modelSync.model) {
-    modelForThreads = modelSync.model;
-  } else {
-    modelForThreads = readRootModelFromConfigText(nextConfigText);
+async function runSwitchCore({
+  codexHome: explicitCodexHome,
+  sqliteHome,
+  storage: providedStorage,
+  expectedConfigText,
+  provider,
+  model,
+  keepRootModel = false,
+  keepCount = DEFAULT_BACKUP_RETENTION_COUNT,
+  onProgress,
+  platform,
+  faultInjector,
+  signal,
+  expectedPlanState
+}) {
+  if (!provider) {
+    throw new CoreError(
+      "INVALID_INPUT",
+      "Missing provider id. Usage: codex-provider switch <provider-id>"
+    );
   }
+
+  const codexHome = providedStorage?.codexHome ?? normalizeCodexHome(explicitCodexHome);
+  const configPath = path.join(codexHome, "config.toml");
+  const originalConfigText = await readConfigText(configPath);
+  if (expectedConfigText !== undefined && originalConfigText !== expectedConfigText) {
+    throw new CoreError(
+      "PLAN_STALE",
+      "config.toml changed after the operation was confirmed. Refresh and retry."
+    );
+  }
+  const storage = await prepareStorage({ codexHome, sqliteHome, configText: originalConfigText, storage: providedStorage, platform });
+  assertSqliteAccessSupported(storage, "switch");
+  if (!storage.stateDbLocation && isConfiguredSqliteHome(storage)) {
+    throw missingConfiguredStateDbError(storage);
+  }
+  await faultInjector?.({
+    point: "after_switch_storage_preflight",
+    stateDbPath: storage.stateDbLocation?.path ?? null
+  });
+  const { nextConfigText, modelSync, modelForThreads } = buildSwitchIntent(
+    originalConfigText,
+    provider,
+    model,
+    keepRootModel
+  );
   const syncResult = await runSyncCore(
     {
       codexHome,
-      storage,
+      sqliteHome,
       provider,
       configBackupText: originalConfigText,
       keepCount,
       onProgress,
       model: modelForThreads,
       faultInjector,
-      signal
+      signal,
+      expectedPlanState,
+      platform
     },
     {
       afterBackup: async () => {
@@ -911,8 +1374,7 @@ export async function runSwitch({
   };
 }
 
-/** @deprecated Compatibility adapter. New transports must use prepareRestore/applyRestore once available. */
-export async function runRestore({
+async function runRestoreCore({
   codexHome: explicitCodexHome,
   sqliteHome,
   storage: providedStorage,
@@ -923,7 +1385,8 @@ export async function runRestore({
   restoreSessions = true,
   allowSqliteHomeRelocation = false,
   platform,
-  faultInjector
+  faultInjector,
+  expectedPlanState
 }) {
   if (!backupDir) {
     throw new CoreError(
@@ -939,9 +1402,10 @@ export async function runRestore({
     );
   }
   const releaseLock = await acquireLock(codexHome, "restore");
+  let releaseStateDbLock = null;
   try {
     const configText = await readConfigText(path.join(codexHome, "config.toml"));
-    if (expectedConfigText !== undefined && configText !== expectedConfigText) {
+    if (!expectedPlanState && expectedConfigText !== undefined && configText !== expectedConfigText) {
       throw new CoreError(
         "PLAN_STALE",
         "config.toml changed after the operation was confirmed. Refresh and retry."
@@ -953,6 +1417,31 @@ export async function runRestore({
       throw missingConfiguredStateDbError(storage);
     }
     const normalizedBackupDir = path.resolve(backupDir);
+    if (restoreDatabase) {
+      const stateDbTargetPath = await resolveRestoreStateDbTargetPath(normalizedBackupDir, storage);
+      ({ release: releaseStateDbLock } = await acquireStateDbLock(
+        stateDbTargetPath,
+        "restore",
+        { platform }
+      ));
+    }
+    const foreignPending = (await findPendingTransactions(codexHome))
+      .filter((transaction) => pathComparisonKey(transaction.backupDir) !== pathComparisonKey(normalizedBackupDir));
+    if (foreignPending.length > 0) {
+      throw new CoreError(
+        "RECOVERY_REQUIRED",
+        "An unrelated unfinished transaction must be resolved before this restore.",
+        { suggestedAction: "Restore the transaction-bound managed backup before starting another write." }
+      );
+    }
+    await verifyExpectedPlanState({
+      expectedPlanState,
+      codexHome,
+      configText,
+      storage,
+      platform,
+      backupDir: normalizedBackupDir
+    });
     let boundJournal = null;
     try {
       boundJournal = await readTransactionJournal(
@@ -1030,8 +1519,398 @@ export async function runRestore({
     }
     return result;
   } finally {
-    await releaseLock();
+    await releaseWriteLocks(releaseStateDbLock, releaseLock);
   }
+}
+
+function sqliteRowsToChange(sqliteCounts, targetProvider, sqliteRepairStats) {
+  let count = 0;
+  for (const scope of ["sessions", "archived_sessions"]) {
+    for (const [provider, providerCount] of Object.entries(sqliteCounts?.[scope] ?? {})) {
+      if (provider !== targetProvider && Number.isSafeInteger(providerCount)) count += providerCount;
+    }
+  }
+  count += sqliteRepairStats?.userEventRowsNeedingRepair ?? 0;
+  count += sqliteRepairStats?.cwdRowsNeedingRepair ?? 0;
+  return count;
+}
+
+async function preparePlanContext(options, operation, { backupDir = null } = {}) {
+  const codexHome = options.storage?.codexHome ?? normalizeCodexHome(options.codexHome);
+  if (operationCoordinator.isActive(codexHome, options.platform)) {
+    throw new CoreError("OPERATION_BUSY", "Lock already exists for this Codex Home; another write operation is active.", {
+      details: { busyScope: "codex-home" }
+    });
+  }
+  const sqliteHome = explicitSqliteHomeFromOptions(options);
+  const configPath = path.join(codexHome, "config.toml");
+  const configText = await readConfigText(configPath);
+  if (options.expectedConfigText !== undefined && configText !== options.expectedConfigText) {
+    throw new CoreError(
+      "PLAN_STALE",
+      "config.toml changed after the operation was confirmed. Refresh and retry."
+    );
+  }
+  const storage = await prepareStorage({ codexHome, sqliteHome, configText, platform: options.platform });
+  assertSqliteAccessSupported(storage, operation);
+  const profile = profileFromOptions(options, codexHome, sqliteHome, options.platform);
+  const status = await scanStatus({
+    codexHome,
+    sqliteHome,
+    storage,
+    configText,
+    profileId: profile.id,
+    profileRevision: profile.suppliedRevision,
+    platform: options.platform
+  });
+  // Capture the executable revision after all read-only status queries have
+  // closed their SQLite handles; opening a WAL database may legitimately
+  // update its SHM sidecar.
+  const revisions = await captureOperationRevisions({
+    codexHome,
+    profileRevision: profile.revision,
+    configText,
+    storage,
+    backupDir,
+    platform: options.platform
+  });
+  operationCoordinator.cacheStatus(codexHome, status, options.platform);
+  return { codexHome, sqliteHome, configText, storage, profile, revisions, status };
+}
+
+async function issueSyncLikePlan(operation, options, switchIntent = null) {
+  const keepCount = options.keepCount ?? DEFAULT_BACKUP_RETENTION_COUNT;
+  if (!Number.isInteger(keepCount) || keepCount < 1) {
+    throw new CoreError(
+      "INVALID_INPUT",
+      `Invalid automatic keep count: ${keepCount}. Expected an integer greater than or equal to 1.`
+    );
+  }
+  const context = await preparePlanContext(options, operation);
+  if (!context.storage.stateDbLocation && isConfiguredSqliteHome(context.storage)) {
+    throw missingConfiguredStateDbError(context.storage);
+  }
+  const current = readCurrentProviderFromConfigText(context.configText);
+  const targetProvider = switchIntent?.provider
+    ?? options.provider
+    ?? current.provider
+    ?? DEFAULT_PROVIDER;
+  const targetModel = switchIntent?.modelForThreads ?? options.model ?? null;
+  if (targetModel !== null && targetModel !== undefined
+      && (typeof targetModel !== "string" || !targetModel)) {
+    throw new CoreError("INVALID_INPUT", "The target model must be a non-empty string or null.");
+  }
+  const scan = await collectSessionChanges(context.codexHome, targetProvider, {
+    skipLockedReads: true,
+    targetModel
+  });
+  const { lockedChanges } = await splitLockedSessionChanges(scan.changes);
+  const lockedCount = new Set([
+    ...scan.lockedPaths,
+    ...lockedChanges.map((change) => change.path)
+  ]).size;
+  const warnings = [];
+  if (!context.status.projectThreadVisibilityAvailable) {
+    warnings.push("Project visibility diagnostics are unavailable; the write operation will still validate and protect the global state with backup-first recovery.");
+  }
+  const encryptedWarning = buildEncryptedContentWarning(scan.encryptedContentCounts, targetProvider);
+  if (encryptedWarning) warnings.push(encryptedWarning);
+  if (lockedCount > 0) {
+    warnings.push(`${lockedCount} rollout file(s) are currently locked and may produce a partial result.`);
+  }
+  if (switchIntent?.modelSync.warning) warnings.push(switchIntent.modelSync.warning);
+
+  const summary = {
+    profile: { id: context.profile.id, revision: context.profile.revision },
+    storageRevision: context.revisions.storageRevision,
+    configRevision: context.revisions.configRevision,
+    rolloutRevision: context.revisions.rolloutRevision,
+    stateDbRevision: context.revisions.stateDbRevision,
+    target: {
+      provider: targetProvider,
+      model: targetModel,
+      ...(switchIntent ? { modelMode: switchIntent.modelMode } : {})
+    },
+    impact: {
+      rolloutFilesToChange: scan.changes.length,
+      sqliteRowsToChange: sqliteRowsToChange(
+        context.status.sqliteCounts,
+        targetProvider,
+        context.status.sqliteRepairStats
+      ),
+      workspaceRootsToChange: context.status.sqliteRepairStats?.cwdRowsNeedingRepair ?? 0,
+      lockedRolloutFiles: context.revisions.lockedRolloutFiles,
+      backupExpected: true
+    },
+    warnings
+  };
+  const executionOptions = operation === "switch"
+    ? {
+        codexHome: context.codexHome,
+        ...(context.sqliteHome ? { sqliteHome: context.sqliteHome } : {}),
+        provider: switchIntent.provider,
+        model: options.model,
+        keepRootModel: Boolean(options.keepRootModel),
+        keepCount,
+        onProgress: options.onProgress,
+        platform: options.platform,
+        faultInjector: options.faultInjector,
+        signal: options.signal
+      }
+    : {
+        codexHome: context.codexHome,
+        ...(context.sqliteHome ? { sqliteHome: context.sqliteHome } : {}),
+        provider: targetProvider,
+        keepCount,
+        sqliteBusyTimeoutMs: options.sqliteBusyTimeoutMs,
+        onProgress: options.onProgress,
+        model: targetModel,
+        platform: options.platform,
+        faultInjector: options.faultInjector,
+        signal: options.signal
+      };
+  return planLedger.issue(operation, summary, {
+    codexHome: context.codexHome,
+    platform: options.platform,
+    actor: options.__actor === "watch" ? "watch" : "manual",
+    executionOptions,
+    expectedPlanState: {
+      profile: context.profile,
+      profileResolver: options.profileResolver,
+      revisions: context.revisions
+    },
+    statusOptions: {
+      codexHome: context.codexHome,
+      ...(context.sqliteHome ? { sqliteHome: context.sqliteHome } : {}),
+      profileId: context.profile.id,
+      profileRevision: context.profile.suppliedRevision,
+      platform: options.platform
+    }
+  });
+}
+
+export async function prepareSync(options = {}) {
+  return issueSyncLikePlan("sync", options);
+}
+
+export async function prepareSwitch(options = {}) {
+  if (!options.provider) {
+    throw new CoreError("INVALID_INPUT", "Missing provider id. Usage: codex-provider switch <provider-id>");
+  }
+  const codexHome = options.storage?.codexHome ?? normalizeCodexHome(options.codexHome);
+  if (operationCoordinator.isActive(codexHome, options.platform)) {
+    throw new CoreError("OPERATION_BUSY", "Lock already exists for this Codex Home; another write operation is active.", {
+      details: { busyScope: "codex-home" }
+    });
+  }
+  const configText = await readConfigText(path.join(codexHome, "config.toml"));
+  if (options.expectedConfigText !== undefined && configText !== options.expectedConfigText) {
+    throw new CoreError("PLAN_STALE", "config.toml changed after the operation was confirmed. Refresh and retry.");
+  }
+  const intent = buildSwitchIntent(configText, options.provider, options.model, Boolean(options.keepRootModel));
+  return issueSyncLikePlan("switch", options, {
+    provider: options.provider,
+    modelForThreads: intent.modelForThreads,
+    modelSync: intent.modelSync,
+    modelMode: options.model !== undefined && options.model !== null
+      ? "explicit"
+      : (options.keepRootModel ? "keep-root-model" : "provider-default")
+  });
+}
+
+async function resolvePreparedBackup(options, codexHome) {
+  if (typeof options.backupId === "string" && options.backupId) {
+    const inventory = await listBackups(codexHome);
+    const selected = inventory.backups.find((backup) => backup.id === options.backupId);
+    if (!selected) {
+      throw new CoreError("RESTORE_VALIDATION_FAILED", "The selected managed backup is unavailable.");
+    }
+    return { backupId: selected.id, backupDir: selected.path, metadata: selected.metadata };
+  }
+  if (typeof options.backupDir === "string" && options.backupDir) {
+    return {
+      backupId: path.basename(path.resolve(options.backupDir)),
+      backupDir: path.resolve(options.backupDir),
+      metadata: null
+    };
+  }
+  throw new CoreError("INVALID_INPUT", "A managed backupId is required for Restore preparation.");
+}
+
+export async function prepareRestore(options = {}) {
+  const restoreConfig = options.restoreConfig !== false;
+  const restoreDatabase = options.restoreDatabase !== false;
+  const restoreSessions = options.restoreSessions !== false;
+  if (options.allowSqliteHomeRelocation
+      && !(typeof options.sqliteHome === "string" && options.sqliteHome.trim())) {
+    throw new CoreError(
+      "INVALID_INPUT",
+      "--allow-sqlite-home-relocation requires an explicit --sqlite-home path."
+    );
+  }
+  const codexHome = options.storage?.codexHome ?? normalizeCodexHome(options.codexHome);
+  if (operationCoordinator.isActive(codexHome, options.platform)) {
+    throw new CoreError("OPERATION_BUSY", "Lock already exists for this Codex Home; another write operation is active.", {
+      details: { busyScope: "codex-home" }
+    });
+  }
+  const backup = await resolvePreparedBackup(options, codexHome);
+  const context = await preparePlanContext(options, "restore", { backupDir: backup.backupDir });
+  if (restoreDatabase && !context.storage.stateDbLocation && isConfiguredSqliteHome(context.storage)) {
+    throw missingConfiguredStateDbError(context.storage);
+  }
+  if (restoreDatabase) {
+    await resolveRestoreStateDbTargetPath(backup.backupDir, context.storage);
+  }
+  const warnings = [];
+  if (options.allowSqliteHomeRelocation) {
+    warnings.push("SQLite Home relocation is explicit; config.toml will not be restored.");
+  }
+  const summary = {
+    profile: { id: context.profile.id, revision: context.profile.revision },
+    storageRevision: context.revisions.storageRevision,
+    configRevision: context.revisions.configRevision,
+    rolloutRevision: context.revisions.rolloutRevision,
+    stateDbRevision: context.revisions.stateDbRevision,
+    backupRevision: context.revisions.backupRevision,
+    target: {
+      backupId: backup.backupId,
+      restoreConfig,
+      restoreDatabase,
+      restoreSessions,
+      allowSqliteHomeRelocation: Boolean(options.allowSqliteHomeRelocation)
+    },
+    impact: {
+      rolloutFilesToChange: restoreSessions ? (backup.metadata?.changedSessionFiles ?? 0) : 0,
+      stateDbFilesToChange: restoreDatabase ? 1 : 0,
+      configFilesToChange: restoreConfig ? 1 : 0,
+      lockedRolloutFiles: context.revisions.lockedRolloutFiles,
+      backupExpected: false
+    },
+    warnings
+  };
+  return planLedger.issue("restore", summary, {
+    codexHome: context.codexHome,
+    platform: options.platform,
+    actor: "manual",
+    executionOptions: {
+      codexHome: context.codexHome,
+      ...(context.sqliteHome ? { sqliteHome: context.sqliteHome } : {}),
+      backupDir: backup.backupDir,
+      restoreConfig,
+      restoreDatabase,
+      restoreSessions,
+      allowSqliteHomeRelocation: Boolean(options.allowSqliteHomeRelocation),
+      platform: options.platform,
+      faultInjector: options.faultInjector
+    },
+    expectedPlanState: {
+      profile: context.profile,
+      profileResolver: options.profileResolver,
+      revisions: context.revisions
+    },
+    sourceBackup: { backupId: backup.backupId, backupDir: backup.backupDir },
+    statusOptions: {
+      codexHome: context.codexHome,
+      ...(context.sqliteHome ? { sqliteHome: context.sqliteHome } : {}),
+      profileId: context.profile.id,
+      profileRevision: context.profile.suppliedRevision,
+      platform: options.platform
+    }
+  });
+}
+
+function operationWarnings(result) {
+  return [
+    result?.encryptedContentWarning,
+    result?.autoPruneWarning,
+    result?.backupInventoryWarning,
+    result?.modelSync?.warning
+  ].filter((warning) => typeof warning === "string" && warning.trim());
+}
+
+function operationResult(operation, operationId, result, sourceBackup = null) {
+  const partial = Array.isArray(result?.skippedLockedRolloutFiles)
+    && result.skippedLockedRolloutFiles.length > 0;
+  const backupDir = result?.backupDir ?? sourceBackup?.backupDir ?? null;
+  return {
+    schemaVersion: 1,
+    operationId,
+    operation,
+    outcome: partial ? "partial" : "completed",
+    backup: backupDir
+      ? {
+          backupId: operation === "restore" ? sourceBackup?.backupId : path.basename(backupDir),
+          path: backupDir
+        }
+      : null,
+    warnings: operationWarnings(result),
+    result
+  };
+}
+
+async function applyPrepared(input, operation, execute) {
+  const entry = planLedger.consume(input, operation);
+  const internal = entry.internal;
+  const active = operationCoordinator.begin(internal.codexHome, operation, {
+    actor: internal.actor,
+    platform: internal.platform
+  });
+  try {
+    const result = await execute({
+      ...internal.executionOptions,
+      expectedPlanState: internal.expectedPlanState
+    });
+    return operationResult(operation, active.operationId, result, internal.sourceBackup);
+  } finally {
+    operationCoordinator.end(internal.codexHome, active.operationId, internal.platform);
+    try {
+      await getStatus(internal.statusOptions);
+    } catch {
+      // Keep the last complete snapshot. A status refresh is observational and
+      // cannot change the transaction result or replace it with partial state.
+    }
+  }
+}
+
+export async function applySync(input) {
+  return applyPrepared(input, "sync", (options) => runSyncCore(options));
+}
+
+export async function applySwitch(input) {
+  return applyPrepared(input, "switch", (options) => runSwitchCore(options));
+}
+
+export async function applyRestore(input) {
+  return applyPrepared(input, "restore", (options) => runRestoreCore(options));
+}
+
+// Internal scheduler hook used by Watch. It exposes completion only for a
+// same-process manual operation; external writers remain event-driven and are
+// never polled or queued behind.
+export function waitForManualOperationEnd({ codexHome, platform } = {}) {
+  return operationCoordinator.waitForManualOperation(
+    normalizeCodexHome(codexHome),
+    platform ?? process.platform
+  );
+}
+
+/** @deprecated Compatibility adapter. New transports must use prepareSync/applySync. */
+export async function runSync(options = {}) {
+  const plan = await prepareSync(options);
+  return (await applySync({ schemaVersion: 1, planId: plan.planId })).result;
+}
+
+/** @deprecated Compatibility adapter. New transports must use prepareSwitch/applySwitch. */
+export async function runSwitch(options = {}) {
+  const plan = await prepareSwitch(options);
+  return (await applySwitch({ schemaVersion: 1, planId: plan.planId })).result;
+}
+
+/** @deprecated Compatibility adapter. New transports must use prepareRestore/applyRestore. */
+export async function runRestore(options = {}) {
+  const plan = await prepareRestore(options);
+  return (await applyRestore({ schemaVersion: 1, planId: plan.planId })).result;
 }
 
 export async function runPruneBackups({
@@ -1049,8 +1928,12 @@ export async function runPruneBackups({
   await ensureCodexHome(resolveStorageLayout({ codexHome, env: {} }));
   const releaseLock = await acquireLock(codexHome, "prune-backups");
   try {
-    return await pruneBackups(codexHome, keepCount);
+    return await pruneManagedBackups(codexHome, keepCount);
   } finally {
     await releaseLock();
   }
+}
+
+export async function pruneBackups(options = {}) {
+  return runPruneBackups(options);
 }

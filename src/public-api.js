@@ -12,12 +12,21 @@
 export { CORE_ERROR_CODES, CoreError, toCoreErrorDto } from "./core-error.js";
 
 export {
+  applyRestore,
+  applySwitch,
+  applySync,
   getStatus,
+  pruneBackups,
+  prepareRestore,
+  prepareSwitch,
+  prepareSync,
   runPruneBackups,
   runRestore,
   runSwitch,
   runSync
 } from "./service.js";
+
+export { getDiagnostics } from "./diagnostics.js";
 
 export { listBackups } from "./backup.js";
 export { getHistorySession, listHistory } from "./history.js";
@@ -28,4 +37,4 @@ export {
   resolveStorageLayout,
   withStateDbLocation
 } from "./storage-layout.js";
-export { runWatch } from "./watch.js";
+export { getWatchStatus, runWatch, startWatch, stopWatch } from "./watch.js";

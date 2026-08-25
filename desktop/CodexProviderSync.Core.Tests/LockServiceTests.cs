@@ -48,6 +48,46 @@ public sealed class LockServiceTests
     }
 
     [Fact]
+    public async Task InspectLockAsync_IsReadOnlyAndReportsTheVerifiedActiveOwner()
+    {
+        string codexHome = CreateTempDirectory();
+        LockService service = new();
+        LockInspection before = await service.InspectLockAsync(codexHome);
+        Assert.True(before.IsAbsent);
+
+        await using (LockHandle held = await service.AcquireLockAsync(codexHome, "status-fixture"))
+        {
+            LockInspection active = await new LockService().InspectLockAsync(codexHome);
+            Assert.Equal("active", active.State);
+            Assert.Equal("codex-home", active.Scope);
+            Assert.Equal(held.InstanceId, active.Owner!.InstanceId);
+            Assert.Equal("dotnet", active.Owner.Runtime);
+            Assert.Equal("status-fixture", active.Owner.Label);
+            Assert.NotEmpty(active.ObservationRevision);
+        }
+
+        LockInspection after = await service.InspectLockAsync(codexHome);
+        Assert.True(after.IsAbsent);
+        Assert.False(Directory.Exists(AppConstants.LockPath(codexHome)));
+    }
+
+    [Fact]
+    public async Task InspectLockAsync_PreservesMalformedOwnerFailClosed()
+    {
+        string codexHome = CreateTempDirectory();
+        string lockPath = AppConstants.LockPath(codexHome);
+        Directory.CreateDirectory(lockPath);
+        await File.WriteAllTextAsync(Path.Combine(lockPath, "owner.json"), "not-json");
+
+        LockInspection inspection = await new LockService().InspectLockAsync(codexHome);
+
+        Assert.Equal("unverifiable", inspection.State);
+        Assert.Equal(LockService.LockUnverifiableErrorCode, inspection.ErrorCode);
+        Assert.True(Directory.Exists(lockPath));
+        Assert.Equal("not-json", await File.ReadAllTextAsync(Path.Combine(lockPath, "owner.json")));
+    }
+
+    [Fact]
     public async Task AcquirePathLockAsync_SupportsArbitraryExplicitResourcePath()
     {
         string root = CreateTempDirectory();
@@ -75,7 +115,7 @@ public sealed class LockServiceTests
             () => new LockService().AcquirePathLockAsync(lockPath, "sqlite"));
 
         Assert.Contains("not a directory", error.Message);
-        Assert.True(LockService.IsOperationBusy(error));
+        Assert.True(LockService.IsLockUnverifiable(error));
         Assert.Equal("foreign", await File.ReadAllTextAsync(lockPath));
         Assert.Empty(Directory.EnumerateFiles(lockPath + ".claims", "*.json"));
     }
@@ -98,7 +138,7 @@ public sealed class LockServiceTests
             () => new LockService().AcquirePathLockAsync(lockPath, "sqlite"));
 
         Assert.Contains("symbolic link or reparse point", error.Message);
-        Assert.True(LockService.IsOperationBusy(error));
+        Assert.True(LockService.IsLockUnverifiable(error));
         Assert.Empty(Directory.EnumerateFileSystemEntries(targetPath));
         Assert.Empty(Directory.EnumerateFiles(lockPath + ".claims", "*.json"));
     }
@@ -121,7 +161,7 @@ public sealed class LockServiceTests
         InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
             () => service.AcquireLockAsync(codexHome, "injected"));
 
-        Assert.True(LockService.IsOperationBusy(error));
+        Assert.True(LockService.IsLockUnverifiable(error));
         Assert.Equal("foreign-owner", await File.ReadAllTextAsync(Path.Combine(lockPath, "owner.json")));
         Assert.Equal("keep", await File.ReadAllTextAsync(Path.Combine(lockPath, "foreign.txt")));
         Assert.Empty(Directory.EnumerateFiles(lockPath + ".claims", "*.json"));
@@ -148,7 +188,7 @@ public sealed class LockServiceTests
             () => service.AcquireLockAsync(codexHome, "aba"));
 
         Assert.Contains("reservation changed identity", error.Message);
-        Assert.True(LockService.IsOperationBusy(error));
+        Assert.True(LockService.IsLockUnverifiable(error));
         Assert.Equal("keep", await File.ReadAllTextAsync(Path.Combine(lockPath, "foreign.txt")));
         Assert.Single(Directory.EnumerateFiles(lockPath + ".claims", "*.json"));
         Assert.True(Directory.Exists(displacedPath));
@@ -661,10 +701,10 @@ public sealed class LockServiceTests
                 @"C:\temp\provider-sync.lock",
                 tryCreateDirectory: _ => 183));
 
-        Assert.Contains("Lock already exists", error.Message);
-        Assert.True(LockService.IsOperationBusy(error));
+        Assert.Contains("cannot be verified", error.Message);
+        Assert.True(LockService.IsLockUnverifiable(error));
         Assert.Equal(
-            LockService.OperationBusyErrorCode,
+            LockService.LockUnverifiableErrorCode,
             error.Data["codex-provider-sync/error-code"]);
     }
 

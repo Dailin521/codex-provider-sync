@@ -7,22 +7,22 @@ import { fileURLToPath } from "node:url";
 
 import { defaultCodexHome } from "./constants.js";
 import {
+  applyRestore,
+  applySwitch,
+  applySync,
   CoreError,
-  detectStateDb,
-  ensureCodexHome,
   getHistorySession,
   getStatus,
   listBackups,
   listHistory,
+  prepareRestore,
+  prepareSwitch,
+  prepareSync,
   readConfigText,
   readRootModelFromConfigText,
   resolveStorageLayout,
   runPruneBackups,
-  runRestore,
-  runSwitch,
-  runSync,
   toCoreErrorDto,
-  withStateDbLocation
 } from "./public-api.js";
 import { createMemoryWebUiState, ProfileRevisionConflictError, WebUiStateStore } from "./web-state.js";
 
@@ -70,6 +70,17 @@ function sendError(response, statusCode, error, code) {
     ...(code ? { code } : {}),
     ...(error instanceof CoreError ? { coreError: toCoreErrorDto(error) } : {})
   });
+}
+
+function coreErrorHttpStatus(error, fallback) {
+  if (!(error instanceof CoreError)) return fallback;
+  if (error.code === "INVALID_INPUT"
+      || error.code === "RESTORE_VALIDATION_FAILED"
+      || error.code === "SQLITE_UNSUPPORTED_PATH") return 400;
+  if (error.code === "PLAN_EXPIRED" || error.code === "STALE_STATE"
+      || error.code === "OPERATION_BUSY" || error.code === "LOCK_UNVERIFIABLE"
+      || error.code === "RECOVERY_REQUIRED") return 409;
+  return fallback;
 }
 
 async function readJsonBody(request) {
@@ -175,35 +186,6 @@ function captureStorageProfile(input, stateStore, response) {
   return Object.freeze(snapshot);
 }
 
-function comparableStoragePath(value, platform) {
-  if (typeof value !== "string") return null;
-  return platform === "win32" ? value.toLowerCase() : value;
-}
-
-function storageRevision(profile, storage, configText, platform) {
-  const canonical = JSON.stringify({
-    version: 2,
-    profileId: profile.profileId ?? profile.id,
-    profileRevision: profile.profileRevision ?? profile.revision,
-    configRevision: crypto.createHash("sha256").update(configText, "utf8").digest("base64url"),
-    codexHome: comparableStoragePath(storage.codexHome, platform),
-    sqliteHome: comparableStoragePath(storage.sqliteHome, platform),
-    sqliteHomeSource: storage.sqliteHomeSource,
-    sqliteAccess: {
-      supported: storage.sqliteAccess?.supported !== false,
-      reason: storage.sqliteAccess?.reason ?? null
-    },
-    allowLegacyRootFallback: Boolean(storage.allowLegacyRootFallback),
-    stateDbLocation: storage.stateDbLocation
-      ? {
-          path: comparableStoragePath(storage.stateDbLocation.path, platform),
-          source: storage.stateDbLocation.source
-        }
-      : null
-  });
-  return crypto.createHash("sha256").update(canonical, "utf8").digest("base64url");
-}
-
 function serializeStatus(status) {
   const rollout = status.rolloutCounts ?? { sessions: {}, archived_sessions: {} };
   const sqlite = status.sqliteCounts;
@@ -212,12 +194,15 @@ function serializeStatus(status) {
     Object.entries(distribution?.[scope] ?? {}).every(([provider, count]) => count === 0 || provider === targetProvider)
   ));
   const sqliteReadable = Boolean(sqlite && !sqlite.unreadable);
-  const rolloutScanComplete = !status.lockedRolloutFiles?.length;
+  const rolloutScanComplete = status.rolloutScanComplete !== false
+    && !status.lockedRolloutFiles?.length;
   return {
     ...status,
     alignment: {
       aligned: Boolean(
         targetProvider
+        && !status.operationInProgress
+        && !status.statusReadBlocked
         && sqliteReadable
         && rolloutScanComplete
         && matchesTargetProvider(rollout)
@@ -432,11 +417,14 @@ export function createWebUiServer({
   environment = process.env
 } = {}) {
   const api = {
+    applyRestore: services.applyRestore ?? applyRestore,
+    applySwitch: services.applySwitch ?? applySwitch,
+    applySync: services.applySync ?? applySync,
     getStatus: services.getStatus ?? getStatus,
     listBackups: services.listBackups ?? listBackups,
-    runSync: services.runSync ?? runSync,
-    runSwitch: services.runSwitch ?? runSwitch,
-    runRestore: services.runRestore ?? runRestore,
+    prepareRestore: services.prepareRestore ?? prepareRestore,
+    prepareSwitch: services.prepareSwitch ?? prepareSwitch,
+    prepareSync: services.prepareSync ?? prepareSync,
     runPruneBackups: services.runPruneBackups ?? runPruneBackups,
     readConfigText: services.readConfigText ?? readConfigText,
     readRootModelFromConfigText: services.readRootModelFromConfigText ?? readRootModelFromConfigText,
@@ -492,83 +480,55 @@ export function createWebUiServer({
     record("info", `${kind} started`);
     try {
       const result = await operation();
-      const outcome = Array.isArray(result?.skippedLockedRolloutFiles) && result.skippedLockedRolloutFiles.length > 0
-        ? "partial"
-        : "success";
+      const outcome = typeof result?.outcome === "string"
+        ? result.outcome
+        : (Array.isArray(result?.skippedLockedRolloutFiles) && result.skippedLockedRolloutFiles.length > 0
+            ? "partial"
+            : "success");
       record(outcome === "partial" ? "warning" : "success", `${kind} completed`);
       sendJson(response, 200, { result: { ...result, outcome } });
     } catch (error) {
       record("error", `${kind} failed`, error instanceof Error ? error.message : String(error));
-      sendError(response, 400, error);
+      sendError(response, coreErrorHttpStatus(error, 400), error);
     } finally {
       activeOperation = null;
     }
   };
 
-  const resolveOperationStorage = async (profile) => {
-    let configText = "";
-    try {
-      configText = await api.readConfigText(path.join(profile.codexHome, "config.toml"));
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
-    }
-    const layout = resolveStorageLayout({
-      codexHome: profile.codexHome,
-      sqliteHome: profile.sqliteHome,
-      configText,
-      env: environment,
-      platform
-    });
-    await ensureCodexHome(layout);
-    const storage = layout.sqliteAccess.supported === false
-      ? withStateDbLocation(layout, null)
-      : withStateDbLocation(layout, await detectStateDb(layout));
-    return { configText, storage };
-  };
-
-  const captureOperationStorage = async (input, response) => {
+  const capturePrepareProfile = (input, response) => {
     if (Object.hasOwn(input ?? {}, "codexHome") || Object.hasOwn(input ?? {}, "sqliteHome")) {
       throw new Error("Storage paths must be selected through a server-managed profileId.");
     }
     const profileId = requireString(input?.profileId ?? "default", "profileId", { maxLength: 80 });
     const profile = captureProfileRevision(profileId, input?.profileRevision, stateStore, response);
     if (!profile) return null;
-    if (typeof input?.storageRevision !== "string" || !input.storageRevision) {
-      sendJson(response, 409, {
-        error: "This operation requires the confirmed SQLite storage revision. Refresh and confirm again.",
-        code: "STORAGE_REVISION_REQUIRED",
-        profile
-      });
-      return null;
-    }
-    const prepared = await resolveOperationStorage(profile);
-    if (input.storageRevision !== storageRevision(profile, prepared.storage, prepared.configText, platform)) {
-      sendJson(response, 409, {
-        error: "The configuration or effective SQLite storage changed after this operation was prepared. Refresh and confirm again.",
-        code: "STORAGE_CHANGED",
-        profile
-      });
-      return null;
-    }
+    return Object.freeze({
+      id: profile.id,
+      revision: profile.revision,
+      codexHome: profile.codexHome,
+      ...(profile.sqliteHome ? { sqliteHome: profile.sqliteHome } : {})
+    });
+  };
+
+  const resolveCurrentProfile = async (profileId) => {
+    const profile = stateStore.getProfile(profileId);
     return {
-      profile: Object.freeze({
-        profileId: profile.id,
-        codexHome: profile.codexHome,
-        ...(profile.sqliteHome ? { sqliteHome: profile.sqliteHome } : {})
-      }),
-      ...prepared
+      id: profile.id,
+      revision: profile.revision,
+      codexHome: profile.codexHome,
+      ...(profile.sqliteHome ? { sqliteHome: profile.sqliteHome } : {})
     };
   };
 
-  const assertWebOperationStorage = (storage, operation) => {
-    if (storage.sqliteAccess.supported === false) {
-      throw new CoreError(
-        "SQLITE_UNSUPPORTED_PATH",
-        `Cannot ${operation}: ${storage.sqliteAccess.message}`,
-        { details: storage.sqliteAccess.reason ? { reason: storage.sqliteAccess.reason } : undefined }
-      );
+  const requirePlanApply = (input) => {
+    if (!input || typeof input !== "object" || Array.isArray(input)
+        || Object.keys(input).sort().join(",") !== "planId,schemaVersion"
+        || input.schemaVersion !== 1
+        || typeof input.planId !== "string"
+        || !input.planId) {
+      throw new CoreError("INVALID_INPUT", "Apply accepts exactly { schemaVersion: 1, planId }.");
     }
-    return storage;
+    return { schemaVersion: 1, planId: input.planId };
   };
 
   const server = http.createServer(async (request, response) => {
@@ -722,16 +682,7 @@ export function createWebUiServer({
 
         if (pathname === "/api/status") {
           const profile = resolveStorageProfile(body, stateStore);
-          const prepared = await resolveOperationStorage(profile);
-          const status = serializeStatus(await api.getStatus({
-            ...profile,
-            storage: prepared.storage,
-            configText: prepared.configText
-          }));
-          status.pathComparisonCaseInsensitive = platform === "win32";
-          status.profileId = profile.profileId;
-          status.profileRevision = profile.profileRevision;
-          status.storageRevision = storageRevision(profile, prepared.storage, prepared.configText, platform);
+          const status = serializeStatus(await api.getStatus({ ...profile, platform }));
           record("info", "Status refreshed", status.codexHome, null);
           sendJson(response, 200, { status });
           return;
@@ -758,80 +709,102 @@ export function createWebUiServer({
           return;
         }
 
-        if (pathname === "/api/sync") {
-          const operationStorage = await captureOperationStorage(body, response);
-          if (!operationStorage) return;
-          await withOperation("sync", response, async () => {
-            assertWebOperationStorage(operationStorage.storage, "sync");
-            const provider = requireProvider(body.provider);
-            const keepCount = requireKeepCount(body.keepCount);
-            const model = api.readRootModelFromConfigText(operationStorage.configText);
-            return api.runSync({
-              ...operationStorage.profile,
-              storage: operationStorage.storage,
-              expectedConfigText: operationStorage.configText,
-              provider,
-              keepCount,
-              model,
-              onProgress: (event) => record("progress", stageMessage(event), event)
-            });
+        if (pathname === "/api/sync/prepare") {
+          const profile = capturePrepareProfile(body, response);
+          if (!profile) return;
+          const configText = await api.readConfigText(path.join(profile.codexHome, "config.toml"));
+          const plan = await api.prepareSync({
+            codexHome: profile.codexHome,
+            ...(profile.sqliteHome ? { sqliteHome: profile.sqliteHome } : {}),
+            profile: { id: profile.id, revision: profile.revision },
+            profileResolver: resolveCurrentProfile,
+            provider: requireProvider(body.provider),
+            model: api.readRootModelFromConfigText(configText),
+            keepCount: requireKeepCount(body.keepCount),
+            platform
           });
+          sendJson(response, 200, { plan });
           return;
         }
 
-        if (pathname === "/api/switch") {
-          const operationStorage = await captureOperationStorage(body, response);
-          if (!operationStorage) return;
-          await withOperation("switch", response, async () => {
-            assertWebOperationStorage(operationStorage.storage, "switch");
-            const provider = requireProvider(body.provider);
-            const keepCount = requireKeepCount(body.keepCount);
-            const model = requireString(body.model, "model", { optional: true, maxLength: 500 });
-            return api.runSwitch({
-              ...operationStorage.profile,
-              storage: operationStorage.storage,
-              expectedConfigText: operationStorage.configText,
-              provider,
-              keepCount,
-              model,
-              keepRootModel: Boolean(body.keepRootModel),
-              onProgress: (event) => record("progress", stageMessage(event), event)
-            });
-          });
+        if (pathname === "/api/sync/apply") {
+          await withOperation("sync", response, () => api.applySync(requirePlanApply(body)));
           return;
         }
 
-        if (pathname === "/api/restore") {
-          const operationStorage = await captureOperationStorage(body, response);
-          if (!operationStorage) return;
-          await withOperation("restore", response, async () => {
-            assertWebOperationStorage(operationStorage.storage, "restore");
-            const backupId = requireString(body.backupId, "backupId", { maxLength: 300 });
-            const listed = await api.listBackups(operationStorage.profile.codexHome);
-            const backup = listed.backups.find((entry) => entry.id === backupId);
-            if (!backup) {
-              throw new Error("The selected backup is not a managed backup for this Codex Home.");
-            }
-            const restoreConfig = Boolean(body.restoreConfig);
-            const restoreDatabase = Boolean(body.restoreDatabase);
-            const restoreSessions = Boolean(body.restoreSessions);
-            if (!restoreConfig && !restoreDatabase && !restoreSessions) {
-              throw new Error("Select at least one backup content type to restore.");
-            }
-            if (body.allowSqliteHomeRelocation && !operationStorage.profile.sqliteHome) {
-              throw new Error("SQLite Home relocation requires a storage profile with an explicit SQLite Home target.");
-            }
-            return api.runRestore({
-              ...operationStorage.profile,
-              storage: operationStorage.storage,
-              expectedConfigText: operationStorage.configText,
-              backupDir: backup.path,
-              restoreConfig,
-              restoreDatabase,
-              restoreSessions,
-              allowSqliteHomeRelocation: Boolean(body.allowSqliteHomeRelocation)
-            });
+        if (pathname === "/api/switch/prepare") {
+          const profile = capturePrepareProfile(body, response);
+          if (!profile) return;
+          const modelMode = body.modelMode ?? (body.keepRootModel ? "keep-root-model" : (body.model ? "explicit" : "provider-default"));
+          if (!["provider-default", "keep-root-model", "explicit"].includes(modelMode)) {
+            throw new CoreError("INVALID_INPUT", "modelMode must be provider-default, keep-root-model, or explicit.");
+          }
+          const model = modelMode === "explicit"
+            ? requireString(body.model, "model", { maxLength: 500 })
+            : undefined;
+          if (modelMode !== "explicit" && body.model !== undefined && body.model !== null && body.model !== "") {
+            throw new CoreError("INVALID_INPUT", "model is only accepted when modelMode is explicit.");
+          }
+          const plan = await api.prepareSwitch({
+            codexHome: profile.codexHome,
+            ...(profile.sqliteHome ? { sqliteHome: profile.sqliteHome } : {}),
+            profile: { id: profile.id, revision: profile.revision },
+            profileResolver: resolveCurrentProfile,
+            provider: requireProvider(body.provider),
+            model,
+            keepRootModel: modelMode === "keep-root-model",
+            keepCount: requireKeepCount(body.keepCount),
+            platform
           });
+          sendJson(response, 200, { plan });
+          return;
+        }
+
+        if (pathname === "/api/switch/apply") {
+          await withOperation("switch", response, () => api.applySwitch(requirePlanApply(body)));
+          return;
+        }
+
+        if (pathname === "/api/restore/prepare") {
+          const profile = capturePrepareProfile(body, response);
+          if (!profile) return;
+          const restoreConfig = Boolean(body.restoreConfig);
+          const restoreDatabase = Boolean(body.restoreDatabase);
+          const restoreSessions = Boolean(body.restoreSessions);
+          if (!restoreConfig && !restoreDatabase && !restoreSessions) {
+            throw new CoreError("INVALID_INPUT", "Select at least one backup content type to restore.");
+          }
+          if (body.allowSqliteHomeRelocation && !profile.sqliteHome) {
+            throw new CoreError("INVALID_INPUT", "SQLite Home relocation requires a storage profile with an explicit SQLite Home target.");
+          }
+          const plan = await api.prepareRestore({
+            codexHome: profile.codexHome,
+            ...(profile.sqliteHome ? { sqliteHome: profile.sqliteHome } : {}),
+            profile: { id: profile.id, revision: profile.revision },
+            profileResolver: resolveCurrentProfile,
+            backupId: requireString(body.backupId, "backupId", { maxLength: 300 }),
+            restoreConfig,
+            restoreDatabase,
+            restoreSessions,
+            allowSqliteHomeRelocation: Boolean(body.allowSqliteHomeRelocation),
+            platform
+          });
+          sendJson(response, 200, { plan });
+          return;
+        }
+
+        if (pathname === "/api/restore/apply") {
+          await withOperation("restore", response, () => api.applyRestore(requirePlanApply(body)));
+          return;
+        }
+
+        if (pathname === "/api/sync" || pathname === "/api/switch" || pathname === "/api/restore") {
+          sendError(
+            response,
+            410,
+            `Direct write endpoint ${pathname} is retired. Use ${pathname}/prepare, show the returned plan, then submit only { schemaVersion, planId } to ${pathname}/apply.`,
+            "PLAN_REQUIRED"
+          );
           return;
         }
 
@@ -854,7 +827,7 @@ export function createWebUiServer({
       }
       await serveStatic(response, pathname, webRoot);
     } catch (error) {
-      sendError(response, 500, error);
+      sendError(response, coreErrorHttpStatus(error, 500), error);
     }
   });
 

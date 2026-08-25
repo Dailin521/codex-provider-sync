@@ -279,6 +279,12 @@ function sanitizeStatusResult(value) {
   put(result, "schemaVersion", safeNumber(value.schemaVersion, { integer: true, minimum: 1 }));
   put(result, "snapshotAt", safeString(value.snapshotAt, 64));
   put(result, "storageRevision", safeString(value.storageRevision, 256));
+  if (value.profile && typeof value.profile === "object" && !Array.isArray(value.profile)) {
+    const profile = {};
+    put(profile, "id", safeString(value.profile.id, 80));
+    put(profile, "revision", safeString(value.profile.revision, 256));
+    result.profile = profile;
+  }
   put(result, "codexHome", safeString(value.codexHome, 32768));
   put(result, "sqliteHome", safeString(value.sqliteHome, 32768));
   put(result, "sqliteHomeSource", SQLITE_HOME_SOURCES.has(value.sqliteHomeSource)
@@ -352,6 +358,7 @@ function sanitizeStatusResult(value) {
       return item;
     });
   }
+  put(result, "projectThreadVisibilityAvailable", safeBoolean(value.projectThreadVisibilityAvailable));
   put(result, "backupRoot", safeString(value.backupRoot, 32768));
   if (value.backupSummary && typeof value.backupSummary === "object") {
     const summary = {};
@@ -370,7 +377,22 @@ function sanitizeStatusResult(value) {
       return item;
     });
   }
-  put(result, "operationInProgress", safeBoolean(value.operationInProgress));
+  put(result, "pendingRecovery", safeBoolean(value.pendingRecovery));
+  if (value.operationInProgress && typeof value.operationInProgress === "object"
+      && !Array.isArray(value.operationInProgress)) {
+    const operation = {};
+    put(operation, "operationId", safeUuid(value.operationInProgress.operationId));
+    put(operation, "operation", OPERATION_KINDS.has(value.operationInProgress.operation)
+      ? value.operationInProgress.operation
+      : undefined);
+    put(operation, "actor", new Set(["manual", "watch"]).has(value.operationInProgress.actor)
+      ? value.operationInProgress.actor
+      : undefined);
+    put(operation, "startedAt", safeString(value.operationInProgress.startedAt, 64));
+    result.operationInProgress = operation;
+  } else if (value.operationInProgress === null) {
+    result.operationInProgress = null;
+  }
   put(result, "rolloutScanComplete", safeBoolean(value.rolloutScanComplete));
   return result;
 }

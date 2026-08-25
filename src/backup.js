@@ -186,6 +186,17 @@ function resolveRestoreSqliteHome(storage, metadata, stateDb) {
   return storage.sqliteHome;
 }
 
+export async function resolveRestoreStateDbTargetPath(backupDir, storage) {
+  const metadata = await readValidatedBackupMetadata(backupDir, storage.codexHome);
+  const stateDb = Object.hasOwn(storage, "stateDbLocation")
+    ? storage.stateDbLocation
+    : await detectStateDb(storage);
+  if (!stateDb && storage.sqliteHomeSource !== "default") {
+    throw new Error(`state_5.sqlite not found in SQLite home ${storage.sqliteHome}.`);
+  }
+  return path.join(resolveRestoreSqliteHome(storage, metadata, stateDb), DB_FILE_BASENAME);
+}
+
 async function removeIfPresent(targetPath) {
   await fs.rm(targetPath, { force: true });
 }

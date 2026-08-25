@@ -90,28 +90,14 @@ async function startFixture(services = {}, options = {}) {
 }
 
 async function api(handle, pathname, body = {}, credential, { originHeader = handle.origin, hostHeader } = {}) {
-  const profileRevisionEndpoints = new Set(["/api/sync", "/api/switch", "/api/restore", "/api/prune"]);
-  const storageRevisionEndpoints = new Set(["/api/sync", "/api/switch", "/api/restore"]);
+  const profileRevisionEndpoints = new Set([
+    "/api/prune",
+    "/api/sync/prepare", "/api/switch/prepare", "/api/restore/prepare"
+  ]);
   const profile = profileRevisionEndpoints.has(pathname) && body.profileId && !Object.hasOwn(body, "profileRevision")
     ? handle.stateStore.getProfile(body.profileId)
     : null;
-  let preparedBody = profile ? { ...body, profileRevision: profile.revision } : body;
-  if (storageRevisionEndpoints.has(pathname) && !Object.hasOwn(preparedBody, "storageRevision")) {
-    const status = await request({
-      origin: handle.origin,
-      pathname: "/api/status",
-      method: "POST",
-      body: { profileId: preparedBody.profileId ?? "default" },
-      hostHeader,
-      headers: {
-        Origin: originHeader,
-        "X-Codex-Provider-Device": credential ?? ""
-      }
-    });
-    if (status.payload?.status?.storageRevision) {
-      preparedBody = { ...preparedBody, storageRevision: status.payload.status.storageRevision };
-    }
-  }
+  const preparedBody = profile ? { ...body, profileRevision: profile.revision } : body;
   return request({
     origin: handle.origin,
     pathname,
@@ -145,6 +131,7 @@ function statusFixture(overrides = {}) {
     projectThreadVisibility: [],
     backupRoot: "/tmp/.codex/backups_state/provider-sync",
     backupSummary: { count: 0, totalBytes: 0 },
+    pathComparisonCaseInsensitive: process.platform === "win32",
     ...overrides
   };
 }
@@ -330,36 +317,161 @@ test("server-managed profiles reject per-operation paths and resolve profileId",
   }
 });
 
-test("Web UI sync delegates only server-resolved storage to the shared service", async () => {
-  const calls = [];
+test("legacy Web direct-write routes require Plan/Apply and never invoke a writer", async () => {
+  let calls = 0;
   const handle = await startFixture({
-    readConfigText: async () => 'model_provider = "openai"\nmodel = "gpt-5"\n',
-    readRootModelFromConfigText: () => "gpt-5",
-    runSync: async (options) => { calls.push(options); options.onProgress({ stage: "create_backup", status: "start" }); return { targetProvider: options.provider, backupDir: "/tmp/backup" }; }
+    prepareSync: async () => { calls += 1; },
+    applySync: async () => { calls += 1; },
+    prepareSwitch: async () => { calls += 1; },
+    applySwitch: async () => { calls += 1; },
+    prepareRestore: async () => { calls += 1; },
+    applyRestore: async () => { calls += 1; }
   });
   try {
-    await fs.writeFile(path.join(handle.root, "state_5.sqlite"), "not-a-real-db");
+    const configPath = path.join(handle.root, "config.toml");
+    await fs.writeFile(configPath, 'model_provider = "openai"\n', "utf8");
+    const before = await fs.readFile(configPath);
     const { credential } = await handle.pair();
-    const invalid = await api(handle, "/api/sync", { profileId: "default", provider: "bad provider", keepCount: 5 }, credential);
-    assert.equal(invalid.status, 400);
-    assert.equal(invalid.payload.coreError, undefined);
-    const response = await api(handle, "/api/sync", { profileId: "default", provider: "openai", keepCount: 5 }, credential);
-    assert.equal(response.status, 200);
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].codexHome, path.resolve(handle.root));
-    assert.equal(calls[0].model, "gpt-5");
-    assert.equal(calls[0].storage.stateDbLocation.source, "legacy-root");
-    assert.equal(calls[0].storage.stateDbLocation.path, path.join(handle.root, "state_5.sqlite"));
-    assert.ok(handle.getActivity().some((entry) => entry.message === "Creating backup"));
+    for (const [endpoint, body] of [
+      ["/api/sync", { profileId: "default", provider: "openai", keepCount: 5 }],
+      ["/api/switch", { profileId: "default", provider: "openai", keepCount: 5 }],
+      ["/api/restore", { profileId: "default", backupId: "managed", restoreSessions: true }]
+    ]) {
+      const response = await api(handle, endpoint, body, credential);
+      assert.equal(response.status, 410);
+      assert.equal(response.payload.code, "PLAN_REQUIRED");
+    }
+    assert.equal(calls, 0);
+    assert.deepEqual(await fs.readFile(configPath), before);
+    await assert.rejects(() => fs.access(path.join(handle.root, "backups_state")), { code: "ENOENT" });
   } finally {
     await handle.close();
   }
 });
 
-test("Web UI appends a safe CoreError DTO without changing the legacy error shape", async () => {
+test("Web Prepare/Apply keeps trusted profile paths server-side and Apply accepts only planId", async () => {
+  const prepareCalls = [];
+  const applyCalls = [];
   const handle = await startFixture({
-    readConfigText: async () => 'model_provider = "openai"\n',
-    runSync: async () => {
+    readConfigText: async () => 'model_provider = "openai"\nmodel = "gpt-5"\n',
+    readRootModelFromConfigText: () => "gpt-5",
+    prepareSync: async (options) => {
+      prepareCalls.push(options);
+      return {
+        schemaVersion: 1,
+        planId: "opaque-plan",
+        operation: "sync",
+        requiresConfirmation: true
+      };
+    },
+    applySync: async (input) => {
+      applyCalls.push(input);
+      return {
+        schemaVersion: 1,
+        operationId: "11111111-1111-4111-8111-111111111111",
+        operation: "sync",
+        outcome: "completed",
+        backup: null,
+        warnings: [],
+        result: { targetProvider: "openai" }
+      };
+    }
+  });
+  try {
+    const { credential } = await handle.pair();
+    const prepared = await api(
+      handle,
+      "/api/sync/prepare",
+      { profileId: "default", provider: "openai", keepCount: 5 },
+      credential
+    );
+    assert.equal(prepared.status, 200);
+    assert.equal(prepared.payload.plan.planId, "opaque-plan");
+    assert.equal(prepareCalls.length, 1);
+    assert.equal(prepareCalls[0].codexHome, path.resolve(handle.root));
+    assert.equal(prepareCalls[0].profile.id, "default");
+    assert.equal(prepareCalls[0].model, "gpt-5");
+    assert.equal(typeof prepareCalls[0].profileResolver, "function");
+
+    const rejected = await api(
+      handle,
+      "/api/sync/apply",
+      { schemaVersion: 1, planId: "opaque-plan", provider: "attacker" },
+      credential
+    );
+    assert.equal(rejected.status, 400);
+    assert.equal(rejected.payload.coreError.code, "INVALID_INPUT");
+    assert.equal(applyCalls.length, 0);
+
+    const applied = await api(
+      handle,
+      "/api/sync/apply",
+      { schemaVersion: 1, planId: "opaque-plan" },
+      credential
+    );
+    assert.equal(applied.status, 200);
+    assert.deepEqual(applyCalls, [{ schemaVersion: 1, planId: "opaque-plan" }]);
+    assert.equal(applied.payload.result.outcome, "completed");
+  } finally {
+    await handle.close();
+  }
+});
+
+test("Web Prepare validates Switch model modes and passes Restore only a managed backupId", async () => {
+  const switchCalls = [];
+  const restoreCalls = [];
+  const handle = await startFixture({
+    prepareSwitch: async (options) => {
+      switchCalls.push(options);
+      return { schemaVersion: 1, planId: `switch-${switchCalls.length}`, operation: "switch" };
+    },
+    prepareRestore: async (options) => {
+      restoreCalls.push(options);
+      return { schemaVersion: 1, planId: "restore-1", operation: "restore" };
+    }
+  });
+  try {
+    const { credential } = await handle.pair();
+    const explicit = await api(handle, "/api/switch/prepare", {
+      profileId: "default",
+      provider: "relay",
+      keepCount: 5,
+      modelMode: "explicit",
+      model: "model-x"
+    }, credential);
+    assert.equal(explicit.status, 200);
+    assert.equal(switchCalls[0].model, "model-x");
+    assert.equal(switchCalls[0].keepRootModel, false);
+
+    const invalid = await api(handle, "/api/switch/prepare", {
+      profileId: "default",
+      provider: "relay",
+      keepCount: 5,
+      modelMode: "keep-root-model",
+      model: "must-not-pass"
+    }, credential);
+    assert.equal(invalid.status, 400);
+    assert.equal(invalid.payload.coreError.code, "INVALID_INPUT");
+
+    const restore = await api(handle, "/api/restore/prepare", {
+      profileId: "default",
+      backupId: "managed-backup-1",
+      restoreConfig: true,
+      restoreDatabase: false,
+      restoreSessions: true
+    }, credential);
+    assert.equal(restore.status, 200);
+    assert.equal(restoreCalls.length, 1);
+    assert.equal(restoreCalls[0].backupId, "managed-backup-1");
+    assert.equal(Object.hasOwn(restoreCalls[0], "backupDir"), false);
+  } finally {
+    await handle.close();
+  }
+});
+
+test("Web Apply appends a safe CoreError DTO without leaking transport internals", async () => {
+  const handle = await startFixture({
+    applySync: async () => {
       throw new CoreError("SQLITE_BUSY", "The state database is busy.", {
         details: { causeCode: "SQLITE_BUSY" }
       });
@@ -369,8 +481,8 @@ test("Web UI appends a safe CoreError DTO without changing the legacy error shap
     const { credential } = await handle.pair();
     const response = await api(
       handle,
-      "/api/sync",
-      { profileId: "default", provider: "openai", keepCount: 5 },
+      "/api/sync/apply",
+      { schemaVersion: 1, planId: "opaque-plan" },
       credential
     );
 
@@ -390,156 +502,85 @@ test("Web UI appends a safe CoreError DTO without changing the legacy error shap
   }
 });
 
-test("Web UI rejects an operation when config changes the effective SQLite target after confirmation", async () => {
-  let configText = 'model_provider = "openai"\nsqlite_home = "sqlite-a"\n';
-  const syncCalls = [];
+test("Web status forwards the Core last-complete snapshot without reading or mixing live storage", async () => {
+  let configReads = 0;
+  const coreStatus = statusFixture({
+    schemaVersion: 1,
+    snapshotAt: "2026-08-25T00:00:00.000Z",
+    storageRevision: "cached-storage-revision",
+    profile: { id: "default", revision: "trusted-profile-revision" },
+    profileId: "default",
+    profileRevision: "server-profile-revision",
+    currentProvider: "openai",
+    operationInProgress: {
+      operationId: "external-operation",
+      operation: "sync",
+      actor: "external",
+      busyScope: "codex-home"
+    }
+  });
   const handle = await startFixture({
-    readConfigText: async () => configText,
-    readRootModelFromConfigText: () => null,
-    getStatus: async ({ storage }) => statusFixture({
-      codexHome: storage.codexHome,
-      sqliteHome: storage.sqliteHome,
-      sqliteHomeSource: storage.sqliteHomeSource,
-      sqliteAccess: storage.sqliteAccess,
-      stateDbLocation: storage.stateDbLocation,
-      checkedStateDbPaths: storage.stateDbCandidates.map((candidate) => candidate.path)
-    }),
-    runSync: async (options) => { syncCalls.push(options); return {}; }
+    readConfigText: async () => { configReads += 1; throw new Error("status must not read config in Web"); },
+    getStatus: async () => structuredClone(coreStatus)
   });
   try {
     const { credential } = await handle.pair();
-    const profile = handle.stateStore.getProfile("default");
-    const confirmed = await api(handle, "/api/status", { profileId: "default" }, credential);
-    assert.equal(confirmed.status, 200);
-
-    const missing = await request({
-      origin: handle.origin,
-      pathname: "/api/sync",
-      method: "POST",
-      body: { profileId: "default", profileRevision: profile.revision, provider: "openai", keepCount: 5 },
-      headers: { Origin: handle.origin, "X-Codex-Provider-Device": credential }
-    });
-    assert.equal(missing.status, 409);
-    assert.equal(missing.payload.code, "STORAGE_REVISION_REQUIRED");
-
-    configText = 'model_provider = "openai"\nsqlite_home = "sqlite-b"\n';
-    const changed = await request({
-      origin: handle.origin,
-      pathname: "/api/sync",
-      method: "POST",
-      body: {
-        profileId: "default",
-        profileRevision: profile.revision,
-        storageRevision: confirmed.payload.status.storageRevision,
-        provider: "openai",
-        keepCount: 5
-      },
-      headers: { Origin: handle.origin, "X-Codex-Provider-Device": credential }
-    });
-    assert.equal(changed.status, 409);
-    assert.equal(changed.payload.code, "STORAGE_CHANGED");
-    assert.equal(syncCalls.length, 0);
-
-    const refreshed = await api(handle, "/api/status", { profileId: "default" }, credential);
-    const accepted = await request({
-      origin: handle.origin,
-      pathname: "/api/sync",
-      method: "POST",
-      body: {
-        profileId: "default",
-        profileRevision: profile.revision,
-        storageRevision: refreshed.payload.status.storageRevision,
-        provider: "openai",
-        keepCount: 5
-      },
-      headers: { Origin: handle.origin, "X-Codex-Provider-Device": credential }
-    });
-    assert.equal(accepted.status, 200);
-    assert.equal(syncCalls.length, 1);
-    assert.equal(syncCalls[0].storage.sqliteHome, path.resolve("sqlite-b"));
-    assert.equal(syncCalls[0].storage.sqliteHomeSource, "config");
-    assert.equal(syncCalls[0].expectedConfigText, configText);
+    const response = await api(handle, "/api/status", { profileId: "default" }, credential);
+    assert.equal(response.status, 200);
+    assert.equal(configReads, 0);
+    assert.equal(response.payload.status.storageRevision, coreStatus.storageRevision);
+    assert.deepEqual(response.payload.status.operationInProgress, coreStatus.operationInProgress);
+    assert.equal(response.payload.status.currentProvider, "openai");
   } finally {
     await handle.close();
   }
 });
 
-test("Web UI binds confirmed operations to config contents even when storage is unchanged", async () => {
-  let configText = 'model_provider = "openai"\nmodel = "gpt-5"\n';
-  const syncCalls = [];
+test("Web Switch and Restore Apply reject every field beyond schemaVersion and planId", async () => {
+  let switchCalls = 0;
+  let restoreCalls = 0;
   const handle = await startFixture({
-    readConfigText: async () => configText,
-    readRootModelFromConfigText: (text) => /^model = "([^"]+)"$/m.exec(text)?.[1] ?? null,
-    getStatus: async ({ storage }) => statusFixture({
-      codexHome: storage.codexHome,
-      sqliteHome: storage.sqliteHome,
-      sqliteHomeSource: storage.sqliteHomeSource,
-      sqliteAccess: storage.sqliteAccess,
-      stateDbLocation: storage.stateDbLocation,
-      checkedStateDbPaths: storage.stateDbCandidates.map((candidate) => candidate.path)
-    }),
-    runSync: async (options) => { syncCalls.push(options); return {}; }
+    applySwitch: async () => { switchCalls += 1; },
+    applyRestore: async () => { restoreCalls += 1; }
   });
   try {
     const { credential } = await handle.pair();
-    const profile = handle.stateStore.getProfile("default");
-    const confirmed = await api(handle, "/api/status", { profileId: "default" }, credential);
-    assert.equal(confirmed.status, 200);
-
-    configText = 'model_provider = "openai"\nmodel = "gpt-5.2"\n';
-    const changed = await request({
-      origin: handle.origin,
-      pathname: "/api/sync",
-      method: "POST",
-      body: {
-        profileId: "default",
-        profileRevision: profile.revision,
-        storageRevision: confirmed.payload.status.storageRevision,
-        provider: "openai",
-        keepCount: 5
-      },
-      headers: { Origin: handle.origin, "X-Codex-Provider-Device": credential }
-    });
-    assert.equal(changed.status, 409);
-    assert.equal(changed.payload.code, "STORAGE_CHANGED");
-    assert.match(changed.payload.error, /configuration or effective SQLite storage changed/);
-    assert.equal(syncCalls.length, 0);
-
-    const refreshed = await api(handle, "/api/status", { profileId: "default" }, credential);
-    assert.notEqual(refreshed.payload.status.storageRevision, confirmed.payload.status.storageRevision);
-    const accepted = await request({
-      origin: handle.origin,
-      pathname: "/api/sync",
-      method: "POST",
-      body: {
-        profileId: "default",
-        profileRevision: profile.revision,
-        storageRevision: refreshed.payload.status.storageRevision,
-        provider: "openai",
-        keepCount: 5
-      },
-      headers: { Origin: handle.origin, "X-Codex-Provider-Device": credential }
-    });
-    assert.equal(accepted.status, 200);
-    assert.equal(syncCalls.length, 1);
-    assert.equal(syncCalls[0].expectedConfigText, configText);
-    assert.equal(syncCalls[0].model, "gpt-5.2");
+    const switchResponse = await api(handle, "/api/switch/apply", {
+      schemaVersion: 1,
+      planId: "switch-plan",
+      provider: "attacker"
+    }, credential);
+    const restoreResponse = await api(handle, "/api/restore/apply", {
+      schemaVersion: 1,
+      planId: "restore-plan",
+      backupId: "attacker"
+    }, credential);
+    assert.equal(switchResponse.status, 400);
+    assert.equal(restoreResponse.status, 400);
+    assert.equal(switchResponse.payload.coreError.code, "INVALID_INPUT");
+    assert.equal(restoreResponse.payload.coreError.code, "INVALID_INPUT");
+    assert.equal(switchCalls, 0);
+    assert.equal(restoreCalls, 0);
   } finally {
     await handle.close();
   }
 });
 
-test("Web UI restore only accepts managed backups for the selected profile", async () => {
-  let restored = false;
+test("Web Restore preparation delegates managed backup membership validation to Core", async () => {
+  let applies = 0;
   const handle = await startFixture({
-    listBackups: async () => ({ backupRoot: "/tmp/.codex/backups_state/provider-sync", backups: [{ id: "known", path: "/tmp/.codex/backups_state/provider-sync/known", metadata: {} }] }),
-    runRestore: async () => { restored = true; return { targetProvider: "openai" }; }
+    prepareRestore: async ({ backupId }) => {
+      assert.equal(backupId, "../../outside");
+      throw new CoreError("RESTORE_VALIDATION_FAILED", "The selected backup is not managed by this Codex Home.");
+    },
+    applyRestore: async () => { applies += 1; }
   });
   try {
     const { credential } = await handle.pair();
-    const response = await api(handle, "/api/restore", { profileId: "default", backupId: "../../outside", restoreDatabase: true, restoreSessions: true }, credential);
+    const response = await api(handle, "/api/restore/prepare", { profileId: "default", backupId: "../../outside", restoreDatabase: true }, credential);
     assert.equal(response.status, 400);
-    assert.equal(restored, false);
+    assert.equal(response.payload.coreError.code, "RESTORE_VALIDATION_FAILED");
+    assert.equal(applies, 0);
   } finally {
     await handle.close();
   }
@@ -847,8 +888,8 @@ test("startWebUi reports occupied ports clearly and handles unavailable or headl
 });
 
 test("Web UI operations require a current profile revision and preserve a captured profile snapshot", async () => {
-  let syncCalls = 0;
-  const handle = await startFixture({ runSync: async () => { syncCalls += 1; return {}; } });
+  let prepareCalls = 0;
+  const handle = await startFixture({ prepareSync: async () => { prepareCalls += 1; return {}; } });
   try {
     const first = await handle.pair();
     const second = await handle.pair();
@@ -867,7 +908,7 @@ test("Web UI operations require a current profile revision and preserve a captur
 
     const changed = await request({
       origin: handle.origin,
-      pathname: "/api/sync",
+      pathname: "/api/sync/prepare",
       method: "POST",
       body: { profileId: "work", profileRevision: stale.revision, provider: "openai", keepCount: 5 },
       headers: { Origin: handle.origin, "X-Codex-Provider-Device": first.credential }
@@ -875,18 +916,18 @@ test("Web UI operations require a current profile revision and preserve a captur
     assert.equal(changed.status, 409);
     assert.equal(changed.payload.code, "PROFILE_CHANGED");
     assert.equal(changed.payload.profile.codexHome, path.resolve("/tmp/work-after"));
-    assert.equal(syncCalls, 0);
+    assert.equal(prepareCalls, 0);
 
     const required = await request({
       origin: handle.origin,
-      pathname: "/api/sync",
+      pathname: "/api/sync/prepare",
       method: "POST",
       body: { profileId: "work", provider: "openai", keepCount: 5 },
       headers: { Origin: handle.origin, "X-Codex-Provider-Device": first.credential }
     });
     assert.equal(required.status, 409);
     assert.equal(required.payload.code, "PROFILE_REVISION_REQUIRED");
-    assert.equal(syncCalls, 0);
+    assert.equal(prepareCalls, 0);
   } finally {
     await handle.close();
   }
@@ -998,13 +1039,19 @@ test("Web UI state profile saves apply revision checks after asynchronous valida
 
 test("Web UI marks skipped locked rollout files as a partial operation outcome", async () => {
   const handle = await startFixture({
-    readConfigText: async () => 'model = "gpt-5"\n',
-    readRootModelFromConfigText: () => "gpt-5",
-    runSync: async () => ({ skippedLockedRolloutFiles: ["rollout-active.jsonl"] })
+    applySync: async () => ({
+      schemaVersion: 1,
+      operationId: "partial-operation",
+      operation: "sync",
+      outcome: "partial",
+      backup: null,
+      warnings: [],
+      result: { skippedLockedRolloutFiles: ["rollout-active.jsonl"] }
+    })
   });
   try {
     const { credential } = await handle.pair();
-    const response = await api(handle, "/api/sync", { profileId: "default", provider: "openai", keepCount: 5 }, credential);
+    const response = await api(handle, "/api/sync/apply", { schemaVersion: 1, planId: "partial-plan" }, credential);
     assert.equal(response.status, 200);
     assert.equal(response.payload.result.outcome, "partial");
   } finally {
@@ -1013,12 +1060,11 @@ test("Web UI marks skipped locked rollout files as a partial operation outcome",
 });
 
 test("Web UI restore requires an explicit SQLite Home for relocation and rejects WSL UNC storage", async () => {
-  let restoreCalls = 0;
-  const backups = { backupRoot: "/tmp/.codex/backups_state/provider-sync", backups: [{ id: "known", path: "/tmp/.codex/backups_state/provider-sync/known", metadata: {} }] };
-  const handle = await startFixture({ listBackups: async () => backups, runRestore: async () => { restoreCalls += 1; return {}; } });
+  let restorePrepareCalls = 0;
+  const handle = await startFixture({ prepareRestore: async () => { restorePrepareCalls += 1; return {}; } });
   try {
     const { credential } = await handle.pair();
-    const relocation = await api(handle, "/api/restore", {
+    const relocation = await api(handle, "/api/restore/prepare", {
       profileId: "default",
       backupId: "known",
       restoreDatabase: true,
@@ -1026,7 +1072,7 @@ test("Web UI restore requires an explicit SQLite Home for relocation and rejects
     }, credential);
     assert.equal(relocation.status, 400);
     assert.match(relocation.payload.error, /explicit SQLite Home target/);
-    assert.equal(restoreCalls, 0);
+    assert.equal(restorePrepareCalls, 0);
   } finally {
     await handle.close();
   }
@@ -1042,18 +1088,28 @@ test("Web UI restore requires an explicit SQLite Home for relocation and rejects
   };
   assert.equal(wslStore.getProfile("default").sqliteHome, rawWslUnc);
 
+  let wslPrepareCalls = 0;
   const wslHandle = await startFixture(
-    { runSync: async () => { restoreCalls += 1; return {}; } },
+    {
+      readConfigText: async () => 'model_provider = "openai"\n',
+      prepareSync: async (options) => {
+        wslPrepareCalls += 1;
+        assert.equal(options.sqliteHome, rawWslUnc);
+        throw new CoreError("SQLITE_UNSUPPORTED_PATH", "Windows cannot safely access SQLite through the WSL UNC path.", {
+          details: { reason: "windows-wsl-unc" }
+        });
+      }
+    },
     { platform: "win32", stateStore: wslStore }
   );
   try {
     const { credential } = await wslHandle.pair();
-    const rejected = await api(wslHandle, "/api/sync", { profileId: "default", provider: "openai", keepCount: 5 }, credential);
+    const rejected = await api(wslHandle, "/api/sync/prepare", { profileId: "default", provider: "openai", keepCount: 5 }, credential);
     assert.equal(rejected.status, 400);
     assert.match(rejected.payload.error, /Windows cannot safely access SQLite through the WSL UNC path/);
     assert.equal(rejected.payload.coreError.code, "SQLITE_UNSUPPORTED_PATH");
     assert.deepEqual(rejected.payload.coreError.details, { reason: "windows-wsl-unc" });
-    assert.equal(restoreCalls, 0);
+    assert.equal(wslPrepareCalls, 1);
   } finally {
     await wslHandle.close();
     await fs.rm(wslCodexHome, { recursive: true, force: true });

@@ -7,12 +7,21 @@ import * as publicApi from "../src/public-api.js";
 const EXPECTED_EXPORTS = [
   "CORE_ERROR_CODES",
   "CoreError",
+  "applyRestore",
+  "applySwitch",
+  "applySync",
   "detectStateDb",
   "ensureCodexHome",
+  "getDiagnostics",
   "getHistorySession",
   "getStatus",
+  "getWatchStatus",
   "listBackups",
   "listHistory",
+  "prepareRestore",
+  "prepareSwitch",
+  "prepareSync",
+  "pruneBackups",
   "readConfigText",
   "readRootModelFromConfigText",
   "resolveStorageLayout",
@@ -21,11 +30,13 @@ const EXPECTED_EXPORTS = [
   "runSwitch",
   "runSync",
   "runWatch",
+  "startWatch",
+  "stopWatch",
   "toCoreErrorDto",
   "withStateDbLocation"
 ];
 
-test("public Core API has the exact C1 export surface", () => {
+test("public Core API has the exact C3 export surface", () => {
   assert.deepEqual(Object.keys(publicApi).sort(), EXPECTED_EXPORTS);
   for (const name of EXPECTED_EXPORTS) {
     if (name !== "CORE_ERROR_CODES") {

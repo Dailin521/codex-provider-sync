@@ -256,11 +256,12 @@ test("link failure does not remove a swapped empty reservation and still release
 test("acquirePathLock supports an arbitrary future SQLite resource path", async (t) => {
   const root = await makeLockHome(t);
   const lockPath = path.join(root, "resource-locks", "state-db.lock");
-  const resourceOptions = lockOptions({ scope: "state-db" });
+  const resourceOptions = lockOptions({ scope: "state-db", resourceKey: "a".repeat(64) });
   const release = await acquirePathLock(lockPath, "sqlite-resource", resourceOptions);
   const owner = JSON.parse(await fs.readFile(path.join(lockPath, "owner.json"), "utf8"));
   assert.equal(owner.label, "sqlite-resource");
   assert.equal(owner.scope, "state-db");
+  assert.equal(owner.resourceKey, "a".repeat(64));
   assert.deepEqual(await fs.readdir(`${lockPath}.claims`), [`${owner.instanceId}.json`]);
   await assert.rejects(
     acquirePathLock(lockPath, "sqlite-resource-2", resourceOptions),
@@ -278,7 +279,10 @@ test("acquirePathLock rejects a canonical file with an explicit diagnostic", asy
   await fs.writeFile(lockPath, "foreign", "utf8");
 
   await assert.rejects(
-    acquirePathLock(lockPath, "sqlite-resource", lockOptions({ scope: "state-db" })),
+    acquirePathLock(lockPath, "sqlite-resource", lockOptions({
+      scope: "state-db",
+      resourceKey: "b".repeat(64)
+    })),
     (error) => error?.code === "LOCK_UNVERIFIABLE"
       && error.details?.lockScope === "state-db"
       && /canonical lock path is not a directory/.test(error.message)
