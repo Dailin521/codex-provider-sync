@@ -4,7 +4,8 @@ export { createAppI18n, resources, resourcesHaveMatchingKeys } from "./i18n.js";
 export { profileSchema, restoreSchema, switchSchema, syncSchema } from "./schemas.js";
 export {
   FULL_APP_UI_CAPABILITIES,
-  READ_ONLY_APP_UI_CAPABILITIES
+  READ_ONLY_APP_UI_CAPABILITIES,
+  SYNC_SWITCH_APP_UI_CAPABILITIES
 } from "./types.js";
 export type {
   AppUiCapabilities,

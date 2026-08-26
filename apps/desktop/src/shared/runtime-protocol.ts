@@ -1,13 +1,16 @@
 import {
+  assertCoreOperationEventEnvelope,
   assertCoreRequestEnvelope,
   assertCoreResponseEnvelope,
   type CoreMethodName,
+  type CoreOperationEventEnvelope,
   type CoreRequestEnvelope,
   type CoreResponseEnvelope
 } from "@codex-provider-sync/contracts";
 import {
-  DESKTOP_READ_METHODS,
-  type DesktopReadMethod
+  DESKTOP_RUNTIME_METHODS,
+  isDesktopRuntimeMethod,
+  type DesktopRuntimeMethod
 } from "@codex-provider-sync/core-client";
 
 import {
@@ -24,21 +27,40 @@ export interface RuntimeHelloFrame {
   buildId: string;
   sessionNonce: string;
   generation: number;
-  capabilities: readonly DesktopReadMethod[];
+  capabilities: readonly DesktopRuntimeMethod[];
 }
 
-export interface RuntimeRequestFrame<M extends DesktopReadMethod = DesktopReadMethod> {
+export interface RuntimeRequestFrame<M extends DesktopRuntimeMethod = DesktopRuntimeMethod> {
   kind: "request";
   runtimeProtocolVersion: typeof DESKTOP_RUNTIME_PROTOCOL_VERSION;
   generation: number;
+  dispatchId: string;
   envelope: CoreRequestEnvelope<M>;
 }
 
-export interface RuntimeResponseFrame<M extends DesktopReadMethod = DesktopReadMethod> {
+export interface RuntimeResponseFrame<M extends DesktopRuntimeMethod = DesktopRuntimeMethod> {
   kind: "response";
   runtimeProtocolVersion: typeof DESKTOP_RUNTIME_PROTOCOL_VERSION;
   generation: number;
+  dispatchId: string;
   envelope: CoreResponseEnvelope<M>;
+}
+
+export interface RuntimeOperationEventFrame {
+  kind: "operation-event";
+  runtimeProtocolVersion: typeof DESKTOP_RUNTIME_PROTOCOL_VERSION;
+  generation: number;
+  dispatchId: string;
+  envelope: CoreOperationEventEnvelope;
+}
+
+export interface RuntimeCancelFrame {
+  kind: "cancel";
+  runtimeProtocolVersion: typeof DESKTOP_RUNTIME_PROTOCOL_VERSION;
+  generation: number;
+  dispatchId: string;
+  requestId: string;
+  operationId?: string;
 }
 
 export interface RuntimeShutdownFrame {
@@ -47,7 +69,13 @@ export interface RuntimeShutdownFrame {
   generation: number;
 }
 
-export type RuntimeFrame = RuntimeHelloFrame | RuntimeRequestFrame | RuntimeResponseFrame | RuntimeShutdownFrame;
+export type RuntimeFrame =
+  | RuntimeHelloFrame
+  | RuntimeRequestFrame
+  | RuntimeResponseFrame
+  | RuntimeOperationEventFrame
+  | RuntimeCancelFrame
+  | RuntimeShutdownFrame;
 
 export interface ExpectedRuntimeIdentity {
   appVersion: string;
@@ -77,21 +105,21 @@ function assertGeneration(value: unknown): asserts value is number {
   }
 }
 
+function assertDispatchId(value: unknown): asserts value is string {
+  if (typeof value !== "string"
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    throw new TypeError("Invalid desktop runtime dispatchId.");
+  }
+}
+
 export function assertRuntimeHelloFrame(
   value: unknown,
   expected: ExpectedRuntimeIdentity
 ): asserts value is RuntimeHelloFrame {
   if (!isRecord(value)
       || !hasExactKeys(value, [
-        "kind",
-        "runtimeProtocolVersion",
-        "coreProtocolVersion",
-        "appVersion",
-        "coreVersion",
-        "buildId",
-        "sessionNonce",
-        "generation",
-        "capabilities"
+        "kind", "runtimeProtocolVersion", "coreProtocolVersion", "appVersion",
+        "coreVersion", "buildId", "sessionNonce", "generation", "capabilities"
       ])
       || value.kind !== "hello"
       || value.runtimeProtocolVersion !== DESKTOP_RUNTIME_PROTOCOL_VERSION
@@ -109,38 +137,79 @@ export function assertRuntimeHelloFrame(
       || value.buildId !== expected.buildId
       || value.sessionNonce !== expected.sessionNonce
       || value.generation !== expected.generation
-      || value.capabilities.length !== DESKTOP_READ_METHODS.length
-      || value.capabilities.some((method, index) => method !== DESKTOP_READ_METHODS[index])) {
+      || value.capabilities.length !== DESKTOP_RUNTIME_METHODS.length
+      || value.capabilities.some((method, index) => method !== DESKTOP_RUNTIME_METHODS[index])) {
     throw new TypeError("Desktop runtime identity is incompatible.");
   }
 }
 
 export function assertRuntimeRequestFrame(value: unknown): asserts value is RuntimeRequestFrame {
   if (!isRecord(value)
-      || !hasExactKeys(value, ["kind", "runtimeProtocolVersion", "generation", "envelope"])
+      || !hasExactKeys(value, ["kind", "runtimeProtocolVersion", "generation", "dispatchId", "envelope"])
       || value.kind !== "request"
       || value.runtimeProtocolVersion !== DESKTOP_RUNTIME_PROTOCOL_VERSION) {
     throw new TypeError("Invalid desktop runtime request frame.");
   }
   assertGeneration(value.generation);
+  assertDispatchId(value.dispatchId);
   assertCoreRequestEnvelope(value.envelope);
-  if (!DESKTOP_READ_METHODS.includes(value.envelope.method as DesktopReadMethod)) {
-    throw new TypeError("Desktop runtime method is not read-only.");
+  if (!isDesktopRuntimeMethod(value.envelope.method)) {
+    throw new TypeError("Desktop runtime method is not allowed.");
   }
 }
 
 export function assertRuntimeResponseFrame(
   value: unknown,
-  requestId?: string
+  expected?: { dispatchId?: string; requestId?: string }
 ): asserts value is RuntimeResponseFrame {
   if (!isRecord(value)
-      || !hasExactKeys(value, ["kind", "runtimeProtocolVersion", "generation", "envelope"])
+      || !hasExactKeys(value, ["kind", "runtimeProtocolVersion", "generation", "dispatchId", "envelope"])
       || value.kind !== "response"
       || value.runtimeProtocolVersion !== DESKTOP_RUNTIME_PROTOCOL_VERSION) {
     throw new TypeError("Invalid desktop runtime response frame.");
   }
   assertGeneration(value.generation);
-  assertCoreResponseEnvelope(value.envelope, requestId);
+  assertDispatchId(value.dispatchId);
+  if (expected?.dispatchId !== undefined && value.dispatchId !== expected.dispatchId) {
+    throw new TypeError("Desktop runtime response dispatchId mismatch.");
+  }
+  assertCoreResponseEnvelope(value.envelope, expected?.requestId);
+}
+
+export function assertRuntimeOperationEventFrame(
+  value: unknown,
+  expected?: { dispatchId?: string; requestId?: string; operationId?: string }
+): asserts value is RuntimeOperationEventFrame {
+  if (!isRecord(value)
+      || !hasExactKeys(value, ["kind", "runtimeProtocolVersion", "generation", "dispatchId", "envelope"])
+      || value.kind !== "operation-event"
+      || value.runtimeProtocolVersion !== DESKTOP_RUNTIME_PROTOCOL_VERSION) {
+    throw new TypeError("Invalid desktop runtime operation event frame.");
+  }
+  assertGeneration(value.generation);
+  assertDispatchId(value.dispatchId);
+  if (expected?.dispatchId !== undefined && value.dispatchId !== expected.dispatchId) {
+    throw new TypeError("Desktop runtime operation event dispatchId mismatch.");
+  }
+  assertCoreOperationEventEnvelope(value.envelope, expected?.requestId, expected?.operationId);
+}
+
+export function assertRuntimeCancelFrame(value: unknown): asserts value is RuntimeCancelFrame {
+  if (!isRecord(value)
+      || !hasExactKeys(value, [
+        "kind", "runtimeProtocolVersion", "generation", "dispatchId", "requestId",
+        ...(value.operationId === undefined ? [] : ["operationId"])
+      ])
+      || value.kind !== "cancel"
+      || value.runtimeProtocolVersion !== DESKTOP_RUNTIME_PROTOCOL_VERSION
+      || !isBoundedString(value.requestId, 512)
+      || (value.operationId !== undefined
+        && (typeof value.operationId !== "string"
+          || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.operationId)))) {
+    throw new TypeError("Invalid desktop runtime cancel frame.");
+  }
+  assertGeneration(value.generation);
+  assertDispatchId(value.dispatchId);
 }
 
 export function assertRuntimeShutdownFrame(value: unknown): asserts value is RuntimeShutdownFrame {
@@ -153,30 +222,72 @@ export function assertRuntimeShutdownFrame(value: unknown): asserts value is Run
   assertGeneration(value.generation);
 }
 
-export function createRuntimeRequestFrame<M extends DesktopReadMethod>(
+export function createRuntimeRequestFrame<M extends DesktopRuntimeMethod>(
   generation: number,
+  dispatchId: string,
   envelope: CoreRequestEnvelope<M>
 ): RuntimeRequestFrame<M> {
-  return {
+  const frame: RuntimeRequestFrame<M> = {
     kind: "request",
     runtimeProtocolVersion: DESKTOP_RUNTIME_PROTOCOL_VERSION,
     generation,
+    dispatchId,
     envelope
   };
+  assertRuntimeRequestFrame(frame);
+  return frame;
 }
 
-export function createRuntimeResponseFrame<M extends DesktopReadMethod>(
+export function createRuntimeResponseFrame<M extends DesktopRuntimeMethod>(
   generation: number,
+  dispatchId: string,
   envelope: CoreResponseEnvelope<M>
 ): RuntimeResponseFrame<M> {
-  return {
+  const frame: RuntimeResponseFrame<M> = {
     kind: "response",
     runtimeProtocolVersion: DESKTOP_RUNTIME_PROTOCOL_VERSION,
     generation,
+    dispatchId,
     envelope
   };
+  assertRuntimeResponseFrame(frame);
+  return frame;
 }
 
-export function isReadOnlyCoreMethod(value: CoreMethodName): value is DesktopReadMethod {
-  return DESKTOP_READ_METHODS.includes(value as DesktopReadMethod);
+export function createRuntimeOperationEventFrame(
+  generation: number,
+  dispatchId: string,
+  envelope: CoreOperationEventEnvelope
+): RuntimeOperationEventFrame {
+  const frame: RuntimeOperationEventFrame = {
+    kind: "operation-event",
+    runtimeProtocolVersion: DESKTOP_RUNTIME_PROTOCOL_VERSION,
+    generation,
+    dispatchId,
+    envelope
+  };
+  assertRuntimeOperationEventFrame(frame);
+  return frame;
+}
+
+export function createRuntimeCancelFrame(
+  generation: number,
+  dispatchId: string,
+  requestId: string,
+  operationId?: string
+): RuntimeCancelFrame {
+  const frame: RuntimeCancelFrame = {
+    kind: "cancel",
+    runtimeProtocolVersion: DESKTOP_RUNTIME_PROTOCOL_VERSION,
+    generation,
+    dispatchId,
+    requestId,
+    ...(operationId ? { operationId } : {})
+  };
+  assertRuntimeCancelFrame(frame);
+  return frame;
+}
+
+export function isRuntimeCoreMethod(value: CoreMethodName): value is DesktopRuntimeMethod {
+  return isDesktopRuntimeMethod(value);
 }

@@ -11,7 +11,7 @@ const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const packagedExecutable = process.env.CPS_DESKTOP_EXECUTABLE;
 const electronExecutable = packagedExecutable || require("electron");
 
-test("secure desktop exposes only read-only Core routes and recovers its Utility Process", async () => {
+test("secure desktop exposes C7 Sync/Switch narrowly and blocks writes during recovery", async () => {
   const fixture = await createDesktopReadOnlyFixture();
   let electronApp;
   try {
@@ -25,6 +25,7 @@ test("secure desktop exposes only read-only Core routes and recovers its Utility
         CPS_DESKTOP_E2E: "1",
         CPS_DESKTOP_CODEX_HOME: fixture.codexHome,
         CPS_DESKTOP_USER_DATA: fixture.userData,
+        CPS_DESKTOP_WINDOW_DISPLAY: "hidden",
         ELECTRON_ENABLE_SECURITY_WARNINGS: "true"
       }
     });
@@ -60,7 +61,7 @@ test("secure desktop exposes only read-only Core routes and recovers its Utility
       require: "undefined",
       buffer: "undefined",
       bridgeKeys: ["core", "profiles", "test", "version"],
-      coreKeys: ["requestReadOnly"],
+      coreKeys: ["cancelOperation", "requestReadOnly", "requestSyncSwitch", "subscribeOperation"],
       frozen: true
     });
     expect(rendererBoundary.csp).toContain("script-src 'self'");
@@ -68,9 +69,9 @@ test("secure desktop exposes only read-only Core routes and recovers its Utility
     expect(rendererBoundary.csp).not.toContain("unsafe-eval");
 
     const navigation = page.getByRole("navigation").getByRole("button");
-    await expect(navigation).toHaveCount(6);
-    await expect(page.getByRole("button", { name: "Sync" })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Switch Provider" })).toHaveCount(0);
+    await expect(navigation).toHaveCount(8);
+    await expect(page.getByRole("button", { name: "Sync" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Switch Provider" })).toBeVisible();
 
     await page.getByRole("button", { name: "Backups / Restore" }).click();
     await expect(page.getByText(/read-only/i)).toBeVisible();
@@ -111,6 +112,14 @@ test("secure desktop exposes only read-only Core routes and recovers its Utility
     }), { profile });
     expect(writeAttempt.ok).toBe(false);
     expect(writeAttempt.error.code).toBe("PERMISSION_DENIED");
+    const recoveryBlocked = await page.evaluate(async ({ profile }) => window.codexProvider.core.requestSyncSwitch({
+      protocolVersion: 1,
+      requestId: "c7-write-recovery-blocked",
+      method: "prepareSync",
+      payload: { profile: { profileId: profile.id, profileRevision: profile.revision }, keepCount: 5 }
+    }), { profile });
+    expect(recoveryBlocked.ok).toBe(false);
+    expect(recoveryBlocked.error.code).toBe("PENDING_TRANSACTION");
 
     const beforeCrash = await electronApp.evaluate(() => globalThis.__CPS_DESKTOP_TEST__.runtime());
     expect(beforeCrash.state).toBe("ready");

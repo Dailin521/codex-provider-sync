@@ -24,20 +24,27 @@ import {
   startWatch as startWatchInternal,
   stopWatch as stopWatchInternal
 } from "../../../src/public-api.js";
+import { toPublicProgress } from "./progress.js";
 
 /** @typedef {{profileId: string, profileRevision?: string}} ProfileSelector */
 /** @typedef {{id: string, revision: string, codexHome: string, sqliteHome?: string}} ResolvedProfile */
 /** @typedef {(selector: ProfileSelector) => ResolvedProfile | Promise<ResolvedProfile>} ProfileResolver */
 /** @typedef {Record<string, unknown>} JsonRecord */
+/** @typedef {{stage: string, status: string, progress?: number, count?: number}} PublicProgress */
+/** @typedef {{
+ * signal?: AbortSignal,
+ * onOperationStarted?: (value: {operationId: string, operation: "sync" | "switch" | "restore"}) => void | Promise<void>,
+ * onProgress?: (event: PublicProgress) => void | Promise<void>
+ * }} CoreHostOperationControl */
 /** @typedef {{
  * getStatus: (input: JsonRecord) => Promise<unknown>,
  * prepareSync: (input: JsonRecord) => Promise<unknown>,
- * applySync: (input: JsonRecord) => Promise<unknown>,
+ * applySync: (input: JsonRecord, control?: CoreHostOperationControl) => Promise<unknown>,
  * prepareSwitch: (input: JsonRecord) => Promise<unknown>,
- * applySwitch: (input: JsonRecord) => Promise<unknown>,
+ * applySwitch: (input: JsonRecord, control?: CoreHostOperationControl) => Promise<unknown>,
  * listBackups: (input: JsonRecord) => Promise<unknown>,
  * prepareRestore: (input: JsonRecord) => Promise<unknown>,
- * applyRestore: (input: JsonRecord) => Promise<unknown>,
+ * applyRestore: (input: JsonRecord, control?: CoreHostOperationControl) => Promise<unknown>,
  * pruneBackups: (input: JsonRecord) => Promise<unknown>,
  * listHistory: (input: JsonRecord) => Promise<unknown>,
  * getHistorySession: (input: JsonRecord) => Promise<unknown>,
@@ -199,10 +206,22 @@ function publicStatus(value) {
     ? { reason: value.statusReadBlocked.reason }
     : undefined;
   const sqliteReadable = isRecord(sqliteCounts) && sqliteCounts.unreadable !== true;
+  const storageRevision = typeof value.storageRevision === "string" && value.storageRevision
+    ? value.storageRevision
+    : compositeRevision(JSON.stringify({
+        schemaVersion: 1,
+        profileRevision: isRecord(value.profile) ? value.profile.revision ?? null : null,
+        operation,
+        blocked: blocked ?? null
+      }));
   return {
     schemaVersion: 1,
     snapshotAt: value.snapshotAt,
-    storageRevision: value.storageRevision,
+    // With no last-complete cache, a fail-closed lock inspection can happen
+    // before the internal scanner has a storage revision. Emit a deterministic
+    // degraded revision so clients can cache the blocked snapshot without
+    // mistaking it for a complete scan.
+    storageRevision,
     profile: value.profile,
     currentProvider: provider,
     ...(typeof value.currentModel === "string" || value.currentModel === null
@@ -212,7 +231,14 @@ function publicStatus(value) {
     ...(isRecord(value.modelCounts) ? { modelCounts: value.modelCounts } : {}),
     sqliteCounts,
     codexHomeSource: "profile",
-    sqliteHomeSource: value.sqliteHomeSource,
+    // A fail-closed status read can be blocked before storage resolution has
+    // produced a source label (for example, immediately after a Utility
+    // Process dies while holding the Home lock). The public Status contract
+    // still requires a non-empty source and must not collapse that safe
+    // degraded snapshot into INVALID_INPUT.
+    sqliteHomeSource: typeof value.sqliteHomeSource === "string" && value.sqliteHomeSource
+      ? value.sqliteHomeSource
+      : "unknown",
     backupSummary: {
       count: Number.isSafeInteger(backupSummary.count) ? backupSummary.count : 0,
       totalBytes: Number.isSafeInteger(backupSummary.totalBytes) ? backupSummary.totalBytes : 0
@@ -390,6 +416,33 @@ export function createCoreFacade({ resolveProfile }) {
     return { input: /** @type {JsonRecord} */ (input), profile };
   }
 
+  /** @param {unknown} control @returns {CoreHostOperationControl | undefined} */
+  function trustedOperationControl(control) {
+    if (!isRecord(control)) return undefined;
+    const progressObserver = typeof control.onProgress === "function"
+      ? /** @type {CoreHostOperationControl["onProgress"]} */ (control.onProgress)
+      : undefined;
+    const onProgress = progressObserver
+      ? /** @param {unknown} event */ (event) => {
+          const projected = toPublicProgress(event);
+          if (projected) return progressObserver(projected);
+        }
+      : undefined;
+    const startedObserver = typeof control.onOperationStarted === "function"
+      ? /** @type {CoreHostOperationControl["onOperationStarted"]} */ (control.onOperationStarted)
+      : undefined;
+    const signal = control.signal
+      ? /** @type {AbortSignal} */ (control.signal)
+      : undefined;
+    return {
+      ...(signal ? { signal } : {}),
+      ...(startedObserver
+        ? { onOperationStarted: startedObserver }
+        : {}),
+      ...(onProgress ? { onProgress } : {})
+    };
+  }
+
   /** @type {CoreFacade} */
   const facade = {
     async getStatus(input) {
@@ -410,8 +463,8 @@ export function createCoreFacade({ resolveProfile }) {
       return publicPlan(withPublicProfile(plan, trusted.profile));
     },
 
-    async applySync(input) {
-      return publicOperationResult(await applySyncInternal(input));
+    async applySync(input, control) {
+      return publicOperationResult(await applySyncInternal(input, trustedOperationControl(control)));
     },
 
     async prepareSwitch(input) {
@@ -437,8 +490,8 @@ export function createCoreFacade({ resolveProfile }) {
       return publicPlan(withPublicProfile(plan, trusted.profile));
     },
 
-    async applySwitch(input) {
-      return publicOperationResult(await applySwitchInternal(input));
+    async applySwitch(input, control) {
+      return publicOperationResult(await applySwitchInternal(input, trustedOperationControl(control)));
     },
 
     async listBackups(input) {
@@ -511,8 +564,8 @@ export function createCoreFacade({ resolveProfile }) {
       return publicPlan(withPublicProfile(plan, trusted.profile));
     },
 
-    async applyRestore(input) {
-      return publicOperationResult(await applyRestoreInternal(input));
+    async applyRestore(input, control) {
+      return publicOperationResult(await applyRestoreInternal(input, trustedOperationControl(control)));
     },
 
     async pruneBackups(input) {

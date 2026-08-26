@@ -3,7 +3,13 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "exports": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./desktop-faults": {
+      "types": "./src/desktop-faults.d.ts",
+      "import": "./src/desktop-faults.js"
+    }
+  },
   "scripts": {
     "test": "node --test checks/runner.contract.mjs"
   },

@@ -7,6 +7,7 @@ import {
   APP_UI_MIGRATION_STATE,
   FULL_APP_UI_CAPABILITIES,
   READ_ONLY_APP_UI_CAPABILITIES,
+  SYNC_SWITCH_APP_UI_CAPABILITIES,
   profileSchema,
   resourcesHaveMatchingKeys,
   restoreSchema,
@@ -27,7 +28,7 @@ test("app-ui owns the complete target navigation vocabulary", () => {
   assert.equal(APP_UI_MIGRATION_STATE, "shared-ui-c5");
 });
 
-test("shared UI exposes an explicit Electron read-only capability profile", async () => {
+test("shared UI exposes explicit read-only and C7 Sync/Switch capability profiles", async () => {
   assert.deepEqual(READ_ONLY_APP_UI_CAPABILITIES, {
     sync: false,
     switchProvider: false,
@@ -40,6 +41,17 @@ test("shared UI exposes an explicit Electron read-only capability profile", asyn
   });
   assert.equal(Object.values(FULL_APP_UI_CAPABILITIES).every(Boolean), true);
   assert.equal(Object.isFrozen(READ_ONLY_APP_UI_CAPABILITIES), true);
+  assert.deepEqual(SYNC_SWITCH_APP_UI_CAPABILITIES, {
+    sync: true,
+    switchProvider: true,
+    restore: false,
+    pruneBackups: false,
+    watch: false,
+    manageProfiles: false,
+    revealProfilePaths: false,
+    forgetBrowser: false
+  });
+  assert.equal(Object.isFrozen(SYNC_SWITCH_APP_UI_CAPABILITIES), true);
   const appSource = await fs.readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
   assert.match(appSource, /route === "sync" && capabilities\.sync/);
   assert.match(appSource, /enabled: capabilities\.watch/);
@@ -68,4 +80,7 @@ test("shared UI has no transport, Node, Electron or persistent history access", 
   assert.match(appSource, /messageLimit:\s*200/);
   assert.doesNotMatch(appSource, /queryKey:\s*\["history-detail"/);
   assert.match(appSource, /schemaVersion:\s*1 as const, planId: summary\.planId/);
+  assert.match(appSource, /onOperationStarted/);
+  assert.match(appSource, /onProgress/);
+  assert.match(appSource, /applyController\.current\?\.abort\(\)/);
 });

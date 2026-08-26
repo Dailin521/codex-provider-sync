@@ -35,6 +35,8 @@ for (const forbidden of [
   "__CPS_DESKTOP_TEST__",
   "CPS_DESKTOP_E2E",
   "CPS_DESKTOP_USER_DATA",
+  "CPS_DESKTOP_TEST_GATE",
+  "desktop E2E fault gate",
   "cps:v1:test:crash-runtime",
   "requestRaw",
   "crashRuntime"

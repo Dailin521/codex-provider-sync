@@ -59,6 +59,17 @@ export const READ_ONLY_APP_UI_CAPABILITIES: Readonly<AppUiCapabilities> = Object
   forgetBrowser: false
 });
 
+export const SYNC_SWITCH_APP_UI_CAPABILITIES: Readonly<AppUiCapabilities> = Object.freeze({
+  sync: true,
+  switchProvider: true,
+  restore: false,
+  pruneBackups: false,
+  watch: false,
+  manageProfiles: false,
+  revealProfilePaths: false,
+  forgetBrowser: false
+});
+
 export interface PreferenceStore {
   getLocale(): SupportedLocale | null;
   setLocale(locale: SupportedLocale): void;

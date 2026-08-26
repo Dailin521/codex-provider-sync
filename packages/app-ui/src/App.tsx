@@ -13,6 +13,7 @@ import type {
   ManagedBackup,
   OperationResult,
   PlanSummary,
+  ProgressEvent,
   ProfileSelector,
   StatusSnapshot,
   SwitchModelMode,
@@ -495,18 +496,38 @@ function SettingsPage({ props, profile, capabilities }: { props: AppUiProps; pro
   );
 }
 
-function PlanReview({ plan, applying, close, apply, restoreFocus }: { plan: PlanSummary | null; applying: boolean; close(): void; apply(): void; restoreFocus(): void }) {
+function PlanReview({
+  plan,
+  applying,
+  cancelling,
+  operationId,
+  progress,
+  close,
+  apply,
+  cancel,
+  restoreFocus
+}: {
+  plan: PlanSummary | null;
+  applying: boolean;
+  cancelling: boolean;
+  operationId: string | null;
+  progress: ProgressEvent | null;
+  close(): void;
+  apply(): void;
+  cancel(): void;
+  restoreFocus(): void;
+}) {
   const { t, i18n } = useTranslation();
   return (
     <Dialog
       description={plan ? `${plan.operation} · ${formatDate(plan.expiresAt, i18n.language)}` : undefined}
-      footer={<Fragment><Button disabled={applying} onClick={close} type="button" variant="secondary">{t("common.cancel")}</Button><Button disabled={applying} onClick={apply} type="button">{t("common.confirm")}</Button></Fragment>}
+      footer={<Fragment><Button disabled={applying} onClick={close} type="button" variant="secondary">{t("common.close")}</Button>{applying ? <Button disabled={cancelling} onClick={cancel} type="button" variant="danger">{cancelling ? t("plan.cancelling") : t("plan.cancelOperation")}</Button> : <Button onClick={apply} type="button">{t("common.confirm")}</Button>}</Fragment>}
       onOpenChange={(open) => { if (!open && !applying) close(); }}
       open={Boolean(plan)}
       restoreFocus={restoreFocus}
       title={t("plan.title")}
     >
-      {plan ? <div className="grid gap-4"><Card><h3 className="mb-2 text-sm font-semibold">{t("plan.target")}</h3><pre className="whitespace-pre-wrap break-words text-xs">{JSON.stringify(plan.target, null, 2)}</pre></Card><Card><h3 className="mb-2 text-sm font-semibold">{t("plan.impact")}</h3><pre className="whitespace-pre-wrap break-words text-xs">{JSON.stringify(plan.impact, null, 2)}</pre></Card>{plan.warnings.length ? <div className="rounded-lg border border-[var(--warning)] bg-[var(--warning-soft)] p-4"><h3 className="font-semibold">{t("common.warnings")}</h3><ul className="mt-2 list-disc space-y-1 pl-5 text-sm">{plan.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul></div> : null}<p className="text-sm text-[var(--muted)]">{t("plan.exactApply")}</p></div> : null}
+      {plan ? <div className="grid gap-4"><Card><h3 className="mb-2 text-sm font-semibold">{t("plan.target")}</h3><pre className="whitespace-pre-wrap break-words text-xs">{JSON.stringify(plan.target, null, 2)}</pre></Card><Card><h3 className="mb-2 text-sm font-semibold">{t("plan.impact")}</h3><pre className="whitespace-pre-wrap break-words text-xs">{JSON.stringify(plan.impact, null, 2)}</pre></Card>{plan.warnings.length ? <div className="rounded-lg border border-[var(--warning)] bg-[var(--warning-soft)] p-4"><h3 className="font-semibold">{t("common.warnings")}</h3><ul className="mt-2 list-disc space-y-1 pl-5 text-sm">{plan.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul></div> : null}{applying ? <Card aria-live="polite" role="status"><h3 className="text-sm font-semibold">{t("plan.progress")}</h3><div className="mt-2 font-mono text-xs text-[var(--muted)]">{operationId ?? t("plan.starting")}</div>{progress ? <div className="mt-3 grid gap-2"><div className="text-sm">{progress.stage} · {progress.status}{progress.count === undefined ? "" : ` · ${progress.count}`}</div>{progress.progress === undefined ? null : <progress aria-label={t("plan.progress")} className="w-full" max={1} value={progress.progress} />}</div> : null}{cancelling ? <p className="mt-3 text-sm text-[var(--warning)]">{t("plan.cancelPending")}</p> : null}</Card> : null}<p className="text-sm text-[var(--muted)]">{t("plan.exactApply")}</p></div> : null}
     </Dialog>
   );
 }
@@ -523,6 +544,10 @@ function AppContent({ props }: { props: AppUiProps }) {
   const [route, setRoute] = useState<AppRoute>("overview");
   const [selectedProfileId, setSelectedProfileId] = useState("default");
   const [plan, setPlan] = useState<PlanSummary | null>(null);
+  const [operationId, setOperationId] = useState<string | null>(null);
+  const [operationProgress, setOperationProgress] = useState<ProgressEvent | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const applyController = useRef<AbortController | null>(null);
   const planReturnFocus = useRef<HTMLElement | null>(null);
   const mutationCount = useIsMutating();
   const profilesQuery = useQuery({ queryKey: ["profiles"], queryFn: ({ signal }) => props.host.listProfiles(signal), staleTime: 5000 });
@@ -572,6 +597,9 @@ function AppContent({ props }: { props: AppUiProps }) {
   const closePlan = useCallback(() => {
     const target = planReturnFocus.current;
     setPlan(null);
+    setOperationId(null);
+    setOperationProgress(null);
+    setCancelling(false);
     globalThis.requestAnimationFrame(() => globalThis.requestAnimationFrame(() => {
       if (target?.isConnected) target.focus();
       if (planReturnFocus.current === target) planReturnFocus.current = null;
@@ -585,17 +613,36 @@ function AppContent({ props }: { props: AppUiProps }) {
   const applyMutation = useMutation({
     mutationFn: async (summary: PlanSummary): Promise<OperationResult> => {
       const input = { schemaVersion: 1 as const, planId: summary.planId };
-      if (summary.operation === "sync") return props.core.applySync(input);
-      if (summary.operation === "switch") return props.core.applySwitch(input);
-      return props.core.applyRestore(input);
+      const controller = new AbortController();
+      applyController.current = controller;
+      setOperationId(null);
+      setOperationProgress(null);
+      setCancelling(false);
+      const options = {
+        signal: controller.signal,
+        onOperationStarted: (event: { operationId: string }) => setOperationId(event.operationId),
+        onProgress: (event: { progress: ProgressEvent }) => setOperationProgress(event.progress)
+      };
+      try {
+        if (summary.operation === "sync") return await props.core.applySync(input, options);
+        if (summary.operation === "switch") return await props.core.applySwitch(input, options);
+        return await props.core.applyRestore(input, options);
+      } finally {
+        if (applyController.current === controller) applyController.current = null;
+      }
     },
     onSuccess: async (result) => {
       closePlan();
       await refreshAfterWrite();
       toast.push({ title: result.outcome === "partial" ? t("global.partial") : t("global.completed"), description: result.backup?.backupId, tone: result.outcome === "partial" ? "warning" : "success" });
     },
-    onError: (error) => {
-      if (error instanceof CoreClientError && ["PLAN_EXPIRED", "PLAN_STALE", "STALE_STATE", "PROFILE_CHANGED", "STORAGE_CHANGED"].includes(error.code)) closePlan();
+    onError: async (error) => {
+      await refreshAfterWrite();
+      closePlan();
+      if (error instanceof CoreClientError && error.code === "OPERATION_CANCELLED") {
+        toast.push({ title: t("global.cancelled"), tone: "warning" });
+        return;
+      }
       toast.push({ title: t("global.failed"), description: safeErrorText(error, t("global.unexpected")), tone: "danger" });
     }
   });
@@ -642,7 +689,7 @@ function AppContent({ props }: { props: AppUiProps }) {
           {page}
         </main>
       </div>
-      {capabilities.sync || capabilities.switchProvider || capabilities.restore ? <PlanReview apply={() => { if (plan) applyMutation.mutate(plan); }} applying={applyMutation.isPending} close={closePlan} plan={plan} restoreFocus={restorePlanFocus} /> : null}
+      {capabilities.sync || capabilities.switchProvider || capabilities.restore ? <PlanReview apply={() => { if (plan) applyMutation.mutate(plan); }} applying={applyMutation.isPending} cancel={() => { if (!applyMutation.isPending || cancelling) return; setCancelling(true); applyController.current?.abort(); }} cancelling={cancelling} close={closePlan} operationId={operationId} plan={plan} progress={operationProgress} restoreFocus={restorePlanFocus} /> : null}
     </div>
   );
 }

@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 
 import { SESSION_DIRS } from "./constants.js";
 import { syncDirectory } from "./atomic-file.js";
+import { CoreError } from "./core-error.js";
 
 const execFileAsync = promisify(execFile);
 const ROLLOUT_SCAN_CHUNK_BYTES = 1024 * 1024;
@@ -276,34 +277,30 @@ function parseSessionMetaRecord(firstLine) {
   }
 }
 
-// Scan the start of a rollout file looking for the first `turn_context`
-// event and return its `payload.model` field. This is the field that the
-// Codex GUI bottom-right uses to label old conversations, so we have to
-// rewrite it (along with `payload.collaboration_mode.settings.model`) on
-// every sync in addition to the per-thread SQLite `model` column.
+// Scan every `turn_context` in a rollout and return both its current models
+// and a compact line-indexed model snapshot. These are the fields the Codex
+// GUI uses to label old conversations; the snapshot also lets a managed
+// provider-only backup restore a coherent provider/model state later.
 //
 // We stream line-by-line because individual `turn_context` lines can
 // easily exceed 64 KB once Codex includes the `developer_instructions`
 // blob — the previous code that capped the read at 64 KB silently
 // missed those, which made the rollout model rewrite a no-op for
-// sessions whose first turn was a long planning step. We stop as
-// soon as we find a `turn_context` line, so the scan is O(1) for the
-// common case and we never load multi-MB rollouts into memory just
-// to read a header.
+// sessions whose first turn was a long planning step. The scan remains
+// streaming, so it never loads a multi-MB rollout into memory.
 //
 // For each line we find, we do a regex on the raw text instead of
 // `JSON.parse`-ing the entire payload: Codex writes opaque multi-KB
 // strings (`developer_instructions`, raw tool output, …) into the
 // payload, and round-tripping those through `JSON.parse` -> `JSON.stringify`
 // would silently mangle embedded escape sequences. Anchoring on
-// `"type":"turn_context"` and grabbing the first `"model":"<value>"`
-// that follows is enough for the first `turn_context` of the file,
-// because rollout lines are single JSON objects.
+// `"type":"turn_context"` keeps message and tool payloads out of the
+// backup manifest; only model strings and line indexes are retained.
 const ROLLOUT_TURNCONTEXT_TYPE_RE = /"type"\s*:\s*"turn_context"/;
 
 async function readTurnContextModelSnapshot(
   rolloutPath,
-  { firstLineOffset, firstLineLength, targetModel = null } = {}
+  { firstLineOffset, firstLineLength } = {}
 ) {
   const headerSkip = Math.max(0, firstLineOffset ?? 0);
   const headerLength = Math.max(0, firstLineLength ?? 0);
@@ -330,26 +327,23 @@ async function readTurnContextModelSnapshot(
       if (!ROLLOUT_TURNCONTEXT_TYPE_RE.test(line)) {
         continue;
       }
-      for (const match of line.matchAll(buildTurnContextModelFieldRegex())) {
-        try {
-          const value = decodeJsonStringLiteral(match[1]);
-          if (typeof value === "string" && value.length > 0) {
-            models.push(value);
-          }
-        } catch {
-          // Leave malformed model literals untouched.
-        }
+      const lineModels = readTurnContextModelsInLine(line);
+      if (!lineModels) {
+        continue;
       }
-      if (typeof targetModel === "string" && targetModel.length > 0) {
-        const rewrite = rewriteTurnContextModelInLine(line, targetModel);
-        if (rewrite.replaced) {
-          originalTurnContextModels.push({
-            lineIndex,
-            originalModel: rewrite.originalModel,
-            originalModels: rewrite.originalModels
-          });
-        }
+      for (const value of lineModels) {
+        if (value.length > 0) models.push(value);
       }
+      // A managed backup is a snapshot of the metadata that existed before
+      // this operation, not only of fields this particular operation happened
+      // to rewrite. Recording every parseable turn_context model lets a later
+      // Restore of a provider-only backup return the rollout to one coherent
+      // provider/model state without copying any message body.
+      originalTurnContextModels.push({
+        lineIndex,
+        originalModel: lineModels[0],
+        originalModels: lineModels
+      });
     }
     return { models, originalTurnContextModels };
   } catch (error) {
@@ -413,29 +407,27 @@ function encodeJsonStringLiteral(value) {
   return JSON.stringify(value);
 }
 
-function rewriteTurnContextModelInLine(line, newModel) {
+function readTurnContextModelsInLine(line) {
   if (!line || !line.includes('"turn_context"')) {
-    return { line, replaced: false, originalModel: null };
+    return null;
   }
-  const regex = buildTurnContextModelFieldRegex();
-  // `matchAll` is non-mutating and returns a fresh iterator on
-  // every call, so we can safely use a stateful regex here.
-  const occurrences = [...line.matchAll(regex)];
+  const occurrences = [...line.matchAll(buildTurnContextModelFieldRegex())];
   if (occurrences.length === 0) {
-    return { line, replaced: false, originalModel: null };
+    return null;
   }
-  const originalModels = [];
   try {
-    for (const occurrence of occurrences) {
-      originalModels.push(decodeJsonStringLiteral(occurrence[1]));
-    }
+    const values = occurrences.map((occurrence) => decodeJsonStringLiteral(occurrence[1]));
+    return values.every((value) => typeof value === "string") ? values : null;
   } catch {
-    // The line looks like a turn_context but its `model` value is
-    // not a clean JSON string literal. Refuse to touch it rather
-    // than guess — the roll-out stays byte-identical.
-    return { line, replaced: false, originalModel: null };
+    // The line looks like a turn_context but contains a malformed JSON string
+    // literal. Refuse to snapshot or rewrite it rather than guessing.
+    return null;
   }
-  if (originalModels.some((model) => typeof model !== "string")) {
+}
+
+function rewriteTurnContextModelInLine(line, newModel) {
+  const originalModels = readTurnContextModelsInLine(line);
+  if (!originalModels) {
     return { line, replaced: false, originalModel: null };
   }
   // If every `model` field in the line already equals newModel,
@@ -1085,13 +1077,15 @@ async function rewriteRolloutModelField(change, targetModel) {
         }
         lineIndex += 1;
         const result = rewriteTurnContextModelInLine(line, targetModel);
-        if (result.replaced) {
-          replacements += 1;
+        if (Array.isArray(result.originalModels) && typeof result.originalModel === "string") {
           originalTurnContextModels.push({
             lineIndex,
             originalModel: result.originalModel,
             originalModels: result.originalModels
           });
+        }
+        if (result.replaced) {
+          replacements += 1;
         }
         writer.write(lineSeparator);
         writer.write(result.line);
@@ -1102,9 +1096,14 @@ async function rewriteRolloutModelField(change, targetModel) {
       writer.on("finish", resolve);
     });
 
+    if (!modelSnapshotsEqual(change.originalTurnContextModels, originalTurnContextModels)) {
+      await fsp.rm(tmpPath, { force: true });
+      throw new Error(`Rollout turn_context model snapshot changed before rewrite: ${change.path}`);
+    }
+
     if (replacements === 0) {
       await fsp.rm(tmpPath, { force: true });
-      return { replacedLines: 0, originalTurnContextModels: [] };
+      return { replacedLines: 0, originalTurnContextModels };
     }
 
     // Preserve the original trailing newline state. If the file
@@ -1129,11 +1128,6 @@ async function rewriteRolloutModelField(change, targetModel) {
     // new line has no original value in the backup manifest. Throwing here
     // leaves the appended line untouched and lets the transaction restore the
     // already-mutated first line.
-    if (!modelSnapshotsEqual(change.originalTurnContextModels, originalTurnContextModels)) {
-      await fsp.rm(tmpPath, { force: true });
-      throw new Error(`Rollout turn_context model snapshot changed before rewrite: ${change.path}`);
-    }
-
     await fsp.chmod(tmpPath, beforeStat.mode);
     await syncStagedFile(tmpPath);
     await fsp.rename(tmpPath, filePath);
@@ -1249,15 +1243,12 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
         throw error;
       }
 
-      // Peek at the first `turn_context` event to capture the
-      // per-turn model that the Codex GUI bottom-right reads. We
-      // keep this on the summary so the rewrite step knows what
-      // value to swap out, without making collectSessionChanges
-      // require a target model.
+      // Stream all `turn_context` events so the rewrite step can validate the
+      // complete model snapshot and a provider-only backup can later restore
+      // those same metadata fields without retaining any message content.
       const modelSnapshot = await readTurnContextModelSnapshot(rolloutPath, {
         firstLineOffset: 0,
-        firstLineLength: record.offset,
-        targetModel
+        firstLineLength: record.offset
       });
       const currentModels = modelSnapshot.models;
       const originalModel = currentModels[0] ?? null;
@@ -1535,8 +1526,19 @@ export async function restoreSessionChanges(manifestEntries, options = {}) {
           await rewriteFirstLine(entry.path, entry.originalFirstLine, entry.originalSeparator ?? "\n");
         }
       }
+      await options.onAfterFirstLineRestore?.(entry);
       if (entry.originalTurnContextModels?.length) {
-        await restoreTurnContextModelsInFile(entry.path, entry.originalTurnContextModels, entry.originalSeparator);
+        const modelRestore = await restoreTurnContextModelsInFile(
+          entry.path,
+          entry.originalTurnContextModels,
+          entry.originalSeparator
+        );
+        if (!modelRestore.restored) {
+          throw new CoreError(
+            "ROLLOUT_CHANGED",
+            `Rollout turn_context model restore could not be verified: ${entry.path}`
+          );
+        }
       }
       await restoreOriginalMtime(entry.path, entry.originalMtimeMs);
       restoredPaths.push(entry.path);
@@ -1583,7 +1585,7 @@ export async function restoreSessionChanges(manifestEntries, options = {}) {
 // separator + trailing-newline state of the file.
 async function restoreTurnContextModelsInFile(filePath, originalTurnContextModels, originalSeparator) {
   if (!filePath || !Array.isArray(originalTurnContextModels) || originalTurnContextModels.length === 0) {
-    return;
+    return { restored: false, changed: false };
   }
   // Build a quick lookup by index.
   const byIndex = new Map();
@@ -1593,7 +1595,7 @@ async function restoreTurnContextModelsInFile(filePath, originalTurnContextModel
     }
   }
   if (byIndex.size === 0) {
-    return;
+    return { restored: false, changed: false };
   }
 
   const beforeStat = await fsp.stat(filePath);
@@ -1606,7 +1608,10 @@ async function restoreTurnContextModelsInFile(filePath, originalTurnContextModel
     handle = await fsp.open(filePath, "r+");
     const openedStat = await handle.stat();
     if (openedStat.size !== beforeSnapshot.size || openedStat.mtimeMs !== beforeSnapshot.mtimeMs) {
-      return;
+      throw new CoreError(
+        "ROLLOUT_CHANGED",
+        `Rollout changed before turn_context model restore: ${filePath}`
+      );
     }
     const tail = Buffer.alloc(Math.min(2, openedStat.size));
     if (tail.length > 0) {
@@ -1621,6 +1626,8 @@ async function restoreTurnContextModelsInFile(filePath, originalTurnContextModel
     let firstLine = true;
     let lineIndex = -1;
     let replacements = 0;
+    let validationError = null;
+    const matchedIndexes = new Set();
 
     await new Promise((resolve, reject) => {
       reader.on("error", reject);
@@ -1634,7 +1641,26 @@ async function restoreTurnContextModelsInFile(filePath, originalTurnContextModel
         }
         lineIndex += 1;
         const restoreEntry = byIndex.get(lineIndex);
-        if (restoreEntry !== undefined && line.includes('"turn_context"')) {
+        if (restoreEntry !== undefined) {
+          const currentModels = line.includes('"turn_context"')
+            && ROLLOUT_TURNCONTEXT_TYPE_RE.test(line)
+            ? readTurnContextModelsInLine(line)
+            : null;
+          const expectedModelCount = Array.isArray(restoreEntry.originalModels)
+            ? restoreEntry.originalModels.length
+            : null;
+          if (!currentModels
+              || currentModels.length === 0
+              || (expectedModelCount !== null && currentModels.length !== expectedModelCount)) {
+            validationError ??= new CoreError(
+              "ROLLOUT_CHANGED",
+              `Rollout turn_context model snapshot changed before restore: ${filePath}`
+            );
+          } else {
+            matchedIndexes.add(lineIndex);
+          }
+        }
+        if (restoreEntry !== undefined && validationError === null) {
           // The current line is a turn_context line whose
           // per-turn `model` field we need to put back. We only
           // touch it if it currently holds some other value
@@ -1659,9 +1685,17 @@ async function restoreTurnContextModelsInFile(filePath, originalTurnContextModel
       writer.on("finish", resolve);
     });
 
+    if (validationError || matchedIndexes.size !== byIndex.size) {
+      await fsp.rm(tmpPath, { force: true });
+      throw validationError ?? new CoreError(
+        "ROLLOUT_CHANGED",
+        `Rollout turn_context model snapshot is incomplete during restore: ${filePath}`
+      );
+    }
+
     if (replacements === 0) {
       await fsp.rm(tmpPath, { force: true });
-      return;
+      return { restored: true, changed: false };
     }
 
     if (hasTrailingNewline) {
@@ -1671,13 +1705,17 @@ async function restoreTurnContextModelsInFile(filePath, originalTurnContextModel
     const afterStat = await fsp.stat(filePath);
     if (afterStat.size !== beforeSnapshot.size || afterStat.mtimeMs !== beforeSnapshot.mtimeMs) {
       await fsp.rm(tmpPath, { force: true });
-      return;
+      throw new CoreError(
+        "ROLLOUT_CHANGED",
+        `Rollout changed during turn_context model restore: ${filePath}`
+      );
     }
 
     await fsp.chmod(tmpPath, beforeStat.mode);
     await syncStagedFile(tmpPath);
     await fsp.rename(tmpPath, filePath);
     await syncDirectory(path.dirname(filePath));
+    return { restored: true, changed: true };
   } catch (error) {
     throw wrapRolloutFileBusyError(error, filePath, "restore turn_context model");
   } finally {

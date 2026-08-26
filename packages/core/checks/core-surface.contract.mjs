@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import * as core from "../src/index.js";
+import { toPublicProgress } from "../src/progress.js";
 
 const EXPECTED_METHODS = [
   "applyRestore",
@@ -38,12 +39,36 @@ test("Core workspace exposes only the stable vNext method surface", () => {
   assert.equal("resolveStorageLayout" in core, false);
 });
 
+test("Core progress projection enforces the shared DTO numeric ranges", () => {
+  assert.deepEqual(
+    toPublicProgress({ stage: "scan", status: "running", progress: 0.5, count: 2 }),
+    { stage: "scan", status: "running", progress: 0.5, count: 2 }
+  );
+  assert.deepEqual(
+    toPublicProgress({ stage: "scan", status: "running", progress: 1.1, count: -1 }),
+    { stage: "scan", status: "running" }
+  );
+  assert.deepEqual(
+    toPublicProgress({ stage: "scan", status: "running", progress: -0.1, count: 1.5 }),
+    { stage: "scan", status: "running" }
+  );
+  assert.equal(toPublicProgress({ stage: "", status: "running" }), null);
+});
+
 test("Core workspace bridge imports only the root public API", async () => {
   const source = await fs.readFile(new URL("../src/index.js", import.meta.url), "utf8");
+  const declarations = await fs.readFile(new URL("../src/index.d.ts", import.meta.url), "utf8");
+  const rootDeclarations = await fs.readFile(
+    new URL("../../../src/public-api.d.ts", import.meta.url),
+    "utf8"
+  );
   const rootImports = [...source.matchAll(/from\s+["'](\.\.\/\.\.\/\.\.\/src\/[^"']+)["']/g)]
     .map((match) => match[1]);
   assert.deepEqual(rootImports, ["../../../src/public-api.js"]);
   assert.doesNotMatch(source, /src\/(service|locking|backup|history|watch)\.js/);
+  assert.doesNotMatch(source, /faultInjector/);
+  assert.doesNotMatch(declarations, /faultInjector/);
+  assert.doesNotMatch(rootDeclarations, /faultInjector/);
 });
 
 test("profile resolution fails closed before a Core path can be selected", async () => {
@@ -133,6 +158,91 @@ test("trusted profile selection never falls back to the process default Codex Ho
   } finally {
     if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = originalCodexHome;
+    await fs.rm(testRoot, { recursive: true, force: true });
+  }
+});
+
+test("an unverifiable Home lock remains a valid fail-closed public StatusSnapshot", async () => {
+  const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "provider-sync-core-blocked-status-"));
+  const codexHome = path.join(testRoot, "codex-home");
+  const lockDir = path.join(codexHome, "tmp", "provider-sync.lock");
+  try {
+    await fs.mkdir(path.join(codexHome, "sessions"), { recursive: true });
+    await fs.mkdir(path.join(codexHome, "archived_sessions"), { recursive: true });
+    await fs.mkdir(path.join(codexHome, "sqlite"), { recursive: true });
+    await fs.mkdir(lockDir, { recursive: true });
+    await fs.writeFile(path.join(codexHome, "config.toml"), 'model_provider = "openai"\n');
+    await fs.writeFile(path.join(lockDir, "owner.json"), "{malformed", "utf8");
+    const facade = core.createCoreFacade({
+      resolveProfile: async () => ({
+        id: "default",
+        revision: "r1",
+        codexHome
+      })
+    });
+
+    const status = await facade.getStatus({
+      profile: { profileId: "default", profileRevision: "r1" }
+    });
+
+    assert.equal(status.sqliteHomeSource, "unknown");
+    assert.equal(typeof status.storageRevision, "string");
+    assert.ok(status.storageRevision.length > 0);
+    assert.equal(status.operationInProgress.lockState, "unverifiable");
+    assert.equal(status.operationInProgress.errorCode, "LOCK_UNVERIFIABLE");
+    assert.equal(status.rolloutScanComplete, false);
+    assert.equal(status.alignment.aligned, false);
+  } finally {
+    await fs.rm(testRoot, { recursive: true, force: true });
+  }
+});
+
+test("host operation controls stay off the method surface and project pathless progress", async () => {
+  const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "provider-sync-core-control-"));
+  const codexHome = path.join(testRoot, "codex-home");
+  const rollout = path.join(codexHome, "sessions", "rollout-control.jsonl");
+  try {
+    await fs.mkdir(path.dirname(rollout), { recursive: true });
+    await fs.mkdir(path.join(codexHome, "archived_sessions"), { recursive: true });
+    await fs.writeFile(path.join(codexHome, "config.toml"), 'model_provider = "openai"\n');
+    await fs.writeFile(rollout, `${JSON.stringify({
+      type: "session_meta",
+      timestamp: "2026-08-26T00:00:00.000Z",
+      payload: { id: "control", cwd: "C:\\private", model_provider: "legacy" }
+    })}\n`);
+    const facade = core.createCoreFacade({
+      resolveProfile: async () => ({
+        id: "default",
+        revision: "r1",
+        codexHome
+      })
+    });
+    const plan = await facade.prepareSync({
+      profile: { profileId: "default", profileRevision: "r1" },
+      keepCount: 1
+    });
+    const started = [];
+    const progress = [];
+    const result = await facade.applySync(
+      { schemaVersion: 1, planId: plan.planId },
+      {
+        onOperationStarted(event) { started.push(event); },
+        onProgress(event) {
+          progress.push(event);
+          throw new Error("observer failure must not change the transaction");
+        }
+      }
+    );
+    assert.equal(result.outcome, "completed");
+    assert.equal(started.length, 1);
+    assert.equal(started[0].operationId, result.operationId);
+    assert.ok(progress.length > 0);
+    assert.equal(progress.every((event) => (
+      Object.keys(event).every((key) => ["stage", "status", "progress", "count"].includes(key))
+    )), true);
+    assert.doesNotMatch(JSON.stringify(progress), /private|backupDir|state_5\.sqlite/i);
+    assert.deepEqual(Object.keys(facade).sort(), EXPECTED_METHODS);
+  } finally {
     await fs.rm(testRoot, { recursive: true, force: true });
   }
 });

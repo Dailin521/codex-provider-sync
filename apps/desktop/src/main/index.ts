@@ -7,6 +7,7 @@ import {
   BrowserWindow,
   ipcMain,
   protocol,
+  screen,
   session
 } from "electron";
 
@@ -62,9 +63,20 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   const createWindow = async (): Promise<BrowserWindow> => {
+    const windowDisplay = process.env.CPS_DESKTOP_WINDOW_DISPLAY;
+    const preferredDisplay = windowDisplay === "secondary"
+      ? screen.getAllDisplays().find((display) => display.id !== screen.getPrimaryDisplay().id)
+      : undefined;
+    const workArea = preferredDisplay?.workArea;
+    const width = workArea ? Math.min(1280, workArea.width) : 1280;
+    const height = workArea ? Math.min(840, workArea.height) : 840;
     const window = new BrowserWindow({
-      width: 1280,
-      height: 840,
+      width,
+      height,
+      ...(workArea ? {
+        x: workArea.x + Math.max(0, Math.floor((workArea.width - width) / 2)),
+        y: workArea.y + Math.max(0, Math.floor((workArea.height - height) / 2))
+      } : {}),
       minWidth: 760,
       minHeight: 560,
       show: false,
@@ -72,7 +84,7 @@ if (!app.requestSingleInstanceLock()) {
       backgroundColor: "#11141b",
       webPreferences: createSecureWebPreferences(preloadPath)
     });
-    window.once("ready-to-show", () => window.show());
+    if (windowDisplay !== "hidden") window.once("ready-to-show", () => window.show());
     window.on("closed", () => {
       if (mainWindow === window) mainWindow = null;
     });

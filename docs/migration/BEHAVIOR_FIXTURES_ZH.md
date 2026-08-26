@@ -1,6 +1,6 @@
 # vNext 行为兼容 Fixture 清单
 
-> **状态：Accepted（阶段 0 语义清单；C2 动态 CLI Fixture、C4 安全 Runner/Schema、C5 首批跨运行时静态 Corpus 已实现）**
+> **状态：Accepted（阶段 0 语义清单；C2 动态 CLI Fixture、C4 安全 Runner/Schema、C5 首批跨运行时静态 Corpus、C7 Electron Sync/Switch 动态 Fixture 已实现）**
 >
 > **日期：2026-08-24**
 >
@@ -94,6 +94,8 @@ Fixture 不是用户数据样本，严禁从真实 `~/.codex`、认证文件或�
 真实跨运行时测试不能用 Mock 代替进程争锁。Node 与 .NET 必须在同一临时目标上运行，并以文件/SQLite 最终效果作为独立证据。
 
 V1/C3 的 executable mapping：Plan/revision 见 `test/plan-ledger.test.js`、`test/operation-revision.test.js`、`test/plan-apply.test.js`；Node 锁与外部 Status 见 `test/state-db-lock.test.js`、`test/status-coordination.test.js`；Watch 见 `test/watch.test.js`；Web transport 见 `test/web-server.test.js`；.NET 与跨运行时锁见 `StateDbLockResourceTests`、`DualResourceLockIntegrationTests`、`CrossRuntimeStateDbLockTests`、`LockServiceTests`。C5 的双向 backup/foreign pending executable mapping 为 `test-support/cross-runtime-fixtures.mjs`、`test-support/cross-runtime-node-crash-host.mjs`、`.NET FixtureHost` 与既有 `.NET CrashHost`；完整命令与结果记录在 `evidence/C5_SHARED_UI_WEB_2026-08-26.md`。
+
+C7 的 executable mapping 为 `test-support/desktop-sync-switch-fixture.mjs`、`apps/desktop/e2e/desktop-sync-switch.spec.mjs`、`apps/desktop/tests/ipc-router.test.mjs`、`runtime-supervisor.test.mjs` 与 `test/plan-apply.test.js`。它使用临时 Home、真实 SQLite、Windows `FileShare.None`、受控 test-build Utility 终止和完整目标 Hash/语义快照；生产 Core host control 不包含故障注入能力。当前 Windows 主机的 Ubuntu 因 WSL `ext4.vhdx` 缺失无法启动，因此 `wsl-unc-unchanged-hash` 仅按明确原因 Skip，仍是远端/修复后本机必须闭合的 C7 门槛；详见 `evidence/C7_ELECTRON_SYNC_SWITCH_2026-08-26.md`。
 
 ## 6. Restore、Backup 与 Prune
 

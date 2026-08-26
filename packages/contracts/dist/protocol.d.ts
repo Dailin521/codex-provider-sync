@@ -27,6 +27,14 @@ export interface CoreProgressEnvelope {
     event: "progress";
     progress: ProgressEvent;
 }
+export interface CoreOperationStartedEnvelope {
+    protocolVersion: CoreProtocolVersion;
+    requestId: string;
+    operationId: string;
+    event: "operation-started";
+    operation: "sync" | "switch" | "restore";
+}
+export type CoreOperationEventEnvelope = CoreOperationStartedEnvelope | CoreProgressEnvelope;
 export declare class ContractValidationError extends Error {
     readonly code: "INVALID_INPUT" | "PROTOCOL_VERSION_MISMATCH";
     constructor(code: "INVALID_INPUT" | "PROTOCOL_VERSION_MISMATCH", message: string);
@@ -39,8 +47,13 @@ export declare function assertCoreRequestEnvelope<M extends CoreMethodName = Cor
 export declare function assertCoreResponseEnvelope<M extends CoreMethodName = CoreMethodName>(value: unknown, expectedRequestId?: string): asserts value is CoreResponseEnvelope<M>;
 export declare function assertCoreMethodOutput<M extends CoreMethodName>(method: M, value: unknown): asserts value is CoreMethodMap[M]["output"];
 export declare function assertProgressEvent(value: unknown): asserts value is ProgressEvent;
+export declare function assertCoreOperationStartedEnvelope(value: unknown, expectedRequestId?: string, expectedOperationId?: string): asserts value is CoreOperationStartedEnvelope;
+export declare function assertCoreProgressEnvelope(value: unknown, expectedRequestId?: string, expectedOperationId?: string): asserts value is CoreProgressEnvelope;
+export declare function assertCoreOperationEventEnvelope(value: unknown, expectedRequestId?: string, expectedOperationId?: string): asserts value is CoreOperationEventEnvelope;
+export declare function createCoreOperationStartedEnvelope(requestId: string, operationId: string, operation: CoreOperationStartedEnvelope["operation"]): CoreOperationStartedEnvelope;
+export declare function createCoreProgressEnvelope(requestId: string, operationId: string, progress: ProgressEvent): CoreProgressEnvelope;
 export declare function createCoreRequestEnvelope<M extends CoreMethodName>(method: M, payload: CoreMethodMap[M]["input"], requestId: string, operationId?: string): CoreRequestEnvelope<M>;
 export declare function createCoreSuccessEnvelope<M extends CoreMethodName>(request: CoreRequestEnvelope<M>, result: CoreMethodMap[M]["output"], operationId?: string): CoreResponseEnvelope<M>;
-export declare function createCoreFailureEnvelope<M extends CoreMethodName>(request: CoreRequestEnvelope<M>, error: CoreErrorDto): CoreResponseEnvelope<M>;
+export declare function createCoreFailureEnvelope<M extends CoreMethodName>(request: CoreRequestEnvelope<M>, error: CoreErrorDto, operationId?: string): CoreResponseEnvelope<M>;
 export declare function isCoreErrorCode(value: unknown): value is CoreErrorCode;
 export declare function isCoreErrorSeverity(value: unknown): value is CoreErrorSeverity;

@@ -1,6 +1,6 @@
 import process from "node:process";
 
-import { DESKTOP_READ_METHODS } from "@codex-provider-sync/core-client";
+import { DESKTOP_RUNTIME_METHODS } from "@codex-provider-sync/core-client";
 
 import { DesktopProfileRepository } from "../profiles/repository.js";
 import {
@@ -10,8 +10,10 @@ import {
   DESKTOP_RUNTIME_PROTOCOL_VERSION
 } from "../shared/constants.js";
 import {
+  assertRuntimeCancelFrame,
   assertRuntimeRequestFrame,
   assertRuntimeShutdownFrame,
+  createRuntimeOperationEventFrame,
   createRuntimeResponseFrame,
   type RuntimeHelloFrame
 } from "../shared/runtime-protocol.js";
@@ -20,6 +22,13 @@ import { createDesktopRuntimeHost } from "./host.js";
 interface UtilityParentPort {
   postMessage(value: unknown): void;
   on(event: "message", listener: (event: { data: unknown }) => void): void;
+}
+
+interface ActiveDispatch {
+  requestId: string;
+  controller: AbortController;
+  operationId?: string;
+  task?: Promise<void>;
 }
 
 function requiredEnvironment(name: string): string {
@@ -44,7 +53,13 @@ const profiles = new DesktopProfileRepository({
     : {})
 });
 await profiles.initialize();
-const host = createDesktopRuntimeHost(profiles);
+const testApplyInvoker = __CPS_DESKTOP_TEST_BUILD__
+  && process.env.CPS_DESKTOP_E2E === "1"
+  ? (await import("./e2e-gate.js")).createDesktopTestApplyInvoker()
+  : undefined;
+const host = createDesktopRuntimeHost(profiles, testApplyInvoker);
+const active = new Map<string, ActiveDispatch>();
+let shuttingDown = false;
 
 const hello: RuntimeHelloFrame = {
   kind: "hello",
@@ -55,24 +70,96 @@ const hello: RuntimeHelloFrame = {
   buildId: DESKTOP_BUILD_ID,
   sessionNonce: requiredEnvironment("CPS_DESKTOP_RUNTIME_NONCE"),
   generation,
-  capabilities: DESKTOP_READ_METHODS
+  capabilities: DESKTOP_RUNTIME_METHODS
 };
 parentPort.postMessage(hello);
 
-parentPort.on("message", (event) => {
-  void (async () => {
-    const frame = event.data;
-    if (frame !== null && typeof frame === "object" && !Array.isArray(frame)
-        && (frame as { kind?: unknown }).kind === "shutdown") {
-      assertRuntimeShutdownFrame(frame);
-      if (frame.generation !== generation) throw new Error("Stale desktop runtime shutdown frame.");
-      process.exit(0);
+async function beginShutdown(frame: unknown): Promise<void> {
+  assertRuntimeShutdownFrame(frame);
+  if (frame.generation !== generation) throw new Error("Stale desktop runtime shutdown frame.");
+  shuttingDown = true;
+  for (const dispatch of active.values()) dispatch.controller.abort();
+  await Promise.allSettled(
+    [...active.values()].map((dispatch) => dispatch.task).filter(Boolean) as Promise<void>[]
+  );
+  process.exit(0);
+}
+
+function cancelDispatch(frame: unknown): void {
+  assertRuntimeCancelFrame(frame);
+  if (frame.generation !== generation) throw new Error("Stale desktop runtime cancel frame.");
+  const dispatch = active.get(frame.dispatchId);
+  if (!dispatch || dispatch.requestId !== frame.requestId) {
+    throw new Error("Unknown desktop runtime cancel target.");
+  }
+  if (frame.operationId !== undefined && dispatch.operationId !== frame.operationId) {
+    throw new Error("Desktop runtime cancel operationId mismatch.");
+  }
+  dispatch.controller.abort();
+}
+
+function startDispatch(frame: unknown): void {
+  assertRuntimeRequestFrame(frame);
+  if (shuttingDown) throw new Error("Desktop runtime is shutting down.");
+  if (frame.generation !== generation) throw new Error("Stale desktop runtime request frame.");
+  if (active.has(frame.dispatchId)) throw new Error("Duplicate desktop runtime dispatchId.");
+  const dispatch: ActiveDispatch = {
+    requestId: frame.envelope.requestId,
+    controller: new AbortController()
+  };
+  active.set(frame.dispatchId, dispatch);
+  const task = host.dispatch(frame.envelope, {
+    signal: dispatch.controller.signal,
+    onOperationStarted(envelope) {
+      if (dispatch.operationId !== undefined) {
+        throw new Error("Duplicate desktop operation-started event.");
+      }
+      dispatch.operationId = envelope.operationId;
+      parentPort.postMessage(createRuntimeOperationEventFrame(
+        generation,
+        frame.dispatchId,
+        envelope
+      ));
+    },
+    onProgress(envelope) {
+      if (!dispatch.operationId || envelope.operationId !== dispatch.operationId) {
+        throw new Error("Desktop progress event preceded operation-started.");
+      }
+      parentPort.postMessage(createRuntimeOperationEventFrame(
+        generation,
+        frame.dispatchId,
+        envelope
+      ));
     }
-    assertRuntimeRequestFrame(frame);
-    if (frame.generation !== generation) throw new Error("Stale desktop runtime request frame.");
-    const response = await host.dispatch(frame.envelope);
-    parentPort.postMessage(createRuntimeResponseFrame(generation, response));
-  })().catch(() => {
-    process.exit(70);
+  }).then((response) => {
+    parentPort.postMessage(createRuntimeResponseFrame(
+      generation,
+      frame.dispatchId,
+      response
+    ));
+  }).finally(() => {
+    active.delete(frame.dispatchId);
   });
+  dispatch.task = task;
+  void task.catch(() => process.exit(70));
+}
+
+parentPort.on("message", (event) => {
+  try {
+    const frame = event.data;
+    const kind = frame !== null && typeof frame === "object" && !Array.isArray(frame)
+      ? (frame as { kind?: unknown }).kind
+      : undefined;
+    if (kind === "shutdown") {
+      void beginShutdown(frame).catch(() => process.exit(70));
+      return;
+    }
+    if (kind === "cancel") {
+      cancelDispatch(frame);
+      return;
+    }
+    startDispatch(frame);
+  } catch {
+    process.exit(70);
+  }
 });

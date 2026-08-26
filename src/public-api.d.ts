@@ -19,11 +19,18 @@ export class CoreError extends Error {
 export function toCoreErrorDto(error: unknown, options?: Record<string, unknown>): Record<string, unknown>;
 export function getStatus(options?: Record<string, unknown>): Promise<unknown>;
 export function prepareSync(options?: Record<string, unknown>): Promise<unknown>;
-export function applySync(input: Record<string, unknown>): Promise<unknown>;
+/** @internal Trusted host control. Never expose this object to HTTP, IPC, or Renderer input. */
+export interface CoreHostOperationControl {
+  signal?: AbortSignal;
+  onOperationStarted?(value: { operationId: string; operation: "sync" | "switch" | "restore" }): void | Promise<void>;
+  onProgress?(event: Record<string, unknown>): void | Promise<void>;
+}
+
+export function applySync(input: Record<string, unknown>, control?: CoreHostOperationControl): Promise<unknown>;
 export function prepareSwitch(options?: Record<string, unknown>): Promise<unknown>;
-export function applySwitch(input: Record<string, unknown>): Promise<unknown>;
+export function applySwitch(input: Record<string, unknown>, control?: CoreHostOperationControl): Promise<unknown>;
 export function prepareRestore(options?: Record<string, unknown>): Promise<unknown>;
-export function applyRestore(input: Record<string, unknown>): Promise<unknown>;
+export function applyRestore(input: Record<string, unknown>, control?: CoreHostOperationControl): Promise<unknown>;
 export function pruneBackups(options?: Record<string, unknown>): Promise<unknown>;
 export function listBackups(codexHome: string): Promise<unknown>;
 export function listHistory(codexHome: string, options?: Record<string, unknown>): Promise<unknown>;

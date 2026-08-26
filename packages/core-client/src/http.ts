@@ -5,7 +5,7 @@ import type {
 
 import {
   TransportCoreClient,
-  type CoreCallOptions,
+  type CoreTransportCallOptions,
   type CoreTransport,
   type RequestIdFactory
 } from "./client.js";
@@ -50,7 +50,7 @@ export class HttpCoreTransport implements CoreTransport {
 
   async request<M extends CoreMethodName>(
     envelope: CoreRequestEnvelope<M>,
-    options: Pick<CoreCallOptions, "signal"> = {}
+    options: CoreTransportCallOptions = {}
   ): Promise<unknown> {
     const body = JSON.stringify(envelope);
     if (new TextEncoder().encode(body).byteLength > MAX_CORE_REQUEST_BYTES) {

@@ -47,6 +47,16 @@ export interface CoreProgressEnvelope {
   progress: ProgressEvent;
 }
 
+export interface CoreOperationStartedEnvelope {
+  protocolVersion: CoreProtocolVersion;
+  requestId: string;
+  operationId: string;
+  event: "operation-started";
+  operation: "sync" | "switch" | "restore";
+}
+
+export type CoreOperationEventEnvelope = CoreOperationStartedEnvelope | CoreProgressEnvelope;
+
 const METHOD_SET = new Set<string>(CORE_METHODS);
 const ERROR_CODE_SET = new Set<string>(CORE_ERROR_CODES);
 const SEVERITY_SET = new Set<string>(["info", "warning", "error", "fatal"]);
@@ -543,12 +553,117 @@ export function assertProgressEvent(value: unknown): asserts value is ProgressEv
   if (Object.keys(value).some((key) => !allowed.has(key))
       || !isNonEmptyString(value.stage)
       || !isNonEmptyString(value.status)
+      || value.stage.length > 80
+      || value.status.length > 40
       || (value.progress !== undefined
-        && (typeof value.progress !== "number" || !Number.isFinite(value.progress)))
+        && (typeof value.progress !== "number"
+          || !Number.isFinite(value.progress)
+          || value.progress < 0
+          || value.progress > 1))
       || (value.count !== undefined
-        && (typeof value.count !== "number" || !Number.isFinite(value.count)))) {
+        && (!Number.isSafeInteger(value.count) || Number(value.count) < 0))) {
     throw new ContractValidationError("INVALID_INPUT", "Invalid ProgressEvent.");
   }
+}
+
+export function assertCoreOperationStartedEnvelope(
+  value: unknown,
+  expectedRequestId?: string,
+  expectedOperationId?: string
+): asserts value is CoreOperationStartedEnvelope {
+  if (!isRecord(value)
+      || !exactObjectKeys(value, [
+        "protocolVersion",
+        "requestId",
+        "operationId",
+        "event",
+        "operation"
+      ])) {
+    throw new ContractValidationError("INVALID_INPUT", "Invalid operation-started envelope.");
+  }
+  assertProtocolVersion(value.protocolVersion);
+  if (!isNonEmptyString(value.requestId)
+      || value.requestId.length > 512
+      || (expectedRequestId !== undefined && value.requestId !== expectedRequestId)
+      || !isNonEmptyString(value.operationId)
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.operationId)
+      || (expectedOperationId !== undefined && value.operationId !== expectedOperationId)
+      || value.event !== "operation-started"
+      || !["sync", "switch", "restore"].includes(String(value.operation))) {
+    throw new ContractValidationError("INVALID_INPUT", "Invalid operation-started envelope.");
+  }
+}
+
+export function assertCoreProgressEnvelope(
+  value: unknown,
+  expectedRequestId?: string,
+  expectedOperationId?: string
+): asserts value is CoreProgressEnvelope {
+  if (!isRecord(value)
+      || !exactObjectKeys(value, [
+        "protocolVersion",
+        "requestId",
+        "operationId",
+        "event",
+        "progress"
+      ])) {
+    throw new ContractValidationError("INVALID_INPUT", "Invalid Core progress envelope.");
+  }
+  assertProtocolVersion(value.protocolVersion);
+  if (!isNonEmptyString(value.requestId)
+      || value.requestId.length > 512
+      || (expectedRequestId !== undefined && value.requestId !== expectedRequestId)
+      || !isNonEmptyString(value.operationId)
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.operationId)
+      || (expectedOperationId !== undefined && value.operationId !== expectedOperationId)
+      || value.event !== "progress") {
+    throw new ContractValidationError("INVALID_INPUT", "Invalid Core progress envelope.");
+  }
+  assertProgressEvent(value.progress);
+}
+
+export function assertCoreOperationEventEnvelope(
+  value: unknown,
+  expectedRequestId?: string,
+  expectedOperationId?: string
+): asserts value is CoreOperationEventEnvelope {
+  if (isRecord(value) && value.event === "operation-started") {
+    assertCoreOperationStartedEnvelope(value, expectedRequestId, expectedOperationId);
+    return;
+  }
+  assertCoreProgressEnvelope(value, expectedRequestId, expectedOperationId);
+}
+
+export function createCoreOperationStartedEnvelope(
+  requestId: string,
+  operationId: string,
+  operation: CoreOperationStartedEnvelope["operation"]
+): CoreOperationStartedEnvelope {
+  const envelope: CoreOperationStartedEnvelope = {
+    protocolVersion: CORE_PROTOCOL_VERSION,
+    requestId,
+    operationId,
+    event: "operation-started",
+    operation
+  };
+  assertCoreOperationStartedEnvelope(envelope);
+  return envelope;
+}
+
+export function createCoreProgressEnvelope(
+  requestId: string,
+  operationId: string,
+  progress: ProgressEvent
+): CoreProgressEnvelope {
+  const envelope: CoreProgressEnvelope = {
+    protocolVersion: CORE_PROTOCOL_VERSION,
+    requestId,
+    operationId,
+    event: "progress",
+    progress
+  };
+  assertCoreProgressEnvelope(envelope);
+  return envelope;
 }
 
 export function createCoreRequestEnvelope<M extends CoreMethodName>(
@@ -587,14 +702,15 @@ export function createCoreSuccessEnvelope<M extends CoreMethodName>(
 
 export function createCoreFailureEnvelope<M extends CoreMethodName>(
   request: CoreRequestEnvelope<M>,
-  error: CoreErrorDto
+  error: CoreErrorDto,
+  operationId?: string
 ): CoreResponseEnvelope<M> {
   assertCoreErrorDto(error);
   return {
     protocolVersion: CORE_PROTOCOL_VERSION,
     requestId: request.requestId,
-    ...(error.operationId ?? request.operationId
-      ? { operationId: error.operationId ?? request.operationId }
+    ...(operationId ?? error.operationId ?? request.operationId
+      ? { operationId: operationId ?? error.operationId ?? request.operationId }
       : {}),
     ok: false,
     error

@@ -17,7 +17,7 @@
     "build:electron": "electron-vite build",
     "build:electron:test": "electron-vite build --mode test",
     "verify:production-bundle": "node scripts/verify-production-bundle.mjs",
-    "pack:dir": "electron-builder --dir --config electron-builder.yml",
+    "pack:dir": "npm run build && npm run build:electron && npm run verify:production-bundle && electron-builder --dir --config electron-builder.yml",
     "test": "node --test checks/*.contract.mjs tests/*.test.mjs",
     "test:e2e": "playwright test -c playwright.config.mjs",
     "test:e2e:production": "playwright test -c playwright.production.config.mjs",
@@ -36,6 +36,7 @@
     "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@codex-provider-sync/test-fixtures": "0.0.0",
     "@playwright/test": "1.62.1",
     "@tailwindcss/vite": "4.3.3",
     "@types/react": "19.2.18",

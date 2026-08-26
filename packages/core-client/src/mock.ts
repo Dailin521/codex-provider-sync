@@ -11,7 +11,7 @@ import {
 
 import {
   TransportCoreClient,
-  type CoreCallOptions,
+  type CoreTransportCallOptions,
   type CoreTransport,
   type RequestIdFactory
 } from "./client.js";
@@ -41,7 +41,7 @@ class MockCoreTransport implements CoreTransport {
 
   async request<M extends CoreMethodName>(
     request: CoreRequestEnvelope<M>,
-    _options: Pick<CoreCallOptions, "signal"> = {}
+    _options: CoreTransportCallOptions = {}
   ): Promise<unknown> {
     this.requests.push(request);
     const handler = this.#handlers[request.method] as MockCoreHandler<M> | undefined;

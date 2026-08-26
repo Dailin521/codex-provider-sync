@@ -8,10 +8,14 @@ import {
   assertCoreErrorDto,
   assertCoreMethodInput,
   assertCoreMethodOutput,
+  assertCoreOperationStartedEnvelope,
+  assertCoreProgressEnvelope,
   assertCoreRequestEnvelope,
   assertCoreResponseEnvelope,
   assertProgressEvent,
   createPublicCoreErrorDto,
+  createCoreOperationStartedEnvelope,
+  createCoreProgressEnvelope,
   createCoreRequestEnvelope
 } from "../dist/index.js";
 
@@ -187,4 +191,38 @@ test("ProgressEvent cannot carry messages, paths or diagnostics", () => {
     status: "running",
     messageBody: "must not cross the progress channel"
   }));
+});
+
+test("operation lifecycle envelopes are exact, correlated, and pathless", () => {
+  const operationId = "11111111-1111-4111-8111-111111111111";
+  const started = createCoreOperationStartedEnvelope("request-1", operationId, "sync");
+  const progress = createCoreProgressEnvelope("request-1", operationId, {
+    stage: "create_backup",
+    status: "start",
+    progress: 0.25,
+    count: 1
+  });
+  assert.doesNotThrow(() => assertCoreOperationStartedEnvelope(
+    started,
+    "request-1",
+    operationId
+  ));
+  assert.doesNotThrow(() => assertCoreProgressEnvelope(
+    progress,
+    "request-1",
+    operationId
+  ));
+  assert.throws(() => assertCoreOperationStartedEnvelope(
+    { ...started, path: "C:/private" }
+  ));
+  assert.throws(() => assertCoreProgressEnvelope({
+    ...progress,
+    progress: { ...progress.progress, backupDir: "C:/private" }
+  }));
+  assert.throws(() => assertCoreProgressEnvelope(progress, "request-2", operationId));
+  assert.throws(() => assertCoreProgressEnvelope(
+    progress,
+    "request-1",
+    "22222222-2222-4222-8222-222222222222"
+  ));
 });

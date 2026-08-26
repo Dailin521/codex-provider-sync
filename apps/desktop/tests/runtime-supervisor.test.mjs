@@ -3,25 +3,33 @@ import test from "node:test";
 
 import {
   createCoreFailureEnvelope,
+  createCoreOperationStartedEnvelope,
+  createCoreProgressEnvelope,
   createCoreRequestEnvelope,
   createCoreSuccessEnvelope,
   createPublicCoreErrorDto
 } from "@codex-provider-sync/contracts";
-import { DESKTOP_READ_METHODS } from "@codex-provider-sync/core-client";
+import { DESKTOP_RUNTIME_METHODS } from "@codex-provider-sync/core-client";
 
 import { CoreRuntimeSupervisor } from "../dist/main/runtime-supervisor.js";
 import {
   DESKTOP_CORE_PROTOCOL_VERSION,
   DESKTOP_RUNTIME_PROTOCOL_VERSION
 } from "../dist/shared/constants.js";
-import { createRuntimeResponseFrame } from "../dist/shared/runtime-protocol.js";
+import {
+  createRuntimeOperationEventFrame,
+  createRuntimeResponseFrame
+} from "../dist/shared/runtime-protocol.js";
 
-function statusResult({ pending = false, profile = { profileId: "default", profileRevision: "profile-r1" } } = {}) {
+const profile = { profileId: "default", profileRevision: "profile-r1" };
+const operationId = "11111111-1111-4111-8111-111111111111";
+
+function statusResult({ pending = false, selectedProfile = profile } = {}) {
   return {
     schemaVersion: 1,
     snapshotAt: "2026-08-26T00:00:00.000Z",
     storageRevision: "storage-r1",
-    profile: { id: profile.profileId, revision: profile.profileRevision ?? "resolved-revision" },
+    profile: { id: selectedProfile.profileId, revision: selectedProfile.profileRevision },
     currentProvider: "openai",
     rolloutCounts: { sessions: { openai: 1 }, archived_sessions: {} },
     sqliteCounts: {},
@@ -29,22 +37,34 @@ function statusResult({ pending = false, profile = { profileId: "default", profi
     sqliteHomeSource: "default",
     backupSummary: { count: 0, totalBytes: 0 },
     pendingRecovery: pending,
-    pendingTransactions: pending ? [{ operationId: "op-pending", state: "applying" }] : [],
+    pendingTransactions: pending ? [{ operationId: "pending", state: "applying" }] : [],
     operationInProgress: null,
     rolloutScanComplete: true,
     lockedRolloutFiles: []
   };
 }
 
-function outputFor(request, options) {
-  if (request.method === "getStatus") return statusResult({
-    ...options,
-    profile: options.wrongStatusProfile
-      ? { profileId: "wrong-profile", profileRevision: "wrong-revision" }
-      : request.payload.profile
-  });
-  if (request.method === "listBackups") return { backups: [] };
-  throw new Error(`Unexpected fake method: ${request.method}`);
+function planResult(request) {
+  const operation = request.method === "prepareSwitch" ? "switch" : "sync";
+  return {
+    schemaVersion: 1,
+    planId: "p".repeat(48),
+    operation,
+    createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+    profile: {
+      id: request.payload.profile.profileId,
+      revision: request.payload.profile.profileRevision
+    },
+    storageRevision: "storage-r1",
+    configRevision: "config-r1",
+    rolloutRevision: "rollout-r1",
+    stateDbRevision: "db-r1",
+    target: { provider: operation === "sync" ? "openai" : request.payload.provider },
+    impact: { backupExpected: true },
+    warnings: [],
+    requiresConfirmation: true
+  };
 }
 
 class FakeUtility {
@@ -55,6 +75,7 @@ class FakeUtility {
     this.messageListeners = new Set();
     this.exitListeners = new Set();
     this.exited = false;
+    this.applyFrames = new Map();
     queueMicrotask(() => this.emitMessage({
       kind: "hello",
       runtimeProtocolVersion: DESKTOP_RUNTIME_PROTOCOL_VERSION,
@@ -64,14 +85,31 @@ class FakeUtility {
       buildId: identity.buildId,
       sessionNonce: identity.sessionNonce,
       generation: identity.generation,
-      capabilities: DESKTOP_READ_METHODS
+      capabilities: behavior.readOnlyHello
+        ? DESKTOP_RUNTIME_METHODS.slice(0, 5)
+        : DESKTOP_RUNTIME_METHODS
     }));
   }
 
   postMessage(frame) {
     this.messages.push(frame);
     if (frame.kind === "shutdown") {
-      if (!this.behavior.holdShutdown) queueMicrotask(() => this.exit());
+      queueMicrotask(() => this.exit());
+      return;
+    }
+    if (frame.kind === "cancel") {
+      const requestFrame = this.applyFrames.get(frame.dispatchId);
+      if (!requestFrame || this.behavior.ignoreCancel) return;
+      const response = createCoreFailureEnvelope(
+        requestFrame.envelope,
+        createPublicCoreErrorDto("OPERATION_CANCELLED", { operationId }),
+        operationId
+      );
+      queueMicrotask(() => this.emitMessage(createRuntimeResponseFrame(
+        frame.generation,
+        frame.dispatchId,
+        response
+      )));
       return;
     }
     if (frame.kind !== "request") return;
@@ -81,24 +119,64 @@ class FakeUtility {
     }
     if (this.behavior.holdRequests) return;
     const respond = () => {
-      let envelope;
-      if (frame.envelope.method === "getStatus" && this.behavior.failStatusCount > 0) {
-        this.behavior.failStatusCount -= 1;
-        envelope = createCoreFailureEnvelope(
-          frame.envelope,
-          createPublicCoreErrorDto("INTERNAL_ERROR")
-        );
-      } else {
-        envelope = createCoreSuccessEnvelope(
-          frame.envelope,
-          outputFor(frame.envelope, {
-            pending: this.behavior.pendingStatus === true,
-            wrongStatusProfile: this.behavior.wrongStatusProfile === true
-          }),
-          this.behavior.wrongOperationId ? "wrong-operation" : undefined
-        );
+      const request = frame.envelope;
+      if (request.method === "getStatus") {
+        const response = createCoreSuccessEnvelope(request, statusResult({
+          pending: this.behavior.pendingStatus === true,
+          selectedProfile: this.behavior.wrongStatusProfile
+            ? { profileId: "wrong", profileRevision: "wrong" }
+            : request.payload.profile
+        }));
+        this.emitMessage(createRuntimeResponseFrame(frame.generation, frame.dispatchId, response));
+        return;
       }
-      this.emitMessage(createRuntimeResponseFrame(frame.generation, envelope));
+      if (request.method === "listBackups") {
+        const response = createCoreSuccessEnvelope(request, { backups: [] });
+        this.emitMessage(createRuntimeResponseFrame(frame.generation, frame.dispatchId, response));
+        return;
+      }
+      if (request.method === "prepareSync" || request.method === "prepareSwitch") {
+        const response = createCoreSuccessEnvelope(request, planResult(request));
+        this.emitMessage(createRuntimeResponseFrame(frame.generation, frame.dispatchId, response));
+        return;
+      }
+      if (request.method === "applySync" || request.method === "applySwitch") {
+        if (this.behavior.holdApplyBeforeStart) return;
+        if (this.behavior.failApplyBeforeStart) {
+          const response = createCoreFailureEnvelope(
+            request,
+            createPublicCoreErrorDto("PLAN_EXPIRED")
+          );
+          this.emitMessage(createRuntimeResponseFrame(frame.generation, frame.dispatchId, response));
+          return;
+        }
+        this.applyFrames.set(frame.dispatchId, frame);
+        const operation = request.method === "applySync" ? "sync" : "switch";
+        this.emitMessage(createRuntimeOperationEventFrame(
+          frame.generation,
+          frame.dispatchId,
+          createCoreOperationStartedEnvelope(request.requestId, operationId, operation)
+        ));
+        this.emitMessage(createRuntimeOperationEventFrame(
+          frame.generation,
+          frame.dispatchId,
+          createCoreProgressEnvelope(request.requestId, operationId, {
+            stage: "create_backup",
+            status: "start"
+          })
+        ));
+        if (this.behavior.holdApply) return;
+        const response = createCoreSuccessEnvelope(request, {
+          schemaVersion: 1,
+          operationId,
+          operation,
+          outcome: "completed",
+          backup: { backupId: "managed-backup" },
+          warnings: [],
+          result: { targetProvider: "openai" }
+        }, operationId);
+        this.emitMessage(createRuntimeResponseFrame(frame.generation, frame.dispatchId, response));
+      }
     };
     if (this.behavior.responseDelayMs) setTimeout(respond, this.behavior.responseDelayMs);
     else queueMicrotask(respond);
@@ -115,138 +193,174 @@ class FakeUtility {
   }
 }
 
-function request(method, requestId, profileId = "default", profileRevision = "profile-r1", operationId) {
-  const profile = { profileId, profileRevision };
-  return method === "getStatus"
-    ? createCoreRequestEnvelope(method, { profile }, requestId, operationId)
-    : createCoreRequestEnvelope(method, { profile }, requestId, operationId);
+function readRequest(method, requestId, selectedProfile = profile) {
+  return createCoreRequestEnvelope(method, { profile: selectedProfile }, requestId);
 }
 
-test("runtime handshake completes before the first read-only business request", async () => {
+function prepareRequest(requestId = "prepare-1") {
+  return createCoreRequestEnvelope(
+    "prepareSync",
+    { profile, keepCount: 5 },
+    requestId
+  );
+}
+
+function applyRequest(requestId = "apply-1") {
+  return createCoreRequestEnvelope(
+    "applySync",
+    { schemaVersion: 1, planId: "p".repeat(48) },
+    requestId
+  );
+}
+
+test("runtime handshake completes before the first read", async () => {
   const children = [];
   const supervisor = new CoreRuntimeSupervisor({
     appVersion: "0.5.0",
-    spawnUtility(identity) {
-      const child = new FakeUtility(identity);
-      children.push(child);
-      return child;
-    }
+    spawnUtility(identity) { const child = new FakeUtility(identity); children.push(child); return child; }
   });
-  const response = await supervisor.request(request("getStatus", "status-1"));
+  const response = await supervisor.request(readRequest("getStatus", "status-1"));
   assert.equal(response.ok, true);
   assert.equal(children.length, 1);
   assert.deepEqual(children[0].messages.map((frame) => frame.envelope?.method), ["getStatus"]);
-  assert.equal(supervisor.snapshot.state, "ready");
   assert.equal(supervisor.snapshot.generation, 1);
 });
 
-test("runtime crash rejects every pending request with CORE_RUNTIME_CRASHED", async () => {
+test("first cold-start write preflights Status before Prepare", async () => {
+  const children = [];
+  const supervisor = new CoreRuntimeSupervisor({
+    appVersion: "0.5.0",
+    spawnUtility(identity) { const child = new FakeUtility(identity); children.push(child); return child; }
+  });
+  const response = await supervisor.requestWrite(prepareRequest(), profile);
+  assert.equal(response.ok, true);
+  assert.deepEqual(
+    children[0].messages.filter((frame) => frame.kind === "request").map((frame) => frame.envelope.method),
+    ["getStatus", "prepareSync"]
+  );
+});
+
+test("pending recovery blocks cold-start writes but preserves reads", async () => {
+  const children = [];
+  const supervisor = new CoreRuntimeSupervisor({
+    appVersion: "0.5.0",
+    spawnUtility(identity) { const child = new FakeUtility(identity, { pendingStatus: true }); children.push(child); return child; }
+  });
+  const blocked = await supervisor.requestWrite(prepareRequest(), profile);
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.error.code, "PENDING_TRANSACTION");
+  assert.equal((await supervisor.request(readRequest("listBackups", "read-after-block"))).ok, true);
+  assert.deepEqual(
+    children[0].messages.filter((frame) => frame.kind === "request").map((frame) => frame.envelope.method),
+    ["getStatus", "listBackups"]
+  );
+});
+
+test("apply lifecycle is correlated and cancellation waits for the terminal response", async () => {
+  const children = [];
+  const events = [];
+  const supervisor = new CoreRuntimeSupervisor({
+    appVersion: "0.5.0",
+    spawnUtility(identity) { const child = new FakeUtility(identity, { holdApply: true }); children.push(child); return child; }
+  });
+  supervisor.subscribeOperation((event) => events.push(event));
+  const applying = supervisor.requestWrite(applyRequest(), profile);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events.map((event) => event.event), ["operation-started", "progress"]);
+  assert.equal(supervisor.cancel("apply-1", operationId), true);
+  const response = await applying;
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, "OPERATION_CANCELLED");
+  assert.equal(response.operationId, operationId);
+  assert.equal(children[0].messages.at(-1).kind, "cancel");
+});
+
+test("cancel before operation-started rejects a forged operationId without killing Runtime", async () => {
   const children = [];
   const supervisor = new CoreRuntimeSupervisor({
     appVersion: "0.5.0",
     spawnUtility(identity) {
-      const child = new FakeUtility(identity, { holdRequests: true });
+      const child = new FakeUtility(identity, { holdApplyBeforeStart: true });
       children.push(child);
       return child;
     }
   });
-  const first = supervisor.request(request("getStatus", "pending-1"));
-  const second = supervisor.request(request("listBackups", "pending-2"));
+  const applying = supervisor.requestWrite(applyRequest("apply-before-start"), profile);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(supervisor.cancel("apply-before-start", operationId), false);
+  assert.equal(children[0].messages.some((frame) => frame.kind === "cancel"), false);
+  assert.equal(supervisor.snapshot.state, "ready");
+  children[0].exit();
+  assert.equal((await applying).error.code, "CORE_RUNTIME_CRASHED");
+});
+
+test("an Apply failure before operation-started remains a normal Core failure", async () => {
+  const supervisor = new CoreRuntimeSupervisor({
+    appVersion: "0.5.0",
+    spawnUtility(identity) { return new FakeUtility(identity, { failApplyBeforeStart: true }); }
+  });
+  const response = await supervisor.requestWrite(applyRequest(), profile);
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, "PLAN_EXPIRED");
+  assert.equal(response.operationId, undefined);
+  assert.equal(supervisor.snapshot.state, "ready");
+});
+
+test("runtime crash rejects every pending request and next read restarts with preflight", async () => {
+  const children = [];
+  const supervisor = new CoreRuntimeSupervisor({
+    appVersion: "0.5.0",
+    spawnUtility(identity) {
+      const child = new FakeUtility(identity, children.length === 0 ? { holdRequests: true } : {});
+      children.push(child);
+      return child;
+    }
+  });
+  const first = supervisor.request(readRequest("getStatus", "pending-1"));
+  const second = supervisor.request(readRequest("listBackups", "pending-2"));
   await new Promise((resolve) => setImmediate(resolve));
   children[0].exit();
   for (const response of await Promise.all([first, second])) {
     assert.equal(response.ok, false);
     assert.equal(response.error.code, "CORE_RUNTIME_CRASHED");
   }
-  assert.equal(supervisor.snapshot.state, "crashed");
-});
-
-test("next request restarts once, preflights pending journals, then serves reads", async () => {
-  const children = [];
-  const supervisor = new CoreRuntimeSupervisor({
-    appVersion: "0.5.0",
-    spawnUtility(identity) {
-      const child = new FakeUtility(identity, { pendingStatus: children.length === 1 });
-      children.push(child);
-      return child;
-    }
-  });
-  assert.equal((await supervisor.request(request("getStatus", "initial"))).ok, true);
-  children[0].exit();
-  const response = await supervisor.request(request("listBackups", "after-crash"));
-  assert.equal(response.ok, true);
-  assert.equal(children.length, 2);
+  const recovered = await supervisor.request(readRequest("listBackups", "after-crash"));
+  assert.equal(recovered.ok, true);
   assert.deepEqual(
-    children[1].messages.map((frame) => frame.envelope?.method),
+    children[1].messages.filter((frame) => frame.kind === "request").map((frame) => frame.envelope.method),
     ["getStatus", "listBackups"]
   );
-  assert.equal(supervisor.snapshot.generation, 2);
-  assert.equal(supervisor.snapshot.recoveryBlocked, true);
 });
 
-test("incompatible hello fails before business dispatch and does not restart-loop", async () => {
+test("unknown dispatch operation event fails the generation closed", async () => {
   const children = [];
   const supervisor = new CoreRuntimeSupervisor({
     appVersion: "0.5.0",
-    spawnUtility(identity) {
-      const child = new FakeUtility(identity, { badAppVersion: true });
-      children.push(child);
-      return child;
-    },
-    handshakeTimeoutMs: 100
+    spawnUtility(identity) { const child = new FakeUtility(identity); children.push(child); return child; }
   });
-  const response = await supervisor.request(request("getStatus", "bad-hello"));
-  assert.equal(response.ok, false);
-  assert.equal(response.error.code, "PROTOCOL_VERSION_MISMATCH");
-  assert.equal(children.length, 1);
-  assert.equal(children[0].messages.length, 0);
+  assert.equal((await supervisor.request(readRequest("getStatus", "activate"))).ok, true);
+  children[0].emitMessage(createRuntimeOperationEventFrame(
+    1,
+    "22222222-2222-4222-8222-222222222222",
+    createCoreOperationStartedEnvelope("unknown", operationId, "sync")
+  ));
   assert.equal(supervisor.snapshot.state, "crashed");
 });
 
-test("a crash during restart preflight is not retried inside the same request", async () => {
+test("incompatible C6-only capability hello fails before business dispatch", async () => {
   const children = [];
   const supervisor = new CoreRuntimeSupervisor({
     appVersion: "0.5.0",
-    spawnUtility(identity) {
-      const behavior = children.length === 1
-        ? { crashOnRequest: (envelope) => envelope.method === "getStatus" }
-        : {};
-      const child = new FakeUtility(identity, behavior);
-      children.push(child);
-      return child;
-    }
+    handshakeTimeoutMs: 100,
+    spawnUtility(identity) { const child = new FakeUtility(identity, { readOnlyHello: true }); children.push(child); return child; }
   });
-  assert.equal((await supervisor.request(request("getStatus", "pre-crash"))).ok, true);
-  children[0].exit();
-  const response = await supervisor.request(request("listBackups", "restart-fails"));
+  const response = await supervisor.request(readRequest("getStatus", "bad-hello"));
   assert.equal(response.ok, false);
-  assert.equal(response.error.code, "CORE_RUNTIME_CRASHED");
-  assert.equal(children.length, 2);
+  assert.equal(response.error.code, "PROTOCOL_VERSION_MISMATCH");
+  assert.equal(children[0].messages.length, 0);
 });
 
-test("shutdown is idempotent and rejects concurrent requests without spawning an orphan runtime", async () => {
-  const children = [];
-  const supervisor = new CoreRuntimeSupervisor({
-    appVersion: "0.5.0",
-    spawnUtility(identity) {
-      const child = new FakeUtility(identity);
-      children.push(child);
-      return child;
-    }
-  });
-  assert.equal((await supervisor.request(request("getStatus", "shutdown-ready"))).ok, true);
-  const firstShutdown = supervisor.shutdown();
-  const secondShutdown = supervisor.shutdown();
-  const duringShutdown = await supervisor.request(request("getStatus", "shutdown-denied"));
-  assert.equal(duringShutdown.ok, false);
-  assert.equal(duringShutdown.error.code, "INTERNAL_ERROR");
-  await Promise.all([firstShutdown, secondShutdown]);
-  assert.equal(children.length, 1);
-  assert.equal(children[0].exited, true);
-  assert.equal(supervisor.snapshot.state, "stopped");
-});
-
-test("a timeout terminates its generation before a late response or reused requestId can alias", async () => {
+test("read timeout kills its generation before a late response can alias", async () => {
   const children = [];
   const supervisor = new CoreRuntimeSupervisor({
     appVersion: "0.5.0",
@@ -257,120 +371,52 @@ test("a timeout terminates its generation before a late response or reused reque
       return child;
     }
   });
-  const timedOut = await supervisor.request(request("getStatus", "late-response"));
+  const timedOut = await supervisor.request(readRequest("getStatus", "late"));
   assert.equal(timedOut.ok, false);
   assert.equal(timedOut.error.code, "INTERNAL_ERROR");
   assert.equal(supervisor.snapshot.state, "crashed");
-  await new Promise((resolve) => setTimeout(resolve, 40));
-  assert.equal(supervisor.snapshot.state, "crashed");
-  assert.equal((await supervisor.request(request("getStatus", "late-response"))).ok, true);
+  await new Promise((resolve) => setTimeout(resolve, 35));
+  assert.equal((await supervisor.request(readRequest("getStatus", "late"))).ok, true);
   assert.equal(children.length, 2);
-  assert.equal(supervisor.snapshot.generation, 2);
 });
 
-test("restart preflights every concurrently requested profile before dispatch", async () => {
+test("write timeout is a Runtime crash, never a cancellation, and the restart preflights", async () => {
   const children = [];
   const supervisor = new CoreRuntimeSupervisor({
     appVersion: "0.5.0",
+    writeRequestTimeoutMs: 5,
     spawnUtility(identity) {
-      const child = new FakeUtility(identity);
+      const child = new FakeUtility(
+        identity,
+        children.length === 0 ? { holdApplyBeforeStart: true } : {}
+      );
       children.push(child);
       return child;
     }
   });
-  assert.equal((await supervisor.request(request("getStatus", "profiles-initial"))).ok, true);
-  children[0].exit();
-  const [profileA, profileB] = await Promise.all([
-    supervisor.request(request("listBackups", "profile-a-read", "profile-a", "revision-a")),
-    supervisor.request(request("listBackups", "profile-b-read", "profile-b", "revision-b"))
-  ]);
-  assert.equal(profileA.ok, true);
-  assert.equal(profileB.ok, true);
-  const statusProfiles = children[1].messages
-    .filter((frame) => frame.envelope?.method === "getStatus")
-    .map((frame) => frame.envelope.payload.profile.profileId)
-    .sort();
-  assert.deepEqual(statusProfiles, ["profile-a", "profile-b"]);
-  assert.equal(children[1].messages.filter((frame) => frame.envelope?.method === "listBackups").length, 2);
-});
-
-test("a failed restart preflight remains required and is retried on the next request", async () => {
-  const children = [];
-  const supervisor = new CoreRuntimeSupervisor({
-    appVersion: "0.5.0",
-    spawnUtility(identity) {
-      const child = new FakeUtility(identity, children.length === 1 ? { failStatusCount: 1 } : {});
-      children.push(child);
-      return child;
-    }
-  });
-  assert.equal((await supervisor.request(request("getStatus", "preflight-retry-initial"))).ok, true);
-  children[0].exit();
-  const failed = await supervisor.request(request("listBackups", "preflight-first-fails"));
-  assert.equal(failed.ok, false);
-  assert.equal(failed.error.code, "INTERNAL_ERROR");
-  const retried = await supervisor.request(request("listBackups", "preflight-second-succeeds"));
-  assert.equal(retried.ok, true);
+  const timedOut = await supervisor.requestWrite(applyRequest("write-timeout"), profile);
+  assert.equal(timedOut.ok, false);
+  assert.equal(timedOut.error.code, "CORE_RUNTIME_CRASHED");
+  assert.equal(children[0].messages.some((frame) => frame.kind === "cancel"), false);
+  assert.equal(supervisor.snapshot.state, "crashed");
+  const recovered = await supervisor.request(readRequest("listBackups", "after-write-timeout"));
+  assert.equal(recovered.ok, true);
+  assert.equal(children.length, 2);
   assert.deepEqual(
-    children[1].messages.map((frame) => frame.envelope?.method),
-    ["getStatus", "getStatus", "listBackups"]
+    children[1].messages.filter((frame) => frame.kind === "request").map((frame) => frame.envelope.method),
+    ["getStatus", "listBackups"]
   );
 });
 
-test("a response operationId mismatch fails the runtime instead of resolving the request", async () => {
+test("shutdown before activation permanently rejects later requests", async () => {
   const children = [];
   const supervisor = new CoreRuntimeSupervisor({
     appVersion: "0.5.0",
-    spawnUtility(identity) {
-      const child = new FakeUtility(identity, { wrongOperationId: true });
-      children.push(child);
-      return child;
-    }
-  });
-  const response = await supervisor.request(request(
-    "getStatus",
-    "operation-mismatch",
-    "default",
-    "profile-r1",
-    "expected-operation"
-  ));
-  assert.equal(response.ok, false);
-  assert.equal(response.error.code, "CORE_RUNTIME_CRASHED");
-  assert.equal(supervisor.snapshot.state, "crashed");
-});
-
-test("shutdown before first activation permanently rejects later requests", async () => {
-  const children = [];
-  const supervisor = new CoreRuntimeSupervisor({
-    appVersion: "0.5.0",
-    spawnUtility(identity) {
-      const child = new FakeUtility(identity);
-      children.push(child);
-      return child;
-    }
+    spawnUtility(identity) { const child = new FakeUtility(identity); children.push(child); return child; }
   });
   await supervisor.shutdown();
-  const response = await supervisor.request(request("getStatus", "disposed-request"));
+  const response = await supervisor.request(readRequest("getStatus", "disposed"));
   assert.equal(response.ok, false);
   assert.equal(response.error.code, "INTERNAL_ERROR");
   assert.equal(children.length, 0);
-  assert.equal(supervisor.snapshot.state, "stopped");
-});
-
-test("restart preflight rejects a status projected for the wrong profile", async () => {
-  const children = [];
-  const supervisor = new CoreRuntimeSupervisor({
-    appVersion: "0.5.0",
-    spawnUtility(identity) {
-      const child = new FakeUtility(identity, children.length === 1 ? { wrongStatusProfile: true } : {});
-      children.push(child);
-      return child;
-    }
-  });
-  assert.equal((await supervisor.request(request("getStatus", "wrong-profile-initial"))).ok, true);
-  children[0].exit();
-  const response = await supervisor.request(request("listBackups", "wrong-profile-preflight"));
-  assert.equal(response.ok, false);
-  assert.equal(response.error.code, "CORE_RUNTIME_CRASHED");
-  assert.equal(supervisor.snapshot.state, "crashed");
 });

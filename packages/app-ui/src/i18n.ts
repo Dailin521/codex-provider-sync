@@ -45,6 +45,7 @@ export const resources = {
         unexpected: "The page encountered an unexpected error.",
         partial: "Completed with locked rollout files skipped.",
         completed: "Operation completed.",
+        cancelled: "Operation cancelled.",
         failed: "Operation failed."
       },
       overview: {
@@ -145,7 +146,12 @@ export const resources = {
         impact: "Impact",
         expires: "Expires",
         backupExpected: "A backup will be created before writes.",
-        exactApply: "Apply sends only this one-time plan ID."
+        exactApply: "Apply sends only this one-time plan ID.",
+        progress: "Operation progress",
+        starting: "Starting protected operation…",
+        cancelOperation: "Cancel operation",
+        cancelling: "Cancelling…",
+        cancelPending: "Cancellation will take effect at the next safe point."
       },
       validation: {
         required: "This field is required.",
@@ -201,6 +207,7 @@ export const resources = {
         unexpected: "页面遇到未预期错误。",
         partial: "操作完成，但跳过了仍被锁定的 rollout 文件。",
         completed: "操作已完成。",
+        cancelled: "操作已取消。",
         failed: "操作失败。"
       },
       overview: {
@@ -301,7 +308,12 @@ export const resources = {
         impact: "影响",
         expires: "失效时间",
         backupExpected: "写入前会先创建备份。",
-        exactApply: "执行时只提交此一次性 planId。"
+        exactApply: "执行时只提交此一次性 planId。",
+        progress: "操作进度",
+        starting: "正在启动受保护操作…",
+        cancelOperation: "取消操作",
+        cancelling: "正在取消…",
+        cancelPending: "取消将在下一个安全点生效。"
       },
       validation: {
         required: "此项必填。",

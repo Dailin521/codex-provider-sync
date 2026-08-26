@@ -167,7 +167,7 @@
 | C4 | Workspace、Core、Contracts、CoreClient | C1～C3（Phase 1 全部门槛已验证） | 不搬高风险算法；根 npm CLI tarball/Node 16 兼容 | In Progress（V1，本地门禁通过） |
 | C5 | 共享 React UI 与 Web | C4 | AppShell/Features/HttpCoreClient；Web 安全与功能等价；阶段 2 门槛 | In Progress（V1，本地门禁通过，等待远端 CI/最终合入） |
 | C6 | Electron 安全骨架、Utility Runtime、只读能力 | C5（需 Phase 2 远端门槛闭合；当前未满足） | 安全窗口/IPC、握手、crash recovery、三平台只读 smoke | Pending（V1 候选实现与本地 Windows 门禁通过；不得在 C5/远端 CI 前正式验证） |
-| C7 | Electron Sync/Switch | C6（Phase 3 全部门槛已验证） | Prepare/Apply、Busy/Partial/Cancel、Backup/Restore 回环 | Pending |
+| C7 | Electron Sync/Switch | C6（Phase 3 全部门槛已验证） | Prepare/Apply、Busy/Partial/Cancel、Backup/Restore 回环 | Pending（V1 候选实现与本地 Windows 门禁通过；WSL 实机、C5/C6 前置门槛、远端三平台 CI 与最终合入未闭合） |
 | C8 | Restore/Watch/Diagnostics/Update | C7（Phase 4 全部门槛已验证） | Restore v2 crash matrix、foreign pending、诊断隐私、Watch/Update | Pending |
 | C9 | 打包、CI 与发布工程 | C8（Phase 5 全部门槛已验证） | 四目标产物、native SQLite、packaged smoke、SBOM/checksums | Pending |
 | C10 | 最终证据与 Legacy 交接 | C9 | evidence bundle、README/Legacy、全量门禁；不自动发布 | Pending |
@@ -217,4 +217,4 @@ Node 与 .NET 在同一 Fixture 上不一致时，PR 必须记录：
 
 ## 8. 本 PR 完成后的下一步
 
-V1 已准备 `C6` 候选实现；本地 Windows production/test bundle、unpacked SQLite/History smoke 与 Utility crash/restart 已通过，但 C5 required CI、远端 Windows/macOS/Linux C6 CI 和最终分支复验尚未闭合，因此 C6/Phase 3 仍为 Pending。C7 写能力继续阻断。C1 的本地证据见 [C1 Public API 与结构化错误证据](evidence/C1_PUBLIC_API_ERRORS_2026-08-25.md)，C2 证据见 [C2 CLI JSON 合同证据](evidence/C2_CLI_JSON_2026-08-25.md)，C3 证据见 [C3 Plan/Apply 与双层锁证据](evidence/C3_PLAN_APPLY_DUAL_LOCK_2026-08-25.md)，C4 证据见 [C4 Workspace、Core 与 CoreClient 证据](evidence/C4_WORKSPACE_CORE_CLIENT_2026-08-25.md)，C5 证据见 [C5 共享 UI、Web 与跨运行时 Fixture 证据](evidence/C5_SHARED_UI_WEB_2026-08-26.md)，C6 证据见 [C6 Electron Read-only Alpha 证据](evidence/C6_ELECTRON_READONLY_2026-08-26.md)。
+V1 已准备 `C7` 候选实现；本地 Windows 的真实 Sync/Switch、Busy/Partial/Cancel、Main-owned Plan、六窗口 Utility crash matrix、共享 Core Restore 回环和 unpacked production smoke 已通过。由于本机已注册的 Ubuntu 缺失 WSL `ext4.vhdx`，真实 WSL UNC 用例按合同 Skip；C5/C6 required CI、远端 Windows/macOS/Linux C7 CI 和最终分支复验也尚未闭合，因此 C6/Phase 3 与 C7/Phase 4 均保持 Pending，不能宣称写能力 Beta 已完成。C1 的本地证据见 [C1 Public API 与结构化错误证据](evidence/C1_PUBLIC_API_ERRORS_2026-08-25.md)，C2 证据见 [C2 CLI JSON 合同证据](evidence/C2_CLI_JSON_2026-08-25.md)，C3 证据见 [C3 Plan/Apply 与双层锁证据](evidence/C3_PLAN_APPLY_DUAL_LOCK_2026-08-25.md)，C4 证据见 [C4 Workspace、Core 与 CoreClient 证据](evidence/C4_WORKSPACE_CORE_CLIENT_2026-08-25.md)，C5 证据见 [C5 共享 UI、Web 与跨运行时 Fixture 证据](evidence/C5_SHARED_UI_WEB_2026-08-26.md)，C6 证据见 [C6 Electron Read-only Alpha 证据](evidence/C6_ELECTRON_READONLY_2026-08-26.md)，C7 证据见 [C7 Electron Sync/Switch 证据](evidence/C7_ELECTRON_SYNC_SWITCH_2026-08-26.md)。

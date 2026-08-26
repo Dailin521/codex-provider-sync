@@ -20,7 +20,8 @@ import { getUnsupportedNodeVersionMessage } from "../src/node-version.js";
 import {
   applySessionChanges,
   collectSessionChanges,
-  createWindowsExclusiveRewriteWorker
+  createWindowsExclusiveRewriteWorker,
+  restoreSessionChanges
 } from "../src/session-files.js";
 import { openDatabase } from "../src/sqlite.js";
 import {
@@ -2955,6 +2956,106 @@ test("runSync leaves turn_context model field alone when no model is provided", 
     .filter((entry) => entry.type === "turn_context");
   for (const entry of turnContextLines) {
     assert.equal(entry.payload.model, "gpt-5.4", "turn_context model must stay put when caller does not pass a target");
+  }
+});
+
+test("a provider-only managed backup restores its original turn_context models after a later switch", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"\n');
+  const configPath = path.join(codexHome, "config.toml");
+  const sessionPath = path.join(
+    codexHome,
+    "sessions",
+    "2026",
+    "06",
+    "09",
+    "rollout-provider-only-backup.jsonl"
+  );
+  await writeRolloutWithTurnContext(sessionPath, {
+    id: "thread-provider-only-backup",
+    provider: "legacy-provider",
+    model: "legacy-model"
+  });
+  const original = await fs.readFile(sessionPath);
+
+  const firstScan = await collectSessionChanges(codexHome, "openai");
+  assert.equal(firstScan.changes.length, 1);
+  assert.equal(firstScan.changes[0].modelRewriteRequired, false);
+  assert.equal(firstScan.changes[0].originalTurnContextModels.length, 2);
+  const firstBackup = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: firstScan.changes,
+    configPath
+  });
+  await applySessionChanges(firstScan.changes);
+  await updateSessionBackupManifest(firstBackup, firstScan.changes);
+
+  const laterScan = await collectSessionChanges(codexHome, "relay", {
+    targetModel: "later-model"
+  });
+  await applySessionChanges(laterScan.changes, { targetModel: "later-model" });
+  assert.match(await fs.readFile(sessionPath, "utf8"), /"model":"later-model"/);
+
+  await restoreBackup(firstBackup, codexHome, {
+    restoreConfig: false,
+    restoreDatabase: false,
+    restoreSessions: true
+  });
+
+  assert.deepEqual(await fs.readFile(sessionPath), original);
+});
+
+test("rollout restore fails closed when an expected turn_context changes after provider restore", async () => {
+  const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "provider-sync-restore-race-"));
+  const sessionPath = path.join(testRoot, "rollout.jsonl");
+  const originalFirstLine = JSON.stringify({
+    type: "session_meta",
+    payload: { id: "restore-race", model_provider: "openai" }
+  });
+  const currentFirstLine = JSON.stringify({
+    type: "session_meta",
+    payload: { id: "restore-race", model_provider: "relay" }
+  });
+  const currentTurnContext = JSON.stringify({
+    type: "turn_context",
+    payload: { model: "relay-model" }
+  });
+  try {
+    await fs.writeFile(sessionPath, `${currentFirstLine}\n${currentTurnContext}\n`, "utf8");
+    const originalMtimeMs = (await fs.stat(sessionPath)).mtimeMs;
+    await assert.rejects(
+      () => restoreSessionChanges([{
+        path: sessionPath,
+        originalFirstLine,
+        originalSeparator: "\n",
+        originalMtimeMs,
+        modelOnlyChange: false,
+        originalTurnContextModels: [{
+          lineIndex: 1,
+          originalModel: "legacy-model",
+          originalModels: ["legacy-model"]
+        }]
+      }], {
+        async onAfterFirstLineRestore() {
+          const externalEvent = JSON.stringify({
+            type: "event_msg",
+            payload: { type: "agent_reasoning", marker: "external-change" }
+          });
+          await fs.writeFile(sessionPath, `${originalFirstLine}\n${externalEvent}\n`, "utf8");
+        }
+      }),
+      (error) => error instanceof AggregateError
+        && error.errors.some((failure) => failure.cause?.code === "ROLLOUT_CHANGED")
+    );
+    const [restoredMeta, externalLine] = (await fs.readFile(sessionPath, "utf8"))
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    assert.equal(restoredMeta.payload.model_provider, "openai");
+    assert.equal(externalLine.payload.marker, "external-change");
+  } finally {
+    await fs.rm(testRoot, { recursive: true, force: true });
   }
 });
 

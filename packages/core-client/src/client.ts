@@ -11,6 +11,8 @@ import {
   type CoreMethodMap,
   type CoreMethodName,
   type CoreRequestEnvelope,
+  type CoreOperationStartedEnvelope,
+  type CoreProgressEnvelope,
   type DiagnosticsSnapshot,
   type GetDiagnosticsInput,
   type GetHistorySessionInput,
@@ -38,12 +40,19 @@ export interface CoreCallOptions {
   signal?: AbortSignal;
   operationId?: string;
   requestId?: string;
+  onOperationStarted?(event: CoreOperationStartedEnvelope): void;
+  onProgress?(event: CoreProgressEnvelope): void;
 }
+
+export type CoreTransportCallOptions = Pick<
+  CoreCallOptions,
+  "signal" | "onOperationStarted" | "onProgress"
+>;
 
 export interface CoreTransport {
   request<M extends CoreMethodName>(
     envelope: CoreRequestEnvelope<M>,
-    options?: Pick<CoreCallOptions, "signal">
+    options?: CoreTransportCallOptions
   ): Promise<unknown>;
 }
 
@@ -109,7 +118,11 @@ export class TransportCoreClient implements CoreClient {
       requestId,
       options.operationId
     );
-    const response = await this.#transport.request(request, { signal: options.signal });
+    const response = await this.#transport.request(request, {
+      signal: options.signal,
+      onOperationStarted: options.onOperationStarted,
+      onProgress: options.onProgress
+    });
     try {
       assertCoreResponseEnvelope<M>(response, requestId);
       if (response.ok) assertCoreMethodOutput(method, response.result);

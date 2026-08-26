@@ -5,6 +5,7 @@ import {
   CoreClientError,
   CoreTransportError,
   DESKTOP_READ_METHODS,
+  DESKTOP_SYNC_SWITCH_METHODS,
   DesktopCoreClient,
   HttpCoreClient,
   HttpCoreTransport,
@@ -235,7 +236,10 @@ test("DesktopCoreClient reuses the Core envelope through one read-only bridge", 
           lockedRolloutFiles: []
         }
       };
-    }
+    },
+    async requestSyncSwitch() { throw new Error("unexpected write"); },
+    subscribeOperation() { return () => {}; },
+    async cancelOperation() { return { accepted: false }; }
   }, { requestIdFactory: () => "desktop-status" });
   assert.equal((await client.getStatus(profile)).currentProvider, "openai");
   assert.deepEqual(requests, [{
@@ -253,18 +257,101 @@ test("DesktopCoreClient reuses the Core envelope through one read-only bridge", 
   ]);
 });
 
-test("DesktopCoreClient rejects every C6 write method before invoking the bridge", async () => {
+test("DesktopCoreClient allows only C7 Sync/Switch and forwards lifecycle cancellation", async () => {
   let calls = 0;
+  let listener = null;
+  const cancellations = [];
+  let finishApply;
   const client = new DesktopCoreClient({
     async requestReadOnly() {
       calls += 1;
-      throw new Error("write request escaped the desktop policy");
+      throw new Error("unexpected read");
+    },
+    async requestSyncSwitch(request) {
+      calls += 1;
+      if (request.method === "prepareSync") {
+        return {
+          protocolVersion: 1,
+          requestId: request.requestId,
+          ok: true,
+          result: {
+            schemaVersion: 1,
+            planId: "a".repeat(32),
+            operation: "sync",
+            createdAt: "2026-08-26T00:00:00.000Z",
+            expiresAt: "2026-08-26T00:10:00.000Z",
+            profile: { id: "default", revision: "r1" },
+            storageRevision: "storage",
+            configRevision: "config",
+            rolloutRevision: "rollout",
+            stateDbRevision: "state-db",
+            target: { provider: "openai" },
+            impact: { backupExpected: true },
+            warnings: [],
+            requiresConfirmation: true
+          }
+        };
+      }
+      return new Promise((resolve) => { finishApply = () => resolve({
+        protocolVersion: 1,
+        requestId: request.requestId,
+        operationId: "11111111-1111-4111-8111-111111111111",
+        ok: false,
+        error: {
+          code: "OPERATION_CANCELLED",
+          message: "The operation was cancelled.",
+          severity: "info",
+          retryable: true,
+          recoveryRequired: false,
+          operationId: "11111111-1111-4111-8111-111111111111"
+        }
+      }); });
+    },
+    subscribeOperation(next) { listener = next; return () => { listener = null; }; },
+    async cancelOperation(input) { cancellations.push(input); return { accepted: true }; }
+  }, { requestIdFactory: (() => {
+    const ids = ["desktop-prepare", "desktop-apply"];
+    return () => ids.shift() ?? `desktop-denied-${calls}`;
+  })() });
+  const plan = await client.prepareSync({ ...profile, keepCount: 5 });
+  assert.equal(plan.operation, "sync");
+  const controller = new AbortController();
+  const started = [];
+  const progress = [];
+  const applying = client.applySync(
+    { schemaVersion: 1, planId: plan.planId },
+    {
+      signal: controller.signal,
+      onOperationStarted: (event) => started.push(event),
+      onProgress: (event) => progress.push(event)
     }
-  });
-  await assert.rejects(
-    client.prepareSync({ ...profile, keepCount: 5 }),
-    (error) => error instanceof CoreClientError && error.code === "PERMISSION_DENIED"
   );
+  listener({
+    protocolVersion: 1,
+    requestId: "desktop-apply",
+    operationId: "11111111-1111-4111-8111-111111111111",
+    event: "operation-started",
+    operation: "sync"
+  });
+  listener({
+    protocolVersion: 1,
+    requestId: "desktop-apply",
+    operationId: "11111111-1111-4111-8111-111111111111",
+    event: "progress",
+    progress: { stage: "create_backup", status: "start" }
+  });
+  controller.abort();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(started.length, 1);
+  assert.equal(progress.length, 1);
+  assert.deepEqual(cancellations.at(-1), {
+    requestId: "desktop-apply",
+    operationId: "11111111-1111-4111-8111-111111111111"
+  });
+  finishApply();
+  await assert.rejects(applying, (error) => (
+    error instanceof CoreClientError && error.code === "OPERATION_CANCELLED"
+  ));
   await assert.rejects(
     client.applyRestore({ schemaVersion: 1, planId: "plan-denied" }),
     (error) => error instanceof CoreClientError && error.code === "PERMISSION_DENIED"
@@ -273,5 +360,11 @@ test("DesktopCoreClient rejects every C6 write method before invoking the bridge
     client.startWatch(profile),
     (error) => error instanceof CoreClientError && error.code === "PERMISSION_DENIED"
   );
-  assert.equal(calls, 0);
+  assert.deepEqual(DESKTOP_SYNC_SWITCH_METHODS, [
+    "prepareSync",
+    "applySync",
+    "prepareSwitch",
+    "applySwitch"
+  ]);
+  assert.equal(calls, 2);
 });

@@ -116,6 +116,11 @@ const desktopDependencies = {
   ...(desktopManifest.devDependencies ?? {}),
   ...(desktopManifest.optionalDependencies ?? {})
 };
+assert(
+  desktopManifest.dependencies?.["@codex-provider-sync/test-fixtures"] === undefined
+    && desktopManifest.devDependencies?.["@codex-provider-sync/test-fixtures"] === "0.0.0",
+  "Desktop fault fixtures must remain an exact private devDependency, never a production dependency."
+);
 const approvedDesktopElectronDependencies = new Map([
   ["electron", "44.0.0"],
   ["electron-vite", "5.0.0"],

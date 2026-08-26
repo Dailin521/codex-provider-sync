@@ -1,6 +1,6 @@
 import {
   AppUi,
-  READ_ONLY_APP_UI_CAPABILITIES,
+  SYNC_SWITCH_APP_UI_CAPABILITIES,
   type HostClient,
   type HostProfile,
   type PreferenceStore
@@ -50,7 +50,7 @@ const preferences: PreferenceStore = Object.freeze({
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <AppUi
-      capabilities={READ_ONLY_APP_UI_CAPABILITIES}
+      capabilities={SYNC_SWITCH_APP_UI_CAPABILITIES}
       core={core}
       host={host}
       initialLocale={navigator.language.toLowerCase().startsWith("zh") ? "zh-CN" : "en"}

@@ -1,15 +1,20 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 
 import {
   assertCoreRequestEnvelope,
+  assertCoreOperationEventEnvelope,
   createCoreFailureEnvelope,
   createPublicCoreErrorDto,
   type CoreRequestEnvelope,
-  type CoreResponseEnvelope
+  type CoreResponseEnvelope,
+  type CoreOperationEventEnvelope
 } from "@codex-provider-sync/contracts";
 import {
   isDesktopReadMethod,
-  type DesktopReadMethod
+  isDesktopSyncSwitchMethod,
+  type DesktopCancelOperationInput,
+  type DesktopReadMethod,
+  type DesktopSyncSwitchMethod
 } from "@codex-provider-sync/core-client";
 
 import type { DesktopBridgeApi } from "../shared/bridge.js";
@@ -83,9 +88,70 @@ async function requestReadOnly<M extends DesktopReadMethod>(
   );
 }
 
+async function requestSyncSwitch<M extends DesktopSyncSwitchMethod>(
+  envelope: CoreRequestEnvelope<M>
+): Promise<unknown> {
+  try {
+    assertCoreRequestEnvelope(envelope);
+  } catch {
+    return requestFailure(envelope, "INVALID_INPUT");
+  }
+  if (!isDesktopSyncSwitchMethod(envelope.method) || envelope.operationId !== undefined) {
+    return requestFailure(envelope, "PERMISSION_DENIED");
+  }
+  let size = Number.POSITIVE_INFINITY;
+  try { size = new TextEncoder().encode(JSON.stringify(envelope)).byteLength; } catch {}
+  if (size > MAX_DESKTOP_IPC_BYTES) return requestFailure(envelope, "INVALID_INPUT");
+  return ipcRenderer.invoke(
+    DESKTOP_IPC_CHANNELS.coreSyncSwitch,
+    structuredClone(envelope)
+  );
+}
+
+function subscribeOperation(
+  listener: (event: CoreOperationEventEnvelope) => void
+): () => void {
+  const receive = (_event: IpcRendererEvent, value: unknown) => {
+    try {
+      assertCoreOperationEventEnvelope(value);
+      listener(structuredClone(value));
+    } catch {
+      // Main is trusted, but malformed lifecycle data must fail closed at the
+      // observer boundary and never influence an in-flight transaction.
+    }
+  };
+  ipcRenderer.on(DESKTOP_IPC_CHANNELS.operationEvent, receive);
+  return () => ipcRenderer.removeListener(DESKTOP_IPC_CHANNELS.operationEvent, receive);
+}
+
+async function cancelOperation(input: DesktopCancelOperationInput): Promise<{ accepted: boolean }> {
+  const allowed = input.operationId === undefined
+    ? ["requestId"]
+    : ["requestId", "operationId"];
+  if (Object.keys(input).sort().join(",") !== allowed.sort().join(",")
+      || typeof input.requestId !== "string"
+      || input.requestId.length === 0
+      || input.requestId.length > 512
+      || (input.operationId !== undefined
+        && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.operationId))) {
+    return { accepted: false };
+  }
+  const value: unknown = await ipcRenderer.invoke(
+    DESKTOP_IPC_CHANNELS.operationCancel,
+    structuredClone(input)
+  );
+  return value !== null
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && Object.keys(value).length === 1
+    && typeof (value as { accepted?: unknown }).accepted === "boolean"
+    ? { accepted: (value as { accepted: boolean }).accepted }
+    : { accepted: false };
+}
+
 const api: DesktopBridgeApi = {
   version: 1,
-  core: { requestReadOnly },
+  core: { requestReadOnly, requestSyncSwitch, subscribeOperation, cancelOperation },
   profiles: {
     async list() {
       return validateProfileList(await ipcRenderer.invoke(

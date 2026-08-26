@@ -103,6 +103,82 @@ test("prepareSync returns schema v1 summary and applySync consumes it exactly on
   }
 });
 
+test("Apply publishes one operation id, projects progress, and cancels before backup", async () => {
+  const value = await makeFixture();
+  const controller = new AbortController();
+  const lifecycle = [];
+  try {
+    const plan = await prepareSync({ codexHome: value.codexHome });
+    await assert.rejects(
+      applySync(
+        { schemaVersion: 1, planId: plan.planId },
+        {
+          onOperationStarted(started) {
+            lifecycle.push({ kind: "started", ...started });
+          },
+          onProgress(progress) {
+            lifecycle.push({ kind: "progress", ...progress });
+            if (progress.stage === "create_backup" && progress.status === "start") {
+              controller.abort();
+            }
+          },
+          signal: controller.signal
+        }
+      ),
+      (error) => error?.code === "OPERATION_CANCELLED"
+        && error?.operationId === lifecycle[0]?.operationId
+    );
+    assert.equal(lifecycle[0]?.kind, "started");
+    assert.equal(lifecycle[0]?.operation, "sync");
+    assert.ok(lifecycle.some((event) => event.kind === "progress"));
+    assert.equal(await backupCount(value.codexHome), 0);
+    assert.equal((await getStatus({ codexHome: value.codexHome })).operationInProgress, null);
+  } finally {
+    await fs.rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("Apply cancellation after rollout mutation preserves rolled-back failure semantics", async () => {
+  const value = await makeFixture();
+  const controller = new AbortController();
+  const rolloutBefore = await fs.readFile(value.rolloutPath);
+  let startedOperationId;
+  try {
+    const plan = await prepareSync({
+      codexHome: value.codexHome,
+      faultInjector({ point }) {
+        if (point === "after_rollout_mutation_before_applied") controller.abort();
+      }
+    });
+    await assert.rejects(
+      applySync(
+        { schemaVersion: 1, planId: plan.planId },
+        {
+          signal: controller.signal,
+          onOperationStarted(value) { startedOperationId = value.operationId; }
+        }
+      ),
+      (error) => error?.code === "SYNC_FAILED_ROLLED_BACK"
+        && error?.operationId === startedOperationId
+    );
+    assert.deepEqual(await fs.readFile(value.rolloutPath), rolloutBefore);
+    const database = await openDatabase(value.stateDbPath, { readOnly: true });
+    try {
+      assert.equal(
+        database.prepare("SELECT model_provider FROM threads WHERE id = ?").get("thread-a").model_provider,
+        "custom"
+      );
+    } finally {
+      database.close();
+    }
+    const status = await getStatus({ codexHome: value.codexHome });
+    assert.equal(status.pendingRecovery, false);
+    assert.deepEqual(status.pendingTransactions, []);
+  } finally {
+    await fs.rm(value.root, { recursive: true, force: true });
+  }
+});
+
 test("applySync rejects config drift under the write locks before backup", async () => {
   const value = await makeFixture();
   try {

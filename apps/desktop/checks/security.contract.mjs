@@ -30,14 +30,18 @@ test("Renderer has no Node, Electron, filesystem, Core or arbitrary IPC imports"
   assert.doesNotMatch(text, /@codex-provider-sync\/core(?:["'/])/);
   assert.doesNotMatch(text, /ipcRenderer|BrowserWindow|child_process|node:fs|node:path/);
   assert.match(text, /DesktopCoreClient/);
-  assert.match(text, /READ_ONLY_APP_UI_CAPABILITIES/);
+  assert.match(text, /SYNC_SWITCH_APP_UI_CAPABILITIES/);
 });
 
 test("Preload exposes one frozen purpose-built bridge and no raw IPC surface", async () => {
   const source = await read("src/preload/index.ts");
   assert.match(source, /exposeInMainWorld\("codexProvider"/);
   assert.match(source, /requestReadOnly/);
-  assert.doesNotMatch(source, /ipcRenderer\.(?:send|sendSync|on|once|postMessage)\s*\(/);
+  assert.match(source, /requestSyncSwitch/);
+  assert.match(source, /subscribeOperation/);
+  assert.match(source, /cancelOperation/);
+  assert.match(source, /ipcRenderer\.on\(DESKTOP_IPC_CHANNELS\.operationEvent/);
+  assert.doesNotMatch(source, /ipcRenderer\.(?:send|sendSync|once|postMessage)\s*\(/);
   assert.doesNotMatch(source, /node:(?:fs|path|child_process)|@codex-provider-sync\/core["']/);
   assert.doesNotMatch(source, /exposeInMainWorld\([^,]+,\s*ipcRenderer/);
   assert.match(source, /__CPS_DESKTOP_TEST_BUILD__/);
@@ -66,24 +70,27 @@ test("Main security policy fixes the BrowserWindow, CSP, protocol and deny defau
   assert.match(security, /will-attach-webview/);
 });
 
-test("Utility imports only the Core public package and C6 read-only methods", async () => {
+test("Utility imports only the Core public package and C7 exact Sync/Switch methods", async () => {
   const runtime = await read("src/runtime/host.ts");
   const protocol = await read("src/shared/runtime-protocol.ts");
+  const clientPolicy = await read("../../packages/core-client/src/desktop.ts");
   assert.match(runtime, /from "@codex-provider-sync\/core"/);
   assert.doesNotMatch(runtime, /src\/(?:public-api|service|backup|locking|history|watch)/);
   assert.doesNotMatch(runtime, /\.\.\/main\//);
+  for (const allowed of ["prepareSync", "applySync", "prepareSwitch", "applySwitch"]) {
+    assert.match(clientPolicy, new RegExp(`\\"${allowed}\\"`));
+  }
   for (const denied of [
-    "prepareSync",
-    "applySync",
-    "prepareSwitch",
-    "applySwitch",
     "prepareRestore",
     "applyRestore",
     "pruneBackups",
     "startWatch",
     "stopWatch",
     "getWatchStatus"
-  ]) assert.doesNotMatch(protocol, new RegExp(`\\"${denied}\\"`));
+  ]) assert.doesNotMatch(clientPolicy, new RegExp(`\\"${denied}\\"`));
+  assert.match(protocol, /dispatchId/);
+  assert.match(protocol, /operation-event/);
+  assert.match(protocol, /RuntimeCancelFrame/);
 });
 
 test("electron-vite emits a CJS sandbox preload and keeps source maps disabled", async () => {
@@ -94,4 +101,12 @@ test("electron-vite emits a CJS sandbox preload and keeps source maps disabled",
   assert.equal((config.match(/sourcemap: false/g) ?? []).length, 3);
   assert.match(config, /external: \["electron"\]/);
   assert.match(config, /__CPS_DESKTOP_TEST_BUILD__:\s*JSON\.stringify\(mode === "test"\)/);
+});
+
+test("packaging always replaces test output with a verified production bundle", async () => {
+  const packageDocument = JSON.parse(await read("package.json"));
+  assert.equal(
+    packageDocument.scripts["pack:dir"],
+    "npm run build && npm run build:electron && npm run verify:production-bundle && electron-builder --dir --config electron-builder.yml"
+  );
 });

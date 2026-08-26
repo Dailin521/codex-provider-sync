@@ -1849,19 +1849,76 @@ function operationResult(operation, operationId, result, sourceBackup = null) {
   };
 }
 
-async function applyPrepared(input, operation, execute) {
+function composeProgressObservers(primary, secondary) {
+  if (typeof primary !== "function") return secondary;
+  if (typeof secondary !== "function" || primary === secondary) return primary;
+  return (event) => {
+    emitProgress(primary, event);
+    emitProgress(secondary, event);
+  };
+}
+
+function notifyOperationStarted(observer, value) {
+  if (typeof observer !== "function") return;
+  try {
+    const result = observer(value);
+    if (result && typeof result.then === "function") result.catch(() => {});
+  } catch {
+    // Runtime lifecycle observers are non-authoritative, just like progress.
+  }
+}
+
+function attachOperationId(error, operationId) {
+  if (!error || (typeof error !== "object" && typeof error !== "function")) return;
+  if (typeof error.operationId === "string" && error.operationId) return;
+  try {
+    Object.defineProperty(error, "operationId", {
+      configurable: true,
+      enumerable: true,
+      value: operationId,
+      writable: false
+    });
+  } catch {
+    // Error correlation is observational. Preserve the original failure when
+    // a frozen third-party error cannot be annotated.
+  }
+}
+
+async function applyPrepared(input, operation, execute, control = {}) {
   const entry = planLedger.consume(input, operation);
   const internal = entry.internal;
   const active = operationCoordinator.begin(internal.codexHome, operation, {
     actor: internal.actor,
     platform: internal.platform
   });
+  notifyOperationStarted(control.onOperationStarted, {
+    operationId: active.operationId,
+    operation
+  });
   try {
     const result = await execute({
       ...internal.executionOptions,
+      ...(control.signal ? { signal: control.signal } : {}),
+      ...(typeof control.faultInjector === "function"
+        ? { faultInjector: control.faultInjector }
+        : {}),
+      onProgress: composeProgressObservers(
+        internal.executionOptions.onProgress,
+        control.onProgress
+      ),
       expectedPlanState: internal.expectedPlanState
     });
     return operationResult(operation, active.operationId, result, internal.sourceBackup);
+  } catch (error) {
+    attachOperationId(error, active.operationId);
+    if (error?.name === "AbortError" && error?.code === "ABORT_ERR") {
+      throw new CoreError(
+        "OPERATION_CANCELLED",
+        "The provider-sync operation was cancelled before commit.",
+        { operationId: active.operationId, cause: error }
+      );
+    }
+    throw error;
   } finally {
     operationCoordinator.end(internal.codexHome, active.operationId, internal.platform);
     try {
@@ -1873,16 +1930,16 @@ async function applyPrepared(input, operation, execute) {
   }
 }
 
-export async function applySync(input) {
-  return applyPrepared(input, "sync", (options) => runSyncCore(options));
+export async function applySync(input, control) {
+  return applyPrepared(input, "sync", (options) => runSyncCore(options), control);
 }
 
-export async function applySwitch(input) {
-  return applyPrepared(input, "switch", (options) => runSwitchCore(options));
+export async function applySwitch(input, control) {
+  return applyPrepared(input, "switch", (options) => runSwitchCore(options), control);
 }
 
-export async function applyRestore(input) {
-  return applyPrepared(input, "restore", (options) => runRestoreCore(options));
+export async function applyRestore(input, control) {
+  return applyPrepared(input, "restore", (options) => runRestoreCore(options), control);
 }
 
 // Internal scheduler hook used by Watch. It exposes completion only for a
