@@ -2,8 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-08-25
-- Amended: 2026-08-26 (C5 shared UI/Web runtime)
-- Scope: vNext C4 workspace baseline and C5 shared UI/Web dependency boundary
+- Amended: 2026-08-26 (C5 shared UI/Web runtime and C6 Electron read-only runtime)
+- Scope: vNext C4 workspace baseline, C5 shared UI/Web and C6 Electron dependency boundaries
 
 ## Context
 
@@ -28,6 +28,8 @@ test-fixtures（仅测试，不进入产品依赖图）
 
 C5 已把旧 `web/src`、`web/index.html` 和 Vite 配置迁入 `apps/web`；`web/dist` 仅是根发布包使用的静态部署物。React 与所有现代构建依赖只归 private workspace，根 manifest 不重复声明。这样 npm 8 读取单一 workspace lockfile 并执行 `npm ci --workspaces=false --omit=dev` 时，根生产树不会因 hoisted production 标记误装 React。
 
+C6 的 Electron、electron-vite、electron-builder、Desktop Vite/React plugin 和 Playwright 只声明在 private `apps/desktop` workspace。Main、Utility、Preload 与 Renderer 均由 electron-vite 打成自包含边界；根 npm manifest、生产树和 tarball 明确拒绝 `electron` / `electron-*`。正常 production build 以编译期常量移除测试 bridge；只有显式 `--mode test` 的本地/CI 测试构建才包含 crash/raw-request hook，运行时环境变量不能把 production bridge 升格为测试 bridge。
+
 ## Dependency Resolution
 
 2026-08-25 通过 npm registry 的 `latest`、`engines` 和 `peerDependencies` 元数据解析 C4 实际引入或迁移的依赖：
@@ -47,11 +49,15 @@ C5 已把旧 `web/src`、`web/index.html` 和 Vite 配置迁入 `apps/web`；`we
 | UI utilities | `lucide-react 1.34.0`、`class-variance-authority 0.7.1`、`clsx 2.1.1`、`tailwind-merge 3.6.0` | 图标与检入组件样式组合 |
 | Tailwind | `tailwindcss 4.3.3`、`@tailwindcss/vite 4.3.3` | 仅在 Node 24 Web workspace build 使用 |
 | Playwright | `@playwright/test 1.62.1` | C5 production bundle 的真实 Chromium 验收；仅 dev dependency |
+| Electron | `44.0.0` | C6 解析时最新 stable，并处于 Electron 官方支持线；只在 Desktop workspace |
+| `electron-vite` | `5.0.0` | C6 最新 stable；peer 支持 Vite 5～7，与 Desktop Vite 7.3.6 闭合 |
+| `electron-builder` | `26.15.7` | C6 最新 stable；先提供三平台 unpacked Alpha 构建，发布目标与 native fallback 留到 C9 |
+| Desktop Vite / React plugin | `vite 7.3.6`、`@vitejs/plugin-react 5.2.0` | `electron-vite 5.0.0` 的兼容组合；与 Web workspace 的 Vite 8/plugin 6 分开锁定 |
 | `better-sqlite3` | `8.7.0` | 保留现有根 optional fallback；更新版本不满足根 Node 16 合同，不在 C4 强升 |
 
 所有直接 dependency/devDependency/optionalDependency/peerDependency 使用精确版本，不使用 `^`、`~`、`workspace:*`、`file:` 或未锁定 URL。传递依赖由唯一 lockfile 锁定。候选经 `npm audit --omit=dev --audit-level=moderate` 与全树 `npm audit --audit-level=high` 检查；任一不合格候选不得进入 checkpoint。
 
-Electron、electron-vite、electron-builder 和 native fallback 的具体版本不在 C4/C5 提前解析：分别在 C6/C9 按同一规则选择并记录。尤其不得为了“先搭骨架”把 Electron 写入根 manifest。
+Electron、electron-vite 与 electron-builder 已在 C6 按上述规则解析；`better-sqlite3` 的 Electron ABI fallback、`asarUnpack` 与发布级 native driver matrix 仍由 C9 解析和验证。不得把 Electron 写入根 manifest。
 
 ## Invariants
 
@@ -73,6 +79,7 @@ Electron、electron-vite、electron-builder 和 native fallback 的具体版本�
 - packlist：不存在 `apps/`、未批准的 `packages/`、workspace manifest、Electron、Fixture 或 node_modules；只允许 `packages/contracts/dist` 与 `packages/core/src`；
 - import contract：除 `packages/core -> src/public-api.js` 的单一过渡例外外，禁止深度导入；
 - security：生产树 moderate/high/critical 为零，全树 high/critical 为零。
+- C6：Node 24 production/test 两种 Electron bundle、production bundle test-hook 排除、Windows unpacked production SQLite/Utility smoke、真实 crash/restart/journal preflight E2E；同一 job 在 Windows/macOS/Linux 运行并受唯一 `ci-gate` 约束。
 
 ## Related
 

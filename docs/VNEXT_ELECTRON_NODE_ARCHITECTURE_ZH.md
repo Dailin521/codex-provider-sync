@@ -1412,6 +1412,8 @@ rename
 - Windows x64、macOS x64/arm64、Linux x64 都运行 packaged smoke test；
 - 每次 Electron Major 升级都执行 SQLite 驱动矩阵测试。
 
+C6/Phase 3 先以 Windows、macOS、Linux host-native runner 的 `electron-builder --dir` unpacked app 闭合只读启动、握手、真实 SQLite 与 Renderer 隔离；本节完整 Windows x64、macOS x64/arm64、Linux x64 packaged/native-driver 矩阵仍是 C9 发布工程门槛。两层证据不可互相替代。
+
 ### 17.3 不使用 ORM
 
 项目只操作少量明确的 Codex 表和字段。继续使用显式 SQL：

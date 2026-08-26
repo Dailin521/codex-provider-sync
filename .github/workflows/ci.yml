@@ -105,6 +105,45 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npm run web:test:e2e
 
+  electron-readonly:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - ubuntu-latest
+          - macos-latest
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: "npm"
+      - run: npm ci
+      - name: Install Linux Electron runtime dependencies
+        if: runner.os == 'Linux'
+        run: npx playwright install-deps
+      - run: npm run desktop:test
+      - run: npm run desktop:build
+      - run: npm run desktop:verify-production-bundle
+      - run: npm run desktop:pack:dir
+      - name: Run unpacked production Electron smoke
+        if: runner.os != 'Linux'
+        run: npm run desktop:test:e2e:packaged
+      - name: Run unpacked production Electron smoke under Xvfb
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run desktop:test:e2e:packaged
+      - run: npm run desktop:build:test
+      - name: Run Utility crash and read-only integration
+        if: runner.os != 'Linux'
+        run: npm run test:e2e --workspace @codex-provider-sync/desktop
+      - name: Run Utility crash and read-only integration under Xvfb
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:e2e --workspace @codex-provider-sync/desktop
+
   dependency-audit:
     runs-on: ubuntu-latest
     steps:
@@ -179,6 +218,7 @@ jobs:
       - root-package-compat
       - web-build
       - web-browser
+      - electron-readonly
       - dependency-audit
       - cross-runtime-fixtures
       - desktop-test
@@ -193,6 +233,7 @@ jobs:
           ROOT_PACKAGE_COMPAT_RESULT: ${{ needs.root-package-compat.result }}
           WEB_BUILD_RESULT: ${{ needs.web-build.result }}
           WEB_BROWSER_RESULT: ${{ needs.web-browser.result }}
+          ELECTRON_READONLY_RESULT: ${{ needs.electron-readonly.result }}
           DEPENDENCY_AUDIT_RESULT: ${{ needs.dependency-audit.result }}
           CROSS_RUNTIME_FIXTURES_RESULT: ${{ needs.cross-runtime-fixtures.result }}
           DESKTOP_TEST_RESULT: ${{ needs.desktop-test.result }}
@@ -204,6 +245,7 @@ jobs:
              [ "$ROOT_PACKAGE_COMPAT_RESULT" != "success" ] ||
              [ "$WEB_BUILD_RESULT" != "success" ] ||
              [ "$WEB_BROWSER_RESULT" != "success" ] ||
+             [ "$ELECTRON_READONLY_RESULT" != "success" ] ||
              [ "$DEPENDENCY_AUDIT_RESULT" != "success" ] ||
              [ "$CROSS_RUNTIME_FIXTURES_RESULT" != "success" ] ||
              [ "$DESKTOP_TEST_RESULT" != "success" ] ||

@@ -76,8 +76,9 @@ test("history prefers canonical user events over response-item bootstrap and dup
     await fs.writeFile(file, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`, "utf8");
 
     const list = await listHistory(home, { page: 1, pageSize: 50 });
-    assert.equal(list.sessions[0].title, "请检查真实标题");
-    assert.equal(list.sessions[0].firstUserMessage, "请检查真实标题");
+    assert.equal(list.sessions[0].title, "");
+    assert.equal("firstUserMessage" in list.sessions[0], false);
+    assert.doesNotMatch(JSON.stringify(list), /请检查真实标题|标题已检查/);
     assert.equal(list.sessions[0].messageCount, 2);
 
     const detail = await getHistorySession(home, "thread-one");
@@ -93,7 +94,8 @@ test("history prefers canonical user events over response-item bootstrap and dup
     ];
     await fs.writeFile(file, `${legacyLines.map((line) => JSON.stringify(line)).join("\n")}\n`, "utf8");
     const legacy = await listHistory(home, { page: 1, pageSize: 50 });
-    assert.equal(legacy.sessions[0].firstUserMessage, "旧格式用户消息");
+    assert.equal(legacy.sessions[0].title, "");
+    assert.equal("firstUserMessage" in legacy.sessions[0], false);
     assert.equal(legacy.sessions[0].messageCount, 2);
   } finally {
     await fs.rm(home, { recursive: true, force: true });

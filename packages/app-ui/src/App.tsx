@@ -59,7 +59,12 @@ import { z } from "zod";
 import { APP_ROUTES, type AppRoute } from "./routes.js";
 import { createAppI18n } from "./i18n.js";
 import { profileSchema, restoreSchema, switchSchema, syncSchema } from "./schemas.js";
-import type { AppUiProps, HostProfile } from "./types.js";
+import {
+  FULL_APP_UI_CAPABILITIES,
+  type AppUiCapabilities,
+  type AppUiProps,
+  type HostProfile
+} from "./types.js";
 import { Badge, Button, Card, Dialog, Field, Input, ToastProvider, cn, useToast } from "./ui.js";
 
 const navigation = [
@@ -72,6 +77,16 @@ const navigation = [
   ["diagnostics", "nav.diagnostics", Activity],
   ["settings", "nav.settings", Settings]
 ] as const;
+
+function resolveCapabilities(value: AppUiProps["capabilities"]): AppUiCapabilities {
+  return { ...FULL_APP_UI_CAPABILITIES, ...value };
+}
+
+function routeIsAvailable(route: AppRoute, capabilities: AppUiCapabilities): boolean {
+  if (route === "sync") return capabilities.sync;
+  if (route === "switch-provider") return capabilities.switchProvider;
+  return true;
+}
 
 type SyncValues = z.infer<typeof syncSchema>;
 type SwitchValues = z.infer<typeof switchSchema>;
@@ -238,16 +253,18 @@ function SwitchPage({ disabled, providers, prepare }: { disabled: boolean; provi
   );
 }
 
-function BackupRow({ backup, selected, onSelect }: { backup: ManagedBackup; selected: boolean; onSelect(): void }) {
+function BackupRow({ backup, selected, onSelect }: { backup: ManagedBackup; selected: boolean; onSelect?: () => void }) {
+  const content = <Fragment><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-mono text-xs font-semibold">{backup.backupId}</span><Badge>{formatBytes(backup.sizeBytes)}</Badge></div>{backup.createdAt ? <div className="mt-2 text-xs text-[var(--muted)]">{formatDate(backup.createdAt)}</div> : null}</Fragment>;
+  const className = cn("w-full rounded-lg border p-4 text-left", selected ? "border-[var(--accent)] bg-[var(--accent-soft)]" : "border-[var(--border)]");
+  if (!onSelect) return <div className={className}>{content}</div>;
   return (
     <button
       aria-pressed={selected}
-      className={cn("w-full rounded-lg border p-4 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus)]", selected ? "border-[var(--accent)] bg-[var(--accent-soft)]" : "border-[var(--border)] hover:bg-[var(--surface-hover)]")}
+      className={cn(className, "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus)] hover:bg-[var(--surface-hover)]")}
       onClick={onSelect}
       type="button"
     >
-      <div className="flex flex-wrap items-center justify-between gap-2"><span className="font-mono text-xs font-semibold">{backup.backupId}</span><Badge>{formatBytes(backup.sizeBytes)}</Badge></div>
-      {backup.createdAt ? <div className="mt-2 text-xs text-[var(--muted)]">{formatDate(backup.createdAt)}</div> : null}
+      {content}
     </button>
   );
 }
@@ -258,6 +275,8 @@ function BackupsPage({
   backups,
   loading,
   disabled,
+  canRestore,
+  canPrune,
   prepare,
   prune
 }: {
@@ -266,6 +285,8 @@ function BackupsPage({
   backups: ManagedBackup[];
   loading: boolean;
   disabled: boolean;
+  canRestore: boolean;
+  canPrune: boolean;
   prepare(values: RestoreValues, trigger: HTMLButtonElement | null): Promise<void>;
   prune(keepCount: number): Promise<void>;
 }) {
@@ -287,14 +308,15 @@ function BackupsPage({
   return (
     <Fragment>
       <PageHeading title={t("backups.title")} subtitle={t("backups.subtitle")} />
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(320px,440px)]">
+      <div className={cn("grid gap-4", (canRestore || canPrune) && "xl:grid-cols-[minmax(0,1fr)_minmax(320px,440px)]")}>
         <Card>
           <div className="grid gap-3">
-            {loading ? <span className="text-sm text-[var(--muted)]">{t("common.loading")}</span> : backups.length === 0 ? <span className="text-sm text-[var(--muted)]">{t("backups.empty")}</span> : backups.map((backup) => <BackupRow backup={backup} key={backup.backupId} onSelect={() => form.setValue("backupId", backup.backupId, { shouldValidate: true })} selected={form.watch("backupId") === backup.backupId} />)}
+            {loading ? <span className="text-sm text-[var(--muted)]">{t("common.loading")}</span> : backups.length === 0 ? <span className="text-sm text-[var(--muted)]">{t("backups.empty")}</span> : backups.map((backup) => <BackupRow backup={backup} key={backup.backupId} onSelect={canRestore ? () => form.setValue("backupId", backup.backupId, { shouldValidate: true }) : undefined} selected={canRestore && form.watch("backupId") === backup.backupId} />)}
           </div>
+          {!canRestore && !canPrune ? <p className="mt-4 text-xs text-[var(--muted)]">{t("backups.readOnly")}</p> : null}
         </Card>
-        <div className="grid content-start gap-4">
-          <Card>
+        {canRestore || canPrune ? <div className="grid content-start gap-4">
+          {canRestore ? <Card>
             <form className="grid gap-4" onSubmit={form.handleSubmit((values) => prepare(values, prepareButton.current))}>
               {["restoreConfig", "restoreDatabase", "restoreSessions"].map((name) => (
                 <label className="flex items-center gap-3 text-sm" key={name}>
@@ -307,12 +329,12 @@ function BackupsPage({
               {form.formState.errors.restoreSessions ? <span className="text-xs text-[var(--danger)]" role="alert">{t("validation.restore")}</span> : null}
               <Button disabled={disabled || !form.watch("backupId")} ref={prepareButton} type="submit"><ArchiveRestore size={17} />{t("backups.prepare")}</Button>
             </form>
-          </Card>
-          <Card>
+          </Card> : null}
+          {canPrune ? <Card>
             <Field label={t("backups.pruneKeep")}><Input max={1000} min={0} onChange={(event) => setKeepCount(Number(event.target.value))} type="number" value={keepCount} /></Field>
             <Button className="mt-4 w-full" disabled={disabled || !Number.isInteger(keepCount) || keepCount < 0} onClick={() => void prune(keepCount)} type="button" variant="secondary">{t("backups.prune")}</Button>
-          </Card>
-        </div>
+          </Card> : null}
+        </div> : null}
       </div>
     </Fragment>
   );
@@ -352,7 +374,7 @@ function HistoryPage({ core, profile }: { core: AppUiProps["core"]; profile: Hos
   if (selectedId) {
     return (
       <Fragment>
-        <PageHeading title={detail?.session.title ?? t("history.title")} subtitle={t("history.subtitle")} action={<Button onClick={() => setSelectedId(null)} type="button" variant="secondary">{t("history.back")}</Button>} />
+        <PageHeading title={detail ? (detail.session.title || t("history.untitled")) : t("history.title")} subtitle={t("history.subtitle")} action={<Button onClick={() => setSelectedId(null)} type="button" variant="secondary">{t("history.back")}</Button>} />
         <Card>
           {detailLoading ? <span>{t("common.loading")}</span> : detailError ? <span className="text-[var(--danger)]" role="alert">{detailError}</span> : detail ? <div className="grid gap-4">{detail.messages.map((message) => <article className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-4" key={`${message.sequence}-${message.role}`}><div className="mb-2 flex justify-between text-xs font-semibold uppercase text-[var(--muted)]"><span>{message.role}</span><span>{formatDate(message.timestamp, i18n.language)}</span></div><pre className="whitespace-pre-wrap break-words font-sans text-sm leading-6">{message.text}</pre></article>)}</div> : null}
         </Card>
@@ -363,36 +385,58 @@ function HistoryPage({ core, profile }: { core: AppUiProps["core"]; profile: Hos
     <Fragment>
       <PageHeading title={t("history.title")} subtitle={t("history.subtitle")} />
       <Card>
-        {list.isPending ? <span>{t("common.loading")}</span> : list.isError ? <span className="text-[var(--danger)]" role="alert">{safeErrorText(list.error, t("global.failed"))}</span> : list.data.sessions.length === 0 ? <span className="text-[var(--muted)]">{t("history.empty")}</span> : <div className="divide-y divide-[var(--border)]">{list.data.sessions.map((session) => <div className="flex flex-wrap items-center justify-between gap-4 py-4" key={session.id}><div className="min-w-0"><div className="truncate font-semibold">{session.title || session.id}</div><div className="mt-1 flex flex-wrap gap-2 text-xs text-[var(--muted)]"><span>{session.provider}</span><span>{session.messageCount} {t("history.messages")}</span><span>{formatDate(session.updatedAt, i18n.language)}</span>{session.archived ? <Badge>{t("history.archived")}</Badge> : null}</div></div><Button onClick={() => setSelectedId(session.id)} type="button" variant="secondary">{t("history.open")}</Button></div>)}</div>}
+        {list.isPending ? <span>{t("common.loading")}</span> : list.isError ? <span className="text-[var(--danger)]" role="alert">{safeErrorText(list.error, t("global.failed"))}</span> : list.data.sessions.length === 0 ? <span className="text-[var(--muted)]">{t("history.empty")}</span> : <div className="divide-y divide-[var(--border)]">{list.data.sessions.map((session) => <div className="flex flex-wrap items-center justify-between gap-4 py-4" key={session.id}><div className="min-w-0"><div className="truncate font-semibold">{session.title || t("history.untitled")}</div><div className="mt-1 flex flex-wrap gap-2 text-xs text-[var(--muted)]"><span>{session.provider}</span><span>{session.messageCount} {t("history.messages")}</span><span>{formatDate(session.updatedAt, i18n.language)}</span>{session.archived ? <Badge>{t("history.archived")}</Badge> : null}</div></div><Button onClick={() => setSelectedId(session.id)} type="button" variant="secondary">{t("history.open")}</Button></div>)}</div>}
       </Card>
     </Fragment>
   );
 }
 
-function ProfilesPage({ profiles, refresh, host }: { profiles: HostProfile[]; refresh(): Promise<unknown>; host: AppUiProps["host"] }) {
+function ProfilesPage({
+  profiles,
+  refresh,
+  host,
+  canManage,
+  revealPaths
+}: {
+  profiles: HostProfile[];
+  refresh(): Promise<unknown>;
+  host: AppUiProps["host"];
+  canManage: boolean;
+  revealPaths: boolean;
+}) {
   const { t } = useTranslation();
   const toast = useToast();
   const [editing, setEditing] = useState<HostProfile | null>(null);
   const form = useForm<ProfileValues>({ resolver: zodResolver(profileSchema), defaultValues: { profileId: "", name: "", codexHome: "", sqliteHome: "" } });
   useEffect(() => {
-    form.reset(editing ? { profileId: editing.id, name: editing.name, codexHome: editing.codexHome, sqliteHome: editing.sqliteHome ?? "" } : { profileId: "", name: "", codexHome: "", sqliteHome: "" });
+    form.reset(editing ? { profileId: editing.id, name: editing.name, codexHome: editing.codexHome ?? "", sqliteHome: editing.sqliteHome ?? "" } : { profileId: "", name: "", codexHome: "", sqliteHome: "" });
   }, [editing, form]);
   const save = useMutation({
-    mutationFn: async (values: ProfileValues) => host.saveProfile({ ...values, ...(editing ? { profileRevision: editing.revision } : {}) }),
+    mutationFn: async (values: ProfileValues) => {
+      if (!canManage || !host.saveProfile) throw new Error("Profile management is unavailable.");
+      return host.saveProfile({ ...values, ...(editing ? { profileRevision: editing.revision } : {}) });
+    },
     onSuccess: async () => { await refresh(); setEditing(null); form.reset(); toast.push({ title: t("common.save"), tone: "success" }); },
     onError: (error) => toast.push({ title: t("global.failed"), description: safeErrorText(error, t("global.unexpected")), tone: "danger" })
   });
   const remove = useMutation({
-    mutationFn: (profile: HostProfile) => host.deleteProfile(profile.id, profile.revision),
+    mutationFn: (profile: HostProfile) => {
+      if (!canManage || !host.deleteProfile) throw new Error("Profile management is unavailable.");
+      return host.deleteProfile(profile.id, profile.revision);
+    },
     onSuccess: async () => { await refresh(); setEditing(null); toast.push({ title: t("common.delete"), tone: "success" }); },
     onError: (error) => toast.push({ title: t("global.failed"), description: safeErrorText(error, t("global.unexpected")), tone: "danger" })
   });
   return (
     <Fragment>
       <PageHeading title={t("profiles.title")} subtitle={t("profiles.subtitle")} />
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_420px]">
-        <Card><div className="grid gap-3">{profiles.map((profile) => <button className={cn("rounded-lg border p-4 text-left", editing?.id === profile.id ? "border-[var(--accent)] bg-[var(--accent-soft)]" : "border-[var(--border)] hover:bg-[var(--surface-hover)]")} key={profile.id} onClick={() => setEditing(profile.id === "default" ? null : profile)} type="button"><div className="flex justify-between"><span className="font-semibold">{profile.name}</span>{profile.id === "default" ? <Badge>{t("common.current")}</Badge> : null}</div><div className="mt-2 font-mono text-xs text-[var(--muted)]">{profile.id}</div><div className="mt-1 truncate font-mono text-xs text-[var(--muted)]">{profile.codexHome}</div></button>)}</div></Card>
-        <Card>
+      <div className={cn("grid gap-4", canManage && "xl:grid-cols-[minmax(0,1fr)_420px]")}>
+        <Card><div className="grid gap-3">{profiles.map((profile) => {
+          const content = <Fragment><div className="flex justify-between"><span className="font-semibold">{profile.name}</span>{profile.id === "default" ? <Badge>{t("common.current")}</Badge> : null}</div><div className="mt-2 font-mono text-xs text-[var(--muted)]">{profile.id}</div>{revealPaths && profile.codexHome ? <div className="mt-1 truncate font-mono text-xs text-[var(--muted)]">{profile.codexHome}</div> : <div className="mt-1 text-xs text-[var(--muted)]">{t("profiles.pathManaged")}</div>}</Fragment>;
+          if (!canManage || profile.id === "default") return <div className="rounded-lg border border-[var(--border)] p-4 text-left" key={profile.id}>{content}</div>;
+          return <button className={cn("rounded-lg border p-4 text-left", editing?.id === profile.id ? "border-[var(--accent)] bg-[var(--accent-soft)]" : "border-[var(--border)] hover:bg-[var(--surface-hover)]")} key={profile.id} onClick={() => setEditing(profile)} type="button">{content}</button>;
+        })}</div>{!canManage ? <p className="mt-4 text-xs text-[var(--muted)]">{t("profiles.readOnly")}</p> : null}</Card>
+        {canManage ? <Card>
           <form className="grid gap-4" onSubmit={form.handleSubmit((values) => save.mutateAsync(values))}>
             <Field error={form.formState.errors.profileId ? t("validation.profileId") : undefined} label={t("profiles.id")}><Input disabled={Boolean(editing)} {...form.register("profileId")} /></Field>
             <Field error={form.formState.errors.name ? t("validation.required") : undefined} label={t("profiles.name")}><Input {...form.register("name")} /></Field>
@@ -401,7 +445,7 @@ function ProfilesPage({ profiles, refresh, host }: { profiles: HostProfile[]; re
             <div className="flex flex-wrap gap-3"><Button disabled={save.isPending} type="submit">{editing ? t("profiles.update") : t("profiles.create")}</Button>{editing ? <Button disabled={remove.isPending} onClick={() => remove.mutate(editing)} type="button" variant="danger">{t("common.delete")}</Button> : null}</div>
           </form>
           <p className="mt-4 text-xs text-[var(--muted)]">{t("profiles.defaultManaged")}</p>
-        </Card>
+        </Card> : null}
       </div>
     </Fragment>
   );
@@ -424,11 +468,11 @@ function activeWatch(value: WatchSnapshot | WatchStatusList | undefined): WatchS
   return value;
 }
 
-function SettingsPage({ props, profile }: { props: AppUiProps; profile: HostProfile }) {
+function SettingsPage({ props, profile, capabilities }: { props: AppUiProps; profile: HostProfile; capabilities: AppUiCapabilities }) {
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const [theme, setTheme] = useState(props.preferences.getTheme() ?? props.initialTheme);
-  const watch = useQuery({ queryKey: ["watch-status"], queryFn: () => props.core.getWatchStatus({}), refetchInterval: 3000 });
+  const watch = useQuery({ queryKey: ["watch-status"], queryFn: () => props.core.getWatchStatus({}), enabled: capabilities.watch, refetchInterval: capabilities.watch ? 3000 : false });
   const currentWatch = activeWatch(watch.data);
   const start = useMutation({ mutationFn: () => props.core.startWatch({ profile: profileSelector(profile), includeStateDb: true }), onSuccess: () => queryClient.invalidateQueries({ queryKey: ["watch-status"] }) });
   const stop = useMutation({ mutationFn: (watchId: string) => props.core.stopWatch({ watchId }), onSuccess: () => queryClient.invalidateQueries({ queryKey: ["watch-status"] }) });
@@ -444,8 +488,8 @@ function SettingsPage({ props, profile }: { props: AppUiProps; profile: HostProf
       <div className="grid gap-4 lg:grid-cols-2">
         <Card><Field label={t("settings.language")}><select className="min-h-10 rounded-lg border border-[var(--border)] bg-[var(--input)] px-3" onChange={(event) => void setLocale(event.target.value as "zh-CN" | "en")} value={i18n.language === "zh-CN" ? "zh-CN" : "en"}><option value="zh-CN">简体中文</option><option value="en">English</option></select></Field><div className="mt-3 flex items-center gap-2 text-xs text-[var(--muted)]"><Languages size={15} />{t("settings.englishFallback")}</div></Card>
         <Card><Field label={t("settings.theme")}><div className="grid grid-cols-3 gap-2">{(["system", "light", "dark"] as const).map((value) => <Button aria-pressed={theme === value} key={value} onClick={() => applyTheme(value)} type="button" variant={theme === value ? "primary" : "secondary"}>{value === "system" ? <Globe2 size={16} /> : value === "light" ? <Sun size={16} /> : <Moon size={16} />}{t(`settings.${value}`)}</Button>)}</div></Field></Card>
-        <Card><h2 className="font-semibold">{t("settings.watch")}</h2><div className="mt-3 flex items-center justify-between gap-3"><div><Badge tone={currentWatch?.status === "running" ? "success" : "neutral"}>{currentWatch?.status ?? t("common.none")}</Badge>{currentWatch ? <div className="mt-2 font-mono text-xs text-[var(--muted)]">{currentWatch.watchId}</div> : null}</div>{currentWatch?.status === "running" ? <Button disabled={stop.isPending} onClick={() => stop.mutate(currentWatch.watchId)} type="button" variant="secondary">{t("settings.watchStop")}</Button> : <Button disabled={start.isPending} onClick={() => start.mutate()} type="button"><Play size={16} />{t("settings.watchStart")}</Button>}</div></Card>
-        <Card><h2 className="font-semibold">{t("settings.forget")}</h2><p className="mt-2 text-sm text-[var(--muted)]">{t("settings.forgetHint")}</p><Button className="mt-4" onClick={() => void (props.onForgetBrowser?.() ?? props.host.forgetBrowser?.())} type="button" variant="danger">{t("settings.forget")}</Button></Card>
+        {capabilities.watch ? <Card><h2 className="font-semibold">{t("settings.watch")}</h2><div className="mt-3 flex items-center justify-between gap-3"><div><Badge tone={currentWatch?.status === "running" ? "success" : "neutral"}>{currentWatch?.status ?? t("common.none")}</Badge>{currentWatch ? <div className="mt-2 font-mono text-xs text-[var(--muted)]">{currentWatch.watchId}</div> : null}</div>{currentWatch?.status === "running" ? <Button disabled={stop.isPending} onClick={() => stop.mutate(currentWatch.watchId)} type="button" variant="secondary">{t("settings.watchStop")}</Button> : <Button disabled={start.isPending} onClick={() => start.mutate()} type="button"><Play size={16} />{t("settings.watchStart")}</Button>}</div></Card> : null}
+        {capabilities.forgetBrowser ? <Card><h2 className="font-semibold">{t("settings.forget")}</h2><p className="mt-2 text-sm text-[var(--muted)]">{t("settings.forgetHint")}</p><Button className="mt-4" onClick={() => void (props.onForgetBrowser?.() ?? props.host.forgetBrowser?.())} type="button" variant="danger">{t("settings.forget")}</Button></Card> : null}
       </div>
     </Fragment>
   );
@@ -471,6 +515,11 @@ function AppContent({ props }: { props: AppUiProps }) {
   const { t, i18n } = useTranslation();
   const toast = useToast();
   const queryClient = useQueryClient();
+  const capabilities = useMemo(() => resolveCapabilities(props.capabilities), [props.capabilities]);
+  const visibleNavigation = useMemo(
+    () => navigation.filter(([id]) => routeIsAvailable(id, capabilities)),
+    [capabilities]
+  );
   const [route, setRoute] = useState<AppRoute>("overview");
   const [selectedProfileId, setSelectedProfileId] = useState("default");
   const [plan, setPlan] = useState<PlanSummary | null>(null);
@@ -483,6 +532,9 @@ function AppContent({ props }: { props: AppUiProps }) {
     document.documentElement.lang = i18n.resolvedLanguage?.toLowerCase().startsWith("zh") ? "zh-CN" : "en";
   }, [i18n.resolvedLanguage]);
   useEffect(() => { if (profiles.length && !profiles.some((entry) => entry.id === selectedProfileId)) setSelectedProfileId(profiles[0].id); }, [profiles, selectedProfileId]);
+  useEffect(() => {
+    if (!routeIsAvailable(route, capabilities)) setRoute("overview");
+  }, [capabilities, route]);
   const statusQuery = useQuery({
     queryKey: ["status", profile?.id, profile?.revision],
     queryFn: ({ signal }) => props.core.getStatus({ profile: profileSelector(profile) }, { signal }),
@@ -563,13 +615,14 @@ function AppContent({ props }: { props: AppUiProps }) {
     : [status?.currentProvider ?? "openai"];
   const page = !profile ? <Card>{profilesQuery.isPending ? t("common.loading") : safeErrorText(profilesQuery.error, t("global.failed"))}</Card>
     : route === "overview" ? <OverviewPage loading={statusQuery.isFetching} refresh={() => void statusQuery.refetch()} status={status} />
-    : route === "sync" ? <SyncPage disabled={writeDisabled} prepare={(values, trigger) => prepare(() => props.core.prepareSync({ profile: profileSelector(profile), keepCount: values.keepCount }), trigger)} />
-    : route === "switch-provider" ? <SwitchPage disabled={writeDisabled} prepare={(values, trigger) => prepare(() => props.core.prepareSwitch({ profile: profileSelector(profile), provider: values.provider, modelMode: values.modelMode as SwitchModelMode, ...(values.modelMode === "explicit" ? { model: values.model } : {}), keepCount: values.keepCount }), trigger)} providers={configuredProviders} />
-    : route === "backups-restore" ? <BackupsPage backups={backupsQuery.data?.backups ?? []} disabled={writeDisabled} loading={backupsQuery.isPending} prepare={(values, trigger) => prepare(() => props.core.prepareRestore({ profile: profileSelector(profile), backupId: values.backupId, restoreConfig: values.restoreConfig, restoreDatabase: values.restoreDatabase, restoreSessions: values.restoreSessions, ...(values.allowSqliteHomeRelocation ? { allowSqliteHomeRelocation: true, relocationTargetProfileId: values.relocationTargetProfileId } : {}) }), trigger)} profile={profile} profiles={profiles} prune={prune} />
+    : route === "sync" && capabilities.sync ? <SyncPage disabled={writeDisabled} prepare={(values, trigger) => prepare(() => props.core.prepareSync({ profile: profileSelector(profile), keepCount: values.keepCount }), trigger)} />
+    : route === "switch-provider" && capabilities.switchProvider ? <SwitchPage disabled={writeDisabled} prepare={(values, trigger) => prepare(() => props.core.prepareSwitch({ profile: profileSelector(profile), provider: values.provider, modelMode: values.modelMode as SwitchModelMode, ...(values.modelMode === "explicit" ? { model: values.model } : {}), keepCount: values.keepCount }), trigger)} providers={configuredProviders} />
+    : route === "backups-restore" ? <BackupsPage backups={backupsQuery.data?.backups ?? []} canPrune={capabilities.pruneBackups} canRestore={capabilities.restore} disabled={writeDisabled} loading={backupsQuery.isPending} prepare={(values, trigger) => prepare(() => props.core.prepareRestore({ profile: profileSelector(profile), backupId: values.backupId, restoreConfig: values.restoreConfig, restoreDatabase: values.restoreDatabase, restoreSessions: values.restoreSessions, ...(values.allowSqliteHomeRelocation ? { allowSqliteHomeRelocation: true, relocationTargetProfileId: values.relocationTargetProfileId } : {}) }), trigger)} profile={profile} profiles={profiles} prune={prune} />
     : route === "history" ? <HistoryPage core={props.core} profile={profile} />
-    : route === "profiles" ? <ProfilesPage host={props.host} profiles={profiles} refresh={() => profilesQuery.refetch()} />
+    : route === "profiles" ? <ProfilesPage canManage={capabilities.manageProfiles} host={props.host} profiles={profiles} refresh={() => profilesQuery.refetch()} revealPaths={capabilities.revealProfilePaths} />
     : route === "diagnostics" ? <DiagnosticsPage diagnostics={diagnosticsQuery.data} loading={diagnosticsQuery.isFetching} refresh={() => void diagnosticsQuery.refetch()} />
-    : <SettingsPage profile={profile} props={props} />;
+    : route === "settings" ? <SettingsPage capabilities={capabilities} profile={profile} props={props} />
+    : <OverviewPage loading={statusQuery.isFetching} refresh={() => void statusQuery.refetch()} status={status} />;
 
   return (
     <div className="min-h-screen bg-[var(--surface)] text-[var(--text)]">
@@ -580,7 +633,7 @@ function AppContent({ props }: { props: AppUiProps }) {
       </header>
       <div className="mx-auto grid max-w-[1600px] md:grid-cols-[240px_minmax(0,1fr)]">
         <aside className="border-b border-[var(--border)] bg-[var(--surface-raised)] p-3 md:min-h-[calc(100vh-4rem)] md:border-b-0 md:border-r">
-          <nav aria-label={t("a11y.primaryNavigation")} className="grid grid-cols-2 gap-1 sm:grid-cols-4 md:grid-cols-1">{navigation.map(([id, label, Icon]) => <button aria-current={route === id ? "page" : undefined} className={cn("flex min-h-11 items-center gap-3 rounded-lg px-3 text-left text-sm font-medium text-[var(--muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus)]", route === id ? "bg-[var(--accent-soft)] text-[var(--accent-strong)]" : "hover:bg-[var(--surface-hover)] hover:text-[var(--text)]")} key={id} onClick={() => setRoute(id)} type="button"><Icon size={17} /><span>{t(label)}</span></button>)}</nav>
+          <nav aria-label={t("a11y.primaryNavigation")} className="grid grid-cols-2 gap-1 sm:grid-cols-4 md:grid-cols-1">{visibleNavigation.map(([id, label, Icon]) => <button aria-current={route === id ? "page" : undefined} className={cn("flex min-h-11 items-center gap-3 rounded-lg px-3 text-left text-sm font-medium text-[var(--muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus)]", route === id ? "bg-[var(--accent-soft)] text-[var(--accent-strong)]" : "hover:bg-[var(--surface-hover)] hover:text-[var(--text)]")} key={id} onClick={() => setRoute(id)} type="button"><Icon size={17} /><span>{t(label)}</span></button>)}</nav>
         </aside>
         <main className="min-w-0 p-4 md:p-8" id="main-content" tabIndex={-1}>
           {status?.pendingRecovery ? <div className="mb-5 flex items-start gap-3 rounded-xl border border-[var(--danger)] bg-[var(--danger-soft)] p-4 text-sm" role="alert"><ShieldAlert className="mt-0.5 shrink-0 text-[var(--danger)]" size={20} /><div><div className="font-semibold">RECOVERY_REQUIRED</div><div className="mt-1">{t("global.recovery")}</div></div></div> : null}
@@ -589,7 +642,7 @@ function AppContent({ props }: { props: AppUiProps }) {
           {page}
         </main>
       </div>
-      <PlanReview apply={() => { if (plan) applyMutation.mutate(plan); }} applying={applyMutation.isPending} close={closePlan} plan={plan} restoreFocus={restorePlanFocus} />
+      {capabilities.sync || capabilities.switchProvider || capabilities.restore ? <PlanReview apply={() => { if (plan) applyMutation.mutate(plan); }} applying={applyMutation.isPending} close={closePlan} plan={plan} restoreFocus={restorePlanFocus} /> : null}
     </div>
   );
 }

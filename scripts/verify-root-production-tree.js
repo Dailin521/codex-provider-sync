@@ -9,6 +9,8 @@ const forbidden = [
   "vite",
   "typescript",
   "electron",
+  "electron-vite",
+  "electron-builder",
   "@codex-provider-sync/core",
   "@codex-provider-sync/contracts",
   "@codex-provider-sync/core-client"

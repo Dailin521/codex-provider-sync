@@ -1,0 +1,10 @@
+appId: com.dailin521.codex-provider-sync
+productName: Codex Provider Sync
+asar: true
+directories:
+  output: ../../dist-desktop
+files:
+  - out/**
+  - package.json
+extraMetadata:
+  main: out/main/index.js

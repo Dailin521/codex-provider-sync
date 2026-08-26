@@ -5,6 +5,8 @@ import test from "node:test";
 import {
   APP_ROUTES,
   APP_UI_MIGRATION_STATE,
+  FULL_APP_UI_CAPABILITIES,
+  READ_ONLY_APP_UI_CAPABILITIES,
   profileSchema,
   resourcesHaveMatchingKeys,
   restoreSchema,
@@ -23,6 +25,26 @@ test("app-ui owns the complete target navigation vocabulary", () => {
     "settings"
   ]);
   assert.equal(APP_UI_MIGRATION_STATE, "shared-ui-c5");
+});
+
+test("shared UI exposes an explicit Electron read-only capability profile", async () => {
+  assert.deepEqual(READ_ONLY_APP_UI_CAPABILITIES, {
+    sync: false,
+    switchProvider: false,
+    restore: false,
+    pruneBackups: false,
+    watch: false,
+    manageProfiles: false,
+    revealProfilePaths: false,
+    forgetBrowser: false
+  });
+  assert.equal(Object.values(FULL_APP_UI_CAPABILITIES).every(Boolean), true);
+  assert.equal(Object.isFrozen(READ_ONLY_APP_UI_CAPABILITIES), true);
+  const appSource = await fs.readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+  assert.match(appSource, /route === "sync" && capabilities\.sync/);
+  assert.match(appSource, /enabled: capabilities\.watch/);
+  assert.match(appSource, /canRestore=\{capabilities\.restore\}/);
+  assert.match(appSource, /canManage=\{capabilities\.manageProfiles\}/);
 });
 
 test("shared UI translations and write forms keep one strict schema", () => {

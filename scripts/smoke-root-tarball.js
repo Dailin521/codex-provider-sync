@@ -359,6 +359,9 @@ try {
   for (const forbidden of ["react", "react-dom", "vite", "typescript", "electron"]) {
     if (installedNames.has(forbidden)) throw new Error(`Root production tree contains ${forbidden}.`);
   }
+  for (const name of installedNames) {
+    if (name.startsWith("electron-")) throw new Error(`Root production tree contains ${name}.`);
+  }
 
   process.stdout.write(
     `Root tarball ${installLifecycle ? "lifecycle + SQLite" : "content"} smoke passed on Node ${process.version}.\n`

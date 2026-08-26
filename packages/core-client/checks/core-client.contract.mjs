@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   CoreClientError,
   CoreTransportError,
+  DESKTOP_READ_METHODS,
+  DesktopCoreClient,
   HttpCoreClient,
   HttpCoreTransport,
   MockCoreClient,
@@ -204,4 +206,72 @@ test("HTTP status cannot turn a failed request into a success envelope", async (
     busy.getWatchStatus({}),
     (error) => error instanceof CoreClientError && error.code === "OPERATION_BUSY"
   );
+});
+
+test("DesktopCoreClient reuses the Core envelope through one read-only bridge", async () => {
+  const requests = [];
+  const client = new DesktopCoreClient({
+    async requestReadOnly(request) {
+      requests.push(request);
+      return {
+        protocolVersion: 1,
+        requestId: request.requestId,
+        ok: true,
+        result: {
+          schemaVersion: 1,
+          snapshotAt: "2026-08-26T00:00:00.000Z",
+          storageRevision: "storage",
+          profile: { id: "default", revision: "r1" },
+          currentProvider: "openai",
+          rolloutCounts: {},
+          sqliteCounts: {},
+          codexHomeSource: "profile",
+          sqliteHomeSource: "default",
+          backupSummary: { count: 0, totalBytes: 0 },
+          pendingRecovery: false,
+          pendingTransactions: [],
+          operationInProgress: null,
+          rolloutScanComplete: true,
+          lockedRolloutFiles: []
+        }
+      };
+    }
+  }, { requestIdFactory: () => "desktop-status" });
+  assert.equal((await client.getStatus(profile)).currentProvider, "openai");
+  assert.deepEqual(requests, [{
+    protocolVersion: 1,
+    requestId: "desktop-status",
+    method: "getStatus",
+    payload: profile
+  }]);
+  assert.deepEqual(DESKTOP_READ_METHODS, [
+    "getStatus",
+    "listBackups",
+    "listHistory",
+    "getHistorySession",
+    "getDiagnostics"
+  ]);
+});
+
+test("DesktopCoreClient rejects every C6 write method before invoking the bridge", async () => {
+  let calls = 0;
+  const client = new DesktopCoreClient({
+    async requestReadOnly() {
+      calls += 1;
+      throw new Error("write request escaped the desktop policy");
+    }
+  });
+  await assert.rejects(
+    client.prepareSync({ ...profile, keepCount: 5 }),
+    (error) => error instanceof CoreClientError && error.code === "PERMISSION_DENIED"
+  );
+  await assert.rejects(
+    client.applyRestore({ schemaVersion: 1, planId: "plan-denied" }),
+    (error) => error instanceof CoreClientError && error.code === "PERMISSION_DENIED"
+  );
+  await assert.rejects(
+    client.startWatch(profile),
+    (error) => error instanceof CoreClientError && error.code === "PERMISSION_DENIED"
+  );
+  assert.equal(calls, 0);
 });

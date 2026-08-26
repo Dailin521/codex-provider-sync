@@ -547,8 +547,9 @@ archived
 createdAt
 updatedAt
 messageCount
-firstUserMessage
 ```
+
+vNext 公共 Core/HTTP/IPC 列表投影不返回 `rolloutPath`、`cwd` 或 `firstUserMessage`。`title` 只能来自显式 session metadata；metadata 没有标题时返回空字符串，由 UI 本地化显示“未命名会话”，不得用消息正文回退。列表搜索可以在本次只读扫描内匹配安全抽取文本，但消息正文不能进入列表 DTO、日志或缓存；正文只能由用户明确调用 `getHistorySession` 后返回。
 
 ### 9.3 `getHistorySession`
 
@@ -941,6 +942,16 @@ V1/C3 已实现上述边界；`runSync/runSwitch/runRestore/runWatch` 仍作为 
 - React UI 的业务调用固定为 `HttpCoreClient → /api/core → createCoreFacade`；profile 管理、配对和忘记浏览器属于 Host API，不得把业务实现复制进 UI。
 - History 列表仅在用户进入 History 页面后读取；详情仅在用户明确选择会话后延迟读取，正文不进入 TanStack Query cache，离开页面时清空并取消 pending detail request。
 - Production HTML 使用每响应随机 nonce 的严格 CSP；无 `unsafe-inline`，外部导航、远程脚本和跨源 Core 请求不在允许面内。
+
+### 16.5 C6 Electron Read-only Alpha
+
+- 数据流固定为 `Renderer → DesktopCoreClient → sandboxed Preload → Main IPC/Supervisor → Utility Process → createCoreFacade`。Renderer、Preload 和 Main 都不能导入 Core 实现；Utility 的唯一 Core 业务实现入口是 `@codex-provider-sync/core`，可依赖共享 contracts/client allowlist，但不得深度导入根 `src/`。
+- C6 IPC 仅允许 `getStatus`、`listBackups`、`listHistory`、`getHistorySession`、`getDiagnostics`。Sync/Switch/Restore/Prune/Watch 在 DesktopCoreClient、Preload、Main 和 Utility 四层均 fail closed 为 `PERMISSION_DENIED`；协议漂移在业务调用前返回 `PROTOCOL_VERSION_MISMATCH`。
+- Preload 公开面固定为 version、`core.requestReadOnly` 与 `profiles.list`，不暴露原始 IPC、Node、路径或通用 channel。production build 不含 test bridge；测试 hook 只能存在于编译期 test build。
+- Main 只接受主窗口顶层 `cps-app://app` sender，Core envelope 上限 64 KiB；Profile 列表只返回 `id/name/revision/codexHomeConfigured/sqliteHomeConfigured`，不得返回 Codex/SQLite 路径。
+- Runtime Hello 必须同时匹配 runtime/core protocol、app/core version、buildId、随机 nonce、generation 和精确只读 capability。崩溃立即拒绝全部 pending 为 `CORE_RUNTIME_CRASHED`；不后台重启；下一次用户请求每个 profile/revision 都必须先完成 `getStatus` pending-journal preflight，失败不得被后续请求绕过。
+- request timeout 必须终止当前 Runtime generation，避免迟到响应与复用 requestId 错误关联；下一次用户请求按 crash restart/preflight 规则处理。shutdown 是终结性、幂等操作，调用前后都拒绝新请求，不能产生孤儿 Utility。response 的 requestId/generation/operationId 及 preflight profile 必须与请求关联。
+- History 列表标题只能来自显式 metadata；无标题返回空字符串并由 UI 本地化。消息正文只在用户显式打开详情后返回，离开详情立即清空/abort，不进入 Query cache、日志或 Diagnostics。
 
 ## 17. Phase 1 提取要求
 

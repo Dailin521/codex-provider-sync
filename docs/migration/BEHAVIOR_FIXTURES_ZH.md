@@ -111,6 +111,9 @@ V1/C3 的 executable mapping：Plan/revision 见 `test/plan-ledger.test.js`、`t
 | --- | --- | --- |
 | `workspace-roots` | global state、rollout cwd 与 SQLite cwd 不一致，含跨平台路径形式 | 只修复合同允许的 workspace/cwd 元数据；路径规范化一致；Backup/Restore 覆盖 global state |
 | `history-safe-content` | user/event/response-item 重复消息、无 thread id、同 id 多 rollout | 列表选择稳定会话；详情只在用户主动读取时返回安全消息；正文不进入日志、诊断包或应用数据库 |
+| `desktop-readonly-c6` | 临时 Codex Home 含无标题 rollout、真实 SQLite row、valid pending journal 与正文 marker | production bridge 无测试/Node 能力；列表/Profiles/Diagnostics 无路径和正文；显式详情后才显示 marker；写 IPC 拒绝；Utility crash 后按 profile preflight 并恢复；测试前后 Codex Home 全树 Hash 不变 |
+
+C6 executable mapping：`test-support/desktop-readonly-fixture.mjs`、`apps/desktop/tests/*.test.mjs`、`apps/desktop/e2e/desktop-production-boundary.spec.mjs` 与 `desktop-readonly.spec.mjs`。production unpacked smoke 通过 `apps/desktop/scripts/run-packaged-e2e.mjs` 解析当前平台 builder 输出；Windows/macOS/Linux Node 24 job 同时验证正常 production bundle、真实 SQLite/History 边界和 test build 的 Utility crash/restart。正式安装器、双架构 macOS 发行产物和 native fallback 留在 C9。
 
 ## 8. CLI JSON 动态 Fixture
 

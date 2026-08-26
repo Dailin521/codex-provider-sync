@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-08-24
+- Amended: 2026-08-26 (C6 exact toolchain and unpacked Alpha gate)
 - Scope: vNext
 
 ## Context
@@ -10,7 +11,7 @@ Electron 需要统一构建 Main、Preload、Renderer 和 Core Runtime，并为�
 
 ## Decision
 
-采用 `electron-vite` 组织 Electron 构建，采用 `electron-builder` 生成安装包与发布产物。阶段 0 只冻结工具组合，不锁定尚未引入仓库的具体版本号。
+采用 `electron-vite` 组织 Electron 构建，采用 `electron-builder` 生成安装包与发布产物。阶段 0 只冻结工具组合；C6 已按 ADR-0014 锁定 Electron `44.0.0`、electron-vite `5.0.0`、electron-builder `26.15.7`，并使用 Desktop 专属 Vite `7.3.6` / React plugin `5.2.0` 兼容组合。
 
 ## Decision Drivers
 
@@ -40,7 +41,7 @@ Electron 需要统一构建 Main、Preload、Renderer 和 Core Runtime，并为�
 
 ## Migration and Validation
 
-阶段 3 引入固定版本与 lockfile，并在 Windows x64、macOS x64/arm64、Linux x64 上验证安装/启动、SQLite、Utility Process 和 Renderer 隔离。版本选择必须处于 Electron 官方支持线。
+阶段 3/C6 在 Windows、macOS、Linux 的 host-native runner 上验证 `electron-builder --dir` unpacked app 启动、真实 SQLite、Utility Process 握手和 Renderer 隔离，不生成或发布安装器。macOS x64/arm64 两个发布目标、Windows/Linux 发行格式、native fallback/asar、安装卸载、SBOM/checksum 属于 C9 的发布矩阵；两层门槛都必须通过，不能用开发态 Electron E2E 替代 unpacked smoke。版本选择必须处于 Electron 官方支持线。
 
 ## Related
 

@@ -89,12 +89,14 @@ export const resources = {
         targetProfile: "Relocation target profile",
         prepare: "Prepare restore",
         pruneKeep: "Keep newest backups",
-        prune: "Prune older backups"
+        prune: "Prune older backups",
+        readOnly: "Desktop Alpha lists managed backups read-only; Restore and Prune are not exposed."
       },
       history: {
         title: "History",
         subtitle: "Session bodies load only after you explicitly open a session.",
         empty: "No sessions found.",
+        untitled: "Untitled session",
         open: "Open session",
         back: "Back to sessions",
         messages: "messages",
@@ -110,7 +112,9 @@ export const resources = {
         sqliteHome: "SQLite Home (optional)",
         create: "Create profile",
         update: "Update profile",
-        defaultManaged: "The default profile is managed by startup flags."
+        defaultManaged: "The default profile is managed by startup flags.",
+        pathManaged: "Storage paths are retained by the trusted desktop host.",
+        readOnly: "Desktop Alpha exposes profile IDs and revisions only; profile editing is not enabled."
       },
       diagnostics: {
         title: "Diagnostics",
@@ -241,12 +245,14 @@ export const resources = {
         targetProfile: "迁移目标配置",
         prepare: "生成恢复计划",
         pruneKeep: "保留最新备份数",
-        prune: "清理旧备份"
+        prune: "清理旧备份",
+        readOnly: "桌面 Alpha 仅只读列出受管备份；未开放恢复和清理。"
       },
       history: {
         title: "聊天记录",
         subtitle: "只有在你明确打开会话后才加载消息正文。",
         empty: "没有找到会话。",
+        untitled: "未命名会话",
         open: "打开会话",
         back: "返回会话列表",
         messages: "条消息",
@@ -262,7 +268,9 @@ export const resources = {
         sqliteHome: "SQLite Home（可选）",
         create: "新建配置",
         update: "更新配置",
-        defaultManaged: "默认配置由启动参数管理。"
+        defaultManaged: "默认配置由启动参数管理。",
+        pathManaged: "存储路径仅由可信桌面 Host 持有。",
+        readOnly: "桌面 Alpha 只公开配置 ID 与 revision；尚未开放配置编辑。"
       },
       diagnostics: {
         title: "诊断",

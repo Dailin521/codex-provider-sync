@@ -58,6 +58,11 @@ assert(Array.isArray(rootManifest.workspaces), "Root npm workspaces are not enab
 assert(rootManifest.workspaces.includes("apps/*") && rootManifest.workspaces.includes("packages/*"), "Root workspace globs are incomplete.");
 assert(Object.keys(rootManifest.dependencies ?? {}).length === 0, "Root runtime dependencies must stay Core-only.");
 assertExactDependencies(rootManifest, "root package");
+const rootDependencyNames = DEPENDENCY_FIELDS.flatMap((field) => Object.keys(rootManifest[field] ?? {}));
+assert(
+  !rootDependencyNames.some((name) => name === "electron" || name.startsWith("electron-")),
+  "Root npm manifest must not contain Electron dependencies."
+);
 
 const rootPublishAllowlist = new Set([
   "README.md",
@@ -111,6 +116,50 @@ const desktopDependencies = {
   ...(desktopManifest.devDependencies ?? {}),
   ...(desktopManifest.optionalDependencies ?? {})
 };
-assert(!Object.keys(desktopDependencies).some((name) => name === "electron" || name.startsWith("electron-")), "C4 must not enable Electron dependencies before C6.");
+const approvedDesktopElectronDependencies = new Map([
+  ["electron", "44.0.0"],
+  ["electron-vite", "5.0.0"],
+  ["electron-builder", "26.15.7"]
+]);
+for (const [name, version] of approvedDesktopElectronDependencies) {
+  assert(
+    desktopManifest.devDependencies?.[name] === version,
+    `apps/desktop must pin ${name} to the reviewed C6 version ${version}.`
+  );
+}
+for (const name of Object.keys(desktopDependencies)) {
+  if (name === "electron" || name.startsWith("electron-")) {
+    assert(approvedDesktopElectronDependencies.has(name), `Unreviewed Electron dependency: ${name}`);
+  }
+}
+for (const [workspace, manifest] of manifests) {
+  if (workspace === "apps/desktop") continue;
+  const dependencies = DEPENDENCY_FIELDS.flatMap((field) => Object.keys(manifest[field] ?? {}));
+  assert(
+    !dependencies.some((name) => name === "electron" || name.startsWith("electron-")),
+    `${workspace} must not depend on Electron.`
+  );
+}
 
-process.stdout.write("Workspace package, dependency, import and root publish boundaries are valid.\n");
+for (const filePath of await sourceFiles("apps/desktop/src/renderer")) {
+  const source = await fs.readFile(filePath, "utf8");
+  assert(!/from\s+["'](?:node:|electron)/.test(source), `${path.relative(repositoryRoot, filePath)} imports Node or Electron.`);
+  assert(!/@codex-provider-sync\/core(?:["'/])/.test(source), `${path.relative(repositoryRoot, filePath)} imports Core directly.`);
+}
+for (const filePath of await sourceFiles("apps/desktop/src/preload")) {
+  const source = await fs.readFile(filePath, "utf8");
+  assert(!/from\s+["']node:/.test(source), `${path.relative(repositoryRoot, filePath)} imports Node in sandboxed preload.`);
+  assert(!/@codex-provider-sync\/core(?:["'/])/.test(source), `${path.relative(repositoryRoot, filePath)} imports Core in preload.`);
+}
+for (const filePath of await sourceFiles("apps/desktop/src/main")) {
+  const source = await fs.readFile(filePath, "utf8");
+  assert(!/@codex-provider-sync\/core(?:["'/])/.test(source), `${path.relative(repositoryRoot, filePath)} runs Core in Main.`);
+  assert(!/\.\.\/\.\.\/\.\.\/src\//.test(source), `${path.relative(repositoryRoot, filePath)} deep-imports root implementation.`);
+}
+for (const filePath of await sourceFiles("apps/desktop/src/runtime")) {
+  const source = await fs.readFile(filePath, "utf8");
+  assert(!/\.\.\/main\//.test(source), `${path.relative(repositoryRoot, filePath)} depends on Electron Main.`);
+  assert(!/\.\.\/\.\.\/\.\.\/src\//.test(source), `${path.relative(repositoryRoot, filePath)} deep-imports root implementation.`);
+}
+
+process.stdout.write("Workspace package, Electron, dependency, import and root publish boundaries are valid.\n");

@@ -177,19 +177,17 @@ async function collectHistory(codexHome) {
 }
 
 function publicSession(session) {
-  const firstUserMessage = session.messages.find((message) => message.role === "user")?.text ?? "";
   return {
     id: session.id,
     rolloutPath: session.rolloutPath,
-    title: session.title || firstUserMessage.slice(0, 80) || "未命名会话",
+    title: session.title || "",
     cwd: session.cwd,
     provider: session.provider,
     model: session.model,
     archived: session.archived,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
-    messageCount: session.messageCount,
-    firstUserMessage: firstUserMessage.slice(0, 240)
+    messageCount: session.messageCount
   };
 }
 

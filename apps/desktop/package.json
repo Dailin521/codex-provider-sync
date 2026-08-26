@@ -1,6 +1,8 @@
 {
   "name": "@codex-provider-sync/desktop",
   "version": "0.0.0",
+  "description": "vNext Electron desktop host for codex-provider-sync.",
+  "author": "Dailin521",
   "private": true,
   "type": "module",
   "exports": {
@@ -9,15 +11,40 @@
       "import": "./dist/index.js"
     }
   },
+  "main": "./out/main/index.js",
   "scripts": {
     "build": "tsc -b",
-    "test": "node --test checks/ownership.contract.mjs"
+    "build:electron": "electron-vite build",
+    "build:electron:test": "electron-vite build --mode test",
+    "verify:production-bundle": "node scripts/verify-production-bundle.mjs",
+    "pack:dir": "electron-builder --dir --config electron-builder.yml",
+    "test": "node --test checks/*.contract.mjs tests/*.test.mjs",
+    "test:e2e": "playwright test -c playwright.config.mjs",
+    "test:e2e:production": "playwright test -c playwright.production.config.mjs",
+    "test:e2e:packaged": "node scripts/run-packaged-e2e.mjs"
   },
   "engines": {
     "node": ">=24"
   },
   "dependencies": {
+    "@codex-provider-sync/app-ui": "0.0.0",
     "@codex-provider-sync/contracts": "0.0.0",
-    "@codex-provider-sync/core-client": "0.0.0"
+    "@codex-provider-sync/core": "0.0.0",
+    "@codex-provider-sync/core-client": "0.0.0",
+    "@codex-provider-sync/design-system": "0.0.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "@tailwindcss/vite": "4.3.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "@vitejs/plugin-react": "5.2.0",
+    "electron": "44.0.0",
+    "electron-builder": "26.15.7",
+    "electron-vite": "5.0.0",
+    "tailwindcss": "4.3.3",
+    "vite": "7.3.6"
   }
 }
