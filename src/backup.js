@@ -30,6 +30,8 @@ import {
 } from "./transaction-journal.js";
 import { syncDirectory, writeFileAtomic } from "./atomic-file.js";
 
+const SESSION_CANONICAL_TARGET = Symbol("codex-provider-sync.session-canonical-target");
+
 function timestampSlug(date = new Date()) {
   return date.toISOString().replaceAll(":", "").replaceAll("-", "").replace(".", "");
 }
@@ -111,6 +113,21 @@ function storagePathsEqual(left, right) {
     : normalizedLeft === normalizedRight;
 }
 
+async function storagePathsEqualPhysical(left, right) {
+  if (storagePathsEqual(left, right)) {
+    return true;
+  }
+  try {
+    const [physicalLeft, physicalRight] = await Promise.all([
+      fs.realpath(path.resolve(left)),
+      fs.realpath(path.resolve(right))
+    ]);
+    return storagePathsEqual(physicalLeft, physicalRight);
+  } catch {
+    return false;
+  }
+}
+
 function pathComparisonKey(value) {
   const resolved = path.resolve(value);
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
@@ -122,6 +139,21 @@ function pathIsWithin(root, target) {
     && !relativePath.startsWith(`..${path.sep}`)
     && relativePath !== ".."
     && !path.isAbsolute(relativePath);
+}
+
+function findRawRolloutRoot(target) {
+  let current = path.dirname(target);
+  while (true) {
+    const name = path.basename(current).toLowerCase();
+    if (name === "sessions" || name === "archived_sessions") {
+      return current;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return null;
+    }
+    current = parent;
+  }
 }
 
 async function assertNoLinkedPathSegments(root, target) {
@@ -141,34 +173,64 @@ async function assertNoLinkedPathSegments(root, target) {
 
 async function validateSessionManifestEntries(entries, codexHome) {
   const roots = ["sessions", "archived_sessions"].map((name) => path.resolve(codexHome, name));
+  const canonicalRoots = (await Promise.all(roots.map(async (root) => {
+    try {
+      return await fs.realpath(root);
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        return null;
+      }
+      throw error;
+    }
+  }))).filter(Boolean);
   const seen = new Set();
+  const validated = [];
   for (const entry of entries) {
     if (!entry || typeof entry.path !== "string" || !path.isAbsolute(entry.path)) {
       throw new Error("Backup session manifest contains a missing or non-absolute rollout path.");
     }
     const target = path.resolve(entry.path);
-    const lexicalRoot = roots.find((root) => pathIsWithin(root, target));
-    if (!lexicalRoot || !/^rollout-.*\.jsonl$/i.test(path.basename(target))) {
+    if (!/^rollout-.*\.jsonl$/i.test(path.basename(target))) {
       throw new Error(`Backup session target is outside the allowed rollout roots: ${entry.path}`);
     }
-    const key = pathComparisonKey(target);
+    const rawRoot = findRawRolloutRoot(target);
+    if (!rawRoot) {
+      throw new Error(`Backup session target is outside the allowed rollout roots: ${entry.path}`);
+    }
+    await assertNoLinkedPathSegments(rawRoot, target);
+    const [canonicalRawRoot, canonicalTarget] = await Promise.all([
+      fs.realpath(rawRoot),
+      fs.realpath(target)
+    ]);
+    const canonicalRoot = canonicalRoots.find((root) =>
+      storagePathsEqual(root, canonicalRawRoot) && pathIsWithin(root, canonicalTarget)
+    );
+    if (!canonicalRoot) {
+      throw new Error(`Backup session target resolves outside the allowed rollout roots: ${entry.path}`);
+    }
+    const key = pathComparisonKey(canonicalTarget);
     if (seen.has(key)) {
       throw new Error(`Backup session manifest contains a duplicate rollout target: ${entry.path}`);
     }
     seen.add(key);
-    await assertNoLinkedPathSegments(lexicalRoot, target);
-    const [canonicalRoot, canonicalTarget] = await Promise.all([
-      fs.realpath(lexicalRoot),
-      fs.realpath(target)
-    ]);
-    if (!pathIsWithin(canonicalRoot, canonicalTarget)) {
-      throw new Error(`Backup session target resolves outside the allowed rollout roots: ${entry.path}`);
-    }
+    await assertNoLinkedPathSegments(canonicalRoot, canonicalTarget);
     const stat = await fs.stat(canonicalTarget);
     if (!stat.isFile()) {
       throw new Error(`Backup session target is not a regular file: ${entry.path}`);
     }
+    const normalizedEntry = { ...entry, path: target };
+    Object.defineProperty(normalizedEntry, SESSION_CANONICAL_TARGET, {
+      configurable: true,
+      enumerable: false,
+      value: canonicalTarget
+    });
+    validated.push({
+      originalPath: target,
+      canonicalPath: canonicalTarget,
+      entry: normalizedEntry
+    });
   }
+  return validated;
 }
 
 function resolveRestoreSqliteHome(storage, metadata, stateDb) {
@@ -498,7 +560,8 @@ async function readValidatedBackupMetadata(backupDir, codexHome) {
   if (metadata.namespace !== BACKUP_NAMESPACE || ![1, 2].includes(metadata.version)) {
     throw new Error(`Unsupported backup metadata in ${metadataPath}.`);
   }
-  if (typeof metadata.codexHome !== "string" || !storagePathsEqual(metadata.codexHome, codexHome)) {
+  if (typeof metadata.codexHome !== "string"
+      || !await storagePathsEqualPhysical(metadata.codexHome, codexHome)) {
     throw new Error(`Backup was created for ${metadata.codexHome}, not ${codexHome}.`);
   }
   return metadata;
@@ -541,7 +604,7 @@ export async function getBackupRecoveryCoverage(backupDir, storageOrCodexHome) {
     throw new Error(`Unsupported session backup manifest in ${sessionManifestPath}.`);
   }
   if (typeof sessionManifest.codexHome !== "string"
-      || !storagePathsEqual(sessionManifest.codexHome, codexHome)) {
+      || !await storagePathsEqualPhysical(sessionManifest.codexHome, codexHome)) {
     throw new Error(`Session backup was created for ${sessionManifest.codexHome}, not ${codexHome}.`);
   }
   if (!Array.isArray(sessionManifest.files)) {
@@ -588,7 +651,8 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
     restoreSessions = true,
     allowSqliteHomeRelocation = false,
     globalStateTargetPaths = null,
-    sessionTargetPaths = null
+    sessionTargetPaths = null,
+    onBeforeSessionRestore = null
   } = options;
   const storage = typeof storageOrCodexHome === "string"
     ? resolveStorageLayout({ codexHome: storageOrCodexHome, env: {} })
@@ -606,16 +670,26 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
       throw new Error(`Unsupported session backup manifest in ${sessionManifestPath}.`);
     }
     if (typeof sessionManifest.codexHome !== "string"
-        || !storagePathsEqual(sessionManifest.codexHome, codexHome)) {
+        || !await storagePathsEqualPhysical(sessionManifest.codexHome, codexHome)) {
       throw new Error(`Session backup was created for ${sessionManifest.codexHome}, not ${codexHome}.`);
     }
-    await validateSessionManifestEntries(sessionManifest.files ?? [], codexHome);
+    const validatedEntries = await validateSessionManifestEntries(sessionManifest.files ?? [], codexHome);
     if (sessionTargetPaths) {
       const selected = new Set(sessionTargetPaths.map(pathComparisonKey));
-      sessionRestoreEntries = (sessionManifest.files ?? [])
-        .filter((entry) => selected.has(pathComparisonKey(entry.path)));
+      for (const selectedPath of sessionTargetPaths) {
+        selected.add(pathComparisonKey(await fs.realpath(selectedPath)));
+      }
+      sessionRestoreEntries = validatedEntries
+        .filter(({ originalPath, canonicalPath }) =>
+          selected.has(pathComparisonKey(originalPath)) || selected.has(pathComparisonKey(canonicalPath))
+        )
+        .map(({ entry }) => entry);
     } else {
-      sessionRestoreEntries = await selectSessionRestoreEntries(backupDir, sessionManifest);
+      const selectedEntries = await selectSessionRestoreEntries(backupDir, sessionManifest);
+      const selected = new Set(selectedEntries.map((entry) => pathComparisonKey(entry.path)));
+      sessionRestoreEntries = validatedEntries
+        .filter(({ originalPath }) => selected.has(pathComparisonKey(originalPath)))
+        .map(({ entry }) => entry);
     }
   }
 
@@ -632,7 +706,7 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
     targetSqliteHome = resolveRestoreSqliteHome(storage, metadata, stateDb);
     const sqliteHomeRelocation = metadata.version >= 2
       && metadata.sqliteHome
-      && !storagePathsEqual(metadata.sqliteHome, targetSqliteHome);
+      && !await storagePathsEqualPhysical(metadata.sqliteHome, targetSqliteHome);
     if (sqliteHomeRelocation && !allowSqliteHomeRelocation) {
       throw new Error(
         `Backup SQLite home is ${metadata.sqliteHome}, but the current target is ${targetSqliteHome}. `
@@ -697,7 +771,19 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
   }
 
   if (restoreSessions) {
-    await restoreSessionChanges(sessionRestoreEntries);
+    await restoreSessionChanges(sessionRestoreEntries, {
+      onBeforeRestore: async (entry) => {
+        await onBeforeSessionRestore?.(entry);
+        const [validated] = await validateSessionManifestEntries([entry], codexHome);
+        if (!validated
+            || !storagePathsEqual(
+              validated.entry[SESSION_CANONICAL_TARGET],
+              entry[SESSION_CANONICAL_TARGET]
+            )) {
+          throw new Error(`Backup session target changed after validation: ${entry.path}`);
+        }
+      }
+    });
   }
 
   return metadata;

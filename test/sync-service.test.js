@@ -3580,6 +3580,91 @@ test("restoreBackup rejects escaped and non-rollout session manifest targets", a
   );
 });
 
+test("restoreBackup rejects rollout targets that traverse a directory link", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const configPath = path.join(codexHome, "config.toml");
+  const sessionsRoot = path.join(codexHome, "sessions");
+  const realDirectory = path.join(sessionsRoot, "2026", "linked-target");
+  const linkedDirectory = path.join(sessionsRoot, "linked-alias");
+  const realPath = path.join(realDirectory, "rollout-linked.jsonl");
+  await fs.mkdir(realDirectory, { recursive: true });
+  await writeRollout(realPath, "thread-linked", "apigather");
+  const { changes } = await collectSessionChanges(codexHome, "openai");
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: changes,
+    configPath
+  });
+  await fs.symlink(realDirectory, linkedDirectory, process.platform === "win32" ? "junction" : "dir");
+  const manifestPath = path.join(backupDir, "session-meta-backup.json");
+  const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+  manifest.files[0].path = path.join(linkedDirectory, "rollout-linked.jsonl");
+  await fs.writeFile(manifestPath, JSON.stringify(manifest), "utf8");
+
+  await assert.rejects(
+    restoreBackup(backupDir, codexHome, {
+      restoreConfig: false,
+      restoreDatabase: false,
+      restoreSessions: true
+    }),
+    /symbolic link or reparse point/
+  );
+});
+
+test("restoreBackup revalidates a rollout target immediately before restore", async () => {
+  const { root, codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionDirectory = path.join(codexHome, "sessions", "2026", "swap-target");
+  const originalDirectory = path.join(codexHome, "sessions", "2026", "swap-original");
+  const sessionPath = path.join(sessionDirectory, "rollout-swap.jsonl");
+  await fs.mkdir(sessionDirectory, { recursive: true });
+  await writeRollout(sessionPath, "thread-swap", "apigather");
+  const { changes } = await collectSessionChanges(codexHome, "openai");
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: changes,
+    configPath: path.join(codexHome, "config.toml")
+  });
+  await writeRollout(sessionPath, "thread-swap", "openai");
+
+  const outsideDirectory = path.join(root, "outside-swap-target");
+  const outsidePath = path.join(outsideDirectory, "rollout-swap.jsonl");
+  await fs.mkdir(outsideDirectory, { recursive: true });
+  await writeRollout(outsidePath, "outside-thread", "outside-provider");
+  const outsideBefore = await fs.readFile(outsidePath, "utf8");
+  let swapped = false;
+  try {
+    await assert.rejects(
+      restoreBackup(backupDir, codexHome, {
+        restoreConfig: false,
+        restoreDatabase: false,
+        restoreSessions: true,
+        onBeforeSessionRestore: async () => {
+          if (swapped) return;
+          swapped = true;
+          await fs.rename(sessionDirectory, originalDirectory);
+          await fs.symlink(
+            outsideDirectory,
+            sessionDirectory,
+            process.platform === "win32" ? "junction" : "dir"
+          );
+        }
+      }),
+      (error) => error instanceof AggregateError
+        && error.failures.some((failure) => /symbolic link or reparse point/.test(failure.message))
+    );
+    assert.equal(await fs.readFile(outsidePath, "utf8"), outsideBefore);
+  } finally {
+    if (swapped) {
+      await fs.unlink(sessionDirectory);
+      await fs.rename(originalDirectory, sessionDirectory);
+    }
+  }
+});
+
 test("Windows restore attempts every rollout even when one target is locked", async () => {
   if (process.platform !== "win32") {
     return;

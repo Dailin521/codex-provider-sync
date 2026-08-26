@@ -341,7 +341,7 @@ function isHistorySummary(value: unknown): boolean {
   if (!isRecord(value)) return false;
   return isNonEmptyString(value.id)
     && typeof value.title === "string"
-    && typeof value.cwd === "string"
+    && !("cwd" in value)
     && isNonEmptyString(value.provider)
     && typeof value.archived === "boolean"
     && isNonEmptyString(value.updatedAt)
@@ -381,8 +381,9 @@ export function assertCoreMethodOutput<M extends CoreMethodName>(
           || (status.modelCounts !== undefined && !isProviderDistribution(status.modelCounts))
           || !("sqliteCounts" in status)
           || !isJsonValue(status.sqliteCounts)
-          || !isNonEmptyString(status.codexHome)
-          || !isNonEmptyString(status.sqliteHome)
+          || "codexHome" in status
+          || "sqliteHome" in status
+          || !isNonEmptyString(status.codexHomeSource)
           || !isNonEmptyString(status.sqliteHomeSource)
           || !isRecord(status.backupSummary)
           || !isNonNegativeInteger(status.backupSummary.count)

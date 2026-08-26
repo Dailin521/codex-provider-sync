@@ -1,6 +1,8 @@
 node_modules/
 apps/*/dist/
 packages/*/dist/
+!packages/contracts/dist/
+!packages/contracts/dist/**
 apps/*/*.tsbuildinfo
 packages/*/*.tsbuildinfo
 coverage/
@@ -11,3 +13,6 @@ desktop/**/obj/
 *.csproj.user
 test/*.exe
 WORKLOG*.md
+.playwright-cli/
+apps/web/test-results/
+apps/web/playwright-report/

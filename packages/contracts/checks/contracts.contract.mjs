@@ -129,8 +129,7 @@ test("method output guards reject structurally invalid successes", () => {
     currentProvider: "openai",
     rolloutCounts: { openai: 1 },
     sqliteCounts: { openai: 1 },
-    codexHome: "redacted",
-    sqliteHome: "redacted",
+    codexHomeSource: "profile",
     sqliteHomeSource: "default",
     backupSummary: { count: 0, totalBytes: 0 },
     pendingRecovery: false,
@@ -157,6 +156,10 @@ test("method output guards reject structurally invalid successes", () => {
   assert.throws(() => assertCoreMethodOutput("getStatus", {
     ...status,
     operationInProgress: { leak: () => "private" }
+  }));
+  assert.throws(() => assertCoreMethodOutput("getStatus", {
+    ...status,
+    codexHome: "C:/private"
   }));
   assert.throws(() => assertCoreMethodOutput("getDiagnostics", {
     schemaVersion: 1,

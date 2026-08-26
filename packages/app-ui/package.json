@@ -17,8 +17,26 @@
     "node": ">=24"
   },
   "dependencies": {
+    "@hookform/resolvers": "5.9.1",
+    "@radix-ui/react-dialog": "1.1.23",
+    "@radix-ui/react-select": "2.3.7",
+    "@radix-ui/react-slot": "1.3.3",
+    "@radix-ui/react-toast": "1.2.23",
+    "@tanstack/react-query": "5.102.3",
     "@codex-provider-sync/contracts": "0.0.0",
     "@codex-provider-sync/core-client": "0.0.0",
-    "@codex-provider-sync/design-system": "0.0.0"
+    "@codex-provider-sync/design-system": "0.0.0",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "i18next": "26.4.0",
+    "lucide-react": "1.34.0",
+    "react-hook-form": "7.86.0",
+    "react-i18next": "17.0.12",
+    "tailwind-merge": "3.6.0",
+    "zod": "4.4.3"
+  },
+  "peerDependencies": {
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
   }
 }

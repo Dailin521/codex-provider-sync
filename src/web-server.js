@@ -25,6 +25,7 @@ import {
   toCoreErrorDto,
 } from "./public-api.js";
 import { createMemoryWebUiState, ProfileRevisionConflictError, WebUiStateStore } from "./web-state.js";
+import { createWebCoreFacade, dispatchWebCoreRequest } from "./web-core-adapter.js";
 
 const DEFAULT_PORT = 8791;
 const MAX_REQUEST_BYTES = 64 * 1024;
@@ -51,6 +52,15 @@ const MIME_TYPES = new Map([
   [".svg", "image/svg+xml"],
   [".webp", "image/webp"]
 ]);
+
+class WebRequestError extends Error {
+  constructor(message, statusCode, code) {
+    super(message);
+    this.name = "WebRequestError";
+    this.statusCode = statusCode;
+    this.code = code;
+  }
+}
 
 function sendJson(response, statusCode, value) {
   const body = JSON.stringify(value);
@@ -89,7 +99,7 @@ async function readJsonBody(request) {
   for await (const chunk of request) {
     received += chunk.length;
     if (received > MAX_REQUEST_BYTES) {
-      throw new Error(`Request body exceeds ${MAX_REQUEST_BYTES} bytes.`);
+      throw new WebRequestError(`Request body exceeds ${MAX_REQUEST_BYTES} bytes.`, 413, "REQUEST_TOO_LARGE");
     }
     chunks.push(chunk);
   }
@@ -99,7 +109,7 @@ async function readJsonBody(request) {
   try {
     return JSON.parse(Buffer.concat(chunks).toString("utf8"));
   } catch {
-    throw new Error("Request body must be valid JSON.");
+    throw new WebRequestError("Request body must be valid JSON.", 400, "INVALID_JSON");
   }
 }
 
@@ -293,9 +303,14 @@ async function serveStatic(response, pathname, webRoot) {
   }
 
   const extension = path.extname(filePath).toLowerCase();
+  let cspNonce = null;
   if (extension === ".html") {
-    file = Buffer.from(file.toString("utf8").replace("__CODEX_PROVIDER_SYNC_BOOTSTRAP__", "{}"), "utf8");
+    cspNonce = crypto.randomBytes(18).toString("base64url");
+    file = Buffer.from(file.toString("utf8")
+      .replace("__CODEX_PROVIDER_SYNC_BOOTSTRAP__", "{}")
+      .replaceAll("__CPS_CSP_NONCE__", cspNonce), "utf8");
   }
+  const nonceSource = cspNonce ? ` 'nonce-${cspNonce}'` : "";
   response.writeHead(200, {
     "Cache-Control": extension === ".html" ? "no-store" : "public, max-age=3600",
     "Content-Type": MIME_TYPES.get(extension) ?? "application/octet-stream",
@@ -303,7 +318,7 @@ async function serveStatic(response, pathname, webRoot) {
     "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
-    "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+    "Content-Security-Policy": `default-src 'self'; script-src 'self'${nonceSource}; style-src 'self'${nonceSource}; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`
   });
   response.end(file);
 }
@@ -431,6 +446,7 @@ export function createWebUiServer({
     listHistory: services.listHistory ?? listHistory,
     getHistorySession: services.getHistorySession ?? getHistorySession
   };
+  const coreFacade = services.coreFacade ?? createWebCoreFacade(stateStore);
   const activity = [];
   let activityId = 0;
   let activeOperation = null;
@@ -488,7 +504,7 @@ export function createWebUiServer({
       record(outcome === "partial" ? "warning" : "success", `${kind} completed`);
       sendJson(response, 200, { result: { ...result, outcome } });
     } catch (error) {
-      record("error", `${kind} failed`, error instanceof Error ? error.message : String(error));
+      record("error", `${kind} failed`, typeof error?.code === "string" ? error.code : "INTERNAL_ERROR");
       sendError(response, coreErrorHttpStatus(error, 400), error);
     } finally {
       activeOperation = null;
@@ -645,6 +661,29 @@ export function createWebUiServer({
         }
 
         const body = await readJsonBody(request);
+        if (pathname === "/api/core") {
+          const contentType = String(request.headers["content-type"] ?? "").toLowerCase();
+          if (!contentType.startsWith("application/json")) {
+            const dispatched = await dispatchWebCoreRequest(coreFacade, {
+              protocolVersion: body?.protocolVersion,
+              requestId: body?.requestId,
+              operationId: body?.operationId,
+              method: body?.method,
+              payload: { invalidContentType: true }
+            });
+            record("warning", "Core request rejected", dispatched.activity);
+            sendJson(response, 415, dispatched.envelope);
+            return;
+          }
+          const dispatched = await dispatchWebCoreRequest(coreFacade, body);
+          record(
+            dispatched.activity.ok ? "info" : "warning",
+            dispatched.activity.ok ? "Core request completed" : "Core request rejected",
+            dispatched.activity
+          );
+          sendJson(response, dispatched.statusCode, dispatched.envelope);
+          return;
+        }
         if (pathname === "/api/profiles/save") {
           const profileId = requireString(body.profileId, "profileId", { maxLength: 80 });
           try {
@@ -683,7 +722,7 @@ export function createWebUiServer({
         if (pathname === "/api/status") {
           const profile = resolveStorageProfile(body, stateStore);
           const status = serializeStatus(await api.getStatus({ ...profile, platform }));
-          record("info", "Status refreshed", status.codexHome, null);
+          record("info", "Status refreshed", { profileId: profile.profileId }, null);
           sendJson(response, 200, { status });
           return;
         }
@@ -827,7 +866,11 @@ export function createWebUiServer({
       }
       await serveStatic(response, pathname, webRoot);
     } catch (error) {
-      sendError(response, coreErrorHttpStatus(error, 500), error);
+      if (error instanceof WebRequestError) {
+        sendError(response, error.statusCode, error, error.code);
+      } else {
+        sendError(response, coreErrorHttpStatus(error, 500), error);
+      }
     }
   });
 

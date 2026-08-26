@@ -74,13 +74,13 @@ codex-provider web --port 8792     # 指定端口
 codex-provider web --reset-access  # 重新配对浏览器
 ```
 
-Web UI 默认只监听 `127.0.0.1`，并自动打开浏览器完成配对。存储路径由页面顶部的存储配置（Profile）管理，写操作需要确认。
+Web UI 默认只监听 `127.0.0.1`，并自动打开浏览器完成配对。共享 React 界面通过版本化 `HttpCoreClient` 调用本地 Web Host；存储路径由服务端 Profile 管理，Sync、Switch 与 Restore 均先显示计划再确认。
 
 #### 切换 Provider 后同步历史
 
 1. 使用 CCSwitch 等常用工具切换 Provider。
-2. 在 Web UI 点击“读取状态”（可跳过）。
-3. 保持“仅同步元数据”，选择目标 Provider（供应商），确认执行同步。
+2. 在“概览”检查当前 Provider 与两侧分布。
+3. 进入“同步”，生成计划并确认执行。
 4. 显示“Provider 元数据已对齐”即完成。
 
 > **注意：** 元数据同步只能恢复历史可见性。跨供应商继续旧会话时，目标后端可能无法解密会话中的 `encrypted_content` 推理内容，导致继续对话或压缩（compact）失败。
@@ -123,15 +123,16 @@ SQLite Home 解析顺序：`--sqlite-home` → `config.toml` 根级 `sqlite_home
 
 ```mermaid
 flowchart LR
-    Browser["Browser Web UI"] --> WebServer["Local Node Web Server<br/>127.0.0.1"]
-    WebServer --> NodeService["Node Service"]
-    CLI["Node CLI"] --> NodeService
+    Browser["Browser React UI"] --> HttpClient["HttpCoreClient"]
+    HttpClient --> WebServer["Local Web Host<br/>127.0.0.1 + pairing"]
+    WebServer --> NodeCore["Node Core public facade"]
+    CLI["Node CLI"] --> NodeCore
 
     WindowsGUI["Windows GUI"] --> Application[".NET Application"]
     Application --> DotNetCore[".NET Core"]
     MacGUI["macOS GUI"] --> DotNetCore
 
-    NodeService --> Storage["Codex Storage"]
+    NodeCore --> Storage["Codex Storage"]
     DotNetCore --> Storage
 
     Storage --> Config["config.toml"]
@@ -140,7 +141,7 @@ flowchart LR
     Storage --> Backups["managed backups"]
 ```
 
-- Web UI 和 CLI 使用同一套 Node 服务逻辑。
+- Web UI 的业务请求经 `HttpCoreClient → /api/core → Node Core public facade`；CLI 直接调用同一公开 Core 边界，不解析彼此的人类输出。
 - Windows GUI 通过 Application 层调用 .NET Core；macOS GUI 当前直接调用 .NET Core。
 - Node 服务和 .NET Core 处理相同的配置、rollout、SQLite 和备份安全边界。
 

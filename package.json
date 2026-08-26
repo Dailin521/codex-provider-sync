@@ -15,6 +15,8 @@
     "AGENTS.md",
     "docs",
     "images/README",
+    "packages/contracts/dist",
+    "packages/core/src",
     "src",
     "web/dist"
   ],
@@ -23,7 +25,9 @@
   },
   "scripts": {
     "test": "node --test",
-    "web:build": "npm run build --workspace @codex-provider-sync/web",
+    "web:build": "npm run workspaces:build && npm run build --workspace @codex-provider-sync/web",
+    "web:test:e2e": "npm run test:e2e --workspace @codex-provider-sync/web",
+    "fixtures:cross-runtime": "node --test test-support/cross-runtime-fixtures.mjs",
     "web:start": "node src/cli.js web",
     "workspaces:build": "tsc -b tsconfig.workspaces.json && tsc -p packages/core/tsconfig.json",
     "workspaces:test": "npm run test --workspaces --if-present",

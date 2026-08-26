@@ -1,7 +1,10 @@
 import fs from "node:fs/promises";
+import crypto from "node:crypto";
+import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -36,6 +39,178 @@ function dependencyNames(tree, result = new Set()) {
   return result;
 }
 
+function containsPrivateStorageField(value) {
+  if (Array.isArray(value)) {
+    return value.some(containsPrivateStorageField);
+  }
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    if (["codexHome", "sqliteHome", "cwd"].includes(key)) {
+      return true;
+    }
+    if (containsPrivateStorageField(child)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function reserveLoopbackPort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        server.close();
+        reject(new Error("Could not reserve a loopback port."));
+        return;
+      }
+      server.close((error) => error ? reject(error) : resolve(address.port));
+    });
+  });
+}
+
+function requestPage(url, options = {}) {
+  return new Promise((resolve, reject) => {
+    const request = http.request(url, {
+      method: options.method ?? "GET",
+      headers: options.headers ?? {}
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => resolve({
+        status: response.statusCode,
+        headers: response.headers,
+        body: Buffer.concat(chunks).toString("utf8")
+      }));
+    });
+    request.once("error", reject);
+    request.end(options.body ?? null);
+  });
+}
+
+async function smokeInstalledWeb(tempRoot, codexHome) {
+  const port = await reserveLoopbackPort();
+  const installedCliPath = path.join(
+    tempRoot,
+    "node_modules",
+    "@dailin521",
+    "codex-provider-sync",
+    "src",
+    "cli.js"
+  );
+  const child = spawn(process.execPath, [
+    installedCliPath,
+    "web",
+    "--no-open",
+    "--port",
+    String(port),
+    "--codex-home",
+    codexHome
+  ], {
+    cwd: tempRoot,
+    windowsHide: true,
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, NO_COLOR: "1" }
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk.toString("utf8"); });
+  child.stderr.on("data", (chunk) => { output += chunk.toString("utf8"); });
+  try {
+    const deadline = Date.now() + 10_000;
+    let health = null;
+    while (Date.now() < deadline) {
+      if (child.exitCode !== null) throw new Error(`Installed Web UI exited early.\n${output}`);
+      try {
+        health = await requestPage(`http://127.0.0.1:${port}/api/health`);
+        if (health.status === 200) break;
+      } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!health || health.status !== 200) throw new Error(`Installed Web UI did not become healthy.\n${output}`);
+    const page = await requestPage(`http://127.0.0.1:${port}/`);
+    if (page.status !== 200 || !page.body.includes("Codex Provider Sync")) {
+      throw new Error("Installed Web UI did not serve the production application shell.");
+    }
+    if (!String(page.headers["content-security-policy"] ?? "").includes("style-src 'self'")) {
+      throw new Error("Installed Web UI did not serve the strict production CSP.");
+    }
+    const pairingUrl = output.match(/One-time pairing link:\s+(\S+)/)?.[1];
+    if (!pairingUrl) throw new Error("Installed Web UI did not emit a one-time pairing link.");
+    const pairingToken = decodeURIComponent(new URL(pairingUrl).hash.replace(/^#pair=/, ""));
+    const origin = `http://127.0.0.1:${port}`;
+    const paired = await requestPage(`${origin}/api/pair`, {
+      method: "POST",
+      headers: { Origin: origin, "X-Codex-Provider-Pairing": pairingToken }
+    });
+    const pairedPayload = JSON.parse(paired.body);
+    if (paired.status !== 200 || typeof pairedPayload.deviceCredential !== "string") {
+      throw new Error("Installed Web UI pairing smoke failed.");
+    }
+    const authenticatedHeaders = {
+      Origin: origin,
+      "X-Codex-Provider-Device": pairedPayload.deviceCredential
+    };
+    const profiles = await requestPage(`${origin}/api/profiles`, { headers: authenticatedHeaders });
+    const profilesPayload = JSON.parse(profiles.body);
+    const profile = profilesPayload.profiles?.find((entry) => entry.id === "default");
+    if (profiles.status !== 200 || !profile?.revision) {
+      throw new Error("Installed Web UI profile smoke failed.");
+    }
+    const coreHeaders = { ...authenticatedHeaders, "Content-Type": "application/json" };
+    const statusRequest = {
+      protocolVersion: 1,
+      requestId: crypto.randomUUID(),
+      method: "getStatus",
+      payload: { profile: { profileId: profile.id, profileRevision: profile.revision } }
+    };
+    const coreStatus = await requestPage(`${origin}/api/core`, {
+      method: "POST",
+      headers: coreHeaders,
+      body: JSON.stringify(statusRequest)
+    });
+    const coreStatusPayload = JSON.parse(coreStatus.body);
+    const serializedStatus = JSON.stringify(coreStatusPayload);
+    if (coreStatus.status !== 200 || coreStatusPayload.ok !== true) {
+      throw new Error("Installed Web UI Core facade smoke failed.");
+    }
+    if (containsPrivateStorageField(coreStatusPayload) || serializedStatus.includes(codexHome)) {
+      throw new Error("Installed Web UI Core facade exposed a private storage path.");
+    }
+    const staleStatus = await requestPage(`${origin}/api/core`, {
+      method: "POST",
+      headers: coreHeaders,
+      body: JSON.stringify({
+        ...statusRequest,
+        requestId: crypto.randomUUID(),
+        payload: {
+          profile: {
+            profileId: profile.id,
+            profileRevision: `${profile.revision}-stale`
+          }
+        }
+      })
+    });
+    const stalePayload = JSON.parse(staleStatus.body);
+    const serializedError = JSON.stringify(stalePayload);
+    if (staleStatus.status !== 409
+        || stalePayload.ok !== false
+        || stalePayload.error?.code !== "PROFILE_CHANGED"
+        || serializedError.includes(codexHome)) {
+      throw new Error("Installed Web UI Core error redaction smoke failed.");
+    }
+  } finally {
+    child.kill();
+    await Promise.race([
+      new Promise((resolve) => child.once("exit", resolve)),
+      new Promise((resolve) => setTimeout(resolve, 3000))
+    ]);
+  }
+}
+
 const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codex-provider-sync-pack-smoke-"));
 let tarballPath = null;
 try {
@@ -62,14 +237,37 @@ try {
   }
   if (!tarballPath) throw new Error("Could not locate the npm pack tarball.");
   const packedPaths = new Set(packResult[0].files.map((entry) => entry.path.replaceAll("\\", "/")));
-  for (const required of ["src/cli.js", "src/public-api.js", "web/dist/index.html"] ) {
+  for (const required of [
+    "src/cli.js",
+    "src/public-api.js",
+    "src/web-core-adapter.js",
+    "packages/contracts/dist/index.js",
+    "packages/core/src/index.js",
+    "web/dist/index.html"
+  ] ) {
     if (!packedPaths.has(required)) throw new Error(`Root tarball is missing ${required}.`);
   }
   for (const packedPath of packedPaths) {
-    if (packedPath.startsWith("apps/")
-        || packedPath.startsWith("packages/")
-        || packedPath.startsWith("node_modules/")) {
-      throw new Error(`Root tarball contains forbidden workspace/runtime content: ${packedPath}`);
+    const allowedExact = new Set([
+      "AGENTS.md",
+      "CHANGELOG.md",
+      "CONTRIBUTING.md",
+      "CONTRIBUTORS.md",
+      "LICENSE",
+      "README.md",
+      "package.json"
+    ]);
+    const allowedPrefix = [
+      "docs/",
+      "images/README/",
+      "packages/contracts/dist/",
+      "packages/core/src/",
+      "src/",
+      "web/dist/"
+    ];
+    if (!allowedExact.has(packedPath)
+        && !allowedPrefix.some((prefix) => packedPath.startsWith(prefix))) {
+      throw new Error(`Root tarball contains an unapproved path: ${packedPath}`);
     }
   }
 
@@ -105,7 +303,13 @@ try {
   if (installLifecycle) {
     const stateDbPath = path.join(codexHome, "sqlite", "state_5.sqlite");
     const createDatabase = [
-      'const Database = require("better-sqlite3");',
+      'let Database;',
+      'try {',
+      '  Database = require("node:sqlite").DatabaseSync;',
+      '} catch (error) {',
+      '  if (!["ERR_UNKNOWN_BUILTIN_MODULE", "MODULE_NOT_FOUND"].includes(error?.code)) throw error;',
+      '  Database = require("better-sqlite3");',
+      '}',
       'const database = new Database(process.env.PROVIDER_SYNC_SMOKE_DB);',
       'database.exec(`CREATE TABLE threads (',
       '  id TEXT PRIMARY KEY,',
@@ -146,6 +350,7 @@ try {
         || statusEnvelope.result?.sqliteCounts?.unreadable === true)) {
     throw new Error("Installed CLI did not open the synthetic SQLite database.");
   }
+  if (installLifecycle) await smokeInstalledWeb(tempRoot, codexHome);
 
   const productionTree = JSON.parse(run(process.execPath, [npmCliPath, "ls", "--omit=dev", "--json"], {
     cwd: tempRoot

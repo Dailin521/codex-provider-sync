@@ -929,8 +929,18 @@ V1/C3 已实现上述边界；`runSync/runSwitch/runRestore/runWatch` 仍作为 
 - `packages/core` 的模块导出仅为 `createCoreFacade({resolveProfile})`；factory 返回对象的业务方法集合精确等于本节 15 个目标方法。根 `src/public-api.js` 继续承载 CLI 与迁移适配器，不被描述为 Renderer 稳定 API。
 - `resolveProfile({profileId, profileRevision?})` 只能由 Local Web Host、Electron Main/Utility Host 或测试 Host 注入，返回可信的 `{id, revision, codexHome, sqliteHome?}`。Facade 必须验证 ID、revision 和绝对路径；selector revision 漂移时 fail closed，不能回退到 `CODEX_HOME` 或默认用户目录。
 - UI/HTTP/IPC 产品输入只包含 profile ID/revision、Provider/model mode、受管 backupId 等产品字段；不得携带 `codexHome`、`sqliteHome`、backup path 或底层 apply 参数。Apply 仍精确只收 schemaVersion/planId。
-- 备份列表在 facade 处移除 backup root、绝对 path 与 metadata 中的存储路径，只返回 `backupId`、size 和有界展示元数据；History 列表移除 rollout path 与首条消息预览，正文只能由用户明确调用详情方法后读取。
+- Status 在 facade 处移除 `codexHome`、`sqliteHome` 和 State DB 路径，只保留来源枚举、revision、分布与安全状态；warning 只能由固定类别/固定文案投影，不得透传底层任意字符串。
+- 备份列表在 facade 处移除 backup root、绝对 path 与 metadata 中的存储路径，只返回 `backupId`、size 和有界展示元数据；History 列表移除 rollout path、`cwd` 与首条消息预览，正文只能由用户明确调用详情方法后读取。
 - `TransportCoreClient` 对成功 payload 执行按方法的最小 runtime guard；协议版本不兼容映射为固定 `PROTOCOL_VERSION_MISMATCH`，其他畸形 envelope/result 收口为固定 `INTERNAL_ERROR`。HTTP 非 2xx 不得携带成功 envelope。
+
+### 16.4 C5 Local Web Host 与共享 UI
+
+- `/api/core` 只接受带 `protocolVersion`、`requestId`、可选 `operationId`、`method`、`payload` 的版本化 POST envelope；请求体上限 64 KiB，content type、结构、方法输入和成功输出均由共享 contracts guard 验证。
+- 响应必须保留同一 `requestId`。非 2xx 不得伪装成功 envelope；不可信异常只返回固定、安全的 `INTERNAL_ERROR` DTO，不输出 stack、cause、路径、token、消息正文或原始异常文本。
+- Web Host 在进入 envelope handler 前验证一次性 pairing、设备凭据 hash 与 loopback Origin；Facade 只解析 server-managed profile ID/revision，Prepare 绑定 storage revisions，Apply 在双锁内重新核对。受管 backupId 在可信 Host/Core 边界解析；Renderer 不能通过 Core 输入提交任意路径。
+- React UI 的业务调用固定为 `HttpCoreClient → /api/core → createCoreFacade`；profile 管理、配对和忘记浏览器属于 Host API，不得把业务实现复制进 UI。
+- History 列表仅在用户进入 History 页面后读取；详情仅在用户明确选择会话后延迟读取，正文不进入 TanStack Query cache，离开页面时清空并取消 pending detail request。
+- Production HTML 使用每响应随机 nonce 的严格 CSP；无 `unsafe-inline`，外部导航、远程脚本和跨源 Core 请求不在允许面内。
 
 ## 17. Phase 1 提取要求
 
@@ -986,7 +996,9 @@ Phase 1 只提取边界，不改变算法或结果：
 
 ### 18.4 Web
 
-- pairing、Origin 和 device credential；
+- 未配对 `/api/core`、一次性 pairing、Origin 和 device credential hash；
+- 非 JSON content type、超过 64 KiB、畸形/版本不兼容 envelope 与未知 method；
+- requestId correlation、非 2xx success 拒绝、Core/Host error 固定脱敏；
 - raw storage path 拒绝；
 - profile/storage revision required/changed；
 - 单写操作；
@@ -994,7 +1006,8 @@ Phase 1 只提取边界，不改变算法或结果：
 - success/partial mapping；
 - alignment 不要求总数相等；
 - runtime storage identity 与安全复用；
-- History 只读与分页边界。
+- History 列表/详情必须显式读取，详情正文不缓存且离页清空；
+- production CSP nonce、八个共享页面、双语/主题、键盘焦点、reduced motion 与 200% 等效窄视口。
 
 ## 19. 变更控制
 

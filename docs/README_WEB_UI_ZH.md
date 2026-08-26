@@ -1,6 +1,6 @@
 # Web UI 使用说明
 
-Web UI 是 CLI 提供的本地浏览器界面，与 CLI 共用同一套同步、备份和恢复逻辑。
+Web UI 是 CLI 提供的本地浏览器界面。共享 React UI 通过版本化 `HttpCoreClient` 调用本地 Web Host，再进入与 CLI 相同的 Node Core 公开边界；页面不会解析 CLI 输出或复制同步逻辑。
 
 ## 启动
 
@@ -45,8 +45,8 @@ npm run web:start
 本工具只同步本地元数据，不负责登录或切换账号。已经通过其他工具切换 Provider 时：
 
 1. 使用 CCSwitch 等常用工具切换 Provider，并确认 Codex 可以正常对话。
-2. 回到 Web UI；需要时点击“读取状态”。
-3. 在概览页的“执行同步”中保持“仅同步元数据”，选择目标 Provider（供应商），确认执行。
+2. 回到 Web UI，在“概览”检查当前 Provider、rollout/SQLite 分布和安全状态。
+3. 进入“同步”，生成十分钟内有效的一次性计划，核对影响数量、警告与备份预期后确认。
 4. 显示“Provider 元数据已对齐”即完成。切回原 Provider 时重复相同步骤。
 
 rollout 与 SQLite 的会话总数可能因活动会话写入和索引时序短暂相差 1；这不表示 Provider 元数据未对齐。以两侧的 Provider 分布和页面对齐状态为准。
@@ -55,20 +55,24 @@ rollout 与 SQLite 的会话总数可能因活动会话写入和索引时序短�
 
 ## 页面功能
 
-- 概览：显示当前 Provider、rollout/SQLite 分布、修复项和项目可见性。
-- 聊天记录：从 rollout 文件只读读取会话列表和用户/助手消息，支持搜索、Provider/项目/归档筛选、分页和会话详情。
-- 执行同步：区分“仅同步元数据”和“切换 Provider 并同步”。
-- 切换模型：支持跟随 Provider section、保留根级 model 或显式指定 model。
-- 备份：查看当前 Codex Home 下由本工具管理的备份，并按内容恢复。
-- 恢复保护：SQLite Home 不同时显示来源与目标；迁移数据库时禁止同时恢复旧配置。
-- 活动：显示当前 Web UI 进程内存中的同步阶段和操作结果；服务停止后不会作为日志文件保留。
-- 清理：按保留数量删除较旧的托管备份。
+- 概览（Overview）：显示当前 Provider、rollout/SQLite 分布、对齐状态、备份数、locked rollout 数和存储来源；公共状态不显示本机绝对路径。
+- 同步（Sync）：设置备份保留数，先生成计划，再在确认对话框中 Apply。
+- 切换 Provider（Switch Provider）：只允许已配置 Provider，并明确选择跟随 Provider 默认模型、保留根 model 或显式 model 三种模式。
+- 备份/恢复（Backups/Restore）：只展示受管 `backupId`；Restore 可选择 config/SQLite/session 范围，跨 SQLite Home 必须选择目标 Profile 并确认 relocation；同页可按保留数清理受管备份。
+- 历史（History）：进入页面后才读取会话列表；只有点击某个会话才延迟读取详情。当前列表最多读取 100 项，不提供搜索/筛选承诺；消息正文不进入 Query cache，离开详情即清空并取消未完成请求。
+- Profiles：管理服务端受信任的 Codex/SQLite Home 配置；Core 业务请求只提交 profile ID/revision，不传递任意路径。
+- Diagnostics：只读显示 Core 返回的有界安全诊断字段，不读取凭据、token、消息正文或原始异常。
+- Settings：切换 `zh-CN` / `en`、`system` / `light` / `dark` 主题，管理 Watch 与撤销当前浏览器授权。
+
+全局区域显示 Recovery、正在进行的 Operation、结构化错误与 Toast。界面支持键盘操作、可见焦点、reduced motion 和 200% 缩放等效窄视口。
 
 ## 本地安全边界
 
 - 服务只监听 `127.0.0.1`，不要直接暴露到局域网或公网。
 - 首次启动使用短时、一次性的配对链接；服务端只保存设备凭证哈希。使用“忘记此浏览器”或 `--reset-access` 可撤销授权。
-- 存储路径由服务端配置管理，写操作串行执行，恢复只能选择当前 Codex Home 下由本工具管理的备份。
+- Core API 请求/响应使用共享版本化 envelope；服务端验证 Origin、64 KiB 请求上限、requestId、Profile/Storage revision 和产品输入 schema。
+- Production HTML 使用每响应随机 nonce 的严格 CSP；不允许远程脚本或跨源 Core 请求。
+- 存储路径由服务端配置管理，写操作 fail-fast 串行；Sync、Switch、Restore 使用 Prepare/Apply，Apply 只接收不透明 `planId`；恢复只能选择受管备份。
 - Web UI 不能绕过共享核心逻辑中的锁、SQLite Home、WSL UNC、备份和恢复限制。
 
 ## SSH、无桌面和远程浏览器

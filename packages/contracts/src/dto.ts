@@ -101,8 +101,7 @@ export interface StatusSnapshot {
   rolloutCounts: ProviderDistribution;
   modelCounts?: ProviderDistribution;
   sqliteCounts: JsonValue;
-  codexHome: string;
-  sqliteHome: string;
+  codexHomeSource: string;
   sqliteHomeSource: string;
   backupSummary: {
     count: number;
@@ -167,7 +166,6 @@ export interface PruneBackupsResult {
 export interface HistorySessionSummary {
   id: string;
   title: string;
-  cwd: string;
   provider: string;
   model?: string | null;
   archived: boolean;

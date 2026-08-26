@@ -1,26 +1,7 @@
-import type { CoreClient } from "@codex-provider-sync/core-client";
-import type { SupportedLocale, ThemeMode } from "@codex-provider-sync/design-system";
+export { AppUi } from "./App.js";
+export { APP_ROUTES, type AppRoute } from "./routes.js";
+export { createAppI18n, resources, resourcesHaveMatchingKeys } from "./i18n.js";
+export { profileSchema, restoreSchema, switchSchema, syncSchema } from "./schemas.js";
+export type { AppUiProps, HostClient, HostProfile, PreferenceStore, SaveProfileInput } from "./types.js";
 
-export const APP_ROUTES = [
-  "overview",
-  "sync",
-  "switch-provider",
-  "backups-restore",
-  "history",
-  "profiles",
-  "diagnostics",
-  "settings"
-] as const;
-
-export type AppRoute = typeof APP_ROUTES[number];
-
-export interface AppShellDependencies {
-  core: CoreClient;
-  locale: SupportedLocale;
-  theme: ThemeMode;
-}
-
-export const APP_UI_MIGRATION_STATE = "contract-only-c4" as const;
-
-// C5 supplies React, routing, queries, forms, validation and rendered pages.
-// This package intentionally has no Electron or Node dependency.
+export const APP_UI_MIGRATION_STATE = "shared-ui-c5" as const;

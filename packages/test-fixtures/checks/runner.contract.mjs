@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   createRuntimeDifference,
@@ -154,4 +155,17 @@ test("difference records make unresolved runtime mismatches blocking", () => {
     decision: "Do not enable the next write stage.",
     notes: ["hash mismatch"]
   });
+});
+
+test("the Phase 2 static corpus is synthetic and accepted by the safe runner", async () => {
+  const staticRoot = fileURLToPath(new URL("../static/", import.meta.url));
+  for (const fixtureId of ["bidirectional-backup-roundtrip", "foreign-pending-restore"]) {
+    const fixtureRoot = path.join(staticRoot, fixtureId);
+    const manifest = await readFixtureManifest(fixtureRoot);
+    assert.equal(manifest.id, fixtureId);
+    assert.equal(manifest.containsRealUserData, false);
+    const rollout = await fs.readFile(path.join(fixtureRoot, "input", "codex-home", "sessions", "2026", "08", "26", "rollout-synthetic.jsonl"), "utf8");
+    assert.match(rollout, /"type":"session_meta"/);
+    assert.doesNotMatch(rollout, /"type":"event_msg"|"message"|encrypted_content/);
+  }
 });

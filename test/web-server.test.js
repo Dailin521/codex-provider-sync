@@ -44,7 +44,7 @@ async function startFixture(services = {}, options = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-provider-sync-web-"));
   await fs.writeFile(
     path.join(root, "index.html"),
-    '<!doctype html><title>fixture</title><script>window.boot=__CODEX_PROVIDER_SYNC_BOOTSTRAP__;</script>',
+    '<!doctype html><title>fixture</title><script nonce="__CPS_CSP_NONCE__">window.boot=__CODEX_PROVIDER_SYNC_BOOTSTRAP__;</script>',
     "utf8"
   );
   const stateStore = options.stateStore ?? createMemoryWebUiState({
@@ -136,6 +136,135 @@ function statusFixture(overrides = {}) {
   };
 }
 
+function coreStatusFixture(profile, overrides = {}) {
+  return {
+    schemaVersion: 1,
+    snapshotAt: "2026-08-25T00:00:00.000Z",
+    storageRevision: "storage-r1",
+    profile: { id: profile.id, revision: profile.revision },
+    currentProvider: "openai",
+    rolloutCounts: { sessions: { openai: 1 }, archived_sessions: {} },
+    sqliteCounts: { sessions: { openai: 1 }, archived_sessions: {} },
+    codexHomeSource: "profile",
+    sqliteHomeSource: "default",
+    backupSummary: { count: 0, totalBytes: 0 },
+    pendingRecovery: false,
+    pendingTransactions: [],
+    operationInProgress: null,
+    rolloutScanComplete: true,
+    lockedRolloutFiles: [],
+    ...overrides
+  };
+}
+
+test("versioned Core HTTP endpoint preserves pairing, correlation and canonical errors", async () => {
+  let statusError = null;
+  const handle = await startFixture({
+    coreFacade: {
+      async getStatus(input) {
+        if (statusError) throw statusError;
+        const profile = handle.stateStore.getProfile(input.profile.profileId);
+        return coreStatusFixture(profile);
+      }
+    }
+  });
+  try {
+    const profile = handle.stateStore.getProfile("default");
+    const envelope = {
+      protocolVersion: 1,
+      requestId: "core-status-request",
+      method: "getStatus",
+      payload: { profile: { profileId: profile.id, profileRevision: profile.revision } }
+    };
+    const anonymous = await api(handle, "/api/core", envelope);
+    assert.equal(anonymous.status, 403);
+
+    const { credential } = await handle.pair();
+    const response = await api(handle, "/api/core", envelope, credential);
+    assert.equal(response.status, 200);
+    assert.equal(response.payload.protocolVersion, 1);
+    assert.equal(response.payload.requestId, envelope.requestId);
+    assert.equal(response.payload.ok, true);
+    assert.equal(response.payload.result.profile.id, "default");
+    assert.equal("codexHome" in response.payload.result, false);
+    assert.equal("sqliteHome" in response.payload.result, false);
+
+    const pathInjection = await api(handle, "/api/core", {
+      ...envelope,
+      requestId: "core-path-injection",
+      payload: { ...envelope.payload, codexHome: "C:\\private" }
+    }, credential);
+    assert.equal(pathInjection.status, 400);
+    assert.equal(pathInjection.payload.ok, false);
+    assert.equal(pathInjection.payload.error.code, "INVALID_INPUT");
+    assert.doesNotMatch(JSON.stringify(pathInjection.payload), /C:\\\\private/);
+
+    statusError = Object.assign(new Error("token=secret C:\\private\\journal.json"), {
+      code: "INTERNAL_ERROR",
+      details: { path: "C:\\private\\journal.json", token: "secret" }
+    });
+    const failed = await api(handle, "/api/core", {
+      ...envelope,
+      requestId: "core-safe-error"
+    }, credential);
+    assert.equal(failed.status, 500);
+    assert.equal(failed.payload.ok, false);
+    assert.equal(failed.payload.requestId, "core-safe-error");
+    assert.deepEqual(failed.payload.error, {
+      code: "INTERNAL_ERROR",
+      message: "An internal error occurred.",
+      severity: "fatal",
+      retryable: false,
+      recoveryRequired: false
+    });
+    assert.doesNotMatch(JSON.stringify(failed.payload), /secret|private|journal/i);
+    assert.doesNotMatch(JSON.stringify(handle.getActivity()), /secret|private|journal/i);
+
+    const applyInjection = await api(handle, "/api/core", {
+      protocolVersion: 1,
+      requestId: "core-apply-injection",
+      method: "applySync",
+      payload: { schemaVersion: 1, planId: "opaque", provider: "openai" }
+    }, credential);
+    assert.equal(applyInjection.status, 400);
+    assert.equal(applyInjection.payload.error.code, "INVALID_INPUT");
+
+    const wrongContentType = await request({
+      origin: handle.origin,
+      pathname: "/api/core",
+      method: "POST",
+      body: envelope,
+      headers: {
+        Origin: handle.origin,
+        "X-Codex-Provider-Device": credential,
+        "Content-Type": "text/plain"
+      }
+    });
+    assert.equal(wrongContentType.status, 415);
+    assert.equal(wrongContentType.payload.ok, false);
+    assert.equal(wrongContentType.payload.error.code, "INVALID_INPUT");
+
+    const incompatible = await api(handle, "/api/core", {
+      ...envelope,
+      protocolVersion: 99,
+      requestId: "core-protocol-mismatch"
+    }, credential);
+    assert.equal(incompatible.status, 400);
+    assert.equal(incompatible.payload.requestId, "core-protocol-mismatch");
+    assert.equal(incompatible.payload.error.code, "PROTOCOL_VERSION_MISMATCH");
+
+    const oversized = await api(handle, "/api/core", {
+      ...envelope,
+      requestId: "core-oversized",
+      padding: "x".repeat(70 * 1024)
+    }, credential);
+    assert.equal(oversized.status, 413);
+    assert.equal(oversized.payload.code, "REQUEST_TOO_LARGE");
+  } finally {
+    await handle.close();
+  }
+});
+
 test("status alignment follows the current provider without requiring equal inventory counts", async () => {
   let currentStatus = statusFixture({
     currentProvider: "dal",
@@ -185,10 +314,18 @@ test("anonymous HTML contains no API or pairing credential and write APIs requir
     const pairingToken = handle.issuePairing();
     const page = await request({ origin: handle.origin });
     assert.equal(page.status, 200);
+    const csp = page.headers["content-security-policy"];
+    const scriptNonce = csp.match(/script-src 'self' 'nonce-([^']+)'/);
+    const styleNonce = csp.match(/style-src 'self' 'nonce-([^']+)'/);
+    assert.ok(scriptNonce);
+    assert.ok(styleNonce);
+    assert.equal(scriptNonce[1], styleNonce[1]);
+    assert.match(page.text, new RegExp(`nonce="${scriptNonce[1]}"`));
+    assert.doesNotMatch(page.text, /__CPS_CSP_NONCE__/);
+    assert.doesNotMatch(csp, /unsafe-inline/);
     assert.doesNotMatch(page.text, new RegExp(pairingToken));
     assert.doesNotMatch(page.text, /apiToken|X-Codex-Provider-Token/);
     assert.doesNotMatch(page.text, /__CODEX_PROVIDER_SYNC_BOOTSTRAP__/);
-    assert.match(page.headers["content-security-policy"], /script-src 'self';/);
 
     const denied = await api(handle, "/api/status", { profileId: "default" }, "wrong-token");
     assert.equal(denied.status, 403);

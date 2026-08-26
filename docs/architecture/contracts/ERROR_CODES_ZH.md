@@ -1,8 +1,8 @@
 # vNext Error Code 合同
 
-> **状态：Accepted（阶段 0 合同；V1 C1 Core DTO、C2 CLI Adapter 与 C4 CoreClient 公共净化已实施）**
+> **状态：Accepted（阶段 0 合同；V1 C1 Core DTO、C2 CLI Adapter、C4 CoreClient 与 C5 Web envelope 公共净化已实施）**
 >
-> **日期：2026-08-24；实现增量：2026-08-25**
+> **日期：2026-08-24；实现增量：2026-08-26**
 >
 > **适用范围：Node Core、CLI、Local Web UI、Electron 与迁移期 .NET 适配层**
 >
@@ -12,7 +12,7 @@
 
 本文冻结 vNext 的错误分类、兼容映射和演进规则，使调用方依据稳定的 `code` 决策，而不是解析自然语言 `message`、异常类型名或堆栈。
 
-V1 的 Node Public API 已实现 Canonical `CoreError`/DTO，CLI JSON Adapter 已按 Canonical Code 输出；Web 与迁移期 .NET 仍存在不同大小写、命名和结构，这些现状继续列为 Legacy Surface，并由后续 Adapter 渐进收口。
+V1 的 Node Public API 已实现 Canonical `CoreError`/DTO，CLI JSON Adapter 与 C5 Web Core envelope 已按 Canonical Code 输出；Web 的非 Core Host transport code 与迁移期 .NET 仍存在不同大小写、命名和结构，这些现状继续列为 Legacy Surface，并由后续 Adapter 渐进收口。
 
 ## 2. 稳定边界
 
@@ -196,4 +196,4 @@ JSON Mode 的当前映射为：
 
 ## 8. 阶段实现边界
 
-阶段 0 冻结分类与映射；V1 C1 已实现 Node 异常类和 DTO，C2 已实现 opt-in CLI JSON/退出码与真实子进程 Contract Test，C4 已实现 Contracts/CoreClient 的公共错误净化与 runtime guard。现有 Web 路由要到 C5 接入统一 envelope，.NET protocol 0.4 仍保持迁移期兼容，尚不能据此声称跨入口错误合同已经全部统一。
+阶段 0 冻结分类与映射；V1 C1 已实现 Node 异常类和 DTO，C2 已实现 opt-in CLI JSON/退出码与真实子进程 Contract Test，C4 已实现 Contracts/CoreClient 的公共错误净化与 runtime guard。V1 C5 的 React Web Core 业务请求已统一经 `HttpCoreClient → POST /api/core` 的 versioned envelope；Host 在调用 Core 前继续执行 pairing、loopback Origin 和可信 profile revision 校验，`PROFILE_REVISION_REQUIRED` / `STORAGE_REVISION_REQUIRED` 等仍是 Web transport code。未知 Host/Core 异常收敛为固定 `INTERNAL_ERROR`，不回显原始 exception。迁移期 .NET protocol 0.4 仍保持旧码兼容，因此尚不能据此声称所有入口的错误合同已完全统一。

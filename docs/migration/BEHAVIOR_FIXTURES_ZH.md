@@ -1,6 +1,6 @@
 # vNext 行为兼容 Fixture 清单
 
-> **状态：Accepted（阶段 0 语义清单；C2 动态 CLI Fixture 与 C4 安全 Runner/Schema 已实现，共享静态 Corpus 尚未创建）**
+> **状态：Accepted（阶段 0 语义清单；C2 动态 CLI Fixture、C4 安全 Runner/Schema、C5 首批跨运行时静态 Corpus 已实现）**
 >
 > **日期：2026-08-24**
 >
@@ -12,7 +12,7 @@
 
 本文冻结需要被共享 Fixture 表达的场景、输入语义和验收结果，用于迁移期间比较 Node 与 .NET，并为 Node 单核心提供长期回归证据。
 
-阶段 0 没有创建 `packages/test-fixtures/`。C4 已建立私有 workspace、严格 schema 和只向临时目录复制的安全 Runner，但尚未检入共享静态 Corpus、SQLite 二进制、锁文件或平台专属二进制。当前 Node 测试继续使用临时目录动态构造输入，.NET 测试使用 `TestCodexHomeFixture` 和 GUI E2E `IsolatedFixture`；后续共享 Corpus 应复用这些已验证的构造能力。
+C4 已建立私有 workspace、严格 schema 和只向临时目录复制的安全 Runner。C5 检入首批完全合成的 `bidirectional-backup-roundtrip` 与 `foreign-pending-restore` 静态输入：只有 fake provider、空正文 thread row、`session_meta` 和 SQLite seed SQL，不提交 SQLite 二进制、锁文件、平台专属二进制或真实用户数据。Driver 每次在临时目录 materialize SQLite，并为四个 Node↔.NET 方向复制同一输入；现有动态 Node/.NET fixtures 继续补充更广的行为矩阵。
 
 Fixture 不是用户数据样本，严禁从真实 `~/.codex`、认证文件或私人会话复制内容。
 
@@ -93,7 +93,7 @@ Fixture 不是用户数据样本，严禁从真实 `~/.codex`、认证文件或�
 
 真实跨运行时测试不能用 Mock 代替进程争锁。Node 与 .NET 必须在同一临时目标上运行，并以文件/SQLite 最终效果作为独立证据。
 
-V1/C3 的 executable mapping：Plan/revision 见 `test/plan-ledger.test.js`、`test/operation-revision.test.js`、`test/plan-apply.test.js`；Node 锁与外部 Status 见 `test/state-db-lock.test.js`、`test/status-coordination.test.js`；Watch 见 `test/watch.test.js`；Web transport 见 `test/web-server.test.js`；.NET 与跨运行时锁见 `StateDbLockResourceTests`、`DualResourceLockIntegrationTests`、`CrossRuntimeStateDbLockTests`、`LockServiceTests`。完整命令与结果记录在 `evidence/C3_PLAN_APPLY_DUAL_LOCK_2026-08-25.md`。
+V1/C3 的 executable mapping：Plan/revision 见 `test/plan-ledger.test.js`、`test/operation-revision.test.js`、`test/plan-apply.test.js`；Node 锁与外部 Status 见 `test/state-db-lock.test.js`、`test/status-coordination.test.js`；Watch 见 `test/watch.test.js`；Web transport 见 `test/web-server.test.js`；.NET 与跨运行时锁见 `StateDbLockResourceTests`、`DualResourceLockIntegrationTests`、`CrossRuntimeStateDbLockTests`、`LockServiceTests`。C5 的双向 backup/foreign pending executable mapping 为 `test-support/cross-runtime-fixtures.mjs`、`test-support/cross-runtime-node-crash-host.mjs`、`.NET FixtureHost` 与既有 `.NET CrashHost`；完整命令与结果记录在 `evidence/C5_SHARED_UI_WEB_2026-08-26.md`。
 
 ## 6. Restore、Backup 与 Prune
 
@@ -128,9 +128,9 @@ C2 使用真实 Node 子进程和完全位于临时目录的最小 Core fixture 
 
 这些用例当前由 `test/cli-json-contract.test.js`、`test/cli-json.test.js`、`test-support/cli-json-driver.js` 和真实 Core Sync 回归承载；未来迁入 `packages/test-fixtures` 时必须保持同一外部合同。
 
-## 9. 未来 Corpus 建议结构
+## 9. Corpus 结构与后续扩展
 
-目录骨架、Schema 和安全 Runner 已在 C4 存在；`static/` 与 `builders/` 仍是目标，不表示共享 Corpus 已经检入：
+目录骨架、Schema、安全 Runner 与首批 `static/` Corpus 已存在；后续 fixture 按同一边界扩展：
 
 ```text
 packages/test-fixtures/
@@ -160,4 +160,4 @@ SQLite live WAL、真实文件锁、跨进程 crash 和 WSL UNC 不能作为静�
 
 ## 11. 阶段验收边界
 
-阶段 0 的完成标志是本文场景、预期和安全门槛获得确认。实际 Corpus、Schema、Builder、跨运行时 Harness 和 CI Matrix 均属于后续阶段；在它们真正通过之前，文档不得宣称行为等价。
+阶段 0 的完成标志是本文场景、预期和安全门槛获得确认。C5 已为 `bidirectional-backup-roundtrip` 与 `foreign-pending-restore` 建立真实跨进程 Windows harness 和 required CI job；这只证明这两个 Phase 2 门槛，不代表 Restore v2、全 crash matrix、WSL 或三平台产物等价。其余 Corpus、Builder 与 CI Matrix 必须在对应 checkpoint 真正通过后才能宣称完成。

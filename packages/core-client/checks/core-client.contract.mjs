@@ -5,6 +5,7 @@ import {
   CoreClientError,
   CoreTransportError,
   HttpCoreClient,
+  HttpCoreTransport,
   MockCoreClient,
   legacyErrorToDto
 } from "../dist/index.js";
@@ -21,8 +22,7 @@ test("MockCoreClient uses the same versioned request envelope", async () => {
       currentProvider: "openai",
       rolloutCounts: {},
       sqliteCounts: null,
-      codexHome: "redacted",
-      sqliteHome: "redacted",
+      codexHomeSource: "profile",
       sqliteHomeSource: "default",
       backupSummary: { count: 0, totalBytes: 0 },
       pendingRecovery: false,
@@ -67,6 +67,30 @@ test("HttpCoreClient validates response correlation and sends one envelope", asy
     method: "getWatchStatus",
     payload: {}
   });
+});
+
+test("HttpCoreClient rejects an oversized envelope before calling fetch", async () => {
+  let fetchCalls = 0;
+  const transport = new HttpCoreTransport({
+    baseUrl: "http://127.0.0.1:31337/",
+    fetch: async () => {
+      fetchCalls += 1;
+      throw new Error("fetch must not be called");
+    }
+  });
+
+  await assert.rejects(
+    transport.request({
+      protocolVersion: 1,
+      requestId: "oversized-request",
+      method: "getWatchStatus",
+      payload: { oversized: "x".repeat(65 * 1024) }
+    }),
+    (error) => error instanceof CoreTransportError
+      && error.status === null
+      && error.message === "Core request exceeds the 64 KiB transport limit."
+  );
+  assert.equal(fetchCalls, 0);
 });
 
 test("canonical failed envelopes become CoreClientError", async () => {

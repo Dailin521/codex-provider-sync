@@ -78,6 +78,17 @@ test("trusted profile selection never falls back to the process default Codex Ho
     }
     await fs.writeFile(path.join(defaultHome, "config.toml"), 'model_provider = "wrong-default"\n');
     await fs.writeFile(path.join(selectedHome, "config.toml"), 'model_provider = "openai"\n');
+    await fs.writeFile(path.join(selectedHome, "sessions", "rollout-synthetic.jsonl"), `${JSON.stringify({
+      type: "session_meta",
+      timestamp: "2026-08-25T00:00:00.000Z",
+      payload: {
+        id: "synthetic-session",
+        title: "Synthetic session",
+        cwd: path.join(selectedHome, "private-project"),
+        model_provider: "relay",
+        encrypted_content: "synthetic-ciphertext"
+      }
+    })}\n`);
     process.env.CODEX_HOME = defaultHome;
     const selectors = [];
     const facade = core.createCoreFacade({
@@ -96,13 +107,28 @@ test("trusted profile selection never falls back to the process default Codex Ho
     const history = await facade.listHistory(input);
     const diagnostics = await facade.getDiagnostics(input);
     const pruned = await facade.pruneBackups({ ...input, keepCount: 1 });
+    const plan = await facade.prepareSync({ ...input, keepCount: 1 });
     assert.equal(status.currentProvider, "openai");
     assert.deepEqual(status.profile, { id: "selected", revision: "selected-r1" });
+    assert.equal(status.codexHomeSource, "profile");
+    assert.equal("codexHome" in status, false);
+    assert.equal("sqliteHome" in status, false);
     assert.deepEqual(backups, { backups: [] });
-    assert.deepEqual(history.sessions, []);
-    assert.equal(diagnostics.storage.codexHome, selectedHome);
+    assert.equal(history.sessions.length, 1);
+    assert.equal(history.sessions[0].id, "synthetic-session");
+    assert.equal("cwd" in history.sessions[0], false);
+    assert.ok(plan.warnings.includes(
+      "Some encrypted histories may require their original Provider or account for continuation."
+    ));
+    assert.equal(plan.warnings.every((warning) => [
+      "Some encrypted histories may require their original Provider or account for continuation.",
+      "Project visibility diagnostics are unavailable; backup-first protection remains enabled."
+    ].includes(warning)), true);
+    assert.doesNotMatch(JSON.stringify(plan), /private-project|synthetic-ciphertext/);
+    assert.equal(diagnostics.storage.sqliteHomeSource, "default");
+    assert.equal("codexHome" in diagnostics.storage, false);
     assert.equal(pruned.deletedCount, 0);
-    assert.equal(selectors.length, 5);
+    assert.equal(selectors.length, 6);
     assert.equal(selectors.every((selector) => selector.profileId === "selected"), true);
   } finally {
     if (originalCodexHome === undefined) delete process.env.CODEX_HOME;

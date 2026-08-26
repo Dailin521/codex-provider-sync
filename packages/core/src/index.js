@@ -121,12 +121,209 @@ function withPublicProfile(value, profile) {
 }
 
 /** @param {unknown} value */
+function publicWarnings(value) {
+  if (!Array.isArray(value)) return [];
+  /** @type {string[]} */
+  const result = [];
+  for (const warning of value.filter((entry) => typeof entry === "string")) {
+    let projected;
+    if (warning.startsWith("Backup inventory refresh failed:")) {
+      projected = "Backup inventory refresh failed.";
+    } else if (warning.startsWith("Automatic backup cleanup failed:")) {
+      projected = "Automatic backup cleanup failed.";
+    } else if (warning.startsWith("Encrypted content warning:")) {
+      projected = "Some encrypted histories may require their original Provider or account for continuation.";
+    } else if (/^\d+ rollout file\(s\) are currently locked/.test(warning)) {
+      projected = "One or more rollout files are locked and may be skipped.";
+    } else if (warning.startsWith("Provider \"") && warning.includes("has no model field")) {
+      projected = "The selected Provider has no default model; the root model will remain unchanged.";
+    } else if (warning === "Project visibility diagnostics are unavailable; the write operation will still validate and protect the global state with backup-first recovery.") {
+      projected = "Project visibility diagnostics are unavailable; backup-first protection remains enabled.";
+    } else if (warning === "SQLite Home relocation is explicit; config.toml will not be restored.") {
+      projected = "SQLite Home relocation is confirmed; config.toml will not be restored.";
+    } else {
+      projected = "The operation produced an additional warning.";
+    }
+    if (!result.includes(projected)) result.push(projected);
+  }
+  return result;
+}
+
+/** @param {unknown} value */
+function publicOperationState(value) {
+  if (!isRecord(value)) return null;
+  /** @type {Record<string, string>} */
+  const result = {};
+  for (const key of [
+    "operationId",
+    "operation",
+    "actor",
+    "runtime",
+    "startedAt",
+    "busyScope",
+    "lockState",
+    "errorCode"
+  ]) {
+    const candidate = value[key];
+    if (typeof candidate === "string") result[key] = candidate;
+  }
+  return result;
+}
+
+/** @param {unknown} value */
+function publicStatus(value) {
+  if (!isRecord(value)) return value;
+  const rolloutCounts = isRecord(value.rolloutCounts) ? value.rolloutCounts : {};
+  const sqliteCounts = value.sqliteCounts ?? {};
+  const provider = typeof value.currentProvider === "string" && value.currentProvider
+    ? value.currentProvider
+    : "openai";
+  /** @param {unknown} distribution */
+  const matchesProvider = (distribution) => isRecord(distribution)
+    && ["sessions", "archived_sessions"].every((scope) => {
+      const counts = isRecord(distribution[scope]) ? distribution[scope] : {};
+      return Object.entries(counts).every(([candidate, count]) => Number(count) === 0 || candidate === provider);
+    });
+  const operation = publicOperationState(value.operationInProgress);
+  const locked = Array.isArray(value.lockedRolloutFiles)
+    ? value.lockedRolloutFiles.filter((entry) => typeof entry === "string").map((entry) => path.basename(entry))
+    : [];
+  const pending = Array.isArray(value.pendingTransactions)
+    ? value.pendingTransactions.filter(isRecord).map((transaction) => ({
+        operationId: typeof transaction.operationId === "string" ? transaction.operationId : null,
+        state: typeof transaction.state === "string" ? transaction.state : "unknown"
+      }))
+    : [];
+  const backupSummary = isRecord(value.backupSummary) ? value.backupSummary : {};
+  const blocked = isRecord(value.statusReadBlocked) && typeof value.statusReadBlocked.reason === "string"
+    ? { reason: value.statusReadBlocked.reason }
+    : undefined;
+  const sqliteReadable = isRecord(sqliteCounts) && sqliteCounts.unreadable !== true;
+  return {
+    schemaVersion: 1,
+    snapshotAt: value.snapshotAt,
+    storageRevision: value.storageRevision,
+    profile: value.profile,
+    currentProvider: provider,
+    ...(typeof value.currentModel === "string" || value.currentModel === null
+      ? { currentModel: value.currentModel }
+      : {}),
+    rolloutCounts,
+    ...(isRecord(value.modelCounts) ? { modelCounts: value.modelCounts } : {}),
+    sqliteCounts,
+    codexHomeSource: "profile",
+    sqliteHomeSource: value.sqliteHomeSource,
+    backupSummary: {
+      count: Number.isSafeInteger(backupSummary.count) ? backupSummary.count : 0,
+      totalBytes: Number.isSafeInteger(backupSummary.totalBytes) ? backupSummary.totalBytes : 0
+    },
+    pendingRecovery: pending.length > 0 || value.pendingRecovery === true,
+    pendingTransactions: pending,
+    operationInProgress: operation,
+    rolloutScanComplete: value.rolloutScanComplete === true && locked.length === 0,
+    lockedRolloutFiles: locked,
+    currentProviderImplicit: value.currentProviderImplicit === true,
+    configuredProviders: Array.isArray(value.configuredProviders)
+      ? value.configuredProviders.filter((entry) => typeof entry === "string")
+      : [],
+    alignment: {
+      aligned: Boolean(!operation
+        && !blocked
+        && sqliteReadable
+        && value.rolloutScanComplete === true
+        && locked.length === 0
+        && matchesProvider(rolloutCounts)
+        && matchesProvider(sqliteCounts)),
+      sqliteReadable,
+      targetProvider: provider
+    },
+    ...(blocked ? { statusReadBlocked: blocked } : {})
+  };
+}
+
+/** @param {unknown} value */
+function publicPlan(value) {
+  if (!isRecord(value)) return value;
+  const target = isRecord(value.target) ? value.target : {};
+  const impact = isRecord(value.impact) ? value.impact : {};
+  /** @type {Record<string, string | boolean | null>} */
+  const publicTarget = {};
+  for (const key of ["provider", "model", "modelMode", "backupId"]) {
+    const candidate = target[key];
+    if (typeof candidate === "string" || candidate === null) publicTarget[key] = candidate;
+  }
+  for (const key of ["restoreConfig", "restoreDatabase", "restoreSessions", "allowSqliteHomeRelocation"]) {
+    if (typeof target[key] === "boolean") publicTarget[key] = target[key];
+  }
+  /** @type {Record<string, unknown>} */
+  const publicImpact = {};
+  for (const [key, candidate] of Object.entries(impact)) {
+    if (typeof candidate === "boolean" || (Number.isSafeInteger(candidate) && Number(candidate) >= 0)) {
+      publicImpact[key] = candidate;
+    }
+  }
+  if (Array.isArray(impact.lockedRolloutFiles)) {
+    publicImpact.lockedRolloutFiles = impact.lockedRolloutFiles
+      .filter((entry) => typeof entry === "string")
+      .map((entry) => path.basename(entry));
+  }
+  return {
+    schemaVersion: 1,
+    planId: value.planId,
+    operation: value.operation,
+    createdAt: value.createdAt,
+    expiresAt: value.expiresAt,
+    profile: value.profile,
+    storageRevision: value.storageRevision,
+    configRevision: value.configRevision,
+    rolloutRevision: value.rolloutRevision,
+    stateDbRevision: value.stateDbRevision,
+    ...(typeof value.backupRevision === "string" ? { backupRevision: value.backupRevision } : {}),
+    target: publicTarget,
+    impact: publicImpact,
+    warnings: publicWarnings(value.warnings),
+    requiresConfirmation: value.requiresConfirmation === true
+  };
+}
+
+/** @param {unknown} value */
 function publicOperationResult(value) {
   if (!isRecord(value)) return value;
   const backup = isRecord(value.backup) && typeof value.backup.backupId === "string"
     ? { backupId: value.backup.backupId }
     : null;
-  return { ...value, backup };
+  const source = isRecord(value.result) ? value.result : {};
+  /** @type {Record<string, unknown>} */
+  const result = {};
+  for (const key of [
+    "targetProvider",
+    "targetModel",
+    "modelSource"
+  ]) {
+    const candidate = source[key];
+    if (typeof candidate === "string" || candidate === null) result[key] = candidate;
+  }
+  for (const [key, candidate] of Object.entries(source)) {
+    if ((key.endsWith("Count") || key.endsWith("Changed") || key.endsWith("Updated") || key.endsWith("Restored"))
+        && Number.isSafeInteger(candidate)
+        && Number(candidate) >= 0) {
+      result[key] = candidate;
+    }
+  }
+  if (Array.isArray(source.skippedLockedRolloutFiles)) {
+    result.skippedLockedRolloutFiles = source.skippedLockedRolloutFiles
+      .filter((entry) => typeof entry === "string")
+      .map((entry) => path.basename(entry));
+  }
+  return {
+    schemaVersion: 1,
+    operationId: value.operationId,
+    operation: value.operation,
+    outcome: value.outcome,
+    backup,
+    warnings: publicWarnings(value.warnings),
+    result
+  };
 }
 
 /** @param {unknown} value */
@@ -152,7 +349,6 @@ function publicHistorySummary(value) {
   return {
     id: value.id,
     title: value.title,
-    cwd: value.cwd,
     provider: value.provider,
     ...(value.model === undefined ? {} : { model: value.model }),
     archived: value.archived,
@@ -198,7 +394,10 @@ export function createCoreFacade({ resolveProfile }) {
   const facade = {
     async getStatus(input) {
       const trusted = await trustedInput(input);
-      return withPublicProfile(await getStatusInternal(rootProfileInput(trusted.profile)), trusted.profile);
+      return publicStatus(withPublicProfile(
+        await getStatusInternal(rootProfileInput(trusted.profile)),
+        trusted.profile
+      ));
     },
 
     async prepareSync(input) {
@@ -208,7 +407,7 @@ export function createCoreFacade({ resolveProfile }) {
         ...(trusted.input.keepCount === undefined ? {} : { keepCount: trusted.input.keepCount }),
         profileResolver: currentProfileResolver()
       });
-      return withPublicProfile(plan, trusted.profile);
+      return publicPlan(withPublicProfile(plan, trusted.profile));
     },
 
     async applySync(input) {
@@ -235,7 +434,7 @@ export function createCoreFacade({ resolveProfile }) {
         ...(trusted.input.keepCount === undefined ? {} : { keepCount: trusted.input.keepCount }),
         profileResolver: currentProfileResolver()
       });
-      return withPublicProfile(plan, trusted.profile);
+      return publicPlan(withPublicProfile(plan, trusted.profile));
     },
 
     async applySwitch(input) {
@@ -309,7 +508,7 @@ export function createCoreFacade({ resolveProfile }) {
           : { allowSqliteHomeRelocation: trusted.input.allowSqliteHomeRelocation }),
         profileResolver
       });
-      return withPublicProfile(plan, trusted.profile);
+      return publicPlan(withPublicProfile(plan, trusted.profile));
     },
 
     async applyRestore(input) {
@@ -375,7 +574,49 @@ export function createCoreFacade({ resolveProfile }) {
 
     async getDiagnostics(input) {
       const trusted = await trustedInput(input);
-      return getDiagnosticsInternal(rootProfileInput(trusted.profile));
+      const value = await getDiagnosticsInternal(rootProfileInput(trusted.profile));
+      if (!isRecord(value)) return value;
+      const runtime = isRecord(value.runtime) ? value.runtime : {};
+      const storage = isRecord(value.storage) ? value.storage : {};
+      const provider = isRecord(value.provider) ? value.provider : {};
+      const safety = isRecord(value.safety) ? value.safety : {};
+      return {
+        schemaVersion: 1,
+        generatedAt: value.generatedAt,
+        runtime: {
+          ...(typeof runtime.node === "string" ? { node: runtime.node } : {}),
+          ...(typeof runtime.platform === "string" ? { platform: runtime.platform } : {}),
+          ...(typeof runtime.arch === "string" ? { arch: runtime.arch } : {})
+        },
+        storage: {
+          ...(typeof storage.sqliteHomeSource === "string" ? { sqliteHomeSource: storage.sqliteHomeSource } : {}),
+          stateDbFound: storage.stateDbLocation !== null,
+          sqliteSupported: !isRecord(storage.sqliteAccess) || storage.sqliteAccess.supported !== false
+        },
+        provider: {
+          ...(typeof provider.current === "string" ? { current: provider.current } : {}),
+          implicit: provider.implicit === true,
+          configured: Array.isArray(provider.configured)
+            ? provider.configured.filter((entry) => typeof entry === "string")
+            : [],
+          ...(isRecord(provider.rolloutCounts) ? { rolloutCounts: provider.rolloutCounts } : {}),
+          ...(isRecord(provider.sqliteCounts) ? { sqliteCounts: provider.sqliteCounts } : {})
+        },
+        safety: {
+          ...(typeof safety.storageRevision === "string" ? { storageRevision: safety.storageRevision } : {}),
+          pendingRecovery: safety.pendingRecovery === true,
+          pendingTransactions: Array.isArray(safety.pendingTransactions)
+            ? safety.pendingTransactions.filter(isRecord).map((transaction) => ({
+                operationId: typeof transaction.operationId === "string" ? transaction.operationId : null,
+                state: typeof transaction.state === "string" ? transaction.state : "unknown"
+              }))
+            : [],
+          operationInProgress: publicOperationState(safety.operationInProgress),
+          rolloutScanComplete: safety.rolloutScanComplete === true,
+          lockedRolloutCount: Number.isSafeInteger(safety.lockedRolloutCount) ? safety.lockedRolloutCount : 0,
+          projectThreadVisibilityAvailable: safety.projectThreadVisibilityAvailable === true
+        }
+      };
     }
   };
 

@@ -21,7 +21,7 @@ async function manifest(relativePath) {
   return JSON.parse(await fs.readFile(path.join(repositoryRoot, relativePath, "package.json"), "utf8"));
 }
 
-test("root npm package remains an independent Node 16 CLI tarball surface", async () => {
+test("root npm package remains a Node 16 surface with only the audited shared Web runtime", async () => {
   const root = await manifest("");
   assert.equal(root.name, "@dailin521/codex-provider-sync");
   assert.equal(root.engines.node, ">=16.20.2");
@@ -29,7 +29,11 @@ test("root npm package remains an independent Node 16 CLI tarball surface", asyn
   assert.deepEqual(root.dependencies ?? {}, {});
   assert.ok(root.files.includes("src"));
   assert.ok(root.files.includes("web/dist"));
-  assert.equal(root.files.some((entry) => entry.startsWith("apps") || entry.startsWith("packages")), false);
+  assert.equal(root.files.some((entry) => entry.startsWith("apps")), false);
+  assert.deepEqual(
+    root.files.filter((entry) => entry.startsWith("packages")).sort(),
+    ["packages/contracts/dist", "packages/core/src"]
+  );
 });
 
 test("all C4 workspaces are private and direct dependency versions are exact", async () => {

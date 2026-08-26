@@ -59,8 +59,24 @@ assert(rootManifest.workspaces.includes("apps/*") && rootManifest.workspaces.inc
 assert(Object.keys(rootManifest.dependencies ?? {}).length === 0, "Root runtime dependencies must stay Core-only.");
 assertExactDependencies(rootManifest, "root package");
 
+const rootPublishAllowlist = new Set([
+  "README.md",
+  "CHANGELOG.md",
+  "CONTRIBUTING.md",
+  "CONTRIBUTORS.md",
+  "AGENTS.md",
+  "docs",
+  "images/README",
+  "src",
+  "web/dist",
+  "packages/contracts/dist",
+  "packages/core/src"
+]);
 for (const entry of rootManifest.files ?? []) {
-  assert(!entry.startsWith("apps") && !entry.startsWith("packages"), `Root tarball allowlist leaks workspace source: ${entry}`);
+  assert(rootPublishAllowlist.has(entry), `Root tarball allowlist contains an unapproved path: ${entry}`);
+}
+for (const required of rootPublishAllowlist) {
+  assert(rootManifest.files?.includes(required), `Root tarball allowlist is missing ${required}.`);
 }
 
 const manifests = new Map();
