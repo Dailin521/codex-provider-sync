@@ -36,6 +36,7 @@
 | `npm run desktop:test:e2e`（hidden） | 15 passed，1 skipped；唯一 Skip 为不可用的真实 WSL UNC 环境 |
 | `npm run desktop:build` + production E2E（hidden） | production bundle verifier 通过；无 test bridge/fallback selector；真实 Status 与 Sync→Restore 2/2 passed |
 | `npm run desktop:pack:dir` + packaged production smoke（hidden） | Electron ABI rebuild、unpacked production、真实 fixture Status、Sync→Restore、graceful exit，2/2 passed；本地 executable 为 `NotSigned` |
+| `desktop:pack:candidate` + `desktop:stage:candidate` + `desktop:smoke:candidate:artifacts`（hidden） | `84f47d9` 的 unsigned `1.0.0-rc.82701` Windows x64 ZIP/NSIS 均完成最终容器复审、native SQLite、Status、Sync→Restore、graceful exit；NSIS 静默安装/卸载清理通过 |
 | `npm run fixtures:cross-runtime` | Node↔.NET Restore/lock/8.3/junction/physical Home 矩阵 11/11 passed |
 | .NET Core/Application/Automation/App/GuiE2E Tests | 416 passed，1 skipped；唯一 Skip 为同一真实 WSL UNC 环境 |
 | `.NET` Release build | 五个测试项目的传递构建与 macOS Avalonia 项目均为 0 warning / 0 error |
@@ -46,18 +47,20 @@
 
 `npm run package:verify-root-tree` 只能在 `npm ci --workspaces=false --omit=dev` 的干净根 production tree 上执行；本机完整 Node 24 workspace 含 React/Electron 开发依赖，本轮直接运行按合同拒绝 `react`，不能把该环境误记为 Node 16 兼容门禁。实际根 tarball 的临时安装态 production tree 已由 `package:smoke:lifecycle` 通过；Windows/Ubuntu Node `16.20.2` 的 clean-install、root-tree、tarball 和 lifecycle 继续由 required `root-package-compat` job 闭合。
 
-## C9 Windows 候选引用
+## 当前 Windows 候选引用
 
-C10 不重写 C9 的精确 Windows 候选证据。当前可引用的本地候选仍绑定 C9 实现 commit `73256f3187dd337bb681a1cc9810edad8f6309bb`：
+完成现代 UI hardening 和证据提交后，已在干净 HEAD `84f47d936afa336de2d871043e237d4c4a432a52` 原生构建、审计并 smoke unsigned `1.0.0-rc.82701` Windows x64 候选，build ID 为 `1.0.0-rc.82701-84f47d936afa-windows-x64`。manifest 固定 `releaseAuthorized:false`、`signingStatus:unsigned-candidate`、`notarizationStatus:not-authorized`；PowerShell Authenticode 对 NSIS 与 unpacked executable 均返回 `NotSigned`。
 
 | 资产 | SHA-256 |
 | --- | --- |
-| Windows x64 portable ZIP | `96c0ab0c49bce31999e1d45dad01821f4a1433d72350f1366f1464c3fddcd33d` |
-| Windows x64 NSIS setup | `e5d7076a571ab2742119878ac6d0efb40baf4465c4d5bc057c51bad15ea7619a` |
-| ASAR | `f60ed82f18f52d25bf4ac9071cc664509817486d70c70aa89d8dd737e3534f0f` |
+| Windows x64 portable ZIP | `6eab62e7691e398a8f332ec0bedb207129c2fc5203c7b84dbdc781a7f749669b` |
+| Windows x64 NSIS setup | `d4f1b90432b03e742dd0342fa9a5257a8be75a1598076e37dbde9fc2255c0b08` |
+| ASAR | `6061b62907d4c40d18bc90bccd1e473943711c36abfe84fa557e7aa59d8f0e22` |
 | native binding | `e21e5efd71fba66578e95b62554d9028064a80dafd7221bf8a8ef155de8d240a` |
+| release manifest | `f20d036e166e1d81a4f0f1fbeb69156300d9073b31adae194015bb455ec282d9` |
+| SBOM | `a65472e7858dc9c5bfd3729c00282efc0973f2941b2281fd11416f1c217130b6` |
 
-这些 hash 只证明该 Windows C9 commit，不覆盖当前 C10 工作树，也不能替代最终 commit 的远端 Windows/macOS/Linux 原生候选矩阵。
+旧 `73256f3 / 1.0.0-rc.0` 本地产物未被覆盖，已移动到忽略目录 `artifacts/c9-local-archive/windows-x64-73256f3-rc0`。当前这些 hash 只证明 `84f47d9` 的本地 Windows 候选；不能替代最终 PR tested commit 的远端 Windows、macOS x64、macOS arm64、Linux x64 原生候选矩阵、四目标 aggregate 或 C10 bundle。
 
 ## 必须由远端闭合
 
