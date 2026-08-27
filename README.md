@@ -32,16 +32,18 @@
 
 ## 快速开始
 
-> CLI/Web 与 Windows GUI 独立发布，版本号可能不同。
+> CLI/Web 与当前 Windows GUI 独立发布，版本号可能不同。
+>
+> **迁移状态：**当前公开发布的桌面入口仍是 Windows .NET GUI。仓库内的 vNext Electron 桌面端是未发布候选实现，不是当前默认、Stable 或可下载产品；只有四平台候选门禁、最终证据和另行授权的发布验证全部通过后，README 才会切换为 Electron 主入口并把 .NET 标记为 Legacy。
 
 | 场景 | 推荐入口 |
 | --- | --- |
-| Windows 桌面 | [下载 Windows GUI](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [使用说明](#windows-gui) |
+| Windows 桌面 | [下载当前 Windows GUI（.NET）](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [使用说明](#当前-windows-gui-net) |
 | macOS 桌面 | [本地 Web UI（需 CLI）](#本地-web-ui)；[原生 GUI 构建说明](docs/README_MAC_GUI_ZH.md) |
 | 需要浏览器界面或跨平台使用 | [本地 Web UI（需 CLI）](#本地-web-ui) |
 | 脚本、CI 或 WSL | [CLI](#cli) |
 
-### Windows GUI
+### 当前 Windows GUI（.NET）
 
 从 [Releases](https://github.com/Dailin521/codex-provider-sync/releases/latest) 下载 `CodexProviderSync.exe`：
 
@@ -52,6 +54,8 @@
 程序未做代码签名，Windows 可能显示安全警告。请只从本项目 Releases 下载。
 
 [Windows GUI 完整说明](docs/README_GUI_ZH.md)
+
+vNext Electron 候选的能力、安全边界和内部验收方式见 [Electron 桌面端候选说明](docs/README_DESKTOP_ZH.md)。该说明不提供公开下载，也不构成发布授权。
 
 ### 本地 Web UI
 
@@ -128,6 +132,11 @@ flowchart LR
     WebServer --> NodeCore["Node Core public facade"]
     CLI["Node CLI"] --> NodeCore
 
+    ElectronRenderer["vNext Electron Renderer<br/>unreleased candidate"] --> DesktopClient["DesktopCoreClient"]
+    DesktopClient --> ElectronHost["Preload / Main<br/>narrow IPC"]
+    ElectronHost --> Utility["Utility Process"]
+    Utility --> NodeCore
+
     WindowsGUI["Windows GUI"] --> Application[".NET Application"]
     Application --> DotNetCore[".NET Core"]
     MacGUI["macOS GUI"] --> DotNetCore
@@ -142,8 +151,11 @@ flowchart LR
 ```
 
 - Web UI 的业务请求经 `HttpCoreClient → /api/core → Node Core public facade`；CLI 直接调用同一公开 Core 边界，不解析彼此的人类输出。
+- vNext Electron 候选经 `DesktopCoreClient → 窄 Preload/Main IPC → Utility Process → Node Core`，Renderer 不接触 Node、任意路径或通用 IPC。
 - Windows GUI 通过 Application 层调用 .NET Core；macOS GUI 当前直接调用 .NET Core。
 - Node 服务和 .NET Core 处理相同的配置、rollout、SQLite 和备份安全边界。
+
+当前 .NET 桌面实现仍是已发布产品和兼容行为依据，尚未标记 Legacy。Electron 替代必须满足 [vNext 分阶段迁移执行索引](docs/migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md) 的 Phase 6 退出门槛；内部 checkpoint 或单平台本地测试不能提前改变发行状态。
 
 ## 安全边界
 
@@ -160,6 +172,7 @@ flowchart LR
 - [vNext 分阶段迁移执行索引](docs/migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md)
 - [AI / Agent 操作指南](AGENTS.md)
 - [Windows GUI](docs/README_GUI_ZH.md)
+- [vNext Electron 桌面端候选说明](docs/README_DESKTOP_ZH.md)
 - [Web UI](docs/README_WEB_UI_ZH.md)
 - [English](docs/README_EN.md) · [日本語](docs/README_JA.md) · [한국어](docs/README_KO.md)
 - [macOS GUI：中文](docs/README_MAC_GUI_ZH.md) · [English](docs/README_MAC_GUI_EN.md)

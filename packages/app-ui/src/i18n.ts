@@ -91,7 +91,7 @@ export const resources = {
         prepare: "Prepare restore",
         pruneKeep: "Keep newest backups",
         prune: "Prune older backups",
-        readOnly: "Desktop Alpha lists managed backups read-only; Restore and Prune are not exposed."
+        readOnly: "This build lists managed backups read-only; Restore and Prune are not exposed."
       },
       history: {
         title: "History",
@@ -115,7 +115,7 @@ export const resources = {
         update: "Update profile",
         defaultManaged: "The default profile is managed by startup flags.",
         pathManaged: "Storage paths are retained by the trusted desktop host.",
-        readOnly: "Desktop Alpha exposes profile IDs and revisions only; profile editing is not enabled."
+        readOnly: "This build exposes profile IDs and revisions only; profile editing is not enabled."
       },
       diagnostics: {
         title: "Diagnostics",
@@ -290,7 +290,7 @@ export const resources = {
         prepare: "生成恢复计划",
         pruneKeep: "保留最新备份数",
         prune: "清理旧备份",
-        readOnly: "桌面 Alpha 仅只读列出受管备份；未开放恢复和清理。"
+        readOnly: "此构建仅只读列出受管备份；未开放恢复和清理。"
       },
       history: {
         title: "聊天记录",
@@ -314,7 +314,7 @@ export const resources = {
         update: "更新配置",
         defaultManaged: "默认配置由启动参数管理。",
         pathManaged: "存储路径仅由可信桌面 Host 持有。",
-        readOnly: "桌面 Alpha 只公开配置 ID 与 revision；尚未开放配置编辑。"
+        readOnly: "此构建只公开配置 ID 与 revision；未开放配置编辑。"
       },
       diagnostics: {
         title: "诊断",

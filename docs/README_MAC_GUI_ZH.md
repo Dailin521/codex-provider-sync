@@ -2,6 +2,8 @@
 
 中文 · [English](README_MAC_GUI_EN.md)
 
+> 本文说明迁移期保留的 .NET/Avalonia 本地构建，不是 vNext Electron 发行说明。Electron 当前仍是未发布候选；GitHub Releases 尚无可下载的 macOS Electron 产物，也未发生 .NET Legacy 正式交接。
+
 `CodexProviderSync.app` 是 macOS 桌面版 GUI，使用 Avalonia 构建，复用 `desktop/CodexProviderSync.Core` 的状态、同步、切换、恢复和清理逻辑。
 
 ## 构建

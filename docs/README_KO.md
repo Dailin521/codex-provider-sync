@@ -35,10 +35,12 @@
 > Windows GUI와 로컬 Web UI의 화면 언어는 현재 중국어 간체만 지원합니다.
 >
 > CLI/Web과 Windows GUI는 별도로 릴리스되므로 버전 번호가 다를 수 있습니다.
+>
+> **마이그레이션 상태:** 현재 공개된 데스크톱 진입점은 Windows .NET GUI입니다. 저장소의 vNext Electron은 공개되지 않은 후보 구현이며 기본, Stable 또는 다운로드 가능한 제품이 아닙니다. 4개 플랫폼 게이트, 최종 증거 및 별도 승인을 받은 릴리스 검증이 모두 끝나기 전에는 Electron을 주 데스크톱으로, .NET을 Legacy로 전환하지 않습니다.
 
 | 상황 | 권장 방법 |
 | --- | --- |
-| Windows 데스크톱 | [Windows GUI 다운로드](https://github.com/Dailin521/codex-provider-sync/releases/latest) / [사용 방법](#windows-gui) |
+| Windows 데스크톱 | [현재 Windows GUI(.NET) 다운로드](https://github.com/Dailin521/codex-provider-sync/releases/latest) / [사용 방법](#windows-gui) |
 | macOS 데스크톱 | [로컬 Web UI (CLI 필요)](#로컬-web-ui) / [네이티브 GUI 빌드 안내 (영문)](README_MAC_GUI_EN.md) |
 | 브라우저 UI 또는 크로스 플랫폼 사용 | [로컬 Web UI (CLI 필요)](#로컬-web-ui) |
 | 스크립트, CI 또는 WSL | [CLI](#cli) |
@@ -115,15 +117,21 @@ SQLite Home 해석 순서: `--sqlite-home` → `config.toml` 루트의 `sqlite_h
 
 ```mermaid
 flowchart LR
-    Browser["Browser Web UI"] --> WebServer["Local Node Web Server<br/>127.0.0.1"]
-    WebServer --> NodeService["Node Service"]
-    CLI["Node CLI"] --> NodeService
+    Browser["Browser React UI"] --> HttpClient["HttpCoreClient"]
+    HttpClient --> WebServer["Local Web Host<br/>127.0.0.1 + pairing"]
+    WebServer --> NodeCore["Node Core public facade"]
+    CLI["Node CLI"] --> NodeCore
+
+    ElectronRenderer["vNext Electron Renderer<br/>unreleased candidate"] --> DesktopClient["DesktopCoreClient"]
+    DesktopClient --> ElectronHost["Preload / Main<br/>narrow IPC"]
+    ElectronHost --> Utility["Utility Process"]
+    Utility --> NodeCore
 
     WindowsGUI["Windows GUI"] --> Application[".NET Application"]
     Application --> DotNetCore[".NET Core"]
     MacGUI["macOS GUI"] --> DotNetCore
 
-    NodeService --> Storage["Codex Storage"]
+    NodeCore --> Storage["Codex Storage"]
     DotNetCore --> Storage
 
     Storage --> Config["config.toml"]
@@ -132,9 +140,12 @@ flowchart LR
     Storage --> Backups["managed backups"]
 ```
 
-- Web UI와 CLI는 동일한 Node 서비스 로직을 사용합니다.
+- Web UI는 `HttpCoreClient → /api/core → Node Core public facade`를 사용하고 CLI는 같은 공개 Core 경계를 직접 호출합니다.
+- vNext Electron 후보는 `DesktopCoreClient → 제한된 Preload/Main IPC → Utility Process → Node Core` 경로를 사용하며 Renderer에서는 Node, 임의 경로 또는 범용 IPC에 접근할 수 없습니다.
 - Windows GUI는 Application 계층을 통해 .NET Core를 호출하고, macOS GUI는 현재 .NET Core를 직접 호출합니다.
 - Node 서비스와 .NET Core는 동일한 설정, rollout, SQLite, 백업 안전 범위를 처리합니다.
+
+현재 .NET 데스크톱 구현은 계속 공개 제품이자 호환 동작의 기준이며 아직 Legacy가 아닙니다. Electron 교체는 vNext 마이그레이션 실행 인덱스의 Phase 6 종료 조건을 충족한 뒤에만 진행합니다.
 
 ## 안전 범위
 
@@ -149,6 +160,7 @@ flowchart LR
 
 - [AI / Agent 가이드](../AGENTS.md)
 - [Windows GUI (중국어)](README_GUI_ZH.md)
+- [vNext Electron 데스크톱 후보 (영어)](README_DESKTOP_EN.md)
 - [Web UI (중국어)](README_WEB_UI_ZH.md)
 - [中文](../README.md) · [English](README_EN.md) · [日本語](README_JA.md)
 - [macOS GUI: 中文](README_MAC_GUI_ZH.md) · [English](README_MAC_GUI_EN.md)

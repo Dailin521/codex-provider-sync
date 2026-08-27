@@ -65,5 +65,10 @@ test("CI requires all four native Electron candidates and their aggregate index"
   ]) assert.match(workflow, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.match(workflow, /ELECTRON_RELEASE_CANDIDATE_RESULT/);
   assert.match(workflow, /ELECTRON_CANDIDATE_SET_RESULT/);
+  assert.match(workflow, /c10-evidence-bundle:/);
+  assert.match(workflow, /CPS_REQUIRED_JOB_RESULTS_JSON: \$\{\{ toJSON\(needs\) \}\}/);
+  assert.match(workflow, /C10_EVIDENCE_RESULT/);
+  assert.match(workflow, /vnext-c10-evidence-\$\{\{ github\.sha \}\}/);
+  assert.ok((workflow.match(/retention-days: 30/g) || []).length >= 3);
   assert.match(workflow, /if-no-files-found: error/);
 });

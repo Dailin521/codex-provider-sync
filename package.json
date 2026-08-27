@@ -47,6 +47,7 @@
     "package:smoke": "node scripts/smoke-root-tarball.js",
     "package:smoke:lifecycle": "node scripts/smoke-root-tarball.js --install-lifecycle",
     "package:verify-root-tree": "node scripts/verify-root-production-tree.js",
+    "evidence:c10": "node scripts/write-c10-evidence-bundle.mjs",
     "runtime:verify-node16": "node scripts/verify-node16-runtime.js",
     "publish:npm": "node scripts/publish-npm.js"
   },

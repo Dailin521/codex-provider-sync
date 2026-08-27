@@ -219,7 +219,7 @@ jobs:
           path: artifacts/c9/${{ matrix.target }}
           if-no-files-found: error
           include-hidden-files: false
-          retention-days: 7
+          retention-days: 30
 
   electron-candidate-set:
     needs: electron-release-candidate
@@ -245,7 +245,7 @@ jobs:
           path: artifacts/c9-index
           if-no-files-found: error
           include-hidden-files: false
-          retention-days: 7
+          retention-days: 30
 
   dependency-audit:
     runs-on: ubuntu-latest
@@ -312,8 +312,7 @@ jobs:
           dotnet-version: "10.0.x"
       - run: dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj --filter FullyQualifiedName~LockServiceTests
 
-  ci-gate:
-    name: ci-gate
+  c10-evidence-bundle:
     if: ${{ always() }}
     needs:
       - test
@@ -331,6 +330,53 @@ jobs:
       - desktop-linux-lock
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: "npm"
+      - run: npm ci
+      - name: Download the verified four-target candidate index
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: electron-release-candidate-set
+          path: artifacts/c9-index
+      - name: Generate the redacted commit-bound C10 evidence bundle
+        env:
+          CPS_CANDIDATE_INDEX: artifacts/c9-index/candidate-index.v1.json
+          CPS_REQUIRED_JOB_RESULTS_JSON: ${{ toJSON(needs) }}
+        run: npm run evidence:c10
+      - name: Upload the non-release C10 evidence bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vnext-c10-evidence-${{ github.sha }}
+          path: artifacts/c10
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 30
+
+  ci-gate:
+    name: ci-gate
+    if: ${{ always() }}
+    needs:
+      - test
+      - workspace-contract
+      - root-package-compat
+      - web-build
+      - web-browser
+      - electron-desktop
+      - electron-release-candidate
+      - electron-candidate-set
+      - dependency-audit
+      - cross-runtime-fixtures
+      - desktop-test
+      - desktop-macos
+      - desktop-linux-lock
+      - c10-evidence-bundle
+    runs-on: ubuntu-latest
+    steps:
       - name: Verify required jobs
         env:
           NODE_TEST_RESULT: ${{ needs.test.result }}
@@ -346,6 +392,7 @@ jobs:
           DESKTOP_TEST_RESULT: ${{ needs.desktop-test.result }}
           MACOS_TEST_RESULT: ${{ needs.desktop-macos.result }}
           LINUX_LOCK_RESULT: ${{ needs.desktop-linux-lock.result }}
+          C10_EVIDENCE_RESULT: ${{ needs.c10-evidence-bundle.result }}
         run: |
           if [ "$NODE_TEST_RESULT" != "success" ] ||
              [ "$WORKSPACE_CONTRACT_RESULT" != "success" ] ||
@@ -359,7 +406,8 @@ jobs:
              [ "$CROSS_RUNTIME_FIXTURES_RESULT" != "success" ] ||
              [ "$DESKTOP_TEST_RESULT" != "success" ] ||
              [ "$MACOS_TEST_RESULT" != "success" ] ||
-             [ "$LINUX_LOCK_RESULT" != "success" ]; then
+             [ "$LINUX_LOCK_RESULT" != "success" ] ||
+             [ "$C10_EVIDENCE_RESULT" != "success" ]; then
             echo "One or more required CI jobs did not succeed."
             exit 1
           fi

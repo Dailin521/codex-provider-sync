@@ -34,16 +34,18 @@ This tool synchronizes session files and the SQLite index, restoring session vis
 
 > The Windows GUI and Local Web UI currently use a Simplified Chinese interface.
 >
-> CLI/Web and the Windows GUI are released independently, so their version numbers may differ.
+> CLI/Web and the current Windows GUI are released independently, so their version numbers may differ.
+>
+> **Migration status:** The currently published desktop entry point is the Windows .NET GUI. The vNext Electron desktop code in this repository is an unreleased candidate implementation, not the current default, Stable, or downloadable product. This README will switch to Electron as the primary desktop entry point and mark .NET as Legacy only after the four-platform candidate gates, final evidence, and separately authorized release validation all pass.
 
 | Scenario | Recommended interface |
 | --- | --- |
-| Windows desktop | [Download Windows GUI](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [Usage guide](#windows-gui) |
+| Windows desktop | [Download the current Windows GUI (.NET)](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [Usage guide](#current-windows-gui-net) |
 | macOS desktop | [Local Web UI (CLI required)](#local-web-ui); [native GUI build guide](README_MAC_GUI_EN.md) |
 | Browser interface or cross-platform use | [Local Web UI (CLI required)](#local-web-ui) |
 | Scripts, CI, or WSL | [CLI](#cli) |
 
-### Windows GUI
+### Current Windows GUI (.NET)
 
 Download `CodexProviderSync.exe` from [Releases](https://github.com/Dailin521/codex-provider-sync/releases/latest):
 
@@ -54,6 +56,8 @@ Download `CodexProviderSync.exe` from [Releases](https://github.com/Dailin521/co
 The application is not code-signed, so Windows may show a security warning. Download only from this project's Releases.
 
 [Full Windows GUI guide (Chinese)](README_GUI_ZH.md)
+
+See the [vNext Electron desktop candidate guide](README_DESKTOP_EN.md) for its capabilities, security boundaries, and internal acceptance workflow. That guide does not provide a public download or authorize a release.
 
 ### Local Web UI
 
@@ -115,15 +119,21 @@ SQLite Home resolution order: `--sqlite-home` → root-level `sqlite_home` in `c
 
 ```mermaid
 flowchart LR
-    Browser["Browser Web UI"] --> WebServer["Local Node Web Server<br/>127.0.0.1"]
-    WebServer --> NodeService["Node Service"]
-    CLI["Node CLI"] --> NodeService
+    Browser["Browser React UI"] --> HttpClient["HttpCoreClient"]
+    HttpClient --> WebServer["Local Web Host<br/>127.0.0.1 + pairing"]
+    WebServer --> NodeCore["Node Core public facade"]
+    CLI["Node CLI"] --> NodeCore
+
+    ElectronRenderer["vNext Electron Renderer<br/>unreleased candidate"] --> DesktopClient["DesktopCoreClient"]
+    DesktopClient --> ElectronHost["Preload / Main<br/>narrow IPC"]
+    ElectronHost --> Utility["Utility Process"]
+    Utility --> NodeCore
 
     WindowsGUI["Windows GUI"] --> Application[".NET Application"]
     Application --> DotNetCore[".NET Core"]
     MacGUI["macOS GUI"] --> DotNetCore
 
-    NodeService --> Storage["Codex Storage"]
+    NodeCore --> Storage["Codex Storage"]
     DotNetCore --> Storage
 
     Storage --> Config["config.toml"]
@@ -132,9 +142,12 @@ flowchart LR
     Storage --> Backups["managed backups"]
 ```
 
-- The Web UI and CLI share the same Node service logic.
+- Web requests flow through `HttpCoreClient → /api/core → Node Core public facade`; the CLI calls the same public Core boundary directly.
+- The vNext Electron candidate uses `DesktopCoreClient → narrow Preload/Main IPC → Utility Process → Node Core`; its Renderer has no Node, arbitrary-path, or generic-IPC access.
 - The Windows GUI calls .NET Core through the Application layer; the macOS GUI currently calls .NET Core directly.
 - The Node service and .NET Core enforce the same configuration, rollout, SQLite, and backup safety boundaries.
+
+The .NET desktop implementation remains the published product and compatibility authority; it is not Legacy yet. Electron replacement is gated by Phase 6 in the [vNext migration execution index](migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md). Internal checkpoints and single-platform local evidence do not change release status.
 
 ## Safety boundaries
 
@@ -149,6 +162,7 @@ flowchart LR
 
 - [AI / Agent Guide](../AGENTS.md)
 - [Windows GUI guide (Chinese)](README_GUI_ZH.md)
+- [vNext Electron desktop candidate guide](README_DESKTOP_EN.md)
 - [Web UI guide (Chinese)](README_WEB_UI_ZH.md)
 - [中文](../README.md) · [日本語](README_JA.md) · [한국어](README_KO.md)
 - [macOS GUI: 中文](README_MAC_GUI_ZH.md) · [English](README_MAC_GUI_EN.md)
