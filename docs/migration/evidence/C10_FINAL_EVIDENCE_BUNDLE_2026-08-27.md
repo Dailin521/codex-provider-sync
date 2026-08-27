@@ -4,6 +4,8 @@
 
 输入为 C9 实现 commit `73256f3187dd337bb681a1cc9810edad8f6309bb` 及 C9 证据 commit `d34654994ad790b09ed4284ce8f5d87aeace8723`。开始 C10 前已重新 fetch，并确认 `origin/main` 为 `c7ff85218a07a8e5f14132c582cad1239c52865e`；按 ADR-0011 执行 `git merge --no-ff --no-edit origin/main`，结果为 Already up to date，没有 rebase 或 force-push。C10 输出 commit 和 CI-tested commit 只由最终 bundle 记录，本文不预填尚未产生的 SHA。
 
+完成性审计后的现代 UI hardening 内容 checkpoint 为 `0bd982c4fb977dc965360e58bb9dfcce75ae5f81`。该提交只绑定下述本地 Windows 验证内容，不替代最终 PR merge commit、远端 required CI 或合入后 `main` evidence bundle；其后只允许追加证据/治理文档，若再改运行代码或产物必须重新生成新的 tested checkpoint。
+
 ## Evidence bundle 合同
 
 - `C10_EVIDENCE_BUNDLE.v1.schema.json` 固定 `scope: vnext-c10-evidence`、`outcome: ci-verified-not-release`，发布授权、tag、npm、GitHub Release、签名、公证、更新 metadata 和跨版本升级字段只能为 `false`。
@@ -24,13 +26,13 @@
 
 环境：Windows 11 x64 build `26200`，Node `24.11.1`，npm `11.10.0`，PowerShell `7.6.4`，Git `2.52.0.windows.1`，.NET SDK `10.0.400`。全部开发测试使用临时 fixture；Electron 设置 `CPS_DESKTOP_WINDOW_DISPLAY=hidden`，没有显示或占用主屏窗口。
 
-最终本地 hardening 只面向新版 Electron/共享 React UI，不改造旧 WinForms 视觉层：持久化主题由 CSP 允许的固定 bootstrap 在 React 前应用；Status 尚未成功时 Sync/Switch/Restore/Prune/Watch 与已打开 Plan 的确认全部 fail closed；Plan、OperationResult、Diagnostics 默认显示双语语义摘要，原始 JSON 只在折叠技术详情中出现；History 正文保持显式打开、无 Query cache，详情/结果关闭后恢复键盘焦点。真实隐藏 BrowserWindow 在 `760×560`、200% zoom 下遍历八页，逐页证明整页无横向溢出；Web 以 380 CSS px 复核八页及 Plan/Result 对话框。
+最终本地 hardening 只面向新版 Electron/共享 React UI，不改造旧 WinForms 视觉层：持久化主题由 CSP 允许的固定 bootstrap 在 React 前应用；Status 尚未成功时 Sync/Switch/Restore/Prune/Watch 与已打开 Plan 的确认全部 fail closed；Profile revision 在 Status、Prepare 或 Apply 期间变化时只显示一次本地化提示、合并并发 Profile 刷新，并要求使用新 revision 重新 Prepare；Plan、OperationResult、Diagnostics 默认显示双语语义摘要，原始 JSON 只在折叠技术详情中出现；History 正文保持显式打开、无 Query cache，详情/结果关闭后恢复键盘焦点。Design System 增加统一字体、字号、行高和 4～24 px 间距 token，shared primitives 已消费这些 token。真实隐藏 BrowserWindow 在 `760×560`、200% zoom 下遍历八页，逐页证明整页无横向溢出；Web 以 380 CSS px 复核八页及 Plan/Result 对话框。组件级测试另覆盖 Profile Changed、Progress、Cancel、Error Boundary、i18n、Skip Link 与键盘路由。
 
 | 门禁 | 结果 |
 | --- | --- |
 | `npm test` | 428 passed，0 failed/skipped |
-| `npm run workspaces:check` | 118 workspace tests passed；build/import/package boundary 通过 |
-| `npm run web:build` + `npm run web:test:e2e` | Vite production build 通过（2047 modules，JS 568.45 kB / gzip 173.59 kB）；2/2 E2E passed |
+| `npm run workspaces:check` | 125 workspace tests passed；build/import/package boundary 通过，其中 App UI 为 4 项静态合同 + 13 项 Vitest |
+| `npm run web:build` + `npm run web:test:e2e` | Vite production build 通过（2047 modules，JS 570.06 kB / gzip 173.95 kB）；2/2 E2E passed |
 | `npm run desktop:test:e2e`（hidden） | 15 passed，1 skipped；唯一 Skip 为不可用的真实 WSL UNC 环境 |
 | `npm run desktop:build` + production E2E（hidden） | production bundle verifier 通过；无 test bridge/fallback selector；真实 Status 与 Sync→Restore 2/2 passed |
 | `npm run desktop:pack:dir` + packaged production smoke（hidden） | Electron ABI rebuild、unpacked production、真实 fixture Status、Sync→Restore、graceful exit，2/2 passed；本地 executable 为 `NotSigned` |
