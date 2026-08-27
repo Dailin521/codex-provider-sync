@@ -2,8 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-08-25
-- Amended: 2026-08-27 (C8 Main-only updater runtime)
-- Scope: vNext C4 workspace baseline, C5 shared UI/Web, C6 Electron and C8 updater dependency boundaries
+- Amended: 2026-08-27 (C9 Electron native fallback and release-audit toolchain)
+- Scope: vNext C4 workspace baseline, C5 shared UI/Web, C6 Electron, C8 updater and C9 release-engineering dependency boundaries
 
 ## Context
 
@@ -54,11 +54,14 @@ C6 的 Electron、electron-vite、electron-builder、Desktop Vite/React plugin �
 | `electron-builder` | `26.15.7` | C6 最新 stable；先提供三平台 unpacked Alpha 构建，发布目标与 native fallback 留到 C9 |
 | `electron-updater` | `6.8.9` | C8 解析时最新 stable，非 `next`/preview；仅 Desktop production Main 使用，与 `electron-builder` 的 GitHub provider 元数据闭合 |
 | Desktop Vite / React plugin | `vite 7.3.6`、`@vitejs/plugin-react 5.2.0` | `electron-vite 5.0.0` 的兼容组合；与 Web workspace 的 Vite 8/plugin 6 分开锁定 |
-| `better-sqlite3` | `8.7.0` | 保留现有根 optional fallback；更新版本不满足根 Node 16 合同，不在 C4 强升 |
+| 根 `better-sqlite3` | `8.7.0` | 保留现有根 optional fallback；更新版本不满足根 Node 16 合同，不进入根生产树升级 |
+| Desktop `better-sqlite3` | `13.0.3` | C9 最新 stable；仅 Electron production fallback，按 Electron 44 ABI rebuild，包内只保留 target-native binding |
+| `@electron/asar` / `@electron/fuses` | `4.3.0` / `2.1.3` | C9 build-only 审计工具；读取 ASAR header/entry integrity 与最终 executable fuse wire |
+| `resedit` / `plist` | `3.1.0` / `5.0.0` | C9 build-only 审计工具；分别验证 Windows PE 与 macOS Info.plist 的 embedded ASAR integrity binding |
 
 所有直接 dependency/devDependency/optionalDependency/peerDependency 使用精确版本，不使用 `^`、`~`、`workspace:*`、`file:` 或未锁定 URL。传递依赖由唯一 lockfile 锁定。候选经 `npm audit --omit=dev --audit-level=moderate` 与全树 `npm audit --audit-level=high` 检查；任一不合格候选不得进入 checkpoint。
 
-Electron、electron-vite 与 electron-builder 已在 C6 按上述规则解析；`better-sqlite3` 的 Electron ABI fallback、`asarUnpack` 与发布级 native driver matrix 仍由 C9 解析和验证。不得把 Electron 写入根 manifest。
+Electron、electron-vite 与 electron-builder 已在 C6 按上述规则解析。C9 解析并锁定 Desktop `better-sqlite3`、ASAR/Fuse/PE/plist 审计工具；这些依赖只存在于 private Desktop workspace，不得写入根 manifest、根 production tree 或根 npm tarball。Desktop runtime SBOM 从唯一 lockfile 投影 production closure，必须包含 Electron framework 与 native fallback，但排除 Playwright、builder、Vite、审计工具和 test fixtures。
 
 C8 增加的 `electron-updater` 只能由 `apps/desktop/src/main/updater.ts` 动态加载；Renderer、Preload、Utility、共享 UI 和 Core 不得导入 updater、指定 URL/channel 或接触原始 `UpdateInfo`。安装前由同一 `CoreRuntimeSupervisor` 同步关闭 restart gate，排空已 admission 的写请求，再执行 active Watch 与全部 Profile recovery 复核；失败路径必须重新开放 gate。C8 实现受控状态机与安装门禁，但 `apps/desktop` 版本仍为 `0.0.0` 时发布通道保持 disabled；实际版本注入、签名、更新 metadata 与真实跨版本升级 smoke 属于 C9/C10 发布门禁，不因依赖已接入而视为已发布。
 
@@ -83,6 +86,7 @@ C8 增加的 `electron-updater` 只能由 `apps/desktop/src/main/updater.ts` 动
 - import contract：除 `packages/core -> src/public-api.js` 的单一过渡例外外，禁止深度导入；
 - security：生产树 moderate/high/critical 为零，全树 high/critical 为零。
 - C6：Node 24 production/test 两种 Electron bundle、production bundle test-hook 排除、Windows unpacked production SQLite/Utility smoke、真实 crash/restart/journal preflight E2E；同一 job 在 Windows/macOS/Linux 运行并受唯一 `ci-gate` 约束。
+- C9：Node 24 host-native 四目标 candidate build；Electron ABI fallback probe、最终容器 ASAR/Fuse/敏感内容审计、Status 与 Sync→Restore smoke、SBOM/checksum/manifest，以及四目标 commit/lockfile/tool/policy aggregate；CI 命令固定 `--publish never`。
 
 ## Related
 

@@ -973,7 +973,17 @@ V1/C3 已实现上述边界；`runSync/runSwitch/runRestore/runWatch` 仍作为 
 - Diagnostics Renderer 请求严格只有 `{schemaVersion:1, profile}`。输出目标由 Main 原生文件选择器产生并转换为 5 分钟、单次消费的随机 capability；token 和目标路径不跨 Renderer。ZIP 条目固定且再次执行共享 Diagnostics DTO exact validation，排除 `auth.json`、凭据、token、路径、rollout/DB、消息正文与 `encrypted_content`。
 - Update 只由 Main 的 `electron-updater` controller 管理，固定使用打包 metadata 中的 GitHub provider；不得调用 `setFeedURL`，Renderer 不得提交 URL、channel、路径、版本、silent/force 参数或接收 release notes、下载 URL、缓存路径和原始异常。Preload 仅暴露无参数的 `getStatus/check/download/install`，响应为脱敏 schema v2 状态。
 - `autoDownload` 与 `autoInstallOnAppQuit` 均关闭。检查、下载或更新错误不得改变 Core 结果。安装意图必须在 Supervisor 内同步关闭 restart gate，将已经入场但尚处于 preflight/dispatch 前的写请求计入 admission，并等待这些请求排空；此后新的 Sync/Switch/Restore/Prune/startWatch 立即返回 busy，只有 `getWatchStatus` 仍为只读。排空后必须再次确认 update 已下载、无 active Watch、无写操作，并由 Main 对全部已知 Profile 强制刷新 Status、证明无 pending recovery，最后才可调用 `quitAndInstall`；任一 Profile 无法验证、installer 抛错或安装未启动时均 fail closed 并重新开放 gate。
-- C8 只接入受控状态机和门禁；Desktop 版本仍为 `0.0.0` 或非 packaged/不支持目标时状态为 disabled，不启动网络检查。真实版本注入、签名、Update metadata 和跨版本 packaged smoke 属于 C9/C10 门禁，未获得发布授权前不得把通道描述为已上线。
+- C8 只接入受控状态机和门禁；Desktop source manifest 版本仍为 `0.0.0` 或非 packaged/不支持目标时状态为 disabled，不启动网络检查。C9 只在候选构建时注入 prerelease 版本；签名、Update metadata 和跨版本 packaged smoke 仍属于 C10/发布门禁，未获得发布授权前不得把通道描述为已上线。
+
+### 16.8 C9 Electron 候选产物与 CI 边界
+
+- 候选版本固定为 `1.0.0-alpha|beta|rc.<run>`，buildId 必须绑定完整 commit、target 与 run；source manifest 不因候选构建被改写。所有 builder 调用带 `--publish never`，候选 manifest 固定 `releaseAuthorized:false`、`signingStatus:unsigned-candidate`、`notarizationStatus:not-authorized`。
+- 目标集合恰为 Windows x64 NSIS/portable ZIP、macOS x64/arm64 DMG/ZIP、Linux x64 AppImage/deb。每个目标必须由同架构 host-native runner 构建；不得 cross-build native SQLite 后冒充实机证据。
+- Electron 优先使用 `node:sqlite`；`better-sqlite3` 作为 production fallback 必须针对当前 Electron ABI 验证加载。ASAR 只能引用当前 target 的一个 native binding，且该 binding 是 `app.asar.unpacked` 中唯一文件；其它平台 prebuild、source、build/deps 不得进入包。
+- 每个最终容器都必须实际解包或安装，并与 staging audit 逐字段一致；审计覆盖 ASAR 全文件/block hash、embedded header binding、fuse wire、敏感路径/文件/高置信 token、fixture/test/source map、native binding 与 production buildId。Windows NSIS 还必须完成静默卸载清理。
+- packaged smoke 只使用临时 synthetic fixture，以隐藏窗口启动正式 executable，验证 production test bridge 不存在、真实 SQLite Status、Sync→Restore byte/hash 回环与正常退出；不得访问真实 Codex Home、`auth.json`、凭据或消息正文。
+- 每个目标输出 CycloneDX SBOM、最终容器报告、release manifest 和 `SHA256SUMS.txt`。checksum 必须精确覆盖所有资产与 metadata；aggregate 必须证明四目标 version/commit/lockfile/tool versions/fuse policy/audit policy 一致，且任一 matrix job 失败、取消或跳过都使唯一 `ci-gate` 失败。
+- 推送 tag 不得自动发布。旧发布工作流改为显式 `workflow_dispatch` 并要求既有 `v` 前缀 tag 位于 `main`；这只是发布授权后的入口，不表示当前已获 tag、npm/GitHub Release、签名、公证或更新通道授权。
 
 ## 17. Phase 1 提取要求
 

@@ -1,6 +1,6 @@
 # vNext 行为兼容 Fixture 清单
 
-> **状态：Accepted（阶段 0 语义清单；C2 动态 CLI Fixture、C4 安全 Runner/Schema、C5 首批跨运行时静态 Corpus、C7 Electron Sync/Switch 动态 Fixture 已实现）**
+> **状态：Accepted（阶段 0 语义清单；C2 动态 CLI Fixture、C4 安全 Runner/Schema、C5 首批跨运行时静态 Corpus、C7/C8 Electron 动态 Fixture 与 C9 候选产物 Fixture 已实现）**
 >
 > **日期：2026-08-24**
 >
@@ -123,8 +123,11 @@ C8 的 executable mapping 为 `test/restore-v2-state-machine.test.js`、`Restore
 | `workspace-roots` | global state、rollout cwd 与 SQLite cwd 不一致，含跨平台路径形式 | 只修复合同允许的 workspace/cwd 元数据；路径规范化一致；Backup/Restore 覆盖 global state |
 | `history-safe-content` | user/event/response-item 重复消息、无 thread id、同 id 多 rollout | 列表选择稳定会话；详情只在用户主动读取时返回安全消息；正文不进入日志、诊断包或应用数据库 |
 | `desktop-readonly-c6` | 临时 Codex Home 含无标题 rollout、真实 SQLite row、valid pending journal 与正文 marker | production bridge 无测试/Node 能力；列表/Profiles/Diagnostics 无路径和正文；显式详情后才显示 marker；写 IPC 拒绝；Utility crash 后按 profile preflight 并恢复；测试前后 Codex Home 全树 Hash 不变 |
+| `desktop-release-candidate-c9` | 四个 host-native target 各自生成两个最终发行容器；容器只含 synthetic build content 与 target-native SQLite binding | 每个容器解包/安装后重新审计 ASAR/Fuse/embedded integrity/native binding，隐藏执行 Status 与 Sync→Restore，正常退出；NSIS 卸载清理；SBOM/manifest/checksum 完整闭包；四目标 aggregate 的 version/commit/lock/tool/policy 一致；任何 source map、fixture、凭据名、真实数据、非目标 binding 或未清单文件均阻断 |
 
 C6 executable mapping：`test-support/desktop-readonly-fixture.mjs`、`apps/desktop/tests/*.test.mjs`、`apps/desktop/e2e/desktop-production-boundary.spec.mjs` 与 `desktop-readonly.spec.mjs`。production unpacked smoke 通过 `apps/desktop/scripts/run-packaged-e2e.mjs` 解析当前平台 builder 输出；Windows/macOS/Linux Node 24 job 同时验证正常 production bundle、真实 SQLite/History 边界和 test build 的 Utility crash/restart。正式安装器、双架构 macOS 发行产物和 native fallback 留在 C9。
+
+C9 executable mapping：`apps/desktop/tests/release-candidate.test.mjs`、`apps/desktop/scripts/build-candidate.mjs`、`stage-candidate.mjs`、`release-audit.mjs`、`smoke-candidate-artifacts.mjs`、`verify-candidate-set.mjs`、`apps/desktop/e2e/desktop-production-boundary.spec.mjs` 与 `.github/workflows/ci.yml` 的 `electron-release-candidate`/`electron-candidate-set`。本地 Windows 只证明 Windows x64 ZIP/NSIS；macOS x64/arm64、Linux x64 和四目标 aggregate 必须由 required CI 证明，不能手工补造。
 
 ## 8. CLI JSON 动态 Fixture
 
