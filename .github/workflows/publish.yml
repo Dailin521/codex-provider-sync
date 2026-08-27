@@ -1,9 +1,16 @@
 name: publish
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing v-prefixed release tag to publish
+        required: true
+        type: string
+
+concurrency:
+  group: publish-${{ inputs.release_tag }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -14,14 +21,22 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: refs/tags/${{ inputs.release_tag }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Verify release tag commit is on main
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
+          if ($env:RELEASE_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$') {
+            Write-Error "release_tag must be a v-prefixed semantic version."
+            exit 1
+          }
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          git merge-base --is-ancestor "$env:GITHUB_SHA" "refs/remotes/origin/main"
+          $releaseCommit = git rev-parse HEAD
+          git merge-base --is-ancestor "$releaseCommit" "refs/remotes/origin/main"
           if ($LASTEXITCODE -ne 0) {
             Write-Error "Release tags must point to a commit contained in main."
             exit 1
@@ -35,7 +50,7 @@ jobs:
       - name: Verify release version consistency
         shell: pwsh
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           node scripts/verify-release-version.js --tag $env:RELEASE_TAG
           node scripts/read-release-metadata.js --tag $env:RELEASE_TAG
@@ -81,7 +96,7 @@ jobs:
       - name: Package release assets
         shell: pwsh
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           $version = $env:RELEASE_TAG.Substring(1)
           ./scripts/package-release-assets.ps1 -Version $version -PublishOutput artifacts/win-x64 -Output artifacts/release
@@ -102,6 +117,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: refs/tags/${{ inputs.release_tag }}
           persist-credentials: false
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.1
@@ -111,7 +127,9 @@ jobs:
       - name: Resolve versioned Chinese release announcement
         id: release_metadata
         shell: bash
-        run: node scripts/read-release-metadata.js --tag "$GITHUB_REF_NAME" --github-output "$GITHUB_OUTPUT"
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: node scripts/read-release-metadata.js --tag "$RELEASE_TAG" --github-output "$GITHUB_OUTPUT"
 
       - name: Download packaged assets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -122,6 +140,7 @@ jobs:
       - name: Upload release assets
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
+          tag_name: ${{ inputs.release_tag }}
           name: ${{ steps.release_metadata.outputs.release_title }}
           body_path: ${{ steps.release_metadata.outputs.release_body_path }}
           files: |

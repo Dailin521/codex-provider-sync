@@ -248,6 +248,9 @@ try {
     if (!packedPaths.has(required)) throw new Error(`Root tarball is missing ${required}.`);
   }
   for (const packedPath of packedPaths) {
+    if (packedPath.endsWith(".map")) {
+      throw new Error(`Root tarball contains a production source map: ${packedPath}`);
+    }
     const allowedExact = new Set([
       "AGENTS.md",
       "CHANGELOG.md",

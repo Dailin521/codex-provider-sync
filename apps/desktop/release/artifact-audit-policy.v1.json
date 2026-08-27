@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "requiredAsarEntries": [
+    "package.json",
+    "out/main/index.js",
+    "out/main/runtime.js",
+    "out/preload/index.cjs",
+    "out/renderer/index.html",
+    "node_modules/better-sqlite3/package.json",
+    "node_modules/better-sqlite3/lib/index.js"
+  ],
+  "forbiddenPathSegments": [
+    ".git",
+    ".aws",
+    ".ssh",
+    "__fixtures__",
+    "__tests__",
+    "test",
+    "tests",
+    "checks",
+    "e2e",
+    "fixtures",
+    "test-fixtures",
+    "test-support"
+  ],
+  "forbiddenFileNames": [
+    ".env",
+    ".env.local",
+    ".npmrc",
+    "auth.json",
+    "credentials",
+    "credentials.json",
+    "id_rsa",
+    "id_ed25519",
+    "secrets.json",
+    "tokens.json"
+  ],
+  "forbiddenExtensions": [
+    ".map",
+    ".pem",
+    ".key",
+    ".jsonl",
+    ".p12",
+    ".pfx",
+    ".db",
+    ".sqlite",
+    ".sqlite3"
+  ],
+  "forbiddenFilePatterns": [
+    "^\\.env(?:\\.|$)",
+    "^(?:credential|secret|token)s?\\.(?:json|ya?ml|txt)$",
+    "\\.(?:spec|test)\\.[^.]+$",
+    "^rollout-.*\\.jsonl$",
+    "\\.(?:sqlite|sqlite3|db)(?:-(?:wal|shm))?$"
+  ],
+  "forbiddenTextRules": [
+    {
+      "id": "private-key-pem",
+      "pattern": "-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"
+    },
+    {
+      "id": "github-token",
+      "pattern": "\\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22,255})\\b"
+    },
+    {
+      "id": "aws-access-key",
+      "pattern": "\\b(?:AKIA|ASIA)[A-Z0-9]{16}\\b"
+    },
+    {
+      "id": "slack-token",
+      "pattern": "\\bxox[baprs]-[A-Za-z0-9-]{20,}\\b"
+    },
+    {
+      "id": "desktop-test-bridge",
+      "pattern": "__CPS_DESKTOP_TEST__"
+    },
+    {
+      "id": "desktop-fault-gate",
+      "pattern": "CPS_DESKTOP_TEST_GATE|desktop E2E fault gate"
+    },
+    {
+      "id": "fixture-canary",
+      "pattern": "C6_DESKTOP_BODY_ONLY_MARKER|example\\.invalid"
+    }
+  ]
+}

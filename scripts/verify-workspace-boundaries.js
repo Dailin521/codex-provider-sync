@@ -125,7 +125,12 @@ const approvedDesktopElectronDependencies = new Map([
   ["electron", { version: "44.0.0", field: "devDependencies", checkpoint: "C6" }],
   ["electron-vite", { version: "5.0.0", field: "devDependencies", checkpoint: "C6" }],
   ["electron-builder", { version: "26.15.7", field: "devDependencies", checkpoint: "C6" }],
-  ["electron-updater", { version: "6.8.9", field: "dependencies", checkpoint: "C8" }]
+  ["electron-updater", { version: "6.8.9", field: "dependencies", checkpoint: "C8" }],
+  ["better-sqlite3", { version: "13.0.3", field: "dependencies", checkpoint: "C9" }],
+  ["@electron/asar", { version: "4.3.0", field: "devDependencies", checkpoint: "C9" }],
+  ["@electron/fuses", { version: "2.1.3", field: "devDependencies", checkpoint: "C9" }],
+  ["plist", { version: "5.0.0", field: "devDependencies", checkpoint: "C9" }],
+  ["resedit", { version: "3.1.0", field: "devDependencies", checkpoint: "C9" }]
 ]);
 for (const [name, approval] of approvedDesktopElectronDependencies) {
   assert(
@@ -134,7 +139,7 @@ for (const [name, approval] of approvedDesktopElectronDependencies) {
   );
 }
 for (const name of Object.keys(desktopDependencies)) {
-  if (name === "electron" || name.startsWith("electron-")) {
+  if (name === "electron" || name.startsWith("electron-") || name.startsWith("@electron/")) {
     assert(approvedDesktopElectronDependencies.has(name), `Unreviewed Electron dependency: ${name}`);
   }
 }

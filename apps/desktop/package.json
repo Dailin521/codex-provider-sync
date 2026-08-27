@@ -18,6 +18,10 @@
     "build:electron:test": "electron-vite build --mode test",
     "verify:production-bundle": "node scripts/verify-production-bundle.mjs",
     "pack:dir": "npm run build && npm run build:electron && npm run verify:production-bundle && electron-builder --dir --config electron-builder.yml",
+    "pack:candidate": "node scripts/build-candidate.mjs",
+    "stage:candidate": "node scripts/stage-candidate.mjs",
+    "smoke:candidate:artifacts": "node scripts/smoke-candidate-artifacts.mjs",
+    "verify:candidate:set": "node scripts/verify-candidate-set.mjs",
     "test": "node --test checks/*.contract.mjs tests/*.test.mjs",
     "test:e2e": "playwright test -c playwright.config.mjs",
     "test:e2e:production": "playwright test -c playwright.production.config.mjs",
@@ -32,12 +36,15 @@
     "@codex-provider-sync/core": "0.0.0",
     "@codex-provider-sync/core-client": "0.0.0",
     "@codex-provider-sync/design-system": "0.0.0",
+    "better-sqlite3": "13.0.3",
     "electron-updater": "6.8.9",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
   "devDependencies": {
     "@codex-provider-sync/test-fixtures": "0.0.0",
+    "@electron/asar": "4.3.0",
+    "@electron/fuses": "2.1.3",
     "@playwright/test": "1.62.1",
     "@tailwindcss/vite": "4.3.3",
     "@types/react": "19.2.18",
@@ -46,6 +53,8 @@
     "electron": "44.0.0",
     "electron-builder": "26.15.7",
     "electron-vite": "5.0.0",
+    "plist": "5.0.0",
+    "resedit": "3.1.0",
     "tailwindcss": "4.3.3",
     "vite": "7.3.6"
   }

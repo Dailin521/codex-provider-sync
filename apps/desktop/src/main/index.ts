@@ -51,6 +51,11 @@ if (!app.requestSingleInstanceLock()) {
   let updates: DesktopUpdateController | null = null;
   let activeWatchCount = 0;
   let quitting = false;
+  if (process.platform !== "win32") {
+    const requestGracefulQuit = () => app.quit();
+    process.once("SIGINT", requestGracefulQuit);
+    process.once("SIGTERM", requestGracefulQuit);
+  }
 
   const defaultCodexHome = path.resolve(
     (e2eEnabled ? process.env.CPS_DESKTOP_CODEX_HOME : undefined)

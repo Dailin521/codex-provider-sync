@@ -36,8 +36,34 @@ test("release packaging creates a focused Automation ZIP with its protocol and g
 test("publish workflow resolves a tag-bound Chinese announcement instead of hardcoding a body", () => {
   const workflow = read(".github/workflows/publish.yml");
 
+  assert.match(workflow, /workflow_dispatch:/);
+  assert.match(workflow, /release_tag:/);
+  assert.match(workflow, /ref: refs\/tags\/\$\{\{ inputs\.release_tag \}\}/);
+  assert.match(workflow, /tag_name: \$\{\{ inputs\.release_tag \}\}/);
+  assert.doesNotMatch(workflow, /\bpush:\s*\n\s+tags:/);
+  assert.doesNotMatch(workflow, /github\.ref_name|GITHUB_REF_NAME/);
   assert.match(workflow, /read-release-metadata\.js --tag/);
   assert.match(workflow, /body_path: \$\{\{ steps\.release_metadata\.outputs\.release_body_path \}\}/);
   assert.match(workflow, /name: \$\{\{ steps\.release_metadata\.outputs\.release_title \}\}/);
   assert.doesNotMatch(workflow, /^\s+body:\s*\|/m);
+});
+
+test("CI requires all four native Electron candidates and their aggregate index", () => {
+  const workflow = read(".github/workflows/ci.yml");
+
+  for (const value of [
+    "windows-x64",
+    "macos-x64",
+    "macos-arm64",
+    "linux-x64",
+    "macos-15-intel",
+    "macos-15",
+    "desktop:pack:candidate",
+    "desktop:stage:candidate",
+    "desktop:smoke:candidate:artifacts",
+    "desktop:verify:candidate:set"
+  ]) assert.match(workflow, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(workflow, /ELECTRON_RELEASE_CANDIDATE_RESULT/);
+  assert.match(workflow, /ELECTRON_CANDIDATE_SET_RESULT/);
+  assert.match(workflow, /if-no-files-found: error/);
 });

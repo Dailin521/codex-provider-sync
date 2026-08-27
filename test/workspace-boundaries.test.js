@@ -34,6 +34,8 @@ test("root npm package remains a Node 16 surface with only the audited shared We
     root.files.filter((entry) => entry.startsWith("packages")).sort(),
     ["packages/contracts/dist", "packages/core/src"]
   );
+  const webConfig = await fs.readFile(path.join(repositoryRoot, "apps/web/vite.config.ts"), "utf8");
+  assert.match(webConfig, /sourcemap:\s*false/);
 });
 
 test("all C4 workspaces are private and direct dependency versions are exact", async () => {

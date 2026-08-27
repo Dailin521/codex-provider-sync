@@ -5,11 +5,17 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "electron-vite";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
+const desktopBuildId = process.env.CPS_DESKTOP_BUILD_ID?.trim() || "dev-c9";
+
+if (!/^[A-Za-z0-9._-]{1,128}$/.test(desktopBuildId)) {
+  throw new Error("CPS_DESKTOP_BUILD_ID must be a 1-128 character safe identifier.");
+}
 
 export default defineConfig(({ mode }) => ({
   main: {
     define: {
-      __CPS_DESKTOP_TEST_BUILD__: JSON.stringify(mode === "test")
+      __CPS_DESKTOP_TEST_BUILD__: JSON.stringify(mode === "test"),
+      __CPS_DESKTOP_BUILD_ID__: JSON.stringify(desktopBuildId)
     },
     ssr: {
       noExternal: [/^@codex-provider-sync\//]
@@ -35,7 +41,8 @@ export default defineConfig(({ mode }) => ({
   },
   preload: {
     define: {
-      __CPS_DESKTOP_TEST_BUILD__: JSON.stringify(mode === "test")
+      __CPS_DESKTOP_TEST_BUILD__: JSON.stringify(mode === "test"),
+      __CPS_DESKTOP_BUILD_ID__: JSON.stringify(desktopBuildId)
     },
     ssr: {
       noExternal: [/^@codex-provider-sync\//]

@@ -1,13 +1,73 @@
 appId: com.dailin521.codex-provider-sync
 productName: Codex Provider Sync
-asar: true
+asar:
+  smartUnpack: false
+asarUnpack:
+  - node_modules/better-sqlite3/prebuilds/${platform}-${arch}.node
+npmRebuild: true
+buildDependenciesFromSource: false
+removePackageScripts: true
+includePdb: false
 directories:
   output: ../../dist-desktop
 files:
   - out/**
   - package.json
+  - "!**/*.map"
+  - "!**/{test,tests,__tests__,checks,e2e,fixtures,__fixtures__,test-fixtures,test-support}/**"
+  - "!**/*.{test,spec}.*"
+  - "!**/{.env,.env.*,auth.json,credentials,credentials.json,secrets.json,tokens.json,*.jsonl,*.sqlite,*.sqlite3,*.db,*.pem,*.key,*.p12,*.pfx}"
+  - "!node_modules/better-sqlite3/{build,deps,src}/**"
+  - "!node_modules/better-sqlite3/prebuilds/!(${platform}-${arch}).node"
 extraMetadata:
   main: out/main/index.js
+electronFuses:
+  runAsNode: false
+  enableCookieEncryption: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  loadBrowserProcessSpecificV8Snapshot: false
+  grantFileProtocolExtraPrivileges: false
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: zip
+      arch:
+        - x64
+  artifactName: CodexProviderSync-${version}-windows-${arch}-portable.${ext}
+nsis:
+  artifactName: CodexProviderSync-${version}-windows-${arch}-setup.${ext}
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+mac:
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+    - target: zip
+      arch:
+        - x64
+        - arm64
+  artifactName: CodexProviderSync-${version}-macos-${arch}.${ext}
+  category: public.app-category.utilities
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+    - target: deb
+      arch:
+        - x64
+  artifactName: CodexProviderSync-${version}-linux-${arch}.${ext}
+  executableName: codex-provider-sync
+  category: Utility
+  maintainer: Dailin521
 publish:
   - provider: github
     owner: Dailin521
