@@ -103,11 +103,11 @@ Web Profile 虽然不是 CLI，其显式 SQLite Home 仍沿用现有来源值 `c
 - Windows WSL UNC SQLite Home 不允许安全读写，写操作必须在备份和其他 mutation 之前失败；
 - 不得因为某个候选 DB 存在，就同时改写多个数据库。
 
-### 3.4 vNext 目标：双层资源锁（未实现）
+### 3.4 vNext 双层资源锁（V1/C3 候选已实现，尚未发布）
 
-v0.5 当前以 Codex Home operation lock 为现状事实；它尚未实现共享 State DB 的独立资源锁。vNext 的目标合同由 [ADR-0012](../../adr/0012-dual-resource-lock-contract.md) 冻结：会修改 SQLite 的操作在同一 Codex Home lock 之外还必须持有按物理 DB identity 计算的 State DB resource lock，并以固定顺序在锁内重新校验 storage、Revision、pending journal 和可写性。
+已发布 v0.5 只以 Codex Home operation lock 为事实，不具备共享 State DB 的独立资源锁。V1/C3 已按 [ADR-0012](../../adr/0012-dual-resource-lock-contract.md) 实现候选合同：会修改 SQLite 的操作在同一 Codex Home lock 之外还必须持有按物理 DB identity 计算的 State DB resource lock，并以固定顺序在锁内重新校验 storage、Revision、pending journal 和可写性。
 
-该目标不改变本节的 storage 优先级，也不授权当前入口扩展写入。双层 lock 的 Node/.NET 兼容、owner metadata、Busy/不可验证错误和 Hash 无副作用证据属于后续实现与 Fixture 门槛。
+该合同不改变本节的 storage 优先级，也不授权未经阶段门槛的入口扩展写入。Node/.NET 兼容、owner metadata、Busy/不可验证错误和 Hash 无副作用已有本地 Fixture；只有同一最终提交的 required CI 与最终合入闭合后，才成为发布合同。
 
 ## 4. `getStatus`
 
@@ -406,9 +406,9 @@ platform?
 - 恢复目标完成后尝试把绑定 journal 标记为 rolledBack；
 - 当前 journal terminal 标记失败会使 `runRestore` 整体 reject，即使部分恢复结果已经持久化；只有 inventory 刷新失败会降级为 warning。
 
-### 7.3 已发布 v0.5 Restore 安全债（Legacy）
+### 7.3 已发布 v0.5 Restore 历史安全债（V1/C8 候选已关闭）
 
-`runRestore` 当前会获取正式 operation lock，也会校验被选中备份及其 journal，但**恢复操作自身不会先创建新的恢复前备份，也没有独立的 restore transaction journal**。因此，若 restore 在 config、global state、SQLite 或 rollout 已部分落盘后发生进程崩溃，当前实现没有与 sync/switch 同等级的自动补偿证据。
+已发布 v0.5 的 `runRestore` 会获取正式 operation lock，也会校验被选中备份及其 journal，但**恢复操作自身不会先创建新的恢复前备份，也没有独立的 restore transaction journal**。因此，该发布版若在 config、global state、SQLite 或 rollout 已部分落盘后发生进程崩溃，没有与 sync/switch 同等级的自动补偿证据。V1 当前分支已由 7.4 的 Restore v2 候选取代这条运行路径；在远端门禁与最终合入前，7.3 仍作为已发布 v0.5 的兼容和迁移依据保留。
 
 这属于 v0.5 已知安全债，不是允许 vNext 继续保留的目标合同：
 
@@ -617,9 +617,9 @@ vNext 公共 Core/HTTP/IPC 列表投影不返回 `rolloutPath`、`cwd` 或 `firs
 
 ### 10.4 跨 Codex Home 共享 SQLite Home 盲区
 
-正式 operation lock 当前按 Codex Home 定位。因此，两个不同 Codex Home 如果显式解析到同一个 SQLite Home/同一个 `state_5.sqlite`，会获得不同的 operation lock，当前实现不能阻止它们并发修改同一数据库。
+已发布 v0.5 的正式 operation lock 只按 Codex Home 定位。因此，两个不同 Codex Home 如果显式解析到同一个 SQLite Home/同一个 `state_5.sqlite`，会获得不同的 operation lock，无法阻止它们并发修改同一数据库。V1/C3 已增加按物理数据库 identity 计算的 State DB resource lock，并保留 Codex Home lock 作为第一层。
 
-该行为是已知并发盲区，不是允许并发的合同。ADR-0012 已冻结 vNext 选择：对规范化后的 SQLite 资源增加跨 Codex Home 的 resource lock；在该合同完成真实跨运行时验证前，任何入口仍不得宣称多 Profile/shared SQLite 写入安全。
+该历史行为是已知并发盲区，不是允许并发的合同。ADR-0012 冻结的 vNext 选择已经在 V1/C3 候选实现；在同一最终提交完成真实跨运行时 required CI 与合入验证前，任何入口仍不得把多 Profile/shared SQLite 写入安全表述为已发布保证。
 
 在此问题解决前，测试和文档不得把“不同 Profile/Codex Home”直接等同于“不同存储资源”。
 
@@ -632,14 +632,14 @@ vNext 公共 Core/HTTP/IPC 列表投影不返回 `rolloutPath`、`cwd` 或 `firs
 - restore 必须覆盖 journal 已开始或无法安全排除的所有目标；
 - 完成恢复后持久化 rolledBack terminal。
 
-当前 Node 与 .NET 对“选择的恢复备份之外仍存在其他 pending transaction”的处理尚未形成经过跨运行时测试证明的一致合同。Node restore 主要检查并标记所选 backup 内绑定的 journal；这不能自动证明另一个 foreign pending 已被解决。
+V1/C8 已统一 Node 与 .NET 对“选择的恢复备份之外仍存在其他 pending transaction”的处理：只要存在与所选物理 source/revision 不匹配的 foreign pending，Restore 在新 snapshot、journal 或目标 mutation 前以 `RECOVERY_REQUIRED` fail closed，且不得改写原 pending 证据。
 
 vNext 统一规则必须是：
 
 - restore 只解决与所选备份明确绑定且恢复覆盖完整的 transaction；
 - 其他 foreign pending 保持 recovery blocker，不得被顺带清除或忽略；
-- Node/.NET 迁移期需要增加同一 Codex Home 下多 pending/foreign backup 的交叉 Contract Test；
-- 在测试证明一致之前，不得用任一运行时的当前行为替代正式合同。
+- Node/.NET 迁移期交叉 Contract Test `restore-v2-cross-runtime-foreign-pending` 必须在两个方向验证：另一运行时创建的 pending 保持字节不变、选择 foreign backup 被拒绝、数据和受管备份树无 mutation；
+- 本地 Fixture 通过不等于发布完成；同一最终提交的 required CI 与合入证据仍是正式合同门槛。
 
 ## 11. 当前错误合同
 

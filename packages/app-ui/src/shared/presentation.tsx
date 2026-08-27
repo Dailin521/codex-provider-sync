@@ -51,10 +51,10 @@ export function PageHeading({
   headingTabIndex?: number;
 }) {
   return (
-    <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
+    <div className="mb-[var(--space-6)] flex flex-wrap items-start justify-between gap-[var(--space-4)]">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus)]" ref={headingRef} tabIndex={headingTabIndex}>{title}</h1>
-        <p className="mt-1 max-w-3xl text-sm leading-6 text-[var(--muted)]">{subtitle}</p>
+        <h1 className="[font-size:var(--text-2xl)] leading-[var(--leading-tight)] font-bold tracking-tight text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus)]" ref={headingRef} tabIndex={headingTabIndex}>{title}</h1>
+        <p className="mt-[var(--space-1)] max-w-3xl [font-size:var(--text-sm)] leading-[var(--leading-relaxed)] text-[var(--muted)]">{subtitle}</p>
       </div>
       {action}
     </div>

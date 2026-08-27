@@ -41,6 +41,12 @@ function routeIsAvailable(route: AppRoute, capabilities: AppUiCapabilities): boo
   return true;
 }
 
+function isProfileStaleError(error: unknown): error is CoreClientError {
+  return error instanceof CoreClientError
+    && (error.code === "PROFILE_CHANGED"
+      || (error.code === "STALE_STATE" && error.dto.details?.reason === "profile"));
+}
+
 export function AppContent({ props }: { props: AppUiProps }) {
   const { t, i18n } = useTranslation();
   const toast = useToast();
@@ -62,6 +68,8 @@ export function AppContent({ props }: { props: AppUiProps }) {
   const applySubmissionPending = useRef(false);
   const planReturnFocus = useRef<HTMLElement | null>(null);
   const resultOwnsReturnFocus = useRef(false);
+  const profileStaleNoticeActive = useRef(false);
+  const profileRefreshInFlight = useRef<Promise<void> | null>(null);
   const mutationCount = useIsMutating();
   const profilesQuery = useQuery({
     queryKey: ["profiles"],
@@ -70,6 +78,25 @@ export function AppContent({ props }: { props: AppUiProps }) {
   });
   const profiles = profilesQuery.data ?? [];
   const profile = profiles.find((entry) => entry.id === selectedProfileId) ?? profiles[0];
+  const handleProfileStale = useCallback(async () => {
+    if (!profileStaleNoticeActive.current) {
+      profileStaleNoticeActive.current = true;
+      toast.push({
+        title: t("global.profileChanged"),
+        description: t("global.profileChangedHint"),
+        tone: "warning"
+      });
+    }
+    if (!profileRefreshInFlight.current) {
+      const refresh = profilesQuery.refetch()
+        .then(() => undefined)
+        .finally(() => {
+          if (profileRefreshInFlight.current === refresh) profileRefreshInFlight.current = null;
+        });
+      profileRefreshInFlight.current = refresh;
+    }
+    await profileRefreshInFlight.current;
+  }, [profilesQuery.refetch, t, toast]);
 
   useEffect(() => {
     document.documentElement.lang = i18n.resolvedLanguage?.toLowerCase().startsWith("zh") ? "zh-CN" : "en";
@@ -91,6 +118,15 @@ export function AppContent({ props }: { props: AppUiProps }) {
   });
   const status = statusQuery.data;
   const statusReady = statusQuery.isSuccess && status !== undefined;
+  useEffect(() => {
+    if (statusReady && status.profile.revision === profile?.revision) {
+      profileStaleNoticeActive.current = false;
+      return;
+    }
+    if (isProfileStaleError(statusQuery.error) && !profileStaleNoticeActive.current) {
+      void handleProfileStale();
+    }
+  }, [handleProfileStale, profile?.revision, status?.profile.revision, statusQuery.error, statusReady]);
   const externalWriteActive = status?.operationInProgress != null;
   const writeDisabled = !profile
     || !statusReady
@@ -122,13 +158,17 @@ export function AppContent({ props }: { props: AppUiProps }) {
       setPlan(await action());
     } catch (error) {
       planReturnFocus.current = null;
+      if (isProfileStaleError(error)) {
+        await handleProfileStale();
+        return;
+      }
       toast.push({
         title: t("global.failed"),
         description: safeErrorText(error, t("global.unexpected")),
         tone: "danger"
       });
     }
-  }, [t, toast]);
+  }, [handleProfileStale, t, toast]);
   const closePlan = useCallback(() => {
     const target = planReturnFocus.current;
     resultOwnsReturnFocus.current = false;
@@ -208,6 +248,10 @@ export function AppContent({ props }: { props: AppUiProps }) {
       closePlan();
       if (error instanceof CoreClientError && error.code === "OPERATION_CANCELLED") {
         toast.push({ title: t("global.cancelled"), tone: "warning" });
+        return;
+      }
+      if (isProfileStaleError(error)) {
+        await handleProfileStale();
         return;
       }
       toast.push({

@@ -266,7 +266,7 @@ test("global partial, recovery, operation and error states are visible", async (
   await page.getByRole("button", { name: "Sync", exact: true }).click();
   await page.getByRole("button", { name: "Prepare sync" }).click();
   await page.getByRole("button", { name: "Confirm and apply" }).click();
-  await expect(page.getByText("Completed with locked rollout files skipped.")).toBeVisible();
+  await expect(page.getByText("Completed with locked rollout files skipped.", { exact: true })).toBeVisible();
 
   recovery = true;
   await page.reload();

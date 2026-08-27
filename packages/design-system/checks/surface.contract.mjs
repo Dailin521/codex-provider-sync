@@ -17,4 +17,9 @@ test("design-system owns the frozen locale and theme vocabulary", async () => {
   assert.match(tokens, /prefers-color-scheme:\s*dark/);
   assert.match(tokens, /prefers-reduced-motion:\s*reduce/);
   assert.match(tokens, /--focus:/);
+  assert.match(tokens, /--font-sans:/);
+  assert.match(tokens, /--text-(?:base|sm):/);
+  assert.match(tokens, /--leading-(?:normal|relaxed):/);
+  assert.match(tokens, /--space-1:/);
+  assert.match(tokens, /--space-6:/);
 });

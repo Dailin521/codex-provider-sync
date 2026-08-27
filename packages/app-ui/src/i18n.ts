@@ -48,6 +48,8 @@ export const resources = {
         partial: "Completed with locked rollout files skipped.",
         completed: "Operation completed.",
         cancelled: "Operation cancelled.",
+        profileChanged: "Profile changed.",
+        profileChangedHint: "Review the current profile and prepare the operation again.",
         failed: "Operation failed."
       },
       overview: {
@@ -377,6 +379,8 @@ export const resources = {
         partial: "操作完成，但跳过了仍被锁定的 rollout 文件。",
         completed: "操作已完成。",
         cancelled: "操作已取消。",
+        profileChanged: "存储配置已变化。",
+        profileChangedHint: "请检查当前存储配置，然后重新生成操作计划。",
         failed: "操作失败。"
       },
       overview: {

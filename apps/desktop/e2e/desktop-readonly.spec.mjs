@@ -35,6 +35,8 @@ test("secure desktop exposes the C8 surface narrowly and blocks ordinary writes 
     });
     const page = await electronApp.firstWindow();
     await expect(page).toHaveURL("cps-app://app/index.html");
+    await page.waitForLoadState("load");
+    await expect(page.getByText("Codex Provider Sync", { exact: true })).toBeVisible();
     await page.evaluate(() => localStorage.setItem("cps.desktop.theme", "dark"));
     await page.reload();
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");

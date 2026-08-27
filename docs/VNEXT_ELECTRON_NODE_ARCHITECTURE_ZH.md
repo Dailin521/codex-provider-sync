@@ -1121,8 +1121,7 @@ packages/app-ui/src/
 │  ├─ overview/
 │  ├─ sync/
 │  ├─ switch-provider/
-│  ├─ backups/
-│  ├─ restore/
+│  ├─ backups-restore/
 │  ├─ history/
 │  ├─ profiles/
 │  ├─ diagnostics/
@@ -1440,7 +1439,7 @@ Core Runtime 使用 `OperationCoordinator`：
 
 ### 18.2 跨进程锁
 
-同一 Codex Home 的所有正式入口必须遵守兼容的跨进程锁合同；vNext 对共享 SQLite Home 的双层资源身份、路径、顺序和错误语义由 [ADR-0012](adr/0012-dual-resource-lock-contract.md) 冻结，当前代码尚未实现该目标合同：
+同一 Codex Home 的所有正式入口必须遵守兼容的跨进程锁合同；vNext 对共享 SQLite Home 的双层资源身份、路径、顺序和错误语义由 [ADR-0012](adr/0012-dual-resource-lock-contract.md) 冻结。V1/C3 的 Node 与迁移期 .NET 候选实现已经按 `Codex Home → State DB` 固定顺序落实该合同，但在本 PR 的远端跨运行时门禁和最终合入完成前，不得把候选实现表述为已发布保证：
 
 ```text
 CLI、Web UI、Electron、旧 GUI 同时运行
@@ -1448,7 +1447,7 @@ CLI、Web UI、Electron、旧 GUI 同时运行
 跨进程锁保证同一目标不会并行写入
 ```
 
-阶段 0/1 必须记录并验证现有 Node 与 .NET 锁的路径、命名、持有周期和冲突语义；只有跨进程互斥测试通过后，才能宣称迁移期旧 GUI 与新入口共享同一锁合同。若当前实现不兼容，应先统一合同，不能依赖 UI 层互相避让。
+V1/C3 已记录并测试 Node 与 .NET 锁的路径、命名、持有周期和冲突语义；最终交付仍必须在同一 tested commit 上通过真实跨进程互斥、共享 SQLite Home 和不可验证锁的 required CI。任何差异都必须先统一合同，不能依赖 UI 层互相避让。
 
 Electron 的 UI 禁用按钮只是体验优化，不能替代 Core Lock。
 
@@ -2433,7 +2432,7 @@ Electron 只开放：
 
 ### C5：共享 React UI 与 Web 迁移
 
-- 建立 AppShell、Design System、九个 feature 页面、i18n 和主题；
+- 建立 AppShell、Design System、八个导航页面（Backups/Restore 合并为一页）、i18n 和主题；
 - Web 通过 `HttpCoreClient` 复用 `app-ui`；
 - 保留 pairing、Origin、Profile/Storage Revision、History 隐私边界。
 
