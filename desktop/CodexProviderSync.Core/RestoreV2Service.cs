@@ -71,7 +71,7 @@ internal sealed class RestoreV2Service
         string backupDir,
         CancellationToken cancellationToken = default)
     {
-        string root = Path.GetFullPath(backupDir);
+        string root = ResolveStablePhysicalDirectory(backupDir);
         if (!Directory.Exists(root))
         {
             throw new InvalidOperationException("The selected managed backup is unavailable.");
@@ -106,6 +106,13 @@ internal sealed class RestoreV2Service
         CancellationToken cancellationToken = default)
     {
         string operationId = Guid.NewGuid().ToString("D");
+        RestoreBackupIdentity initialSource = await CaptureSourceIdentityAsync(
+            sourceBackup.BackupDir,
+            cancellationToken);
+        if (!JournalMatchesSource(initialSource, sourceBackup))
+        {
+            throw new CoreWritePlanStaleException();
+        }
         RestorePreSnapshot snapshot = await CreatePreSnapshotAsync(
             operationId,
             plan,
@@ -113,6 +120,14 @@ internal sealed class RestoreV2Service
             stateDbResource,
             resolvesOperationIds,
             cancellationToken);
+        RestoreBackupIdentity preApplySource = await CaptureSourceIdentityAsync(
+            sourceBackup.BackupDir,
+            cancellationToken);
+        if (!JournalMatchesSource(preApplySource, sourceBackup))
+        {
+            TryDeleteDirectory(snapshot.BackupDirectory);
+            throw new CoreWritePlanStaleException();
+        }
         RestoreJournalPrepared prepared = new(
             sourceBackup,
             new RestorePreSnapshotIdentity(
@@ -651,10 +666,12 @@ internal sealed class RestoreV2Service
                 "Restore post-commit manifest acknowledgement failed.");
         }
 
+        string physicalSourceBackupDir = ResolveStablePhysicalDirectory(
+            journal.Prepared.SourceBackup.BackupDir);
         await FileTransactionJournal.MarkBackupRolledBackAsync(
-            journal.Prepared.SourceBackup.BackupDir,
+            physicalSourceBackupDir,
             storage.CodexHome,
-            ReadSourceTargetProvider(journal.Prepared.SourceBackup.BackupDir));
+            ReadSourceTargetProvider(physicalSourceBackupDir));
         await InvokeFaultAsync(
             "after_restore_source_journal_ack_before_completed",
             null,
@@ -873,7 +890,7 @@ internal sealed class RestoreV2Service
         return manifest.Targets.Zip(prepared.Targets).All(pair => pair.First == pair.Second);
     }
 
-    private static string ResolveStablePhysicalDirectory(string directory)
+    internal static string ResolveStablePhysicalDirectory(string directory)
     {
         try
         {
@@ -939,6 +956,27 @@ internal sealed class RestoreV2Service
             return true;
         }
         catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    internal static bool JournalMatchesSource(
+        RestoreBackupIdentity? preparedSource,
+        RestoreBackupIdentity sourceBackup,
+        bool ignoreRevision = false)
+    {
+        if (preparedSource is null || (!ignoreRevision && preparedSource.Revision != sourceBackup.Revision))
+        {
+            return false;
+        }
+        try
+        {
+            string preparedPhysical = ResolveStablePhysicalDirectory(preparedSource.BackupDir);
+            string sourcePhysical = ResolveStablePhysicalDirectory(sourceBackup.BackupDir);
+            return PathsEqual(preparedPhysical, sourcePhysical);
+        }
+        catch
         {
             return false;
         }

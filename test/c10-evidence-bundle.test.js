@@ -1,15 +1,23 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import fs from "node:fs";
+import fsPromises from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import {
+  assertEventBaseContained,
+  assertEvidenceSchema,
   assertRedacted,
   normalizeCandidateIndex,
   normalizeRequiredJobs,
   REQUIRED_JOBS,
   REQUIRED_TARGETS
 } from "../scripts/write-c10-evidence-bundle.mjs";
+
+const execFileAsync = promisify(execFile);
 
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(testDirectory, "..");
@@ -42,6 +50,11 @@ function candidateIndex() {
       assets: expectedAssets[target].map((name, index) => ({ name, sizeBytes: 10 + index, sha256: hash }))
     }))
   };
+}
+
+async function git(repository, ...args) {
+  const result = await execFileAsync("git", args, { cwd: repository, encoding: "utf8" });
+  return String(result.stdout).trim().toLowerCase();
 }
 
 test("C10 required jobs must be exact and all successful", () => {
@@ -82,6 +95,9 @@ test("C10 redaction rejects protected keys, absolute paths, and credential marke
   assert.throws(() => assertRedacted({ apiKey: "redacted" }), /forbidden key class/);
   assert.throws(() => assertRedacted({ accessToken: "redacted" }), /forbidden key class/);
   assert.throws(() => assertRedacted({ value: "C:\\Users\\person\\data" }), /absolute Windows path/);
+  assert.throws(() => assertRedacted({ value: "//server/share/private" }), /absolute network path/);
+  assert.throws(() => assertRedacted({ value: "prefix //server/share/private" }), /absolute network path/);
+  assert.doesNotThrow(() => assertRedacted({ value: "https://example.invalid/path" }));
   assert.throws(() => assertRedacted({ value: "/home/person/data" }), /absolute POSIX path/);
   assert.throws(() => assertRedacted({ value: "/srv/private/key.pem" }), /absolute POSIX path/);
   assert.throws(() => assertRedacted({ value: "file:/etc/passwd" }), /absolute POSIX path/);
@@ -111,4 +127,75 @@ test("C10 JSON schema remains strict and release-false-only", () => {
     REQUIRED_TARGETS
   );
   for (const property of Object.values(schema.properties.release.properties)) assert.equal(property.const, false);
+});
+
+test("C10 JSON schema compiles in strict mode and rejects an incomplete bundle", {
+  skip: Number(process.versions.node.split(".")[0]) < 24
+}, async () => {
+  await assert.rejects(
+    assertEvidenceSchema({}, rootDir),
+    /does not match its JSON Schema/
+  );
+});
+
+test("C10 event-base evidence follows the actual Git graph for push and pull-request commits", async () => {
+  const repository = await fsPromises.mkdtemp(path.join(os.tmpdir(), "c10-git-graph-"));
+  try {
+    await git(repository, "init");
+    await git(repository, "config", "user.name", "C10 Test");
+    await git(repository, "config", "user.email", "c10@example.invalid");
+    await fsPromises.writeFile(path.join(repository, "evidence.txt"), "base\n", "utf8");
+    await git(repository, "add", "evidence.txt");
+    await git(repository, "commit", "-m", "base");
+    const baseBranch = await git(repository, "branch", "--show-current");
+    const eventBaseCommit = await git(repository, "rev-parse", "HEAD");
+
+    await git(repository, "switch", "-c", "source");
+    await fsPromises.appendFile(path.join(repository, "evidence.txt"), "source\n", "utf8");
+    await git(repository, "commit", "-am", "source");
+    const sourceHeadCommit = await git(repository, "rev-parse", "HEAD");
+
+    await assertEventBaseContained(repository, {
+      event: "push",
+      evidenceForCommit: sourceHeadCommit,
+      sourceHeadCommit,
+      eventBaseCommit
+    });
+
+    await git(repository, "switch", baseBranch);
+    await git(repository, "merge", "--no-ff", "source", "-m", "merge source");
+    const testedMergeCommit = await git(repository, "rev-parse", "HEAD");
+    await assertEventBaseContained(repository, {
+      event: "pull_request",
+      evidenceForCommit: testedMergeCommit,
+      sourceHeadCommit,
+      eventBaseCommit
+    });
+    await assert.rejects(
+      assertEventBaseContained(repository, {
+        event: "push",
+        evidenceForCommit: testedMergeCommit,
+        sourceHeadCommit,
+        eventBaseCommit
+      }),
+      /source head to the tested commit/
+    );
+
+    await git(repository, "switch", "--orphan", "unrelated");
+    await fsPromises.writeFile(path.join(repository, "unrelated.txt"), "unrelated\n", "utf8");
+    await git(repository, "add", "-A");
+    await git(repository, "commit", "-m", "unrelated root");
+    const unrelatedHead = await git(repository, "rev-parse", "HEAD");
+    await assert.rejects(
+      assertEventBaseContained(repository, {
+        event: "push",
+        evidenceForCommit: unrelatedHead,
+        sourceHeadCommit: unrelatedHead,
+        eventBaseCommit
+      }),
+      /does not contain the workflow event base commit/
+    );
+  } finally {
+    await fsPromises.rm(repository, { recursive: true, force: true });
+  }
 });

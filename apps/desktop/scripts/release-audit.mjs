@@ -31,6 +31,7 @@ const REQUIRED_ASAR_ENTRIES = Object.freeze([...AUDIT_POLICY.requiredAsarEntries
 const FORBIDDEN_SEGMENTS = new Set(AUDIT_POLICY.forbiddenPathSegments);
 const FORBIDDEN_NAMES = new Set(AUDIT_POLICY.forbiddenFileNames);
 const FORBIDDEN_EXTENSIONS = new Set(AUDIT_POLICY.forbiddenExtensions);
+const AUDITED_PRODUCT_TEXT_EXTENSIONS = new Set(AUDIT_POLICY.auditedProductTextExtensions);
 const FORBIDDEN_FILE_PATTERNS = Object.freeze(
   AUDIT_POLICY.forbiddenFilePatterns.map((pattern) => new RegExp(pattern))
 );
@@ -226,6 +227,12 @@ export function assertSafeProductTextEntry(entry, value) {
   }
 }
 
+export function isAuditedProductTextEntry(entry) {
+  const normalized = normalizeEntry(entry);
+  return normalized.startsWith("out/")
+    && AUDITED_PRODUCT_TEXT_EXTENSIONS.has(path.posix.extname(normalized).toLowerCase());
+}
+
 async function filesUnder(root) {
   const result = [];
   async function visit(directory) {
@@ -405,7 +412,7 @@ export async function auditPackagedLayout({ layout, target, version, buildId }) 
   assert.equal(manifest.version, version, "Packaged Electron version does not match the candidate.");
   assert.equal(manifest.main, "out/main/index.js");
 
-  const productTextEntries = entries.filter((entry) => entry.startsWith("out/") && /\.(?:c?js|mjs|html|css|json)$/.test(entry));
+  const productTextEntries = entries.filter(isAuditedProductTextEntry);
   let buildIdFound = false;
   for (const entry of productTextEntries) {
     const value = extractFile(asarPath, asarEntryPath(entry)).toString("utf8");

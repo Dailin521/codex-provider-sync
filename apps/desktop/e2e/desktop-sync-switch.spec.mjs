@@ -164,7 +164,7 @@ async function findWslDistro() {
   return null;
 }
 
-async function confirmPlan(page) {
+async function confirmPlan(page, returnFocus) {
   const dialog = page.getByRole("dialog", { name: "Review plan" });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByText("Target", { exact: true })).toBeVisible();
@@ -172,6 +172,8 @@ async function confirmPlan(page) {
   await dialog.getByRole("button", { name: "Confirm and apply" }).click();
   await expect(page.getByText("Operation completed.", { exact: true })).toBeVisible();
   await expect(dialog).toHaveCount(0);
+  await page.getByRole("dialog", { name: "Operation result" }).getByRole("button", { name: "Close" }).last().click();
+  if (returnFocus) await expect(returnFocus).toBeFocused();
 }
 
 async function switchProvider(page, { provider, mode, model }) {
@@ -179,11 +181,12 @@ async function switchProvider(page, { provider, mode, model }) {
   await page.getByLabel("Provider ID").fill(provider);
   await page.getByLabel("Model handling").selectOption(mode);
   if (mode === "explicit") await page.getByLabel("Model name").fill(model);
-  await page.getByRole("button", { name: "Prepare switch" }).click();
-  await confirmPlan(page);
+  const prepare = page.getByRole("button", { name: "Prepare switch" });
+  await prepare.click();
+  await confirmPlan(page, prepare);
 }
 
-test("Electron performs Sync, Switch, Restore, Prune, Watch, Diagnostics, and Update status through the narrow C8 bridge", async () => {
+test("hidden Electron test build forces the native fallback through Status, Sync, Restore, and the narrow C8 bridge", async () => {
   test.setTimeout(120_000);
   const fixture = await createDesktopSyncSwitchFixture();
   const baseline = await fixture.snapshotTargets();
@@ -197,6 +200,15 @@ test("Electron performs Sync, Switch, Restore, Prune, Watch, Diagnostics, and Up
     const page = await electronApp.firstWindow();
     await expect(page).toHaveURL("cps-app://app/index.html");
     await expect(page.getByText("openai", { exact: true }).first()).toBeVisible();
+    const profile = (await page.evaluate(() => window.codexProvider.profiles.list())).profiles[0];
+    const fallbackStatus = await page.evaluate(async ({ profile }) => window.codexProvider.core.requestReadOnly({
+      protocolVersion: 1,
+      requestId: "c9-test-fallback-status",
+      method: "getStatus",
+      payload: { profile: { profileId: profile.id, profileRevision: profile.revision } }
+    }), { profile });
+    expect(fallbackStatus.ok).toBe(true);
+    expect(fallbackStatus.result.sqliteCounts.sessions["legacy-provider"]).toBe(1);
     await page.evaluate(() => {
       globalThis.__c7OperationEvents = [];
       globalThis.__c7Unsubscribe = window.codexProvider.core.subscribeOperation((event) => {
@@ -205,8 +217,9 @@ test("Electron performs Sync, Switch, Restore, Prune, Watch, Diagnostics, and Up
     });
 
     await page.getByRole("button", { name: "Sync" }).click();
-    await page.getByRole("button", { name: "Prepare sync" }).click();
-    await confirmPlan(page);
+    const prepareSync = page.getByRole("button", { name: "Prepare sync" });
+    await prepareSync.click();
+    await confirmPlan(page, prepareSync);
     await expect.poll(async () => (await fixture.inspect()).sqlite.provider).toBe("openai");
     syncBackupId = (await fixture.inspect()).backupIds[0];
 
@@ -241,8 +254,9 @@ test("Electron performs Sync, Switch, Restore, Prune, Watch, Diagnostics, and Up
 
     await page.getByRole("button", { name: "Backups / Restore" }).click();
     await page.getByRole("button", { name: new RegExp(syncBackupId) }).click();
-    await page.getByRole("button", { name: "Prepare restore" }).click();
-    await confirmPlan(page);
+    const prepareRestore = page.getByRole("button", { name: "Prepare restore" });
+    await prepareRestore.click();
+    await confirmPlan(page, prepareRestore);
     expect((await fixture.snapshotTargets()).hash).toBe(baseline.hash);
 
     await page.getByLabel("Keep newest backups").fill("2");

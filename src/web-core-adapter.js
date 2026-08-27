@@ -1,7 +1,10 @@
 import {
   CORE_PROTOCOL_VERSION,
   ContractValidationError,
+  assertCoreMethodOutput,
   assertCoreRequestEnvelope,
+  createCoreOperationStartedEnvelope,
+  createCoreProgressEnvelope,
   createCoreFailureEnvelope,
   createCoreSuccessEnvelope,
   createPublicCoreErrorDto,
@@ -74,7 +77,7 @@ export function createWebCoreFacade(stateStore) {
   });
 }
 
-export async function dispatchWebCoreRequest(coreFacade, value) {
+export async function dispatchWebCoreRequest(coreFacade, value, control = {}) {
   let request;
   try {
     assertCoreRequestEnvelope(value);
@@ -100,12 +103,56 @@ export async function dispatchWebCoreRequest(coreFacade, value) {
     };
   }
 
+  let registered = false;
+  let observedOperationId;
+  const operation = request.method === "applySync"
+    ? "sync"
+    : request.method === "applySwitch"
+      ? "switch"
+      : request.method === "applyRestore"
+        ? "restore"
+        : null;
+  const notify = (observer, event) => {
+    if (typeof observer !== "function") return;
+    try { observer(event); } catch {}
+  };
   try {
+    if (typeof control.onRequestValidated === "function") {
+      control.onRequestValidated(request);
+      registered = true;
+    }
     const handler = coreFacade[request.method];
     if (typeof handler !== "function") {
       throw Object.assign(new Error("Unknown Core method."), { code: "INVALID_INPUT" });
     }
-    const result = await handler.call(coreFacade, request.payload);
+    const result = await handler.call(coreFacade, request.payload, {
+      ...(control.signal ? { signal: control.signal } : {}),
+      ...(operation ? {
+        onOperationStarted(event) {
+          const operationId = safeString(event?.operationId);
+          if (!operationId) return;
+          observedOperationId = operationId;
+          notify(
+            control.onOperationStarted,
+            createCoreOperationStartedEnvelope(request.requestId, operationId, operation)
+          );
+        },
+        onProgress(event) {
+          if (!observedOperationId) return;
+          notify(
+            control.onProgress,
+            createCoreProgressEnvelope(request.requestId, observedOperationId, event)
+          );
+        }
+      } : {})
+    });
+    try {
+      assertCoreMethodOutput(request.method, result);
+    } catch {
+      throw Object.assign(new Error("Core returned an invalid public result."), {
+        code: "INTERNAL_ERROR"
+      });
+    }
     const operationId = isRecord(result) ? safeString(result.operationId) : undefined;
     return {
       statusCode: 200,
@@ -128,5 +175,7 @@ export async function dispatchWebCoreRequest(coreFacade, value) {
         operationId: dto.operationId ?? request.operationId ?? null
       }
     };
+  } finally {
+    if (registered) notify(control.onRequestSettled, request);
   }
 }

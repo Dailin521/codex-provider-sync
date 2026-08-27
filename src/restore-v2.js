@@ -82,6 +82,23 @@ async function resolveStablePhysicalDirectory(directory, platform, errorCode, ta
   }
 }
 
+export async function captureStableRestoreSource(
+  backupDir,
+  { platform = process.platform, errorCode = "RESTORE_VALIDATION_FAILED" } = {}
+) {
+  const physicalBackupDir = await resolveStablePhysicalDirectory(
+    backupDir,
+    platform,
+    errorCode,
+    "sourceBackup"
+  );
+  return {
+    backupId: path.basename(physicalBackupDir),
+    backupDir: physicalBackupDir,
+    revision: await captureRestoreSourceIdentity(physicalBackupDir)
+  };
+}
+
 async function restoreTargetRelativePath(target, physicalHome, platform, errorCode) {
   const targetPath = path.resolve(target?.targetPath ?? "");
   const compare = (left, right) => platform === "win32"
@@ -894,7 +911,13 @@ async function acknowledgeCommittedRestore(journalSnapshot, {
   if (!committedEvent || committedEvent.postManifestSha256 !== verified.manifestSha256) {
     throw new CoreError("RECOVERY_REQUIRED", "Restore post-commit manifest acknowledgement failed.");
   }
-  await markBackupTransactionRolledBack(journalSnapshot.prepared.sourceBackup.backupDir);
+  const physicalSourceBackupDir = await resolveStablePhysicalDirectory(
+    journalSnapshot.prepared.sourceBackup.backupDir,
+    platform,
+    "RECOVERY_REQUIRED",
+    "sourceBackup"
+  );
+  await markBackupTransactionRolledBack(physicalSourceBackupDir);
   await faultInjector?.({ point: "after_restore_source_journal_ack_before_completed" });
   const journal = reopenRestoreJournal(journalSnapshot);
   await journal.completed();
@@ -912,12 +935,29 @@ async function acknowledgeCommittedRestore(journalSnapshot, {
   return { completed, manifest };
 }
 
-export function restoreJournalMatchesSource(journal, sourceBackup, platform = process.platform) {
+export async function restoreJournalMatchesSource(journal, sourceBackup, platform = process.platform) {
   const prepared = journal?.prepared;
   if (!prepared || !sourceBackup) return false;
-  return prepared.sourceBackup.backupId === sourceBackup.backupId
-    && pathKey(prepared.sourceBackup.backupDir, platform) === pathKey(sourceBackup.backupDir, platform)
-    && prepared.sourceBackup.revision === sourceBackup.revision;
+  if (prepared.sourceBackup.revision !== sourceBackup.revision) {
+    return false;
+  }
+  try {
+    const [preparedPhysical, runtimePhysical] = await Promise.all([
+      resolveStablePhysicalDirectory(
+        prepared.sourceBackup.backupDir,
+        platform,
+        "RECOVERY_REQUIRED"
+      ),
+      resolveStablePhysicalDirectory(
+        sourceBackup.backupDir,
+        platform,
+        "RECOVERY_REQUIRED"
+      )
+    ]);
+    return pathKey(preparedPhysical, platform) === pathKey(runtimePhysical, platform);
+  } catch {
+    return false;
+  }
 }
 
 export async function restoreJournalMatchesPhysicalHome(
@@ -976,6 +1016,12 @@ export async function executeRestoreV2({
   resolveStateDbResource = resolveStateDbLockResource
 }) {
   const operationId = randomUUID();
+  const initialSourceRevision = await captureRestoreSourceIdentity(sourceBackup.backupDir);
+  if (initialSourceRevision !== sourceBackup.revision) {
+    throw new CoreError("STALE_STATE", "The managed Restore source changed before apply.", {
+      details: { reason: "backup" }
+    });
+  }
   emitRestoreProgress(onProgress, {
     stage: "create_restore_pre_snapshot",
     status: "start",
@@ -999,6 +1045,13 @@ export async function executeRestoreV2({
     signal,
     platform
   });
+  const preApplySourceRevision = await captureRestoreSourceIdentity(sourceBackup.backupDir);
+  if (preApplySourceRevision !== sourceBackup.revision) {
+    await fs.rm(snapshot.backupDir, { recursive: true, force: true }).catch(() => {});
+    throw new CoreError("STALE_STATE", "The managed Restore source changed before mutation.", {
+      details: { reason: "backup" }
+    });
+  }
   emitRestoreProgress(onProgress, {
     stage: "create_restore_pre_snapshot",
     status: "complete",

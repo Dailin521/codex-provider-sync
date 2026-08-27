@@ -424,7 +424,7 @@ platform?
 
 snapshot manifest 与 durable `prepared` event 必须全量绑定 schema/protocol、operation、source backup、storage（含持久化 `codexHomePhysical`）、required target kinds、resolver operation IDs、按顺序排列的完整 targets，以及 snapshot 的稳定物理目录；任何不一致都在 compensation 或 commit acknowledgement 前进入 `recovery-required`，不能仅凭重算后的 manifest hash 放行。
 
-completed resolver 只在 source backup id/path/revision、pending 与 resolver 持久化的 `codexHomePhysical`、当前已加锁 Codex Home 的稳定物理 identity、唯一 operationId 与 required target kinds 全部匹配时解除 write blocker；不得重新解析可变 lexical `codexHome` 来替代历史 physical binding。旧 raw journal 不改写，Prune 继续保护其 journal/source/snapshot。foreign pending、重复 operationId、覆盖不足、invalid tail 或未知 journal/schema 必须在新 snapshot/journal/mutation 前 fail closed，不能依赖 message 推断结果。source backup v1/v2、现有 restore options 与 relocation 双重授权保持兼容。
+completed resolver 只在 source backup 稳定物理目录/revision、pending 与 resolver 持久化的 `codexHomePhysical`、当前已加锁 Codex Home 的稳定物理 identity、唯一 operationId 与 required target kinds 全部匹配时解除 write blocker；`backupId` 是由最终物理目录 basename 生成的展示/索引字段，不作为旧 journal 的独立安全键。Windows 下 source backup 与 Home 的长路径、8.3 短路径、junction 与大小写别名必须先解析到同一稳定物理目录，不得用 lexical path 或旧式 backupId 差异误判 foreign pending。Prepare、Apply、journal、备份读取和 inventory 刷新全程只使用该物理 source path，并在 mutation 前再次核对 source revision；无法两次可靠 realpath 时仍 fail closed。不得重新解析可变 lexical `codexHome` 来替代历史 physical binding。旧 raw journal 不改写，Prune 按物理目录继续保护其 journal/source/snapshot。foreign pending、重复 operationId、覆盖不足、invalid tail 或未知 journal/schema 必须在新 snapshot/journal/mutation 前 fail closed，不能依赖 message 推断结果。source backup v1/v2、现有 restore options 与 relocation 双重授权保持兼容。
 
 已发布 v0.5 仍是 7.3 行为；本节实现只有在 C8、本 PR 远端门禁和最终合入完成后才成为发布合同。
 
@@ -554,6 +554,8 @@ messageCount
 ```
 
 vNext 公共 Core/HTTP/IPC 列表投影不返回 `rolloutPath`、`cwd` 或 `firstUserMessage`。`title` 只能来自显式 session metadata；metadata 没有标题时返回空字符串，由 UI 本地化显示“未命名会话”，不得用消息正文回退。列表搜索可以在本次只读扫描内匹配安全抽取文本，但消息正文不能进入列表 DTO、日志或缓存；正文只能由用户明确调用 `getHistorySession` 后返回。
+
+列表扫描对每个 rollout 只保留计数、最后可见时间与 query 命中等常量聚合状态，不按消息数常驻 descriptor 或正文。详情重新打开时必须绑定列表阶段记录的 regular-file identity、稳定物理路径与 sessions 根边界，从同一文件句柄读取并在读前/读后复核；删除、替换、symlink/junction 逃逸或保留 mtime 的换档均返回 `STALE_STATE`，不得返回另一文件的正文。
 
 ### 9.3 `getHistorySession`
 

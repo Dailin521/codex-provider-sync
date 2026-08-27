@@ -414,12 +414,18 @@ function publicOperationResult(value) {
     result.resolvedOperationCount = source.resolvedOperationIds
       .filter((entry) => typeof entry === "string" && entry.length > 0).length;
   }
-  for (const [key, candidate] of Object.entries(source)) {
-    if ((key.endsWith("Count") || key.endsWith("Changed") || key.endsWith("Updated") || key.endsWith("Restored"))
-        && Number.isSafeInteger(candidate)
-        && Number(candidate) >= 0) {
-      result[key] = candidate;
-    }
+  for (const key of [
+    "backupDurationMs",
+    "changedSessionFiles",
+    "sqliteRowsUpdated",
+    "sqliteProviderRowsUpdated",
+    "sqliteUserEventRowsUpdated",
+    "sqliteCwdRowsUpdated",
+    "updatedWorkspaceRoots",
+    "savedWorkspaceRootCount"
+  ]) {
+    const candidate = source[key];
+    if (Number.isSafeInteger(candidate) && Number(candidate) >= 0) result[key] = candidate;
   }
   if (Array.isArray(source.skippedLockedRolloutFiles)) {
     result.skippedLockedRolloutFiles = source.skippedLockedRolloutFiles

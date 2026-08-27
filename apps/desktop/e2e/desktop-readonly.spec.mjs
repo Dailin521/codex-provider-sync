@@ -13,6 +13,7 @@ const packagedExecutable = process.env.CPS_DESKTOP_EXECUTABLE;
 const electronExecutable = packagedExecutable || require("electron");
 
 test("secure desktop exposes the C8 surface narrowly and blocks ordinary writes during recovery", async () => {
+  test.setTimeout(90_000);
   const fixture = await createDesktopReadOnlyFixture();
   const diagnosticsTarget = path.join(fixture.fixtureRoot, "diagnostics.zip");
   let electronApp;
@@ -34,8 +35,21 @@ test("secure desktop exposes the C8 surface narrowly and blocks ordinary writes 
     });
     const page = await electronApp.firstWindow();
     await expect(page).toHaveURL("cps-app://app/index.html");
+    await page.evaluate(() => localStorage.setItem("cps.desktop.theme", "dark"));
+    await page.reload();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     await expect(page.getByText("Codex Provider Sync", { exact: true })).toBeVisible();
     await expect(page.getByText("openai", { exact: true }).first()).toBeVisible();
+
+    const hiddenWindowState = await electronApp.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0];
+      return {
+        visible: window.isVisible(),
+        focused: window.isFocused(),
+        minimized: window.isMinimized()
+      };
+    });
+    expect(hiddenWindowState).toEqual({ visible: false, focused: false, minimized: false });
 
     const preferences = await electronApp.evaluate(({ BrowserWindow }) => {
       const window = BrowserWindow.getAllWindows()[0];
@@ -84,6 +98,49 @@ test("secure desktop exposes the C8 surface narrowly and blocks ordinary writes 
     await expect(navigation).toHaveCount(8);
     await expect(page.getByRole("button", { name: "Sync" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Switch Provider" })).toBeVisible();
+
+    await electronApp.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0];
+      window.setSize(760, 560);
+      window.webContents.setZoomFactor(2);
+    });
+    await expect.poll(() => page.evaluate(() => document.documentElement.clientWidth)).toBeLessThanOrEqual(380);
+    await expect(page.getByLabel("Profile")).toBeVisible();
+    await expect(page.getByText("Local service ready", { exact: true })).toBeVisible();
+    const zoomedPages = [
+      ["Overview", "Provider metadata overview"],
+      ["Sync", "Sync current Provider"],
+      ["Switch Provider", "Switch Provider"],
+      ["Backups / Restore", "Backups and Restore"],
+      ["History", "History"],
+      ["Profiles", "Profiles"],
+      ["Diagnostics", "Diagnostics"],
+      ["Settings", "Settings"]
+    ];
+    for (const [navigationName, headingName] of zoomedPages) {
+      const target = page.getByRole("navigation").getByRole("button", { name: navigationName, exact: true });
+      await target.scrollIntoViewIfNeeded();
+      await target.click();
+      const heading = page.getByRole("heading", { name: headingName, level: 1 });
+      await expect(heading).toBeVisible();
+      await heading.scrollIntoViewIfNeeded();
+      await expect(heading).toBeInViewport();
+      const zoomedLayout = await page.evaluate(() => ({
+        clientWidth: document.documentElement.clientWidth,
+        scrollWidth: document.documentElement.scrollWidth
+      }));
+      expect(zoomedLayout.scrollWidth, `${navigationName} overflowed at 760px/200%`).toBeLessThanOrEqual(zoomedLayout.clientWidth);
+    }
+    const hiddenZoomedWindow = await electronApp.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0];
+      return { visible: window.isVisible(), focused: window.isFocused() };
+    });
+    expect(hiddenZoomedWindow).toEqual({ visible: false, focused: false });
+    await electronApp.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0];
+      window.webContents.setZoomFactor(1);
+      window.setSize(1180, 760);
+    });
 
     await page.getByRole("button", { name: "Backups / Restore" }).click();
     await expect(page.getByRole("button", { name: "Prepare restore" })).toBeVisible();

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const keepCountSchema = z.number().int().min(0).max(1000);
+export const keepCountSchema = z.number().int().min(1).max(1000);
 
 export const syncSchema = z.object({
   keepCount: keepCountSchema

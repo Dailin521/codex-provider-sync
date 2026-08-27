@@ -86,6 +86,26 @@ test("paired production UI keeps history lazy and Apply opaque", async ({ page }
   await expect(page.locator("html")).toHaveAttribute("lang", "en");
   await page.getByRole("button", { name: "Dark", exact: true }).click();
   await expect.poll(() => page.evaluate(() => document.documentElement.dataset.theme)).toBe("dark");
+  const coldPage = await page.context().newPage();
+  let releaseBundle = () => {};
+  const bundleGate = new Promise((resolve) => { releaseBundle = resolve; });
+  let observeBundle = () => {};
+  const bundleObserved = new Promise((resolve) => { observeBundle = resolve; });
+  await coldPage.route(/\/assets\/index-[^/]+\.js$/, async (route) => {
+    observeBundle();
+    await bundleGate;
+    await route.continue();
+  });
+  try {
+    await coldPage.goto(fixture.origin, { waitUntil: "commit" });
+    await bundleObserved;
+    await expect.poll(() => coldPage.evaluate(() => document.documentElement.dataset.theme)).toBe("dark");
+    expect(await coldPage.locator("#root").textContent()).toBe("");
+  } finally {
+    releaseBundle();
+  }
+  await expect(coldPage.getByRole("heading", { name: "Provider metadata overview" })).toBeVisible();
+  await coldPage.close();
   await page.emulateMedia({ reducedMotion: "reduce" });
   expect(parseFloat(await page.getByRole("button", { name: "Overview", exact: true }).evaluate((element) => getComputedStyle(element).transitionDuration))).toBeLessThanOrEqual(0.001);
 
@@ -101,16 +121,45 @@ test("paired production UI keeps history lazy and Apply opaque", async ({ page }
     expect(layout.scrollWidth, `${navigation} overflowed the 640px/200% equivalent viewport`).toBeLessThanOrEqual(layout.clientWidth);
   }
 
+  await page.setViewportSize({ width: 380, height: 700 });
+  for (const [navigation, heading] of [...pages, ["History", "History"]]) {
+    await page.getByRole("button", { name: navigation, exact: true }).click();
+    const pageHeading = page.getByRole("heading", { name: heading, level: 1 });
+    await expect(pageHeading).toBeVisible();
+    await expect(pageHeading).toBeInViewport();
+    const layout = await page.evaluate(() => ({
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth
+    }));
+    expect(layout.scrollWidth, `${navigation} overflowed the 760px window at 200% zoom`).toBeLessThanOrEqual(layout.clientWidth);
+  }
+  await expect(page.getByLabel("Profile")).toBeVisible();
+  await expect(page.getByText("Local service ready", { exact: true })).toBeVisible();
+
   await page.getByRole("button", { name: "Sync", exact: true }).click();
   const prepare = page.getByRole("button", { name: "Prepare sync" });
   await prepare.click();
-  await expect(page.getByRole("dialog", { name: "Review plan" })).toBeVisible();
+  const planDialog = page.getByRole("dialog", { name: "Review plan" });
+  await expect(planDialog).toBeVisible();
+  await expect(planDialog.getByText("Rollout files affected")).toBeVisible();
+  await expect(planDialog.getByText("A backup will be created before writes.")).toBeVisible();
+  await expect(planDialog.getByText("Technical details")).toBeVisible();
+  await expect(planDialog.locator("details")).not.toHaveAttribute("open", "");
   await page.keyboard.press("Escape");
   await expect(prepare).toBeFocused();
 
   await prepare.click();
   await page.getByRole("button", { name: "Confirm and apply" }).click();
   await expect(page.getByRole("dialog", { name: "Review plan" })).toHaveCount(0);
+  const resultDialog = page.getByRole("dialog", { name: "Operation result" });
+  await expect(resultDialog).toBeVisible();
+  const resultLayout = await page.evaluate(() => ({
+    clientWidth: document.documentElement.clientWidth,
+    scrollWidth: document.documentElement.scrollWidth
+  }));
+  expect(resultLayout.scrollWidth).toBeLessThanOrEqual(resultLayout.clientWidth);
+  await resultDialog.getByRole("button", { name: "Close" }).last().click();
+  await expect(prepare).toBeFocused();
   const applyRequest = coreRequests.findLast((entry) => entry.method === "applySync");
   expect(applyRequest).toBeDefined();
   expect(Object.keys(applyRequest.payload).sort()).toEqual(["planId", "schemaVersion"]);

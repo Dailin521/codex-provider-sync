@@ -529,7 +529,11 @@ export async function pruneBackups(codexHome, keepCount = DEFAULT_BACKUP_RETENTI
   const protectedBackups = new Set();
   let restoreReferencesUnverifiable = false;
   for (const transaction of pruneTransactions) {
-    protectedBackups.add(pathComparisonKey(path.dirname(transaction.filePath)));
+    try {
+      protectedBackups.add(pathComparisonKey(await fs.realpath(path.dirname(transaction.filePath))));
+    } catch {
+      if (transaction.operationKind === "restore") restoreReferencesUnverifiable = true;
+    }
     for (const referencedDir of [
       transaction.prepared?.sourceBackup?.backupDir,
       transaction.prepared?.preRestoreSnapshot?.backupDir,
@@ -537,16 +541,27 @@ export async function pruneBackups(codexHome, keepCount = DEFAULT_BACKUP_RETENTI
       transaction.protectionReferences?.preRestoreSnapshotDir
     ]) {
       if (typeof referencedDir === "string" && path.isAbsolute(referencedDir)) {
-        protectedBackups.add(pathComparisonKey(referencedDir));
+        try {
+          protectedBackups.add(pathComparisonKey(await fs.realpath(referencedDir)));
+        } catch {
+          if (transaction.operationKind === "restore") restoreReferencesUnverifiable = true;
+        }
       }
     }
     restoreReferencesUnverifiable ||= transaction.operationKind === "restore"
       && transaction.protectionReferencesUnverifiable === true;
   }
-  const toDelete = backupDirs
-    .slice(keepCount)
-    .filter((entry) => !restoreReferencesUnverifiable
-      && !protectedBackups.has(pathComparisonKey(entry.fullPath)));
+  const toDelete = [];
+  for (const entry of backupDirs.slice(keepCount)) {
+    if (restoreReferencesUnverifiable) break;
+    let entryKey;
+    try {
+      entryKey = pathComparisonKey(await fs.realpath(entry.fullPath));
+    } catch {
+      continue;
+    }
+    if (!protectedBackups.has(entryKey)) toDelete.push(entry);
+  }
   let freedBytes = 0;
   for (const entry of toDelete) {
     freedBytes += await getBackupDirectorySize(entry.fullPath);

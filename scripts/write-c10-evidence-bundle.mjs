@@ -272,6 +272,11 @@ export function assertRedacted(value) {
     if (typeof current !== "string") return;
     assert.doesNotMatch(current, /(?:^|[^A-Za-z])[A-Za-z]:[\\/]/, "Evidence contains an absolute Windows path.");
     assert.doesNotMatch(current, /\\\\[^\\\s]+\\/, "Evidence contains a UNC path.");
+    assert.doesNotMatch(
+      current,
+      /(?:^|[\s("'=,])\/\/[^/\s]+\/[^/\s]+/,
+      "Evidence contains an absolute network path."
+    );
     assert.doesNotMatch(current, /(?:^|[^A-Za-z0-9._~\/-])\/(?!\/)/, "Evidence contains an absolute POSIX path.");
     assert.doesNotMatch(
       current,
@@ -309,6 +314,52 @@ async function assertTestedCheckout(repositoryRoot, evidenceForCommit) {
   } catch {
     throw new Error("C10 evidence requires a clean tracked checkout of the tested commit.");
   }
+}
+
+export async function assertEventBaseContained(
+  repositoryRoot,
+  { event, evidenceForCommit, sourceHeadCommit, eventBaseCommit }
+) {
+  if (event === "push") {
+    assert.equal(
+      sourceHeadCommit,
+      evidenceForCommit,
+      "Push evidence must bind the source head to the tested commit."
+    );
+  }
+  await assertAncestor(repositoryRoot, sourceHeadCommit, evidenceForCommit);
+  try {
+    await assertAncestor(repositoryRoot, eventBaseCommit, sourceHeadCommit);
+  } catch {
+    throw new Error(
+      "The source branch does not contain the workflow event base commit; merge that base before generating C10 evidence."
+    );
+  }
+}
+
+export async function assertEvidenceSchema(bundle, repositoryRoot = REPOSITORY_ROOT) {
+  const [{ default: Ajv2020 }, schemaText] = await Promise.all([
+    import("ajv/dist/2020.js"),
+    fs.readFile(
+      path.join(repositoryRoot, "docs", "migration", "evidence", "C10_EVIDENCE_BUNDLE.v1.schema.json"),
+      "utf8"
+    )
+  ]);
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  ajv.addFormat("date-time", {
+    type: "string",
+    validate(value) {
+      return typeof value === "string"
+        && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(value)
+        && !Number.isNaN(Date.parse(value));
+    }
+  });
+  const validate = ajv.compile(JSON.parse(schemaText));
+  assert.equal(
+    validate(bundle),
+    true,
+    `C10 evidence does not match its JSON Schema: ${ajv.errorsText(validate.errors, { separator: "; " })}`
+  );
 }
 
 async function collectCheckpoints(repositoryRoot, evidenceForCommit) {
@@ -394,12 +445,20 @@ export async function createEvidenceBundle({
 }) {
   const repository = requiredEnvironment(environment, "GITHUB_REPOSITORY", /^Dailin521\/codex-provider-sync$/);
   const evidenceForCommit = requiredEnvironment(environment, "GITHUB_SHA", SHA_PATTERN).toLowerCase();
+  const sourceHeadCommit = requiredEnvironment(environment, "CPS_SOURCE_HEAD_SHA", SHA_PATTERN).toLowerCase();
+  const eventBaseCommit = requiredEnvironment(environment, "CPS_EVENT_BASE_SHA", SHA_PATTERN).toLowerCase();
   const runId = requiredEnvironment(environment, "GITHUB_RUN_ID", /^[0-9]+$/);
   const runAttemptText = requiredEnvironment(environment, "GITHUB_RUN_ATTEMPT", /^[1-9][0-9]*$/);
   const event = requiredEnvironment(environment, "GITHUB_EVENT_NAME", /^(?:pull_request|push)$/);
   const ref = requiredEnvironment(environment, "GITHUB_REF", /^refs\/[A-Za-z0-9._/-]+$/);
   const requiredJobs = normalizeRequiredJobs(requiredEnvironment(environment, "CPS_REQUIRED_JOB_RESULTS_JSON", /^[\s\S]+$/));
   await assertTestedCheckout(repositoryRoot, evidenceForCommit);
+  await assertEventBaseContained(repositoryRoot, {
+    event,
+    evidenceForCommit,
+    sourceHeadCommit,
+    eventBaseCommit
+  });
   const checkpointRecords = await collectCheckpoints(repositoryRoot, evidenceForCommit);
   const candidateIndex = JSON.parse(await fs.readFile(candidateIndexPath, "utf8"));
   const candidateSet = normalizeCandidateIndex(candidateIndex, evidenceForCommit);
@@ -426,7 +485,10 @@ export async function createEvidenceBundle({
       runAttempt: Number(runAttemptText),
       event,
       ref,
-      testedCommit: evidenceForCommit
+      testedCommit: evidenceForCommit,
+      sourceHeadCommit,
+      eventBaseCommit,
+      containsEventBase: true
     },
     sourceVersions,
     checkpoints: checkpointRecords,
@@ -443,6 +505,7 @@ export async function createEvidenceBundle({
       checkpointChainLinear: true,
       allEvidenceFilesHashed: true,
       workflowHeadMatchesEvidenceCommit: true,
+      sourceHeadContainsEventBase: true,
       allRequiredJobsSucceeded: true,
       candidateSetComplete: true,
       candidateCommitMatchesEvidenceCommit: true,
@@ -468,6 +531,7 @@ export async function createEvidenceBundle({
     }
   };
   assertRedacted(bundle);
+  await assertEvidenceSchema(bundle, repositoryRoot);
   return bundle;
 }
 

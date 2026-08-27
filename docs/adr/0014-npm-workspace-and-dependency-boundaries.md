@@ -2,8 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-08-25
-- Amended: 2026-08-27 (C9 Electron native fallback and release-audit toolchain)
-- Scope: vNext C4 workspace baseline, C5 shared UI/Web, C6 Electron, C8 updater and C9 release-engineering dependency boundaries
+- Amended: 2026-08-27 (C9 Electron native fallback/release audit and C10 shared-UI test hardening)
+- Scope: vNext C4 workspace baseline, C5 shared UI/Web, C6 Electron, C8 updater, C9 release engineering and C10 evidence hardening dependency boundaries
 
 ## Context
 
@@ -49,6 +49,8 @@ C6 的 Electron、electron-vite、electron-builder、Desktop Vite/React plugin �
 | UI utilities | `lucide-react 1.34.0`、`class-variance-authority 0.7.1`、`clsx 2.1.1`、`tailwind-merge 3.6.0` | 图标与检入组件样式组合 |
 | Tailwind | `tailwindcss 4.3.3`、`@tailwindcss/vite 4.3.3` | 仅在 Node 24 Web workspace build 使用 |
 | Playwright | `@playwright/test 1.62.1` | C5 production bundle 的真实 Chromium 验收；仅 dev dependency |
+| Shared UI unit test | `vitest 4.1.11`、`@testing-library/react 16.3.2`、`@testing-library/dom 10.4.1`、`@testing-library/user-event 14.6.6`、`@testing-library/jest-dom 7.0.1` | C10 审计补强；全部只在 private `app-ui` workspace。Vitest 支持 Node 24 且与现有 Vite peer range 闭合 |
+| Shared UI DOM runtime | `jsdom 29.1.1` | 支持 Node `>=24.0.0` 的最新稳定线；`30.0.1` 要求 `^24.15.0`，不满足既有 Node 24.11 本地/证据基线，故不采用 |
 | Electron | `44.0.0` | C6 解析时最新 stable，并处于 Electron 官方支持线；只在 Desktop workspace |
 | `electron-vite` | `5.0.0` | C6 最新 stable；peer 支持 Vite 5～7，与 Desktop Vite 7.3.6 闭合 |
 | `electron-builder` | `26.15.7` | C6 最新 stable；先提供三平台 unpacked Alpha 构建，发布目标与 native fallback 留到 C9 |

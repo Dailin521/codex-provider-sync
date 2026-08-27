@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import { defaultBackupRoot } from "../src/constants.js";
 import { pruneBackups } from "../src/backup.js";
@@ -21,6 +22,43 @@ import {
 import { getStatus, runRestore, runSwitch } from "../src/service.js";
 import { openDatabase } from "../src/sqlite.js";
 import { resolveStateDbLockResource } from "../src/state-db-lock.js";
+import { findPendingTransactions } from "../src/transaction-journal.js";
+
+const execFileAsync = promisify(execFile);
+
+async function windowsShortDirectoryPath(directory) {
+  assert.equal(process.platform, "win32");
+  const executable = path.join(
+    process.env.SystemRoot ?? "C:\\Windows",
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe"
+  );
+  const command = [
+    "$fso = New-Object -ComObject Scripting.FileSystemObject",
+    "$folder = $fso.GetFolder($env:CPS_SHORT_PATH_TARGET)",
+    "$folder.ShortPath"
+  ].join("; ");
+  const { stdout } = await execFileAsync(executable, [
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    command
+  ], {
+    env: { ...process.env, CPS_SHORT_PATH_TARGET: directory },
+    windowsHide: true
+  });
+  const shortPath = stdout.trim();
+  assert.equal(path.isAbsolute(shortPath), true, "PowerShell must return an absolute 8.3 alias");
+  assert.notEqual(
+    path.resolve(shortPath).toLowerCase(),
+    path.resolve(directory).toLowerCase(),
+    "The Windows volume must expose an actual short-path alias for this fixture"
+  );
+  return shortPath;
+}
 
 async function makeFixture({ withDatabase = false } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "provider-sync-restore-v2-"));
@@ -464,7 +502,50 @@ test("a completed resolver with a different source cannot hide a pending Restore
   assert.deepEqual(await fs.readFile(pending.filePath), pendingBefore);
 });
 
-test("a completed resolver matches equivalent physical Windows path aliases", async () => {
+test("a completed resolver binds physical source and revision instead of display backupId", async () => {
+  const fixture = await makeFixture();
+  const crashed = await spawnCrash(
+    fixture.codexHome,
+    fixture.sourceBackup,
+    "after_restore_prepared_before_applying"
+  );
+  assert.equal(crashed.code, 86, crashed.stderr);
+  const [pending] = await listRestoreJournals(fixture.codexHome);
+  const pendingBefore = await fs.readFile(pending.filePath);
+
+  const resolverDir = path.join(defaultBackupRoot(fixture.codexHome), "restore-v2-display-id-resolver");
+  await fs.mkdir(resolverDir, { recursive: true });
+  const resolver = await RestoreJournal.create(resolverDir, {
+    ...pending.prepared,
+    operationId: "display-id-resolver",
+    sourceBackup: {
+      ...pending.prepared.sourceBackup,
+      backupId: "different-lexical-alias-name"
+    },
+    preRestoreSnapshot: {
+      ...pending.prepared.preRestoreSnapshot,
+      backupId: "display-id-resolver-snapshot",
+      backupDir: resolverDir
+    },
+    resolvesOperationIds: [pending.operationId]
+  });
+  await completeResolverJournal(resolver, pending.prepared, "display-id-resolver-post-manifest");
+
+  assert.equal((await getStatus({ codexHome: fixture.codexHome })).pendingRecovery, false);
+  assert.equal(
+    (await findPendingTransactions(fixture.codexHome))
+      .some((transaction) => transaction.operationId === pending.operationId),
+    false
+  );
+  assert.deepEqual(await fs.readFile(pending.filePath), pendingBefore);
+  await pruneBackups(fixture.codexHome, 0);
+  await fs.access(fixture.sourceBackup);
+  await fs.access(pending.snapshotDir);
+});
+
+test("a completed resolver matches real Windows 8.3 and long physical path aliases", {
+  skip: process.platform !== "win32"
+}, async () => {
   const fixture = await makeFixture();
   const crashed = await spawnCrash(
     fixture.codexHome,
@@ -474,6 +555,11 @@ test("a completed resolver matches equivalent physical Windows path aliases", as
   assert.equal(crashed.code, 86, crashed.stderr);
   const [pending] = await listRestoreJournals(fixture.codexHome);
   assert.equal(pending.state, "prepared");
+  const pendingBefore = await fs.readFile(pending.filePath);
+  const shortCodexHome = await windowsShortDirectoryPath(pending.prepared.storage.codexHome);
+  const shortSourceBackup = await windowsShortDirectoryPath(
+    pending.prepared.sourceBackup.backupDir
+  );
 
   const resolverDir = path.join(defaultBackupRoot(fixture.codexHome), "restore-v2-physical-alias-resolver");
   await fs.mkdir(resolverDir, { recursive: true });
@@ -482,11 +568,11 @@ test("a completed resolver matches equivalent physical Windows path aliases", as
     operationId: "physical-alias-resolver",
     sourceBackup: {
       ...pending.prepared.sourceBackup,
-      backupDir: await fs.realpath(pending.prepared.sourceBackup.backupDir)
+      backupDir: shortSourceBackup
     },
     storage: {
       ...pending.prepared.storage,
-      codexHome: await fs.realpath(pending.prepared.storage.codexHome)
+      codexHome: shortCodexHome
     },
     preRestoreSnapshot: {
       ...pending.prepared.preRestoreSnapshot,
@@ -500,6 +586,7 @@ test("a completed resolver matches equivalent physical Windows path aliases", as
   await completeResolverJournal(resolver, pending.prepared, "physical-alias-post-manifest");
 
   assert.equal((await getStatus({ codexHome: fixture.codexHome })).pendingRecovery, false);
+  assert.deepEqual(await fs.readFile(pending.filePath), pendingBefore);
 });
 
 test("a completed resolver with a different persisted physical Home cannot hide pending Restore", async () => {

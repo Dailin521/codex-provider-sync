@@ -6,8 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { getStatus } from "../src/service.js";
 import { openDatabase } from "../src/sqlite.js";
+import { createWebCoreFacade } from "../src/web-core-adapter.js";
 import { createWebUiServer } from "../src/web-server.js";
 import { createMemoryWebUiState } from "../src/web-state.js";
 
@@ -89,7 +89,8 @@ async function startRealWeb(codexHome, webRoot) {
   await fs.mkdir(webRoot, { recursive: true });
   await fs.writeFile(path.join(webRoot, "index.html"), "<!doctype html><title>status</title>", "utf8");
   const stateStore = createMemoryWebUiState({ codexHome });
-  const handle = createWebUiServer({ webRoot, stateStore });
+  const coreFacade = createWebCoreFacade(stateStore);
+  const handle = createWebUiServer({ webRoot, stateStore, services: { coreFacade } });
   await new Promise((resolve, reject) => {
     handle.server.once("error", reject);
     handle.server.listen(0, "127.0.0.1", resolve);
@@ -105,6 +106,7 @@ async function startRealWeb(codexHome, webRoot) {
   const credential = paired.payload.deviceCredential;
   return {
     handle,
+    coreFacade,
     stateStore,
     origin,
     async status() {
@@ -197,6 +199,7 @@ function asLastComplete(status) {
   const value = structuredClone(status);
   value.operationInProgress = null;
   delete value.statusReadBlocked;
+  delete value.alignment;
   return value;
 }
 
@@ -207,13 +210,12 @@ test("Core and Web Status preserve the last complete snapshot under external Hom
   try {
     const profileRevision = web.stateStore.getProfile("default").revision;
     const statusOptions = {
-      codexHome: fixture.codexHome,
-      profileId: "default",
-      profileRevision
+      profile: { profileId: "default", profileRevision }
     };
+    const readCoreStatus = () => web.coreFacade.getStatus(statusOptions);
     const baselineWebResponse = await web.status();
     assert.equal(baselineWebResponse.status, 200);
-    const baselineCore = await getStatus(statusOptions);
+    const baselineCore = await readCoreStatus();
 
     releaseHolder = await startHolder({
       mode: "home",
@@ -221,49 +223,48 @@ test("Core and Web Status preserve the last complete snapshot under external Hom
       stateDbPath: fixture.stateDbPath,
       configText: fixture.configText("external")
     });
-    const blockedCore = await getStatus(statusOptions);
+    const blockedCore = await readCoreStatus();
     const blockedWebResponse = await web.status();
     assert.equal(blockedCore.operationInProgress.actor, "external");
     assert.equal(blockedCore.operationInProgress.busyScope, "codex-home");
     assert.equal(blockedCore.statusReadBlocked.reason, "codex-home-lock");
-    assert.deepEqual(asLastComplete(blockedCore), baselineCore);
+    assert.deepEqual(asLastComplete(blockedCore), asLastComplete(baselineCore));
     assert.equal(blockedWebResponse.status, 200);
     assert.equal(blockedWebResponse.payload.status.alignment.aligned, false);
     assert.equal(blockedWebResponse.payload.status.operationInProgress.busyScope, "codex-home");
-    const blockedWebWithoutAlignment = structuredClone(blockedWebResponse.payload.status);
-    delete blockedWebWithoutAlignment.alignment;
-    assert.deepEqual(asLastComplete(blockedWebWithoutAlignment), baselineCore);
+    assert.deepEqual(
+      asLastComplete(blockedWebResponse.payload.status),
+      asLastComplete(baselineCore)
+    );
     await releaseHolder();
     releaseHolder = null;
-    assert.equal((await getStatus(statusOptions)).currentProvider, "external");
+    assert.equal((await readCoreStatus()).currentProvider, "external");
 
     await fs.writeFile(path.join(fixture.codexHome, "config.toml"), fixture.configText("openai"), "utf8");
     assert.equal((await web.status()).status, 200);
-    const stateBaselineCore = await getStatus(statusOptions);
+    const stateBaselineCore = await readCoreStatus();
     releaseHolder = await startHolder({
       mode: "state-db",
       codexHome: fixture.codexHome,
       stateDbPath: fixture.stateDbPath
     });
-    const stateBlockedCore = await getStatus(statusOptions);
+    const stateBlockedCore = await readCoreStatus();
     const stateBlockedWeb = (await web.status()).payload.status;
     assert.equal(stateBlockedCore.operationInProgress.busyScope, "state-db");
     assert.equal(stateBlockedCore.statusReadBlocked.reason, "state-db-lock");
-    assert.deepEqual(asLastComplete(stateBlockedCore), stateBaselineCore);
+    assert.deepEqual(asLastComplete(stateBlockedCore), asLastComplete(stateBaselineCore));
     assert.equal(stateBlockedWeb.alignment.aligned, false);
     assert.equal(stateBlockedWeb.operationInProgress.busyScope, "state-db");
-    const stateBlockedWebWithoutAlignment = structuredClone(stateBlockedWeb);
-    delete stateBlockedWebWithoutAlignment.alignment;
-    assert.deepEqual(asLastComplete(stateBlockedWebWithoutAlignment), stateBaselineCore);
+    assert.deepEqual(asLastComplete(stateBlockedWeb), asLastComplete(stateBaselineCore));
     await releaseHolder();
     releaseHolder = null;
-    const refreshed = await getStatus(statusOptions);
+    const refreshed = await readCoreStatus();
     assert.equal(refreshed.sqliteCounts.sessions.external, 1);
 
     const lockDir = path.join(fixture.codexHome, "tmp", "provider-sync.lock");
     await fs.mkdir(lockDir, { recursive: true });
     await fs.writeFile(path.join(lockDir, "owner.json"), "{malformed", "utf8");
-    const unverifiable = await getStatus(statusOptions);
+    const unverifiable = await readCoreStatus();
     assert.equal(unverifiable.operationInProgress.lockState, "unverifiable");
     assert.equal(unverifiable.rolloutScanComplete, false);
     assert.ok(unverifiable.statusReadBlocked);

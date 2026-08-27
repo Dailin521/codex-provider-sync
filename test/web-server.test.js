@@ -137,7 +137,7 @@ function statusFixture(overrides = {}) {
 }
 
 function coreStatusFixture(profile, overrides = {}) {
-  return {
+  const status = {
     schemaVersion: 1,
     snapshotAt: "2026-08-25T00:00:00.000Z",
     storageRevision: "storage-r1",
@@ -154,6 +154,27 @@ function coreStatusFixture(profile, overrides = {}) {
     rolloutScanComplete: true,
     lockedRolloutFiles: [],
     ...overrides
+  };
+  const matchesTarget = (distribution) => ["sessions", "archived_sessions"].every((scope) => (
+    Object.entries(distribution?.[scope] ?? {}).every(([provider, count]) => (
+      Number(count) === 0 || provider === status.currentProvider
+    ))
+  ));
+  return {
+    ...status,
+    alignment: status.alignment ?? {
+      aligned: Boolean(
+        !status.operationInProgress
+        && !status.statusReadBlocked
+        && status.rolloutScanComplete
+        && status.lockedRolloutFiles.length === 0
+        && status.sqliteCounts?.unreadable !== true
+        && matchesTarget(status.rolloutCounts)
+        && matchesTarget(status.sqliteCounts)
+      ),
+      sqliteReadable: status.sqliteCounts?.unreadable !== true,
+      targetProvider: status.currentProvider
+    }
   };
 }
 
@@ -265,14 +286,104 @@ test("versioned Core HTTP endpoint preserves pairing, correlation and canonical 
   }
 });
 
+test("versioned Core HTTP stream forwards progress and cancels only its correlated apply", async () => {
+  const operationId = "11111111-1111-4111-8111-111111111111";
+  const handle = await startFixture({
+    coreFacade: {
+      async applySync(_input, control) {
+        control.onOperationStarted({ operationId });
+        control.onProgress({ stage: "create_backup", status: "start" });
+        await new Promise((resolve, reject) => {
+          if (control.signal.aborted) {
+            reject(Object.assign(new Error("cancelled"), { code: "OPERATION_CANCELLED", operationId }));
+            return;
+          }
+          control.signal.addEventListener("abort", () => {
+            reject(Object.assign(new Error("cancelled"), { code: "OPERATION_CANCELLED", operationId }));
+          }, { once: true });
+        });
+      }
+    }
+  });
+  try {
+    const { credential } = await handle.pair();
+    const requestId = "core-stream-cancel";
+    const response = await fetch(`${handle.origin}/api/core`, {
+      method: "POST",
+      headers: {
+        Accept: "application/x-ndjson",
+        "Content-Type": "application/json",
+        Origin: handle.origin,
+        "X-Codex-Provider-Device": credential
+      },
+      body: JSON.stringify({
+        protocolVersion: 1,
+        requestId,
+        method: "applySync",
+        payload: { schemaVersion: 1, planId: "a".repeat(32) }
+      })
+    });
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type"), /^application\/x-ndjson/);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffered = "";
+    const frames = [];
+    let cancelSent = false;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffered += decoder.decode(value, { stream: true });
+      let newline;
+      while ((newline = buffered.indexOf("\n")) >= 0) {
+        const line = buffered.slice(0, newline);
+        buffered = buffered.slice(newline + 1);
+        if (!line) continue;
+        const frame = JSON.parse(line);
+        frames.push(frame);
+        if (frame.event === "operation-started" && !cancelSent) {
+          cancelSent = true;
+          const wrong = await api(handle, "/api/core/cancel", {
+            protocolVersion: 1,
+            requestId,
+            operationId: "22222222-2222-4222-8222-222222222222"
+          }, credential);
+          assert.deepEqual(wrong.payload, { accepted: false });
+          const cancelled = await api(handle, "/api/core/cancel", {
+            protocolVersion: 1,
+            requestId,
+            operationId
+          }, credential);
+          assert.deepEqual(cancelled.payload, { accepted: true });
+        }
+      }
+    }
+    assert.deepEqual(frames.map((frame) => frame.event ?? (frame.ok ? "success" : frame.error.code)), [
+      "operation-started",
+      "progress",
+      "OPERATION_CANCELLED"
+    ]);
+    assert.equal(frames.every((frame) => frame.requestId === requestId), true);
+  } finally {
+    await handle.close();
+  }
+});
+
 test("status alignment follows the current provider without requiring equal inventory counts", async () => {
-  let currentStatus = statusFixture({
+  let currentStatus = {
     currentProvider: "dal",
     configuredProviders: ["dal", "openai"],
     rolloutCounts: { sessions: { dal: 949 }, archived_sessions: {} },
     sqliteCounts: { sessions: { dal: 948 }, archived_sessions: {} }
+  };
+  const handle = await startFixture({
+    coreFacade: {
+      async getStatus(input) {
+        const profile = handle.stateStore.getProfile(input.profile.profileId);
+        return coreStatusFixture(profile, currentStatus);
+      }
+    }
   });
-  const handle = await startFixture({ getStatus: async () => currentStatus });
   try {
     const paired = await handle.pair();
     const readAlignment = async () => {
@@ -300,7 +411,7 @@ test("status alignment follows the current provider without requiring equal inve
       ...currentStatus,
       rolloutCounts: { sessions: { dal: 949 }, archived_sessions: {} },
       sqliteCounts: { sessions: { dal: 948 }, archived_sessions: {} },
-      lockedRolloutFiles: ["C:\\locked-rollout.jsonl"]
+      lockedRolloutFiles: ["locked-rollout.jsonl"]
     };
     assert.equal((await readAlignment()).aligned, false);
   } finally {
@@ -309,7 +420,13 @@ test("status alignment follows the current provider without requiring equal inve
 });
 
 test("anonymous HTML contains no API or pairing credential and write APIs require pairing", async () => {
-  const handle = await startFixture({ getStatus: async () => statusFixture() });
+  const handle = await startFixture({
+    coreFacade: {
+      async getStatus(input) {
+        return coreStatusFixture({ id: input.profile.profileId, revision: "fixture-revision" });
+      }
+    }
+  });
   try {
     const pairingToken = handle.issuePairing();
     const page = await request({ origin: handle.origin });
@@ -405,7 +522,13 @@ test("internal pairing requires and consumes a server-issued authenticated chall
 });
 
 test("Origin validation uses the actual loopback Host and supports forwarded ports", async () => {
-  const handle = await startFixture({ getStatus: async () => statusFixture() });
+  const handle = await startFixture({
+    coreFacade: {
+      async getStatus(input) {
+        return coreStatusFixture({ id: input.profile.profileId, revision: "fixture-revision" });
+      }
+    }
+  });
   try {
     const { credential } = await handle.pair();
     const invalid = await api(handle, "/api/status", { profileId: "default" }, credential, { originHeader: "http://evil.example" });
@@ -423,14 +546,23 @@ test("Origin validation uses the actual loopback Host and supports forwarded por
   }
 });
 
-test("server-managed profiles reject per-operation paths and resolve profileId", async () => {
+test("legacy read endpoints reject per-operation paths and forward only a profile selector", async () => {
   const calls = [];
-  const handle = await startFixture({ getStatus: async (storage) => { calls.push(storage); return statusFixture({ codexHome: storage.codexHome }); } });
+  const handle = await startFixture({
+    coreFacade: {
+      async getStatus(input) {
+        calls.push(structuredClone(input));
+        const profile = handle.stateStore.getProfile(input.profile.profileId);
+        return coreStatusFixture(profile);
+      }
+    }
+  });
   try {
     const { credential } = await handle.pair();
     const rawPath = await api(handle, "/api/status", { codexHome: "/tmp/other" }, credential);
-    assert.equal(rawPath.status, 500);
-    assert.match(rawPath.payload.error, /server-managed profileId/);
+    assert.equal(rawPath.status, 400);
+    assert.equal(rawPath.payload.coreError.code, "INVALID_INPUT");
+    assert.doesNotMatch(JSON.stringify(rawPath.payload), /\/tmp\/other/);
 
     const workCodexHome = path.join(handle.root, "work-codex");
     const workSqliteHome = path.join(handle.root, "work-sqlite");
@@ -446,9 +578,10 @@ test("server-managed profiles reject per-operation paths and resolve profileId",
 
     const response = await api(handle, "/api/status", { profileId: "work" }, credential);
     assert.equal(response.status, 200);
-    assert.equal(response.payload.status.pathComparisonCaseInsensitive, process.platform === "win32");
-    assert.equal(calls.at(-1).codexHome, path.resolve(workCodexHome));
-    assert.equal(calls.at(-1).sqliteHome, path.resolve(workSqliteHome));
+    assert.deepEqual(calls.at(-1), { profile: { profileId: "work" } });
+    assert.equal(response.payload.status.profile.id, "work");
+    assert.equal("codexHome" in response.payload.status, false);
+    assert.equal("sqliteHome" in response.payload.status, false);
   } finally {
     await handle.close();
   }
@@ -641,13 +774,9 @@ test("Web Apply appends a safe CoreError DTO without leaking transport internals
 
 test("Web status forwards the Core last-complete snapshot without reading or mixing live storage", async () => {
   let configReads = 0;
-  const coreStatus = statusFixture({
-    schemaVersion: 1,
+  const coreStatus = coreStatusFixture({ id: "default", revision: "trusted-profile-revision" }, {
     snapshotAt: "2026-08-25T00:00:00.000Z",
     storageRevision: "cached-storage-revision",
-    profile: { id: "default", revision: "trusted-profile-revision" },
-    profileId: "default",
-    profileRevision: "server-profile-revision",
     currentProvider: "openai",
     operationInProgress: {
       operationId: "external-operation",
@@ -658,7 +787,7 @@ test("Web status forwards the Core last-complete snapshot without reading or mix
   });
   const handle = await startFixture({
     readConfigText: async () => { configReads += 1; throw new Error("status must not read config in Web"); },
-    getStatus: async () => structuredClone(coreStatus)
+    coreFacade: { getStatus: async () => structuredClone(coreStatus) }
   });
   try {
     const { credential } = await handle.pair();
@@ -726,14 +855,50 @@ test("Web Restore preparation delegates managed backup membership validation to 
 test("Web UI history endpoints delegate through the selected profile", async () => {
   const calls = [];
   const handle = await startFixture({
-    listHistory: async (codexHome, options) => { calls.push(["list", codexHome, options]); return { page: 1, pageSize: 50, total: 1, hasNextPage: false, sessions: [{ id: "thread", title: "safe" }] }; },
-    getHistorySession: async (codexHome, sessionId) => { calls.push(["detail", codexHome, sessionId]); return { session: { id: sessionId }, messages: [], truncated: false, returnedMessageCount: 0 }; }
+    coreFacade: {
+      async listHistory(input) {
+        calls.push(["list", structuredClone(input)]);
+        return {
+          page: 1,
+          pageSize: 50,
+          total: 1,
+          hasNextPage: false,
+          sessions: [{
+            id: "thread",
+            title: "safe",
+            provider: "openai",
+            archived: false,
+            updatedAt: "2026-08-25T00:00:00.000Z",
+            messageCount: 1
+          }]
+        };
+      },
+      async getHistorySession(input) {
+        calls.push(["detail", structuredClone(input)]);
+        return {
+          session: {
+            id: input.sessionId,
+            title: "safe",
+            provider: "openai",
+            archived: false,
+            updatedAt: "2026-08-25T00:00:00.000Z",
+            messageCount: 0
+          },
+          messages: [],
+          truncated: false,
+          returnedMessageCount: 0
+        };
+      }
+    }
   });
   try {
     const { credential } = await handle.pair();
     assert.equal((await api(handle, "/api/history", { profileId: "default", query: "safe" }, credential)).status, 200);
     assert.equal((await api(handle, "/api/history/session", { profileId: "default", sessionId: "thread" }, credential)).status, 200);
-    assert.deepEqual(calls.map((call) => call[0]), ["list", "detail"]);
+    assert.deepEqual(calls, [
+      ["list", { profile: { profileId: "default" }, query: "safe" }],
+      ["detail", { profile: { profileId: "default" }, sessionId: "thread" }]
+    ]);
   } finally {
     await handle.close();
   }
@@ -765,7 +930,8 @@ test("Web UI opens a no-thread-id history session from a rollout path longer tha
     assert.equal(listed.payload.history.total, 1);
     const [session] = listed.payload.history.sessions;
     assert.match(session.id, /^rollout:[A-Za-z0-9_-]{43}$/);
-    assert.equal(session.rolloutPath, path.resolve(rolloutPath));
+    assert.equal("rolloutPath" in session, false);
+    assert.equal("cwd" in session, false);
 
     const detail = await api(handle, "/api/history/session", {
       profileId: "default",

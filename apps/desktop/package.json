@@ -23,7 +23,7 @@
     "smoke:candidate:artifacts": "node scripts/smoke-candidate-artifacts.mjs",
     "verify:candidate:set": "node scripts/verify-candidate-set.mjs",
     "test": "node --test checks/*.contract.mjs tests/*.test.mjs",
-    "test:e2e": "playwright test -c playwright.config.mjs",
+    "test:e2e": "node scripts/verify-test-fallback-bundle.mjs && playwright test -c playwright.config.mjs",
     "test:e2e:production": "playwright test -c playwright.production.config.mjs",
     "test:e2e:packaged": "node scripts/run-packaged-e2e.mjs"
   },

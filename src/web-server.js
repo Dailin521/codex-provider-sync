@@ -11,10 +11,6 @@ import {
   applySwitch,
   applySync,
   CoreError,
-  getHistorySession,
-  getStatus,
-  listBackups,
-  listHistory,
   prepareRestore,
   prepareSwitch,
   prepareSync,
@@ -40,6 +36,8 @@ const INTERNAL_RESPONSE_DOMAIN = "codex-provider-sync:web-ui:internal-pairing:v2
 const DEVICE_SECRET_BYTES = 32;
 const STATE_FILENAME = "provider-sync-web.json";
 const RUNTIME_FILENAME = "provider-sync-web.runtime.json";
+const CORE_STREAM_CONTENT_TYPE = "application/x-ndjson";
+const CORE_APPLY_METHODS = new Set(["applySync", "applySwitch", "applyRestore"]);
 const WEB_ROOT = fileURLToPath(new URL("../web/dist/", import.meta.url));
 const MIME_TYPES = new Map([
   [".css", "text/css; charset=utf-8"],
@@ -80,6 +78,20 @@ function sendError(response, statusCode, error, code) {
     ...(code ? { code } : {}),
     ...(error instanceof CoreError ? { coreError: toCoreErrorDto(error) } : {})
   });
+}
+
+function startCoreStream(response) {
+  response.writeHead(200, {
+    "Cache-Control": "no-store",
+    "Content-Type": `${CORE_STREAM_CONTENT_TYPE}; charset=utf-8`,
+    "X-Content-Type-Options": "nosniff"
+  });
+  response.flushHeaders?.();
+}
+
+function writeCoreStream(response, value) {
+  if (response.destroyed || response.writableEnded) return;
+  try { response.write(`${JSON.stringify(value)}\n`); } catch {}
 }
 
 function coreErrorHttpStatus(error, fallback) {
@@ -160,6 +172,23 @@ function resolveStorageProfile(input, stateStore) {
   };
 }
 
+function legacyCoreReadInput(input, allowedKeys) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new CoreError("INVALID_INPUT", "The legacy Core read input is invalid.");
+  }
+  const allowed = new Set(["profileId", ...allowedKeys]);
+  if (Object.keys(input).some((key) => !allowed.has(key))) {
+    throw new CoreError("INVALID_INPUT", "The legacy Core read input is invalid.");
+  }
+  const profileId = requireString(input.profileId ?? "default", "profileId", { maxLength: 80 });
+  return {
+    profile: { profileId },
+    ...Object.fromEntries(allowedKeys
+      .filter((key) => input[key] !== undefined)
+      .map((key) => [key, input[key]]))
+  };
+}
+
 function captureProfileRevision(profileId, suppliedRevision, stateStore, response) {
   const profile = stateStore.getProfile(profileId);
   if (typeof suppliedRevision !== "string" || !suppliedRevision) {
@@ -194,34 +223,6 @@ function captureStorageProfile(input, stateStore, response) {
     ...(profile.sqliteHome ? { sqliteHome: profile.sqliteHome } : {})
   };
   return Object.freeze(snapshot);
-}
-
-function serializeStatus(status) {
-  const rollout = status.rolloutCounts ?? { sessions: {}, archived_sessions: {} };
-  const sqlite = status.sqliteCounts;
-  const targetProvider = status.currentProvider;
-  const matchesTargetProvider = (distribution) => ["sessions", "archived_sessions"].every((scope) => (
-    Object.entries(distribution?.[scope] ?? {}).every(([provider, count]) => count === 0 || provider === targetProvider)
-  ));
-  const sqliteReadable = Boolean(sqlite && !sqlite.unreadable);
-  const rolloutScanComplete = status.rolloutScanComplete !== false
-    && !status.lockedRolloutFiles?.length;
-  return {
-    ...status,
-    alignment: {
-      aligned: Boolean(
-        targetProvider
-        && !status.operationInProgress
-        && !status.statusReadBlocked
-        && sqliteReadable
-        && rolloutScanComplete
-        && matchesTargetProvider(rollout)
-        && matchesTargetProvider(sqlite)
-      ),
-      sqliteReadable,
-      targetProvider
-    }
-  };
 }
 
 function stageMessage(event) {
@@ -435,16 +436,12 @@ export function createWebUiServer({
     applyRestore: services.applyRestore ?? applyRestore,
     applySwitch: services.applySwitch ?? applySwitch,
     applySync: services.applySync ?? applySync,
-    getStatus: services.getStatus ?? getStatus,
-    listBackups: services.listBackups ?? listBackups,
     prepareRestore: services.prepareRestore ?? prepareRestore,
     prepareSwitch: services.prepareSwitch ?? prepareSwitch,
     prepareSync: services.prepareSync ?? prepareSync,
     runPruneBackups: services.runPruneBackups ?? runPruneBackups,
     readConfigText: services.readConfigText ?? readConfigText,
     readRootModelFromConfigText: services.readRootModelFromConfigText ?? readRootModelFromConfigText,
-    listHistory: services.listHistory ?? listHistory,
-    getHistorySession: services.getHistorySession ?? getHistorySession
   };
   const coreFacade = services.coreFacade ?? createWebCoreFacade(stateStore);
   const activity = [];
@@ -453,6 +450,25 @@ export function createWebUiServer({
   let baseUrl = null;
   let pairing = null;
   const internalChallenges = new Map();
+  const activeCoreOperations = new Map();
+
+  const callLegacyCoreRead = async (method, payload, response) => {
+    const dispatched = await dispatchWebCoreRequest(coreFacade, {
+      protocolVersion: 1,
+      requestId: crypto.randomUUID(),
+      method,
+      payload
+    });
+    if (!dispatched.envelope.ok) {
+      sendJson(response, dispatched.statusCode, {
+        error: dispatched.envelope.error.message,
+        code: dispatched.envelope.error.code,
+        coreError: dispatched.envelope.error
+      });
+      return null;
+    }
+    return dispatched.envelope.result;
+  };
 
   const record = (level, message, detail = null, operation = activeOperation?.kind ?? null) => {
     activityId += 1;
@@ -661,6 +677,34 @@ export function createWebUiServer({
         }
 
         const body = await readJsonBody(request);
+        if (pathname === "/api/core/cancel") {
+          const allowedKeys = body?.operationId === undefined
+            ? ["protocolVersion", "requestId"]
+            : ["operationId", "protocolVersion", "requestId"];
+          const valid = body
+            && typeof body === "object"
+            && !Array.isArray(body)
+            && Object.keys(body).sort().join(",") === allowedKeys.sort().join(",")
+            && body.protocolVersion === 1
+            && typeof body.requestId === "string"
+            && body.requestId.length > 0
+            && body.requestId.length <= 512
+            && (body.operationId === undefined
+              || (typeof body.operationId === "string"
+                && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.operationId)));
+          if (!valid) {
+            sendJson(response, 400, { accepted: false });
+            return;
+          }
+          const active = activeCoreOperations.get(body.requestId);
+          const accepted = Boolean(
+            active
+            && (!body.operationId || body.operationId === active.operationId)
+          );
+          if (accepted) active.controller.abort();
+          sendJson(response, 200, { accepted });
+          return;
+        }
         if (pathname === "/api/core") {
           const contentType = String(request.headers["content-type"] ?? "").toLowerCase();
           if (!contentType.startsWith("application/json")) {
@@ -673,6 +717,60 @@ export function createWebUiServer({
             });
             record("warning", "Core request rejected", dispatched.activity);
             sendJson(response, 415, dispatched.envelope);
+            return;
+          }
+          const wantsStream = String(request.headers.accept ?? "")
+            .toLowerCase()
+            .split(",")
+            .some((entry) => entry.trim().startsWith(CORE_STREAM_CONTENT_TYPE));
+          if (wantsStream) {
+            const controller = new AbortController();
+            let completed = false;
+            let registeredRequestId = null;
+            startCoreStream(response);
+            response.once("close", () => {
+              if (!completed) controller.abort();
+            });
+            const dispatched = await dispatchWebCoreRequest(coreFacade, body, {
+              signal: controller.signal,
+              onRequestValidated(validatedRequest) {
+                if (!CORE_APPLY_METHODS.has(validatedRequest.method)) return;
+                if (activeCoreOperations.has(validatedRequest.requestId)) {
+                  throw Object.assign(new Error("A Core request with this requestId is already active."), {
+                    code: "OPERATION_BUSY",
+                    details: { busyScope: "web-request" }
+                  });
+                }
+                registeredRequestId = validatedRequest.requestId;
+                activeCoreOperations.set(registeredRequestId, {
+                  controller,
+                  operationId: null
+                });
+              },
+              onOperationStarted(event) {
+                if (registeredRequestId) {
+                  const active = activeCoreOperations.get(registeredRequestId);
+                  if (active?.controller === controller) active.operationId = event.operationId;
+                }
+                writeCoreStream(response, event);
+              },
+              onProgress(event) {
+                writeCoreStream(response, event);
+              },
+              onRequestSettled() {
+                if (!registeredRequestId) return;
+                const active = activeCoreOperations.get(registeredRequestId);
+                if (active?.controller === controller) activeCoreOperations.delete(registeredRequestId);
+              }
+            });
+            record(
+              dispatched.activity.ok ? "info" : "warning",
+              dispatched.activity.ok ? "Core request completed" : "Core request rejected",
+              dispatched.activity
+            );
+            completed = true;
+            writeCoreStream(response, dispatched.envelope);
+            response.end();
             return;
           }
           const dispatched = await dispatchWebCoreRequest(coreFacade, body);
@@ -720,30 +818,34 @@ export function createWebUiServer({
         }
 
         if (pathname === "/api/status") {
-          const profile = resolveStorageProfile(body, stateStore);
-          const status = serializeStatus(await api.getStatus({ ...profile, platform }));
-          record("info", "Status refreshed", { profileId: profile.profileId }, null);
+          const input = legacyCoreReadInput(body, []);
+          const status = await callLegacyCoreRead("getStatus", input, response);
+          if (!status) return;
+          record("info", "Status refreshed", { profileId: input.profile.profileId }, null);
           sendJson(response, 200, { status });
           return;
         }
 
         if (pathname === "/api/backups") {
-          const { codexHome } = resolveStorageProfile(body, stateStore);
-          sendJson(response, 200, await api.listBackups(codexHome));
+          const input = legacyCoreReadInput(body, []);
+          const result = await callLegacyCoreRead("listBackups", input, response);
+          if (!result) return;
+          sendJson(response, 200, result);
           return;
         }
 
         if (pathname === "/api/history") {
-          const storage = resolveStorageProfile(body, stateStore);
-          const history = await api.listHistory(storage.codexHome, body);
+          const input = legacyCoreReadInput(body, ["page", "pageSize", "query", "project", "provider", "archived"]);
+          const history = await callLegacyCoreRead("listHistory", input, response);
+          if (!history) return;
           sendJson(response, 200, { history });
           return;
         }
 
         if (pathname === "/api/history/session") {
-          const storage = resolveStorageProfile(body, stateStore);
-          const sessionId = requireString(body.sessionId, "sessionId", { maxLength: 300 });
-          const history = await api.getHistorySession(storage.codexHome, sessionId);
+          const input = legacyCoreReadInput(body, ["sessionId", "messageLimit"]);
+          const history = await callLegacyCoreRead("getHistorySession", input, response);
+          if (!history) return;
           sendJson(response, 200, { history });
           return;
         }

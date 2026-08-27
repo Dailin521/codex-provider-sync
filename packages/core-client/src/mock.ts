@@ -20,7 +20,8 @@ type MaybePromise<T> = T | Promise<T>;
 
 export type MockCoreHandler<M extends CoreMethodName> = (
   payload: CoreMethodMap[M]["input"],
-  request: CoreRequestEnvelope<M>
+  request: CoreRequestEnvelope<M>,
+  control: CoreTransportCallOptions
 ) => MaybePromise<CoreMethodMap[M]["output"]>;
 
 export type MockCoreHandlers = {
@@ -41,7 +42,7 @@ class MockCoreTransport implements CoreTransport {
 
   async request<M extends CoreMethodName>(
     request: CoreRequestEnvelope<M>,
-    _options: CoreTransportCallOptions = {}
+    options: CoreTransportCallOptions = {}
   ): Promise<unknown> {
     this.requests.push(request);
     const handler = this.#handlers[request.method] as MockCoreHandler<M> | undefined;
@@ -50,7 +51,19 @@ class MockCoreTransport implements CoreTransport {
     }
     let result: CoreMethodMap[M]["output"];
     try {
-      result = await handler(request.payload, request);
+      result = await handler(request.payload, request, {
+        ...(options.signal ? { signal: options.signal } : {}),
+        ...(options.onOperationStarted ? {
+          onOperationStarted(event) {
+            try { options.onOperationStarted?.(event); } catch {}
+          }
+        } : {}),
+        ...(options.onProgress ? {
+          onProgress(event) {
+            try { options.onProgress?.(event); } catch {}
+          }
+        } : {})
+      });
     } catch (error) {
       return createCoreFailureEnvelope(request, legacyErrorToDto(error));
     }

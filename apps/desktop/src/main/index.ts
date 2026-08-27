@@ -7,6 +7,7 @@ import {
   BrowserWindow,
   dialog,
   ipcMain,
+  nativeTheme,
   protocol,
   screen,
   session
@@ -91,7 +92,7 @@ if (!app.requestSingleInstanceLock()) {
       minHeight: 560,
       show: false,
       title: "Codex Provider Sync",
-      backgroundColor: "#11141b",
+      backgroundColor: nativeTheme.shouldUseDarkColors ? "#11141b" : "#f6f7fb",
       webPreferences: createSecureWebPreferences(preloadPath)
     });
     if (windowDisplay !== "hidden") window.once("ready-to-show", () => window.show());

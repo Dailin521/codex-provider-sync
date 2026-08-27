@@ -1610,6 +1610,7 @@ public sealed class CodexSyncService
         await _codexHomeService.EnsureCodexHomeAsync(codexHome);
 
         await using LockHandle homeLock = await _lockService.AcquireLockAsync(codexHome, "restore");
+        string? physicalBackupDir = null;
         StateDbLockResource? lockedStateDb = null;
         LockHandle? stateDbHandle = null;
         if (options.RestoreDatabase)
@@ -1621,8 +1622,12 @@ public sealed class CodexSyncService
                 explicitSqliteHome,
                 lockConfigText);
             lockStorage.EnsureSqliteAccessSupported("restore");
-            string stateDbTargetPath = await _backupService.ResolveRestoreStateDbTargetPathAsync(
+            RestoreBackupIdentity lockedSourceBackup = await RestoreV2Service.CaptureSourceIdentityAsync(
                 backupDir,
+                cancellationToken);
+            physicalBackupDir = lockedSourceBackup.BackupDir;
+            string stateDbTargetPath = await _backupService.ResolveRestoreStateDbTargetPathAsync(
+                physicalBackupDir,
                 lockStorage,
                 options);
             lockedStateDb = await StateDbLockResource.ResolveAsync(
@@ -1631,9 +1636,12 @@ public sealed class CodexSyncService
             stateDbHandle = await _lockService.AcquireStateDbLockAsync(lockedStateDb, "restore");
         }
         await using LockHandle? stateDbLock = stateDbHandle;
+        physicalBackupDir ??= (await RestoreV2Service.CaptureSourceIdentityAsync(
+            backupDir,
+            cancellationToken)).BackupDir;
         RestorePreparation preparation = await PrepareRestoreAsync(
             codexHome,
-            backupDir,
+            physicalBackupDir,
             options,
             explicitSqliteHome,
             cancellationToken);
@@ -1725,7 +1733,10 @@ public sealed class CodexSyncService
         string configText = await _configFileService.ReadConfigTextAsync(configPath);
         CodexStorageLayout storage = await PrepareStorageAsync(codexHome, explicitSqliteHome, configText);
         storage.EnsureSqliteAccessSupported("restore");
-        string normalizedBackupDir = Path.GetFullPath(backupDir);
+        RestoreBackupIdentity sourceBackup = await RestoreV2Service.CaptureSourceIdentityAsync(
+            backupDir,
+            cancellationToken);
+        string normalizedBackupDir = sourceBackup.BackupDir;
         string? stateDbTargetPath = options.RestoreDatabase
             ? await _backupService.ResolveRestoreStateDbTargetPathAsync(
                 normalizedBackupDir,
@@ -1737,9 +1748,6 @@ public sealed class CodexSyncService
             storage,
             options,
             expectedStateDbTargetPath: stateDbTargetPath,
-            cancellationToken);
-        RestoreBackupIdentity sourceBackup = await RestoreV2Service.CaptureSourceIdentityAsync(
-            normalizedBackupDir,
             cancellationToken);
         IReadOnlyList<PendingTransactionInfo> pending = await FileTransactionJournal.FindPendingAsync(codexHome);
         PendingTransactionInfo[] foreignPending = pending
@@ -1770,14 +1778,14 @@ public sealed class CodexSyncService
             bool physicalHomeMatches = RestoreV2Service.JournalMatchesCurrentPhysicalHome(
                 transaction,
                 storage);
-            bool sourceMatches = preparedSource is not null
-                && preparedSource.BackupId == sourceBackup.BackupId
-                && PathsEqual(preparedSource.BackupDir, sourceBackup.BackupDir)
-                && preparedSource.Revision == sourceBackup.Revision;
+            bool sourceMatches = RestoreV2Service.JournalMatchesSource(
+                preparedSource,
+                sourceBackup);
             bool committedLocationMatches = transaction.State == "committed-pending-ack"
-                && preparedSource is not null
-                && preparedSource.BackupId == sourceBackup.BackupId
-                && PathsEqual(preparedSource.BackupDir, sourceBackup.BackupDir);
+                && RestoreV2Service.JournalMatchesSource(
+                    preparedSource,
+                    sourceBackup,
+                    ignoreRevision: true);
             bool coverageComplete = transaction.Prepared?.RequiredTargetKinds.All(
                 kind => requestedKinds.Contains(kind, StringComparer.Ordinal)) == true;
             if ((sourceMatches || committedLocationMatches)

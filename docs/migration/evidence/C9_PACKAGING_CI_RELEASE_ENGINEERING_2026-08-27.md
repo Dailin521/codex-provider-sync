@@ -10,6 +10,8 @@
 - 候选版本从 CI run 注入 `1.0.0-alpha|beta|rc.<run>`，buildId 绑定 commit 与 target；根包仍为 `0.5.0`，Desktop source manifest 仍为 `0.0.0`。远端 RC 门禁全部闭合前不把 source version 改为 `1.0.0`。
 - electron-builder 固定 Windows NSIS/ZIP、macOS DMG/ZIP、Linux AppImage/deb；所有候选构建使用 `--publish never`。旧 tag-push 发布入口已改为显式 `workflow_dispatch + release_tag`，且只允许 tag commit 位于 `main`；本 checkpoint 没有触发该入口。
 - Electron runtime 首选 `node:sqlite`，并打包 Desktop 专用 `better-sqlite3 13.0.3` fallback。ABI rebuild 后，ASAR 只引用当前 target 的一个 native binding，`app.asar.unpacked` 也只允许该文件；其它平台 prebuild、native source/build/deps 全部排除。
+- fallback 可执行证据使用独立 `electron-vite --mode test` 的编译期常量剔除 `node:sqlite` import，并验证 bundle 只保留 `better-sqlite3`；运行时环境变量不能切换生产 driver。production verifier 与最终 artifact audit 同时拒绝该 selector symbol，避免测试 gate 进入发布包。
+- production bundle 预检与最终 ASAR 审计共用 `artifact-audit-policy.v1.json` 的完整文本扩展集合和 forbidden-text 规则，覆盖 JS/CJS/MJS/HTML/CSS/JSON/SVG/manifest/文档配置，不再出现早期门只扫描少数扩展的差异。
 - production Fuse、ASAR entry/block integrity、Windows PE/macOS plist embedded ASAR binding、敏感路径/文件、高置信 credential marker、fixture/test/source map 与 native binding 都由数据化 policy 审计。最终 ZIP/Installer/DMG/AppImage/deb 必须逐个解包或安装后再次审计，不能用 builder unpacked 目录替代。
 - CycloneDX SBOM 从唯一 `package-lock.json` 投影 Desktop production closure；Playwright、builder、Vite、审计工具和 fixture 不进入 runtime closure。每个候选的 checksum 精确覆盖资产、audit、SBOM、staging、container report 与 release manifest，候选目录不得夹带未清单文件。
 - 根 Web production build 已关闭 source map；根 npm packlist 从 111 个条目降为 110 个条目，`.map` 为 0。安装态 tarball smoke 固化了这一拒绝规则。

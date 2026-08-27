@@ -35,6 +35,7 @@ import { acquireStateDbLock, resolveStateDbLockResource } from "./state-db-lock.
 import { PlanLedger } from "./plan-ledger.js";
 import { sharedOperationCoordinator as operationCoordinator } from "./operation-coordinator.js";
 import {
+  captureBackupRevision,
   captureOperationRevisions,
   captureStorageRevision,
   revisionMismatch,
@@ -78,7 +79,7 @@ import {
 } from "./transaction-journal.js";
 import {
   acknowledgePendingRestore,
-  captureRestoreSourceIdentity,
+  captureStableRestoreSource,
   executeRestoreV2,
   restoreJournalCoverageIsComplete,
   restoreJournalMatchesPhysicalHome,
@@ -171,6 +172,19 @@ async function prepareStorage({ codexHome: explicitCodexHome, sqliteHome, config
     return withStateDbLocation(layout, null);
   }
   return withStateDbLocation(layout, await detectStateDb(layout));
+}
+
+async function physicalDirectoryComparisonKey(value) {
+  try {
+    const lexical = path.resolve(value);
+    const first = path.resolve(await fs.realpath(lexical));
+    const stat = await fs.stat(first);
+    const second = path.resolve(await fs.realpath(lexical));
+    if (!stat.isDirectory() || pathComparisonKey(first) !== pathComparisonKey(second)) return null;
+    return pathComparisonKey(first);
+  } catch {
+    return null;
+  }
 }
 
 async function releaseWriteLocks(releaseStateDbLock, releaseHomeLock) {
@@ -1446,7 +1460,8 @@ async function runRestoreCore({
     if (restoreDatabase && !storage.stateDbLocation && isConfiguredSqliteHome(storage)) {
       throw missingConfiguredStateDbError(storage);
     }
-    const normalizedBackupDir = path.resolve(backupDir);
+    const sourceBackup = await captureStableRestoreSource(backupDir, { platform });
+    const normalizedBackupDir = sourceBackup.backupDir;
     if (restoreDatabase) {
       const stateDbTargetPath = await resolveRestoreStateDbTargetPath(normalizedBackupDir, storage);
       ({ release: releaseStateDbLock, resource: stateDbResource } = await acquireStateDbLock(
@@ -1463,11 +1478,6 @@ async function runRestoreCore({
       platform,
       backupDir: normalizedBackupDir
     });
-    const sourceBackup = {
-      backupId: path.basename(normalizedBackupDir),
-      backupDir: normalizedBackupDir,
-      revision: await captureRestoreSourceIdentity(normalizedBackupDir)
-    };
     const requestedKinds = [
       ...(restoreConfig ? ["config", "globalState"] : []),
       ...(restoreDatabase ? ["sqlite"] : []),
@@ -1476,9 +1486,14 @@ async function runRestoreCore({
     const pending = await findPendingTransactions(codexHome);
     const legacyPending = pending.filter((transaction) => transaction.operationKind !== "restore");
     const restorePending = pending.filter((transaction) => transaction.operationKind === "restore");
-    const foreignLegacy = legacyPending.filter(
-      (transaction) => pathComparisonKey(transaction.backupDir) !== pathComparisonKey(normalizedBackupDir)
-    );
+    const normalizedBackupKey = await physicalDirectoryComparisonKey(normalizedBackupDir);
+    const foreignLegacy = [];
+    for (const transaction of legacyPending) {
+      const transactionBackupKey = await physicalDirectoryComparisonKey(transaction.backupDir);
+      if (normalizedBackupKey === null || transactionBackupKey !== normalizedBackupKey) {
+        foreignLegacy.push(transaction);
+      }
+    }
     const boundRestore = [];
     const foreignRestore = [];
     for (const transaction of restorePending) {
@@ -1488,11 +1503,19 @@ async function runRestoreCore({
         storage.codexHome,
         platform
       );
+      const sourceMatches = await restoreJournalMatchesSource(
+        transaction,
+        sourceBackup,
+        platform
+      );
       const committedSourceLocationMatches = transaction.state === "committed-pending-ack"
-        && preparedSource?.backupId === sourceBackup.backupId
-        && typeof preparedSource?.backupDir === "string"
-        && pathComparisonKey(preparedSource.backupDir) === pathComparisonKey(sourceBackup.backupDir);
-      if ((restoreJournalMatchesSource(transaction, sourceBackup, platform)
+        && preparedSource
+        && await restoreJournalMatchesSource(
+          transaction,
+          { ...sourceBackup, revision: preparedSource.revision },
+          platform
+        );
+      if ((sourceMatches
           || committedSourceLocationMatches)
           && physicalHomeMatches
           && restoreJournalCoverageIsComplete(transaction, requestedKinds)) {
@@ -1834,14 +1857,12 @@ async function resolvePreparedBackup(options, codexHome) {
     if (!selected) {
       throw new CoreError("RESTORE_VALIDATION_FAILED", "The selected managed backup is unavailable.");
     }
-    return { backupId: selected.id, backupDir: selected.path, metadata: selected.metadata };
+    const source = await captureStableRestoreSource(selected.path, { platform: options.platform });
+    return { ...source, metadata: selected.metadata };
   }
   if (typeof options.backupDir === "string" && options.backupDir) {
-    return {
-      backupId: path.basename(path.resolve(options.backupDir)),
-      backupDir: path.resolve(options.backupDir),
-      metadata: null
-    };
+    const source = await captureStableRestoreSource(options.backupDir, { platform: options.platform });
+    return { ...source, metadata: null };
   }
   throw new CoreError("INVALID_INPUT", "A managed backupId is required for Restore preparation.");
 }
@@ -1863,8 +1884,15 @@ export async function prepareRestore(options = {}) {
       details: { busyScope: "codex-home" }
     });
   }
+  // Validate config/storage/WSL state before opening any backup path. This
+  // preserves the compatibility contract for stale confirmation and WSL UNC
+  // diagnostics while the source is canonicalized immediately afterwards.
+  const context = await preparePlanContext(options, "restore");
   const backup = await resolvePreparedBackup(options, codexHome);
-  const context = await preparePlanContext(options, "restore", { backupDir: backup.backupDir });
+  const revisions = {
+    ...context.revisions,
+    backupRevision: await captureBackupRevision(backup.backupDir)
+  };
   if (restoreDatabase && !context.storage.stateDbLocation && isConfiguredSqliteHome(context.storage)) {
     throw missingConfiguredStateDbError(context.storage);
   }
@@ -1877,11 +1905,11 @@ export async function prepareRestore(options = {}) {
   }
   const summary = {
     profile: { id: context.profile.id, revision: context.profile.revision },
-    storageRevision: context.revisions.storageRevision,
-    configRevision: context.revisions.configRevision,
-    rolloutRevision: context.revisions.rolloutRevision,
-    stateDbRevision: context.revisions.stateDbRevision,
-    backupRevision: context.revisions.backupRevision,
+    storageRevision: revisions.storageRevision,
+    configRevision: revisions.configRevision,
+    rolloutRevision: revisions.rolloutRevision,
+    stateDbRevision: revisions.stateDbRevision,
+    backupRevision: revisions.backupRevision,
     target: {
       backupId: backup.backupId,
       restoreConfig,
@@ -1918,7 +1946,7 @@ export async function prepareRestore(options = {}) {
     expectedPlanState: {
       profile: context.profile,
       profileResolver: options.profileResolver,
-      revisions: context.revisions
+      revisions
     },
     sourceBackup: { backupId: backup.backupId, backupDir: backup.backupDir },
     statusOptions: {

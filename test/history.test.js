@@ -21,6 +21,23 @@ test("history public inputs fail with typed invalid-input errors", async () => {
   );
 });
 
+test("history treats a missing Codex Home as an empty page", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-history-missing-"));
+  const missing = path.join(root, "not-created");
+  try {
+    const result = await listHistory(missing, { page: 1, pageSize: 50 });
+    assert.deepEqual(result, {
+      page: 1,
+      pageSize: 50,
+      total: 0,
+      hasNextPage: false,
+      sessions: []
+    });
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 async function fixture() {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "codex-history-"));
   const file = path.join(home, "sessions", "2026", "08", "04", "rollout-one.jsonl");
@@ -142,5 +159,105 @@ test("history exposes a stable bounded id when a session has no thread id", asyn
     assert.equal(first.sessions[0].rolloutPath, path.resolve(file));
   } finally {
     await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test("history list aggregates a large rollout while detail retains only its bounded tail", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "codex-history-large-"));
+  const file = path.join(home, "sessions", "rollout-large.jsonl");
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const records = [{
+    type: "session_meta",
+    timestamp: "2026-08-04T08:00:00.000Z",
+    payload: { id: "thread-large", cwd: "/work/large", model_provider: "openai" }
+  }];
+  for (let index = 0; index < 5_000; index += 1) {
+    records.push({
+      type: "event_msg",
+      timestamp: `2026-08-04T08:${String(index % 60).padStart(2, "0")}:00.000Z`,
+      payload: {
+        type: index % 2 === 0 ? "user_message" : "assistant_message",
+        message: `bounded-message-${index}`
+      }
+    });
+  }
+  await fs.writeFile(file, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
+  try {
+    const page = await listHistory(home, { page: 1, pageSize: 50, query: "bounded-message-4999" });
+    assert.equal(page.total, 1);
+    assert.equal(page.sessions[0].messageCount, 5_000);
+    const detail = await getHistorySession(home, "thread-large", { messageLimit: 10 });
+    assert.equal(detail.returnedMessageCount, 10);
+    assert.equal(detail.truncated, true);
+    assert.equal(detail.messages[0].sequence, 4_991);
+    assert.equal(detail.messages.at(-1).text, "bounded-message-4999");
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test("history detail rejects a same-mtime file replacement selected after listing", async (t) => {
+  const { home, file } = await fixture();
+  const replacement = `${file}.replacement`;
+  const displaced = `${file}.displaced`;
+  const originalStat = await fs.stat(file);
+  await fs.writeFile(replacement, [
+    JSON.stringify({
+      type: "session_meta",
+      timestamp: "2026-08-04T08:00:00.000Z",
+      payload: { id: "thread-one", cwd: "/work/demo", model_provider: "openai" }
+    }),
+    JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-08-04T08:01:00.000Z",
+      payload: { type: "assistant_message", message: "replacement marker must never be returned" }
+    })
+  ].join("\n") + "\n", "utf8");
+  await fs.utimes(replacement, originalStat.atime, originalStat.mtime);
+  const originalOpen = fs.open.bind(fs);
+  let openCount = 0;
+  t.mock.method(fs, "open", async (...args) => {
+    openCount += 1;
+    if (openCount === 2) {
+      await fs.rename(file, displaced);
+      await fs.rename(replacement, file);
+    }
+    return originalOpen(...args);
+  });
+  try {
+    await assert.rejects(
+      () => getHistorySession(home, "thread-one"),
+      (error) => error?.code === "STALE_STATE"
+        && !String(error?.message).includes("replacement marker")
+    );
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test("history ignores a linked sessions root outside the selected Codex Home", async (t) => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "codex-history-root-"));
+  const external = await fs.mkdtemp(path.join(os.tmpdir(), "codex-history-external-"));
+  const rollout = path.join(external, "rollout-external.jsonl");
+  await fs.writeFile(rollout, `${JSON.stringify({
+    type: "session_meta",
+    payload: { id: "external-thread", cwd: "/external", model_provider: "openai" }
+  })}\n`, "utf8");
+  try {
+    try {
+      await fs.symlink(external, path.join(home, "sessions"), process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      if (["EPERM", "EACCES", "ENOTSUP"].includes(error?.code)) {
+        t.skip(`directory link unavailable: ${error.code}`);
+        return;
+      }
+      throw error;
+    }
+    const page = await listHistory(home, { page: 1, pageSize: 50 });
+    assert.equal(page.total, 0);
+    assert.doesNotMatch(JSON.stringify(page), /external-thread|\/external/);
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+    await fs.rm(external, { recursive: true, force: true });
   }
 });

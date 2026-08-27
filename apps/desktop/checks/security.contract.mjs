@@ -33,6 +33,15 @@ test("Renderer has no Node, Electron, filesystem, Core or arbitrary IPC imports"
   assert.match(text, /DESKTOP_C8_APP_UI_CAPABILITIES/);
 });
 
+test("Renderer applies an allowlisted persisted theme before the application bundle", async () => {
+  const html = await read("src/renderer/index.html");
+  const bootstrap = await read("src/renderer/public/theme-bootstrap.js");
+  assert.ok(html.indexOf("/theme-bootstrap.js") < html.indexOf("./main.tsx"));
+  assert.match(bootstrap, /cps\.desktop\.theme/);
+  assert.match(bootstrap, /theme === "system" \|\| theme === "light" \|\| theme === "dark"/);
+  assert.doesNotMatch(bootstrap, /eval|Function\s*\(|innerHTML|document\.write/);
+});
+
 test("Preload exposes one frozen purpose-built bridge and no raw IPC surface", async () => {
   const source = await read("src/preload/index.ts");
   assert.match(source, /exposeInMainWorld\("codexProvider"/);
@@ -141,6 +150,10 @@ test("electron-vite emits a CJS sandbox preload and keeps source maps disabled",
   assert.equal((config.match(/sourcemap: false/g) ?? []).length, 3);
   assert.match(config, /external: \["electron"\]/);
   assert.match(config, /__CPS_DESKTOP_TEST_BUILD__:\s*JSON\.stringify\(mode === "test"\)/);
+  assert.match(config, /__CPS_DESKTOP_FORCE_BETTER_SQLITE3__:\s*JSON\.stringify\(mode === "test"\)/);
+  const sqlite = await read("../../src/sqlite.js");
+  assert.match(sqlite, /typeof __CPS_DESKTOP_FORCE_BETTER_SQLITE3__ !== "undefined"/);
+  assert.doesNotMatch(sqlite, /process\.env\.[A-Za-z0-9_]*SQLITE|CPS_FORCE_BETTER_SQLITE3/);
 });
 
 test("packaging always replaces test output with a verified production bundle", async () => {

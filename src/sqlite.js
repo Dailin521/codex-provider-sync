@@ -2,6 +2,15 @@ import path from "node:path";
 
 let databaseFactoryPromise = null;
 
+// electron-vite replaces this identifier only in the Desktop bundle. Regular
+// Node/CLI execution sees it as undefined, while the hidden test bundle can
+// exercise the real Core through the packaged native fallback without adding
+// a production environment-variable switch.
+// @ts-ignore -- compile-time Desktop test-bundle define guarded by typeof.
+const forceBetterSqlite3ForDesktopTestBuild = typeof __CPS_DESKTOP_FORCE_BETTER_SQLITE3__ !== "undefined"
+  // @ts-ignore -- compile-time Desktop test-bundle define guarded above.
+  && __CPS_DESKTOP_FORCE_BETTER_SQLITE3__ === true;
+
 function nativeSqlitePath(value) {
   if (process.platform !== "win32"
       || typeof value !== "string"
@@ -68,13 +77,15 @@ class NodeSqliteDatabase {
 }
 
 async function loadDatabaseFactory() {
-  try {
-    const sqlite = await import("node:sqlite");
-    if (sqlite.DatabaseSync && typeof sqlite.backup === "function") {
-      return (dbPath, options) => new NodeSqliteDatabase(sqlite, dbPath, options);
+  if (!forceBetterSqlite3ForDesktopTestBuild) {
+    try {
+      const sqlite = await import("node:sqlite");
+      if (sqlite.DatabaseSync && typeof sqlite.backup === "function") {
+        return (dbPath, options) => new NodeSqliteDatabase(sqlite, dbPath, options);
+      }
+    } catch {
+      // Older Node.js releases do not include node:sqlite.
     }
-  } catch {
-    // Older Node.js releases do not include node:sqlite.
   }
 
   try {

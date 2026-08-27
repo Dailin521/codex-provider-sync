@@ -6,11 +6,15 @@
 
 - `apps/web` 是唯一 Web source/build owner；旧 `web/src`、旧 Vite 配置与旧页面测试已移除，`web/dist` 仅保留根 npm 包使用的 production 静态产物。
 - `packages/app-ui` 从零建立共享 React AppShell，固定八个页面：Overview、Sync、Switch Provider、Backups/Restore、History、Profiles、Diagnostics、Settings；Recovery、Operation、Error Boundary 与 Toast 是全局状态，不伪装成额外页面。
-- UI 使用 React、检入的 Radix/shadcn 风格组件、Tailwind、TanStack Query、React Hook Form、Zod、Lucide 和 react-i18next；提供 `zh-CN` / `en`（英文 fallback）与 `system` / `light` / `dark`，并实现键盘操作、可见焦点、reduced motion 和 200% 等效窄视口布局。
+- `App.tsx` 只保留 Query/i18n/ErrorBoundary/Toast provider；页面、Plan/Result 与展示工具按 feature 拆分。静态边界递归扫描完整 `src`，不再用巨型 shell 文件充当能力证明。
+- UI 使用 React、检入的 Radix/shadcn 风格组件、Tailwind、TanStack Query、React Hook Form、Zod、Lucide 和 react-i18next；提供 `zh-CN` / `en`（英文 fallback）与 `system` / `light` / `dark`，并实现键盘操作、可见焦点、reduced motion 和 200% 窄视口布局。C10 hardening 又以 Web 380 CSS px 和真实隐藏 Electron `760×560 @ 200%` 遍历八页，持久主题由固定 bootstrap 在 React 前应用。
 - Core 业务流固定为 `Browser → HttpCoreClient → POST /api/core → Web Core adapter → createCoreFacade`。旧直写路由继续返回 `410 PLAN_REQUIRED`，不调用兼容 `run*`；Sync/Switch/Restore 先 Prepare，再以精确 `{schemaVersion:1, planId}` Apply。
 - Web Host 保留 loopback、一次性 pairing、设备凭据 hash、Origin、64 KiB、server-managed profile/storage revision 和受管 `backupId`。响应保留 requestId；协议/输入/输出由共享 contract guard 校验，非 2xx 不能携带成功 envelope。
 - Public Status 不返回 Codex/SQLite/State DB 路径，History summary 不返回 `cwd`，warning 只映射为固定安全类别/文案；未知异常不回显 message/stack/cause。备份只暴露受管 ID 与有界元数据。
-- History 仅在进入页面后加载列表，点击会话后才读取详情；正文不进入 TanStack Query cache，离开详情时清空并 abort pending request。E2E 以合成 marker 证明 Overview/其他页面不会预取消息正文。
+- History 仅在进入页面后按固定 50 条分页加载 summary，点击会话后才读取详情；正文不进入 TanStack Query cache，离开详情时清空并 abort pending request。Vitest + Testing Library 验证翻页前不请求正文、显式打开后才读取且 Query cache 不含正文 marker；E2E 继续证明 Overview/其他页面不会预取消息正文。
+- History Core 列表扫描按 rollout 使用常量聚合内存；详情以列表记录的文件 identity、稳定物理路径和 sessions 根边界重新打开同一 regular file，并从同一句柄读前/读后复核。大 rollout 有界尾部、同 mtime 换档和外部 sessions junction 均有回归测试。
+- 所有写入口同时服从本地 mutation、新鲜且成功的 Status、`operationInProgress` 与 recovery 状态；首次 Status 未完成或刷新失败时 Sync/Switch/Restore/Prune/Watch/Plan confirm 全部 fail closed。`recovery_required` 结果从出现起即不可关闭，只有一次新鲜 Status 成功且确认 pending recovery 已清除后才解锁。Plan/OperationResult/Diagnostics 默认显示语义化摘要，技术 JSON 折叠；结果关闭后恢复原操作按钮焦点。组件测试覆盖白名单投影、locked rollout 与敏感扩展字段不渲染。
+- 保留的 `/api/status`、`/api/backups`、`/api/history` 与详情 URL 只是 Legacy 兼容投影，全部先转为严格 allowlist 的 CoreFacade request，再从共享 DTO 投影旧响应；不再直接调用底层 service 或向浏览器返回路径。
 - Production HTML 每响应生成随机 CSP nonce，`script-src` / `style-src` 均不使用 `unsafe-inline`；Web Host contract test 与 Chromium E2E 都验证 nonce/header 对应且 CSP 生效。
 
 ## Phase 2 跨运行时 Fixture
@@ -26,6 +30,7 @@
 ## 依赖与发布面
 
 - C5 依赖解析与 exact version 记录在 [ADR-0014](../../adr/0014-npm-workspace-and-dependency-boundaries.md)；所有直接依赖不使用 `^`、`~`、`workspace:*` 或 `file:`。
+- C10 审计补入 private `app-ui` 的 Vitest `4.1.11`、Testing Library 与 jsdom `29.1.1` exact dev dependencies；它们不进入根 production tree、tarball 或 Electron runtime closure。
 - 根包继续没有普通 production dependency；为已发布的 Local Web Host 批准窄 tarball runtime：`packages/contracts/dist` 与 `packages/core/src`。边界测试/packlist 禁止其他 workspace、Fixture、Electron、node_modules 和 UI source；Node 16.20.2 与 Node 24 安装态实际执行 CLI、SQLite、Web pairing/profile、真实 `/api/core getStatus` / `PROFILE_CHANGED` 脱敏以及 shell/strict CSP。造库优先使用现代 Node 的 `node:sqlite`，Node 16 才使用安装态 fallback。
 - `npm audit --omit=dev --audit-level=moderate`：0 vulnerabilities；`npm audit --audit-level=high`：0 vulnerabilities。
 

@@ -483,7 +483,6 @@ export async function findBlockingRestoreJournals(codexHome) {
         pending.prepared?.storage?.codexHomePhysical
       );
       const sameSource = pendingSource
-        && resolverSource.backupId === pendingSource.backupId
         && resolverSourceKey !== null
         && resolverSourceKey === pendingSourceKey
         && resolverSource.revision === pendingSource.revision;

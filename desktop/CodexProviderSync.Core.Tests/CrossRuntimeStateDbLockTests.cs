@@ -7,6 +7,99 @@ namespace CodexProviderSync.Core.Tests;
 
 public sealed class CrossRuntimeStateDbLockTests
 {
+    [WindowsStateDbAliasFact]
+    public async Task DotNetAndNode_WindowsDirectoryAliases_ContendOnOneStateDbResource()
+    {
+        using StateDbTempDirectory temporary = new();
+        string stateDbPath = await CreateStateDbFixtureAsync(temporary.Path);
+        string sqliteHome = Path.GetDirectoryName(stateDbPath)!;
+        string aliasHome = Path.Combine(temporary.Path, "node-sqlite-alias");
+        WindowsDirectoryAlias.CreateJunction(aliasHome, sqliteHome);
+        string aliasStateDbPath = Path.Combine(aliasHome, AppConstants.DbFileBasename);
+        await AssertCrossRuntimeAliasContentionAsync(stateDbPath, aliasStateDbPath);
+    }
+
+    [WindowsStateDbAliasFact]
+    public async Task DotNetAndNode_WindowsShortAndLongPaths_ContendOnOneStateDbResource()
+    {
+        using StateDbTempDirectory temporary = new();
+        string sqliteHome = Path.Combine(temporary.Path, "Long SQLite Home For Cross Runtime Alias");
+        Directory.CreateDirectory(sqliteHome);
+        string stateDbPath = Path.Combine(sqliteHome, AppConstants.DbFileBasename);
+        await File.WriteAllTextAsync(stateDbPath, "fixture");
+        string shortHome = WindowsDirectoryAlias.GetShortPath(sqliteHome);
+        if (string.Equals(shortHome, sqliteHome, StringComparison.OrdinalIgnoreCase))
+        {
+            throw Xunit.Sdk.SkipException.ForSkip(
+                "The temporary volume did not provide an actual Windows 8.3 directory alias.");
+        }
+        await AssertCrossRuntimeAliasContentionAsync(
+            stateDbPath,
+            Path.Combine(shortHome, AppConstants.DbFileBasename));
+    }
+
+    private static async Task AssertCrossRuntimeAliasContentionAsync(
+        string stateDbPath,
+        string aliasStateDbPath)
+    {
+        StateDbLockResource resource = await StateDbLockResource.ResolveAsync(stateDbPath);
+        StateDbLockResource aliasResource = await StateDbLockResource.ResolveAsync(aliasStateDbPath);
+        Assert.Equal(resource.ResourceKey, aliasResource.ResourceKey);
+
+        await using (LockHandle held = await new LockService().AcquireStateDbLockAsync(
+            resource,
+            "dotnet-alias-winner"))
+        {
+            ProcessResult result = await RunNodeAsync($$"""
+                import { acquireStateDbLock, resolveStateDbLockResource } from {{JsonSerializer.Serialize(ModuleUrl())}};
+                const resolved = await resolveStateDbLockResource({{JsonSerializer.Serialize(aliasStateDbPath)}});
+                try {
+                  const held = await acquireStateDbLock({{JsonSerializer.Serialize(aliasStateDbPath)}}, "node-alias-contender");
+                  await held.release();
+                  console.log(JSON.stringify({ code: "ACQUIRED", resourceKey: resolved.resourceKey }));
+                  process.exit(0);
+                } catch (error) {
+                  console.log(JSON.stringify({ code: error?.code, busyScope: error?.details?.busyScope, resourceKey: resolved.resourceKey }));
+                  process.exit(5);
+                }
+                """);
+            Assert.Equal(5, result.ExitCode);
+            using JsonDocument payload = JsonDocument.Parse(result.StdOut.Trim());
+            Assert.Equal("OPERATION_BUSY", payload.RootElement.GetProperty("code").GetString());
+            Assert.Equal("state-db", payload.RootElement.GetProperty("busyScope").GetString());
+            Assert.Equal(resource.ResourceKey, payload.RootElement.GetProperty("resourceKey").GetString());
+        }
+
+        string script = $$"""
+            import { acquireStateDbLock } from {{JsonSerializer.Serialize(ModuleUrl())}};
+            const held = await acquireStateDbLock({{JsonSerializer.Serialize(aliasStateDbPath)}}, "node-alias-winner");
+            console.log(JSON.stringify({ ready: true, resourceKey: held.resource.resourceKey }));
+            await new Promise((resolve) => process.stdin.once("data", resolve));
+            await held.release();
+            """;
+        using Process child = StartNode(script);
+        string readyLine = await ReadLineWithTimeoutAsync(child.StandardOutput, TimeSpan.FromSeconds(15));
+        using JsonDocument ready = JsonDocument.Parse(readyLine);
+        Assert.True(ready.RootElement.GetProperty("ready").GetBoolean());
+        Assert.Equal(resource.ResourceKey, ready.RootElement.GetProperty("resourceKey").GetString());
+        try
+        {
+            InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => new LockService().AcquireStateDbLockAsync(resource, "dotnet-alias-contender"));
+            Assert.True(LockService.IsOperationBusy(error));
+            Assert.Equal("state-db", error.Data["codex-provider-sync/lock-scope"]);
+            Assert.Equal(resource.ResourceKey, error.Data["codex-provider-sync/resource-key"]);
+        }
+        finally
+        {
+            await child.StandardInput.WriteLineAsync("release");
+            child.StandardInput.Close();
+            using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(15));
+            await child.WaitForExitAsync(timeout.Token);
+            Assert.Equal(0, child.ExitCode);
+        }
+    }
+
     [Fact]
     public async Task DotNetOwner_BlocksARealNodeContenderWithTheSameResourceKey()
     {

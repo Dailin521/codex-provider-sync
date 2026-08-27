@@ -959,13 +959,25 @@ public sealed class BackupService
             // until explicit recovery resolves that evidence.
             return [];
         }
-        HashSet<string> protectedBackups = new(
-            pending.Select(static transaction => Path.GetFullPath(transaction.BackupDir)),
-            PathComparer);
-        protectedBackups.UnionWith(restoreScan.ProtectedDirectories.Select(Path.GetFullPath));
+        HashSet<string> protectedBackups = new(PathComparer);
+        foreach (string protectedDirectory in pending
+            .Select(static transaction => transaction.BackupDir)
+            .Concat(restoreScan.ProtectedDirectories))
+        {
+            string? physical = TryStablePhysicalBackupDirectory(protectedDirectory);
+            if (physical is null)
+            {
+                return [];
+            }
+            protectedBackups.Add(physical);
+        }
         string? preserved = string.IsNullOrWhiteSpace(preservedBackupDirectory)
             ? null
-            : Path.GetFullPath(preservedBackupDirectory);
+            : TryStablePhysicalBackupDirectory(preservedBackupDirectory);
+        if (!string.IsNullOrWhiteSpace(preservedBackupDirectory) && preserved is null)
+        {
+            return [];
+        }
 
         return await Task.Run<IReadOnlyList<string>>(() =>
         {
@@ -975,13 +987,35 @@ public sealed class BackupService
             }
 
             int existingKeepSlots = Math.Max(0, keepCount - (reserveNewBackupSlot ? 1 : 0));
-            return GetManagedBackupDirectories(backupRoot)
-                .Where(entry => preserved is null || !PathComparer.Equals(Path.GetFullPath(entry.FullName), preserved))
+            List<(DirectoryInfo Entry, string Physical)> directories = [];
+            foreach (DirectoryInfo entry in GetManagedBackupDirectories(backupRoot))
+            {
+                string? physical = TryStablePhysicalBackupDirectory(entry.FullName);
+                if (physical is null)
+                {
+                    return [];
+                }
+                directories.Add((entry, physical));
+            }
+            return directories
+                .Where(item => preserved is null || !PathComparer.Equals(item.Physical, preserved))
                 .Skip(existingKeepSlots)
-                .Where(entry => !protectedBackups.Contains(Path.GetFullPath(entry.FullName)))
-                .Select(static entry => Path.GetFullPath(entry.FullName))
+                .Where(item => !protectedBackups.Contains(item.Physical))
+                .Select(static item => Path.GetFullPath(item.Entry.FullName))
                 .ToArray();
         });
+    }
+
+    private static string? TryStablePhysicalBackupDirectory(string directory)
+    {
+        try
+        {
+            return RestoreV2Service.ResolveStablePhysicalDirectory(directory);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static async Task<SessionBackupManifest> SelectSessionEntriesForRestoreAsync(

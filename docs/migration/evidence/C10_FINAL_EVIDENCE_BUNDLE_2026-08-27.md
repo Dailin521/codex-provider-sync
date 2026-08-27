@@ -7,7 +7,7 @@
 ## Evidence bundle 合同
 
 - `C10_EVIDENCE_BUNDLE.v1.schema.json` 固定 `scope: vnext-c10-evidence`、`outcome: ci-verified-not-release`，发布授权、tag、npm、GitHub Release、签名、公证、更新 metadata 和跨版本升级字段只能为 `false`。
-- `scripts/write-c10-evidence-bundle.mjs` 只接受 GitHub Actions 的固定 workflow context、13 个 required job 的聚合结论、C0～C9 固定 checkpoint 链，以及 C9 四目标 `candidate-index.v1.json`。它要求 tracked checkout 干净、`GITHUB_SHA` 等于实际 `HEAD`、C0～C9 证据 commit 是 tested commit 祖先，并校验四个 target、固定资产名、version/commit/lockfile/tool/audit policy 一致。
+- `scripts/write-c10-evidence-bundle.mjs` 只接受 GitHub Actions 的固定 workflow context、13 个 required job 的聚合结论、C0～C9 固定 checkpoint 链，以及 C9 四目标 `candidate-index.v1.json`。它要求 tracked checkout 干净、`GITHUB_SHA` 等于实际 `HEAD`、PR source head 是 tested merge commit 的祖先且包含 webhook 事件携带的 `eventBaseCommit`（push 时 source head 必须就是 tested commit）、C0～C9 证据 commit 是 tested commit 祖先，并校验四个 target、固定资产名、version/commit/lockfile/tool/audit policy 一致。`containsEventBase:true` 只证明事件基线祖先关系，不宣称工作流执行时已包含远端最新 `main`；最终合入前和合入后仍须按当前 main 重新门禁。最终对象还必须通过检入的 JSON Schema 2020-12 严格校验后才可写出。
 - 输出只包含 commit、公共 workflow/job 状态、版本/buildId、公共工具版本、相对证据路径、资产名/大小/hash 和 Pending 条目。绝对路径、UNC、Codex Home/SQLite/backup/profile 标识、认证文件名、凭据标记、History/消息内容与原始日志都会 hard-fail。
 - CI 从 `electron-release-candidate-set` 下载已经过 C9 aggregate 验证的索引，不复制第二套平台 manifest，也不读取 runner 原始日志。输出为 `artifacts/c10/evidence-bundle.v1.json` 与绑定它的 `SHA256SUMS.txt`，只上传 CI artifact，不提交动态实例，避免“提交证据后 HEAD 再变化”的循环；四个平台候选、aggregate index 与 C10 bundle 统一保留 30 天，保证审查期内可重算引用 hash。
 - `c10-evidence-bundle` 直接依赖现有 13 个 required jobs并使用 `always()` 收集终态；任一失败、取消、跳过、缺失候选 artifact 或 schema/脱敏校验失败都会让 C10 job 失败。唯一 `ci-gate` 同时把 C10 job 作为 strict dependency。
@@ -24,21 +24,25 @@
 
 环境：Windows 11 x64 build `26200`，Node `24.11.1`，npm `11.10.0`，PowerShell `7.6.4`，Git `2.52.0.windows.1`，.NET SDK `10.0.400`。全部开发测试使用临时 fixture；Electron 设置 `CPS_DESKTOP_WINDOW_DISPLAY=hidden`，没有显示或占用主屏窗口。
 
+最终本地 hardening 只面向新版 Electron/共享 React UI，不改造旧 WinForms 视觉层：持久化主题由 CSP 允许的固定 bootstrap 在 React 前应用；Status 尚未成功时 Sync/Switch/Restore/Prune/Watch 与已打开 Plan 的确认全部 fail closed；Plan、OperationResult、Diagnostics 默认显示双语语义摘要，原始 JSON 只在折叠技术详情中出现；History 正文保持显式打开、无 Query cache，详情/结果关闭后恢复键盘焦点。真实隐藏 BrowserWindow 在 `760×560`、200% zoom 下遍历八页，逐页证明整页无横向溢出；Web 以 380 CSS px 复核八页及 Plan/Result 对话框。
+
 | 门禁 | 结果 |
 | --- | --- |
-| `npm test` | 418 passed，0 failed/skipped |
-| `npm run workspaces:check` | 102 workspace tests passed；build/import/package boundary 通过 |
-| `npm run web:build` + `npm run web:test:e2e` | production build 通过；2/2 E2E passed |
+| `npm test` | 428 passed，0 failed/skipped |
+| `npm run workspaces:check` | 118 workspace tests passed；build/import/package boundary 通过 |
+| `npm run web:build` + `npm run web:test:e2e` | Vite production build 通过（2047 modules，JS 568.45 kB / gzip 173.59 kB）；2/2 E2E passed |
 | `npm run desktop:test:e2e`（hidden） | 15 passed，1 skipped；唯一 Skip 为不可用的真实 WSL UNC 环境 |
-| `npm run desktop:pack:dir` + packaged production smoke（hidden） | production boundary、native fallback、真实 fixture Status、Sync→Restore、graceful exit，2/2 passed |
-| `dotnet build CodexProviderSync.sln --configuration Release` | 0 warning，0 error；包含 Windows GUI 与 macOS Avalonia 项目 |
-| .NET Core/Application/Automation/App/GuiE2E Tests | 411 passed，1 skipped；唯一 Skip 为同一真实 WSL UNC 环境 |
+| `npm run desktop:build` + production E2E（hidden） | production bundle verifier 通过；无 test bridge/fallback selector；真实 Status 与 Sync→Restore 2/2 passed |
+| `npm run desktop:pack:dir` + packaged production smoke（hidden） | Electron ABI rebuild、unpacked production、真实 fixture Status、Sync→Restore、graceful exit，2/2 passed；本地 executable 为 `NotSigned` |
+| `npm run fixtures:cross-runtime` | Node↔.NET Restore/lock/8.3/junction/physical Home 矩阵 11/11 passed |
+| .NET Core/Application/Automation/App/GuiE2E Tests | 416 passed，1 skipped；唯一 Skip 为同一真实 WSL UNC 环境 |
+| `.NET` Release build | 五个测试项目的传递构建与 macOS Avalonia 项目均为 0 warning / 0 error |
 | `npm run package:smoke` | 根 tarball content/help/status/Web shell 与 source-map 拒绝通过（本机 Node 24） |
 | `npm run package:smoke:lifecycle` | lifecycle install + SQLite smoke 通过（本机 Node 24） |
 | 两层 npm audit | production moderate/high/critical 为 0；完整树 high/critical 为 0 |
 | C10 定向合同测试 | required jobs、四目标/资产/commit 绑定、tool/audit 一致性、脱敏拒绝与 release-false-only schema 全部通过 |
 
-`npm run package:verify-root-tree` 只能在 `npm ci --workspaces=false --omit=dev` 的干净根 production tree 上执行；本机完整 Node 24 workspace 含 React/Electron 开发依赖，直接运行时按合同拒绝 `react`，不能把该环境误记为 Node 16 兼容门禁。Windows/Ubuntu Node `16.20.2` 的 clean-install、root-tree、tarball 和 lifecycle 继续由 required `root-package-compat` job 闭合。
+`npm run package:verify-root-tree` 只能在 `npm ci --workspaces=false --omit=dev` 的干净根 production tree 上执行；本机完整 Node 24 workspace 含 React/Electron 开发依赖，本轮直接运行按合同拒绝 `react`，不能把该环境误记为 Node 16 兼容门禁。实际根 tarball 的临时安装态 production tree 已由 `package:smoke:lifecycle` 通过；Windows/Ubuntu Node `16.20.2` 的 clean-install、root-tree、tarball 和 lifecycle 继续由 required `root-package-compat` job 闭合。
 
 ## C9 Windows 候选引用
 

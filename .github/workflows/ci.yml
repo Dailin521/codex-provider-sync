@@ -347,6 +347,8 @@ jobs:
         env:
           CPS_CANDIDATE_INDEX: artifacts/c9-index/candidate-index.v1.json
           CPS_REQUIRED_JOB_RESULTS_JSON: ${{ toJSON(needs) }}
+          CPS_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          CPS_EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: npm run evidence:c10
       - name: Upload the non-release C10 evidence bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

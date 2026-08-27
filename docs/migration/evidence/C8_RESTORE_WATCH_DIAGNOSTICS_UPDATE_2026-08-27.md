@@ -18,6 +18,7 @@
 
 - Node Restore 状态机覆盖 prepared/applying/committing/rollback-pending 真实进程终止、snapshot 失败、observer 异常、中途失败补偿、forward-only commit acknowledgement、unknown schema、truncated journal、SQLite online snapshot、State DB physical identity 复核和 reparse swap。
 - Node 与仍受支持的 .NET Core 对同一 v2 journal、source backup、snapshot manifest、terminal 与 resolver projection 采用相同 fail-closed 语义。跨运行时 harness 覆盖双向 Backup/Restore、legacy foreign pending、Restore v2 crash matrix、foreign pending、unknown schema、forward-only ack、manifest/prepared mismatch 和 persisted physical Home mismatch。
+- Windows 物理别名使用真实 junction、大小写变体和系统返回的 8.3 短路径：State DB identity 在 Node↔.NET 两个持锁方向都收敛到同一 resourceKey；Restore 同时覆盖长路径创建/别名恢复，以及 Node/.NET 各自以 8.3 或 junction source 创建 pending、另一运行时以物理长路径恢复。Prepare、Apply、journal、源读取与 inventory 全程绑定物理 source，旧式 backupId 不再作为安全判定键；无法 realpath 或 revision 漂移仍 fail closed，旧 journal bytes 保持不变，Prune 以物理目录保护非终态证据。
 - foreign pending、绑定不完整或未知 evidence 均在新 snapshot/journal/mutation 前阻断。completed resolver 不改写旧 raw journal；Prune 继续保护旧 journal、source backup 与 pre-restore snapshot。
 - 独立 Restore journal 的首个格式就是 v2；历史 protocol v1 `transaction-journal.jsonl` 是 Sync/Switch transaction journal，不被伪装为 standalone Restore v1。
 

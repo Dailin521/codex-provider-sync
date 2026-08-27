@@ -6,6 +6,7 @@ import {
   assertSafeAsarEntries,
   assertSafeProductTextEntry,
   createRuntimeProjection,
+  isAuditedProductTextEntry,
   RELEASE_TARGETS
 } from "../scripts/release-audit.mjs";
 import { resolveCandidateBuild } from "../scripts/resolve-candidate-build.mjs";
@@ -105,6 +106,17 @@ test("ASAR policy rejects source maps, fixtures, credentials and key material by
   assert.throws(() => assertSafeProductTextEntry(
     "out/main/index.js",
     "const credential = 'AKIA1234567890ABCDEF';"
+  ));
+  assert.equal(isAuditedProductTextEntry("out/renderer/assets/logo.svg"), true);
+  assert.equal(isAuditedProductTextEntry("out/renderer/assets/manifest.webmanifest"), true);
+  assert.equal(isAuditedProductTextEntry("out/renderer/assets/image.png"), false);
+  assert.throws(() => assertSafeProductTextEntry(
+    "out/renderer/assets/logo.svg",
+    "<svg><text>ghp_123456789012345678901234567890123456</text></svg>"
+  ));
+  assert.throws(() => assertSafeProductTextEntry(
+    "out/main/runtime.js",
+    "const gate = '__CPS_DESKTOP_FORCE_BETTER_SQLITE3__';"
   ));
 });
 

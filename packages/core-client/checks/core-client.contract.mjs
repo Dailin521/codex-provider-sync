@@ -74,6 +74,278 @@ test("HttpCoreClient validates response correlation and sends one envelope", asy
   });
 });
 
+test("HttpCoreClient streams lifecycle events and cancels an apply by request correlation", async () => {
+  const operationId = "11111111-1111-4111-8111-111111111111";
+  const cancellations = [];
+  let stream;
+  let mainSignal;
+  const client = new HttpCoreClient({
+    baseUrl: "http://127.0.0.1:31337/",
+    requestIdFactory: () => "http-stream-apply",
+    fetch: async (url, init) => {
+      if (String(url).endsWith("/api/core/cancel")) {
+        cancellations.push(JSON.parse(String(init.body)));
+        stream.enqueue(new TextEncoder().encode(`${JSON.stringify({
+          protocolVersion: 1,
+          requestId: "http-stream-apply",
+          operationId,
+          ok: false,
+          error: {
+            code: "OPERATION_CANCELLED",
+            message: "The operation was cancelled.",
+            severity: "info",
+            retryable: true,
+            recoveryRequired: false,
+            operationId
+          }
+        })}\n`));
+        stream.close();
+        return new Response(JSON.stringify({ accepted: true }), { status: 200 });
+      }
+      mainSignal = init.signal;
+      assert.equal(init.headers.Accept, "application/x-ndjson");
+      return new Response(new ReadableStream({
+        start(controller) {
+          stream = controller;
+          for (const event of [{
+            protocolVersion: 1,
+            requestId: "http-stream-apply",
+            operationId,
+            event: "operation-started",
+            operation: "sync"
+          }, {
+            protocolVersion: 1,
+            requestId: "http-stream-apply",
+            operationId,
+            event: "progress",
+            progress: { stage: "create_backup", status: "start" }
+          }]) controller.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+        }
+      }), { status: 200, headers: { "Content-Type": "application/x-ndjson; charset=utf-8" } });
+    }
+  });
+  const controller = new AbortController();
+  const started = [];
+  const progress = [];
+  let progressSeen;
+  const sawProgress = new Promise((resolve) => { progressSeen = resolve; });
+  const applying = client.applySync(
+    { schemaVersion: 1, planId: "a".repeat(32) },
+    {
+      signal: controller.signal,
+      onOperationStarted: (event) => started.push(event),
+      onProgress: (event) => { progress.push(event); progressSeen(); }
+    }
+  );
+  await sawProgress;
+  controller.abort();
+  await assert.rejects(applying, (error) => (
+    error instanceof CoreClientError && error.code === "OPERATION_CANCELLED"
+  ));
+  assert.equal(mainSignal, undefined);
+  assert.equal(started.length, 1);
+  assert.equal(progress.length, 1);
+  assert.deepEqual(cancellations, [{
+    protocolVersion: 1,
+    requestId: "http-stream-apply",
+    operationId
+  }]);
+});
+
+function ndjsonResponse(frames) {
+  return new Response(
+    frames.map((frame) => `${JSON.stringify(frame)}\n`).join(""),
+    { status: 200, headers: { "Content-Type": "application/x-ndjson" } }
+  );
+}
+
+function completedSyncResult(operationId) {
+  return {
+    schemaVersion: 1,
+    operationId,
+    operation: "sync",
+    outcome: "completed",
+    backup: { backupId: "managed" },
+    warnings: [],
+    result: {}
+  };
+}
+
+test("HttpCoreClient rejects a terminal operationId that differs from the lifecycle", async () => {
+  const startedOperationId = "11111111-1111-4111-8111-111111111113";
+  const terminalOperationId = "11111111-1111-4111-8111-111111111114";
+  const client = new HttpCoreClient({
+    baseUrl: "http://127.0.0.1:31337/",
+    requestIdFactory: () => "http-mismatched-terminal",
+    fetch: async () => ndjsonResponse([{
+      protocolVersion: 1,
+      requestId: "http-mismatched-terminal",
+      operationId: startedOperationId,
+      event: "operation-started",
+      operation: "sync"
+    }, {
+      protocolVersion: 1,
+      requestId: "http-mismatched-terminal",
+      operationId: terminalOperationId,
+      ok: true,
+      result: completedSyncResult(terminalOperationId)
+    }])
+  });
+
+  await assert.rejects(
+    client.applySync({ schemaVersion: 1, planId: "a".repeat(32) }),
+    (error) => error instanceof CoreTransportError
+      && error.message === "Core HTTP stream terminal operationId did not match its lifecycle."
+  );
+});
+
+test("HttpCoreClient rejects result and error operationIds that differ from the lifecycle", async () => {
+  const lifecycleOperationId = "11111111-1111-4111-8111-111111111119";
+  const mismatchedOperationId = "11111111-1111-4111-8111-111111111120";
+  for (const terminal of [{
+    protocolVersion: 1,
+    requestId: "http-inner-operation-mismatch",
+    operationId: lifecycleOperationId,
+    ok: true,
+    result: completedSyncResult(mismatchedOperationId)
+  }, {
+    protocolVersion: 1,
+    requestId: "http-inner-operation-mismatch",
+    operationId: lifecycleOperationId,
+    ok: false,
+    error: {
+      code: "OPERATION_CANCELLED",
+      message: "The operation was cancelled.",
+      severity: "info",
+      retryable: true,
+      recoveryRequired: false,
+      operationId: mismatchedOperationId
+    }
+  }]) {
+    const client = new HttpCoreClient({
+      baseUrl: "http://127.0.0.1:31337/",
+      requestIdFactory: () => "http-inner-operation-mismatch",
+      fetch: async () => ndjsonResponse([{
+        protocolVersion: 1,
+        requestId: "http-inner-operation-mismatch",
+        operationId: lifecycleOperationId,
+        event: "operation-started",
+        operation: "sync"
+      }, terminal])
+    });
+    await assert.rejects(
+      client.applySync({ schemaVersion: 1, planId: "a".repeat(32) }),
+      (error) => error instanceof CoreTransportError
+        && /operationId did not match its lifecycle/.test(error.message)
+    );
+  }
+});
+
+test("HttpCoreClient rejects progress before operation-started", async () => {
+  const operationId = "11111111-1111-4111-8111-111111111115";
+  const client = new HttpCoreClient({
+    baseUrl: "http://127.0.0.1:31337/",
+    requestIdFactory: () => "http-progress-before-start",
+    fetch: async () => ndjsonResponse([{
+      protocolVersion: 1,
+      requestId: "http-progress-before-start",
+      operationId,
+      event: "progress",
+      progress: { stage: "create_backup", status: "start" }
+    }])
+  });
+
+  await assert.rejects(
+    client.applySync({ schemaVersion: 1, planId: "a".repeat(32) }),
+    (error) => error instanceof CoreTransportError
+      && error.message === "Core HTTP stream emitted progress before operation-started."
+  );
+});
+
+test("HttpCoreClient rejects lifecycle events on read methods", async () => {
+  const client = new HttpCoreClient({
+    baseUrl: "http://127.0.0.1:31337/",
+    requestIdFactory: () => "http-read-lifecycle",
+    fetch: async () => ndjsonResponse([{
+      protocolVersion: 1,
+      requestId: "http-read-lifecycle",
+      operationId: "11111111-1111-4111-8111-111111111116",
+      event: "operation-started",
+      operation: "sync"
+    }])
+  });
+
+  await assert.rejects(
+    client.getWatchStatus({}),
+    (error) => error instanceof CoreTransportError
+      && error.message === "Core HTTP read stream contained an operation event."
+  );
+});
+
+test("HttpCoreClient rejects successful apply streams without operation-started", async () => {
+  const operationId = "11111111-1111-4111-8111-111111111117";
+  const client = new HttpCoreClient({
+    baseUrl: "http://127.0.0.1:31337/",
+    requestIdFactory: () => "http-apply-without-start",
+    fetch: async () => ndjsonResponse([{
+      protocolVersion: 1,
+      requestId: "http-apply-without-start",
+      ok: true,
+      result: completedSyncResult(operationId)
+    }])
+  });
+
+  await assert.rejects(
+    client.applySync({ schemaVersion: 1, planId: "a".repeat(32) }),
+    (error) => error instanceof CoreTransportError
+      && error.message === "Core HTTP apply stream ended without operation-started."
+  );
+});
+
+test("MockCoreClient exposes observer-safe lifecycle controls to UI handlers", async () => {
+  const operationId = "11111111-1111-4111-8111-111111111112";
+  const controller = new AbortController();
+  const progress = [];
+  const client = new MockCoreClient({
+    applySync: async (_payload, request, control) => {
+      assert.equal(control.signal, controller.signal);
+      control.onOperationStarted?.({
+        protocolVersion: 1,
+        requestId: request.requestId,
+        operationId,
+        event: "operation-started",
+        operation: "sync"
+      });
+      control.onProgress?.({
+        protocolVersion: 1,
+        requestId: request.requestId,
+        operationId,
+        event: "progress",
+        progress: { stage: "create_backup", status: "complete" }
+      });
+      return {
+        schemaVersion: 1,
+        operationId,
+        operation: "sync",
+        outcome: "completed",
+        backup: { backupId: "managed" },
+        warnings: [],
+        result: {}
+      };
+    }
+  }, { requestIdFactory: () => "mock-stream-apply" });
+  const result = await client.applySync(
+    { schemaVersion: 1, planId: "a".repeat(32) },
+    {
+      signal: controller.signal,
+      onOperationStarted: () => { throw new Error("observer failure"); },
+      onProgress: (event) => progress.push(event)
+    }
+  );
+  assert.equal(result.outcome, "completed");
+  assert.equal(progress.length, 1);
+});
+
 test("HttpCoreClient rejects an oversized envelope before calling fetch", async () => {
   let fetchCalls = 0;
   const transport = new HttpCoreTransport({
@@ -187,6 +459,21 @@ test("HTTP status cannot turn a failed request into a success envelope", async (
     }), { status: 500 })
   });
   await assert.rejects(invalid.getWatchStatus({}), CoreTransportError);
+
+  const invalidStream = new HttpCoreClient({
+    baseUrl: "http://127.0.0.1:31337/",
+    requestIdFactory: () => "invalid-http-stream",
+    fetch: async () => new Response(`${JSON.stringify({
+      protocolVersion: 1,
+      requestId: "invalid-http-stream",
+      ok: true,
+      result: { schemaVersion: 1, watches: [] }
+    })}\n`, {
+      status: 500,
+      headers: { "Content-Type": "application/x-ndjson" }
+    })
+  });
+  await assert.rejects(invalidStream.getWatchStatus({}), CoreTransportError);
 
   const busy = new HttpCoreClient({
     baseUrl: "http://127.0.0.1:31337/",

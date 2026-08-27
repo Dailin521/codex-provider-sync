@@ -10,6 +10,8 @@
 - Profile Host 文件由 Main/Utility 可信解析；Renderer 只见 `id/name/revision/codexHomeConfigured/sqliteHomeConfigured`。Status、Backups、Diagnostics 和 History summary 均不回传 Codex Home、SQLite Home、backup/rollout 路径或任意异常原文。
 - production build 通过编译期 flag 移除测试 bridge；设置运行时 `CPS_DESKTOP_E2E=1` 也不能启用 `test.requestRaw/crashRuntime`。只有 `electron-vite --mode test` 的非发布测试构建包含受 sender 校验的 crash hook。
 - History 列表标题只能来自显式 session metadata；无标题由 UI 本地化显示“Untitled session/未命名会话”，不得回退到首条用户正文。正文仅在显式打开详情后读取，返回列表时 abort/清空且不进入 Query cache。
+- 同一临时 fixture 上，`getStatus/listBackups/listHistory/getHistorySession/getDiagnostics` 分别通过独立 CoreFacade 与 Desktop Utility host dispatch，成功 DTO（仅归一化生成时间）及结构化错误 DTO 必须逐字段一致；非详情响应不得含正文、cwd、ciphertext 或工具参数 marker，调用前后 fixture tree hash 不变。
+- 内部 Electron 验收固定 `CPS_DESKTOP_WINDOW_DISPLAY=hidden`；真实 BrowserWindow 断言 `isVisible()===false` 且不聚焦，不占用用户主屏。C10 hardening 进一步在隐藏窗口 `760×560 @ 200%` 遍历八页并逐页验证无整页横向溢出；存在副屏时仍可显式选择 `secondary`，但 CI/本机自动化默认隐藏。
 
 ## Runtime 与并发证据
 

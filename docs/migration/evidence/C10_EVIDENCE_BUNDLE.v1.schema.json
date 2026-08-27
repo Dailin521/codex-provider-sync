@@ -31,7 +31,7 @@
     "workflow": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "workflowSha256", "runId", "runAttempt", "event", "ref", "testedCommit"],
+      "required": ["path", "workflowSha256", "runId", "runAttempt", "event", "ref", "testedCommit", "sourceHeadCommit", "eventBaseCommit", "containsEventBase"],
       "properties": {
         "path": { "const": ".github/workflows/ci.yml" },
         "workflowSha256": { "$ref": "#/$defs/hash" },
@@ -39,7 +39,10 @@
         "runAttempt": { "type": "integer", "minimum": 1 },
         "event": { "enum": ["pull_request", "push"] },
         "ref": { "type": "string", "pattern": "^refs/[A-Za-z0-9._/-]+$" },
-        "testedCommit": { "$ref": "#/$defs/sha" }
+        "testedCommit": { "$ref": "#/$defs/sha" },
+        "sourceHeadCommit": { "$ref": "#/$defs/sha" },
+        "eventBaseCommit": { "$ref": "#/$defs/sha" },
+        "containsEventBase": { "const": true }
       }
     },
     "sourceVersions": {
@@ -56,16 +59,16 @@
       "minItems": 10,
       "maxItems": 10,
       "prefixItems": [
-        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "properties": { "id": { "const": "C0" } } }] },
-        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "properties": { "id": { "const": "C1" } } }] },
-        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "properties": { "id": { "const": "C2" } } }] },
-        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "properties": { "id": { "const": "C3" } } }] },
-        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "properties": { "id": { "const": "C4" } } }] },
-        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "properties": { "id": { "const": "C5" } } }] },
-        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "properties": { "id": { "const": "C6" } } }] },
-        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "properties": { "id": { "const": "C7" } } }] },
-        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "properties": { "id": { "const": "C8" } } }] },
-        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "properties": { "id": { "const": "C9" } } }] }
+        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "type": "object", "properties": { "id": { "const": "C0" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "type": "object", "properties": { "id": { "const": "C1" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "type": "object", "properties": { "id": { "const": "C2" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "type": "object", "properties": { "id": { "const": "C3" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "type": "object", "properties": { "id": { "const": "C4" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "type": "object", "properties": { "id": { "const": "C5" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "type": "object", "properties": { "id": { "const": "C6" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "type": "object", "properties": { "id": { "const": "C7" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "type": "object", "properties": { "id": { "const": "C8" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "type": "object", "properties": { "id": { "const": "C9" } } }] }
       ],
       "items": false
     },
@@ -80,19 +83,19 @@
           "minItems": 13,
           "maxItems": 13,
           "prefixItems": [
-            { "allOf": [{ "$ref": "#/$defs/job" }, { "properties": { "id": { "const": "cross-runtime-fixtures" } } }] },
-            { "allOf": [{ "$ref": "#/$defs/job" }, { "properties": { "id": { "const": "dependency-audit" } } }] },
-            { "allOf": [{ "$ref": "#/$defs/job" }, { "properties": { "id": { "const": "desktop-linux-lock" } } }] },
-            { "allOf": [{ "$ref": "#/$defs/job" }, { "properties": { "id": { "const": "desktop-macos" } } }] },
-            { "allOf": [{ "$ref": "#/$defs/job" }, { "properties": { "id": { "const": "desktop-test" } } }] },
-            { "allOf": [{ "$ref": "#/$defs/job" }, { "properties": { "id": { "const": "electron-candidate-set" } } }] },
-            { "allOf": [{ "$ref": "#/$defs/job" }, { "properties": { "id": { "const": "electron-desktop" } } }] },
-            { "allOf": [{ "$ref": "#/$defs/job" }, { "properties": { "id": { "const": "electron-release-candidate" } } }] },
-            { "allOf": [{ "$ref": "#/$defs/job" }, { "properties": { "id": { "const": "root-package-compat" } } }] },
-            { "allOf": [{ "$ref": "#/$defs/job" }, { "properties": { "id": { "const": "test" } } }] },
-            { "allOf": [{ "$ref": "#/$defs/job" }, { "properties": { "id": { "const": "web-browser" } } }] },
-            { "allOf": [{ "$ref": "#/$defs/job" }, { "properties": { "id": { "const": "web-build" } } }] },
-            { "allOf": [{ "$ref": "#/$defs/job" }, { "properties": { "id": { "const": "workspace-contract" } } }] }
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "cross-runtime-fixtures" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "dependency-audit" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "desktop-linux-lock" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "desktop-macos" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "desktop-test" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "electron-candidate-set" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "electron-desktop" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "electron-release-candidate" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "root-package-compat" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "test" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "web-browser" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "web-build" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "workspace-contract" } } }] }
           ],
           "items": false
         }
@@ -113,10 +116,10 @@
           "minItems": 4,
           "maxItems": 4,
           "prefixItems": [
-            { "allOf": [{ "$ref": "#/$defs/target" }, { "properties": { "target": { "const": "linux-x64" } } }] },
-            { "allOf": [{ "$ref": "#/$defs/target" }, { "properties": { "target": { "const": "macos-arm64" } } }] },
-            { "allOf": [{ "$ref": "#/$defs/target" }, { "properties": { "target": { "const": "macos-x64" } } }] },
-            { "allOf": [{ "$ref": "#/$defs/target" }, { "properties": { "target": { "const": "windows-x64" } } }] }
+            { "allOf": [{ "$ref": "#/$defs/target" }, { "type": "object", "properties": { "target": { "const": "linux-x64" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/target" }, { "type": "object", "properties": { "target": { "const": "macos-arm64" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/target" }, { "type": "object", "properties": { "target": { "const": "macos-x64" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/target" }, { "type": "object", "properties": { "target": { "const": "windows-x64" } } }] }
           ],
           "items": false
         }
@@ -129,6 +132,7 @@
         "checkpointChainLinear",
         "allEvidenceFilesHashed",
         "workflowHeadMatchesEvidenceCommit",
+        "sourceHeadContainsEventBase",
         "allRequiredJobsSucceeded",
         "candidateSetComplete",
         "candidateCommitMatchesEvidenceCommit",
@@ -139,6 +143,7 @@
         "checkpointChainLinear": { "const": true },
         "allEvidenceFilesHashed": { "const": true },
         "workflowHeadMatchesEvidenceCommit": { "const": true },
+        "sourceHeadContainsEventBase": { "const": true },
         "allRequiredJobsSucceeded": { "const": true },
         "candidateSetComplete": { "const": true },
         "candidateCommitMatchesEvidenceCommit": { "const": true },

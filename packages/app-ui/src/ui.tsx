@@ -23,7 +23,7 @@ export function cn(...values: ClassValue[]): string {
 }
 
 const buttonVariants = cva(
-  "inline-flex min-h-10 items-center justify-center gap-2 rounded-lg px-4 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface)] disabled:pointer-events-none disabled:opacity-50",
+  "inline-flex min-h-[var(--control-height)] items-center justify-center gap-2 rounded-[var(--radius-control)] px-4 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface)] disabled:pointer-events-none disabled:opacity-50",
   {
     variants: {
       variant: {
@@ -33,7 +33,7 @@ const buttonVariants = cva(
         ghost: "text-[var(--muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
       },
       size: {
-        default: "h-10",
+        default: "h-[var(--control-height)]",
         compact: "h-9 min-h-9 px-3",
         icon: "h-10 w-10 px-0"
       }
@@ -58,7 +58,7 @@ export const Card = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(f
   { className, ...props },
   ref
 ) {
-  return <div ref={ref} className={cn("rounded-xl border border-[var(--border)] bg-[var(--surface-raised)] p-5 shadow-sm", className)} {...props} />;
+  return <div ref={ref} className={cn("rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--surface-raised)] p-5 [box-shadow:var(--shadow-panel)]", className)} {...props} />;
 });
 
 export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(function Input(
@@ -68,7 +68,7 @@ export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputE
   return (
     <input
       ref={ref}
-      className={cn("min-h-10 w-full rounded-lg border border-[var(--border)] bg-[var(--input)] px-3 text-sm text-[var(--text)] outline-none placeholder:text-[var(--muted)] focus-visible:ring-2 focus-visible:ring-[var(--focus)]", className)}
+      className={cn("min-h-[var(--control-height)] w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--input)] px-3 text-sm text-[var(--text)] outline-none placeholder:text-[var(--muted)] focus-visible:ring-2 focus-visible:ring-[var(--focus)]", className)}
       {...props}
     />
   );
@@ -102,7 +102,9 @@ export function Dialog({
   title,
   description,
   children,
-  footer
+  footer,
+  closeLabel,
+  closeDisabled = false
 }: {
   open: boolean;
   onOpenChange(open: boolean): void;
@@ -111,13 +113,15 @@ export function Dialog({
   description?: string;
   children: ReactNode;
   footer?: ReactNode;
+  closeLabel: string;
+  closeDisabled?: boolean;
 }) {
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="fixed inset-0 z-40 bg-black/50 backdrop-blur-[2px] data-[state=closed]:animate-none" />
         <DialogPrimitive.Content
-          className="fixed left-1/2 top-1/2 z-50 max-h-[90vh] w-[min(92vw,680px)] -translate-x-1/2 -translate-y-1/2 overflow-auto rounded-2xl border border-[var(--border)] bg-[var(--surface-raised)] p-6 text-[var(--text)] shadow-2xl focus:outline-none"
+          className="fixed left-1/2 top-1/2 z-50 max-h-[90vh] w-[min(92vw,680px)] -translate-x-1/2 -translate-y-1/2 overflow-auto rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--surface-raised)] p-6 text-[var(--text)] shadow-2xl focus:outline-none"
           onCloseAutoFocus={(event) => {
             if (!restoreFocus) return;
             event.preventDefault();
@@ -129,7 +133,7 @@ export function Dialog({
             {description ? <DialogPrimitive.Description className="mt-1 text-sm text-[var(--muted)]">{description}</DialogPrimitive.Description> : null}
           </div>
           <DialogPrimitive.Close asChild>
-            <Button aria-label="Close dialog" className="absolute right-4 top-4" size="icon" type="button" variant="ghost"><X size={18} /></Button>
+            <Button aria-label={closeLabel} className="absolute right-4 top-4" disabled={closeDisabled} size="icon" type="button" variant="ghost"><X size={18} /></Button>
           </DialogPrimitive.Close>
           <div className="mt-5">{children}</div>
           {footer ? <div className="mt-6 flex flex-wrap justify-end gap-3">{footer}</div> : null}

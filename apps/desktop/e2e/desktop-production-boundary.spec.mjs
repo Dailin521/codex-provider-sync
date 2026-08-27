@@ -216,6 +216,7 @@ test("production or unpacked desktop completes real Sync and Restore through Uti
     await expect(dialog).toBeVisible();
     await dialog.getByRole("button", { name: "Confirm and apply" }).click();
     await expect(page.getByText("Operation completed.", { exact: true })).toBeVisible();
+    await page.getByRole("dialog", { name: "Operation result" }).getByRole("button", { name: "Close" }).last().click();
     await expect.poll(async () => (await fixture.inspect()).sqlite.provider).toBe("openai");
     const state = await fixture.inspect();
     expect(state.rollout.model_provider).toBe("openai");

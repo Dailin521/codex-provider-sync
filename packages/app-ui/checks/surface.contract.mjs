@@ -12,6 +12,7 @@ import {
   profileSchema,
   resourcesHaveMatchingKeys,
   restoreSchema,
+  syncSchema,
   switchSchema
 } from "../dist/index.js";
 
@@ -70,39 +71,53 @@ test("shared UI exposes explicit read-only, C7, and C8 capability profiles", asy
     viewUpdateStatus: true
   });
   assert.equal(Object.isFrozen(DESKTOP_C8_APP_UI_CAPABILITIES), true);
-  const appSource = await fs.readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
-  assert.match(appSource, /route === "sync" && capabilities\.sync/);
-  assert.match(appSource, /enabled: capabilities\.watch/);
-  assert.match(appSource, /canRestore=\{capabilities\.restore\}/);
-  assert.match(appSource, /canManage=\{capabilities\.manageProfiles\}/);
-  assert.match(appSource, /capabilities\.exportDiagnostics/);
-  assert.match(appSource, /capabilities\.viewUpdateStatus/);
-  assert.match(appSource, /host\.checkForUpdates/);
-  assert.match(appSource, /host\.downloadUpdate/);
-  assert.match(appSource, /host\.installUpdate/);
-  assert.match(appSource, /recoveryWriteDisabled/);
+  const appContentSource = await fs.readFile(new URL("../src/app/AppContent.tsx", import.meta.url), "utf8");
+  const settingsSource = await fs.readFile(new URL("../src/features/settings/SettingsPage.tsx", import.meta.url), "utf8");
+  assert.match(appContentSource, /route === "sync" && capabilities\.sync/);
+  assert.match(settingsSource, /enabled: capabilities\.watch/);
+  assert.match(settingsSource, /recoveryBlocked \|\| writeBlocked/);
+  assert.match(appContentSource, /applySubmissionPending\.current/);
+  assert.match(appContentSource, /canRestore=\{capabilities\.restore\}/);
+  assert.match(appContentSource, /canManage=\{capabilities\.manageProfiles\}/);
+  assert.match(appContentSource, /capabilities\.exportDiagnostics/);
+  assert.match(settingsSource, /capabilities\.viewUpdateStatus/);
+  assert.match(settingsSource, /host\.checkForUpdates/);
+  assert.match(settingsSource, /host\.downloadUpdate/);
+  assert.match(settingsSource, /host\.installUpdate/);
+  assert.match(appContentSource, /recoveryWriteDisabled/);
 });
 
 test("shared UI translations and write forms keep one strict schema", () => {
   assert.equal(resourcesHaveMatchingKeys(), true);
   assert.equal(switchSchema.safeParse({ provider: "relay", modelMode: "explicit", model: "gpt", keepCount: 5 }).success, true);
+  assert.equal(syncSchema.safeParse({ keepCount: 0 }).success, false);
+  assert.equal(switchSchema.safeParse({ provider: "relay", modelMode: "provider-default", keepCount: 0 }).success, false);
   assert.equal(switchSchema.safeParse({ provider: "relay", modelMode: "explicit", model: "", keepCount: 5 }).success, false);
   assert.equal(restoreSchema.safeParse({ backupId: "managed", restoreConfig: false, restoreDatabase: false, restoreSessions: false, allowSqliteHomeRelocation: false }).success, false);
   assert.equal(profileSchema.safeParse({ profileId: "safe", name: "Safe", codexHome: "../relative", sqliteHome: "" }).success, false);
 });
 
 test("shared UI has no transport, Node, Electron or persistent history access", async () => {
-  const appSource = await fs.readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
-  const allSource = await Promise.all([
-    "App.tsx", "i18n.ts", "routes.ts", "schemas.ts", "types.ts", "ui.tsx"
-  ].map((name) => fs.readFile(new URL(`../src/${name}`, import.meta.url), "utf8")));
-  const source = allSource.join("\n");
+  const sourceRoot = new URL("../src/", import.meta.url);
+  const readTree = async (directory) => {
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+    const chunks = [];
+    for (const entry of entries) {
+      const target = new URL(entry.name + (entry.isDirectory() ? "/" : ""), directory);
+      if (entry.isDirectory()) chunks.push(...await readTree(target));
+      else if (/\.tsx?$/.test(entry.name)) chunks.push(await fs.readFile(target, "utf8"));
+    }
+    return chunks;
+  };
+  const source = (await readTree(sourceRoot)).join("\n");
+  const appSource = await fs.readFile(new URL("../src/app/AppContent.tsx", import.meta.url), "utf8");
+  const historySource = await fs.readFile(new URL("../src/features/history/HistoryPage.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(source, /\bfetch\s*\(/);
   assert.doesNotMatch(source, /localStorage|sessionStorage|from\s+["'](?:node:|electron)/);
   assert.doesNotMatch(source, /\/api\//);
-  assert.match(appSource, /core\.getHistorySession/);
-  assert.match(appSource, /messageLimit:\s*200/);
-  assert.doesNotMatch(appSource, /queryKey:\s*\["history-detail"/);
+  assert.match(historySource, /core\.getHistorySession/);
+  assert.match(historySource, /messageLimit:\s*200/);
+  assert.doesNotMatch(historySource, /queryKey:\s*\["history-detail"/);
   assert.match(appSource, /schemaVersion:\s*1 as const, planId: summary\.planId/);
   assert.match(appSource, /onOperationStarted/);
   assert.match(appSource, /onProgress/);

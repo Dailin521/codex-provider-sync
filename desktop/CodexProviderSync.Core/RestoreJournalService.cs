@@ -566,8 +566,7 @@ internal static class RestoreJournalService
             resolverPrepared.Storage.CodexHomePhysical);
         string? pendingRecordedHomePath = TryPersistedPhysicalPathKey(
             pendingPrepared.Storage.CodexHomePhysical);
-        if (!string.Equals(resolverSource.BackupId, pendingSource.BackupId, StringComparison.Ordinal)
-            || resolverSourcePath is null
+        if (resolverSourcePath is null
             || pendingSourcePath is null
             || !PathComparer.Equals(resolverSourcePath, pendingSourcePath)
             || !string.Equals(resolverSource.Revision, pendingSource.Revision, StringComparison.Ordinal)

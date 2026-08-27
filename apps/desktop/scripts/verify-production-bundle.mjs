@@ -5,6 +5,16 @@ import { fileURLToPath } from "node:url";
 
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = path.join(desktopRoot, "out");
+const auditPolicy = JSON.parse(await fs.readFile(
+  path.join(desktopRoot, "release", "artifact-audit-policy.v1.json"),
+  "utf8"
+));
+assert.equal(auditPolicy.schemaVersion, 1, "Unsupported artifact audit policy.");
+const auditedTextExtensions = new Set(auditPolicy.auditedProductTextExtensions);
+const forbiddenTextRules = auditPolicy.forbiddenTextRules.map((rule) => ({
+  id: rule.id,
+  pattern: new RegExp(rule.pattern)
+}));
 
 async function filesUnder(root) {
   const result = [];
@@ -28,22 +38,11 @@ assert.equal(relative.some((file) => file.endsWith(".map")), false, "Production 
 
 const processText = (await Promise.all(
   files
-    .filter((file) => /\.(?:c?js|html)$/.test(file))
+    .filter((file) => auditedTextExtensions.has(path.extname(file).toLowerCase()))
     .map((file) => fs.readFile(file, "utf8"))
 )).join("\n");
-for (const forbidden of [
-  "__CPS_DESKTOP_TEST__",
-  "CPS_DESKTOP_E2E",
-  "CPS_DESKTOP_USER_DATA",
-  "CPS_DESKTOP_TEST_GATE",
-  "desktop E2E fault gate",
-  "cps:v1:test:crash-runtime",
-  "requestRaw",
-  "crashRuntime",
-  "setFeedURL",
-  "example.invalid"
-]) {
-  assert.doesNotMatch(processText, new RegExp(forbidden), `Production Electron output contains ${forbidden}.`);
+for (const rule of forbiddenTextRules) {
+  assert.doesNotMatch(processText, rule.pattern, `Production Electron output violates ${rule.id}.`);
 }
 assert.doesNotMatch(processText, /@codex-provider-sync\//, "Production Electron output contains a workspace import.");
 

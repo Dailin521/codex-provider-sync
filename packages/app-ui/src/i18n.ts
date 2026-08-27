@@ -28,6 +28,8 @@ export const resources = {
         save: "Save",
         delete: "Delete",
         close: "Close",
+        yes: "Yes",
+        no: "No",
         none: "None",
         unknown: "Unknown",
         current: "Current",
@@ -102,7 +104,15 @@ export const resources = {
         back: "Back to sessions",
         messages: "messages",
         archived: "Archived",
-        active: "Active"
+        active: "Active",
+        pagination: "History pagination",
+        pageSummary: "Page {{page}} · {{total}} sessions",
+        previous: "Previous",
+        next: "Next",
+        roles: {
+          user: "You",
+          assistant: "Assistant"
+        }
       },
       profiles: {
         title: "Profiles",
@@ -124,6 +134,29 @@ export const resources = {
         storage: "Storage",
         provider: "Provider",
         safety: "Safety",
+        items: "{{count}} items",
+        fieldsAvailable: "{{count}} redacted fields",
+        technicalDetails: "Show technical details",
+        fields: {
+          arch: "Architecture",
+          node: "Node.js",
+          platform: "Platform",
+          sqliteHomeSource: "SQLite Home source",
+          sqliteSupported: "SQLite supported",
+          stateDbFound: "State DB found",
+          configured: "Configured Providers",
+          current: "Current Provider",
+          implicit: "Implicit Provider",
+          rolloutCounts: "Rollout distribution",
+          sqliteCounts: "SQLite distribution",
+          lockedRolloutCount: "Locked rollouts",
+          operationInProgress: "Operation in progress",
+          pendingRecovery: "Recovery required",
+          pendingTransactions: "Pending transactions",
+          projectThreadVisibilityAvailable: "Project visibility available",
+          rolloutScanComplete: "Rollout scan complete",
+          storageRevision: "Storage revision"
+        },
         export: "Export redacted bundle",
         exporting: "Exporting…",
         exportCreated: "Redacted diagnostics bundle created.",
@@ -179,20 +212,117 @@ export const resources = {
       },
       plan: {
         title: "Review plan",
+        operations: {
+          sync: "Sync Provider metadata",
+          switch: "Switch Provider",
+          restore: "Restore backup",
+          operation: "Protected operation"
+        },
+        modelModes: {
+          "provider-default": "Use Provider default model",
+          "keep-root-model": "Keep root model",
+          explicit: "Use explicit model"
+        },
+        fields: {
+          modelMode: "Model handling",
+          restoreConfig: "Restore config.toml",
+          restoreDatabase: "Restore State DB",
+          restoreSessions: "Restore rollout files",
+          relocation: "SQLite Home relocation",
+          rolloutFiles: "Rollout files affected",
+          sqliteRows: "SQLite rows affected",
+          workspaceRoots: "Workspace roots affected",
+          stateDbFiles: "State DB files affected",
+          configFiles: "Config files affected",
+          lockedRollouts: "Currently locked rollouts"
+        },
+        stages: {
+          scan_rollout_files: "Scan rollout files",
+          check_locked_rollout_files: "Check locked rollouts",
+          create_backup: "Create managed backup",
+          rewrite_rollout_files: "Update rollout files",
+          update_sqlite: "Update SQLite metadata",
+          update_config: "Update config.toml",
+          clean_backups: "Clean old backups",
+          create_restore_pre_snapshot: "Create pre-restore snapshot",
+          persist_restore_journal: "Persist Restore journal",
+          apply_restore_targets: "Restore selected targets",
+          commit_restore: "Commit Restore",
+          acknowledge_restore_commit: "Acknowledge Restore commit",
+          rollback_restore: "Roll back Restore"
+        },
+        statuses: {
+          start: "Starting",
+          progress: "In progress",
+          complete: "Completed"
+        },
         target: "Target",
         impact: "Impact",
         expires: "Expires",
+        items: "{{count}} items",
         backupExpected: "A backup will be created before writes.",
         exactApply: "Apply sends only this one-time plan ID.",
+        writeBlocked: "Another protected operation or recovery state currently blocks confirmation.",
+        technicalDetails: "Technical details",
         progress: "Operation progress",
         starting: "Starting protected operation…",
         cancelOperation: "Cancel operation",
         cancelling: "Cancelling…",
         cancelPending: "Cancellation will take effect at the next safe point."
       },
+      operationResult: {
+        title: "Operation result",
+        operationId: "Operation ID",
+        backupId: "Managed backup ID",
+        skippedRollouts: "Skipped locked rollout files",
+        resolveBeforeClose: "Resolve the pending recovery before closing this result.",
+        fields: {
+          targetProvider: "Target Provider",
+          targetModel: "Target model",
+          modelSource: "Model source",
+          restoreOperationId: "Restore operation ID",
+          preRestoreSnapshotId: "Pre-restore snapshot ID",
+          restoreJournalState: "Restore journal state",
+          backupDurationMs: "Backup duration (ms)",
+          changedSessionFiles: "Rollout files changed",
+          sqliteRowsUpdated: "SQLite rows updated",
+          sqliteProviderRowsUpdated: "Provider rows updated",
+          sqliteUserEventRowsUpdated: "User-event rows updated",
+          sqliteCwdRowsUpdated: "Workspace rows updated",
+          updatedWorkspaceRoots: "Workspace roots updated",
+          savedWorkspaceRootCount: "Saved workspace roots",
+          restoreVersion: "Restore format version",
+          resolvedOperationCount: "Resolved operations",
+          commitAcknowledgementRecovered: "Commit acknowledgement recovered"
+        },
+        completed: {
+          title: "Completed",
+          description: "The protected operation reached a durable completed state."
+        },
+        partial: {
+          title: "Partially completed",
+          description: "Committed changes are durable, but one or more locked rollout files were skipped."
+        },
+        failedRolledBack: {
+          title: "Failed and rolled back",
+          description: "The operation failed, and the previous state was restored successfully."
+        },
+        recoveryRequired: {
+          title: "Recovery required",
+          description: "A durable journal remains unresolved. Further writes stay blocked until recovery is completed."
+        },
+        cancelled: {
+          title: "Cancelled",
+          description: "The operation stopped at a safe cancellation point."
+        },
+        stale: {
+          title: "Plan became stale",
+          description: "Protected state changed after planning. Review a newly prepared plan before retrying."
+        }
+      },
       validation: {
         required: "This field is required.",
-        keep: "Use a whole number from 0 to 1000.",
+        keep: "Use a whole number from 1 to 1000.",
         provider: "Enter a valid Provider ID.",
         model: "Enter a model name for explicit mode.",
         restore: "Select at least one item to restore.",
@@ -227,6 +357,8 @@ export const resources = {
         save: "保存",
         delete: "删除",
         close: "关闭",
+        yes: "是",
+        no: "否",
         none: "无",
         unknown: "未知",
         current: "当前",
@@ -301,7 +433,15 @@ export const resources = {
         back: "返回会话列表",
         messages: "条消息",
         archived: "已归档",
-        active: "活动"
+        active: "活动",
+        pagination: "聊天记录分页",
+        pageSummary: "第 {{page}} 页 · 共 {{total}} 个会话",
+        previous: "上一页",
+        next: "下一页",
+        roles: {
+          user: "你",
+          assistant: "助手"
+        }
       },
       profiles: {
         title: "存储配置",
@@ -323,6 +463,29 @@ export const resources = {
         storage: "存储",
         provider: "Provider",
         safety: "安全状态",
+        items: "{{count}} 项",
+        fieldsAvailable: "{{count}} 个脱敏字段",
+        technicalDetails: "显示技术详情",
+        fields: {
+          arch: "架构",
+          node: "Node.js",
+          platform: "平台",
+          sqliteHomeSource: "SQLite Home 来源",
+          sqliteSupported: "SQLite 支持状态",
+          stateDbFound: "State DB 是否存在",
+          configured: "已配置 Provider",
+          current: "当前 Provider",
+          implicit: "隐式 Provider",
+          rolloutCounts: "Rollout 分布",
+          sqliteCounts: "SQLite 分布",
+          lockedRolloutCount: "锁定的 rollout",
+          operationInProgress: "执行中的操作",
+          pendingRecovery: "需要恢复",
+          pendingTransactions: "待处理事务",
+          projectThreadVisibilityAvailable: "项目可见性可用",
+          rolloutScanComplete: "Rollout 扫描完成",
+          storageRevision: "存储 revision"
+        },
         export: "导出脱敏诊断包",
         exporting: "正在导出…",
         exportCreated: "脱敏诊断包已创建。",
@@ -378,20 +541,117 @@ export const resources = {
       },
       plan: {
         title: "审核计划",
+        operations: {
+          sync: "同步 Provider 元数据",
+          switch: "切换 Provider",
+          restore: "恢复备份",
+          operation: "受保护操作"
+        },
+        modelModes: {
+          "provider-default": "使用 Provider 默认模型",
+          "keep-root-model": "保留根模型",
+          explicit: "使用显式模型"
+        },
+        fields: {
+          modelMode: "模型处理方式",
+          restoreConfig: "恢复 config.toml",
+          restoreDatabase: "恢复 State DB",
+          restoreSessions: "恢复 rollout 文件",
+          relocation: "SQLite Home 迁移",
+          rolloutFiles: "受影响的 rollout 文件",
+          sqliteRows: "受影响的 SQLite 行",
+          workspaceRoots: "受影响的工作区根目录",
+          stateDbFiles: "受影响的 State DB 文件",
+          configFiles: "受影响的配置文件",
+          lockedRollouts: "当前锁定的 rollout"
+        },
+        stages: {
+          scan_rollout_files: "扫描 rollout 文件",
+          check_locked_rollout_files: "检查锁定的 rollout",
+          create_backup: "创建受管备份",
+          rewrite_rollout_files: "更新 rollout 文件",
+          update_sqlite: "更新 SQLite 元数据",
+          update_config: "更新 config.toml",
+          clean_backups: "清理旧备份",
+          create_restore_pre_snapshot: "创建恢复前快照",
+          persist_restore_journal: "持久化 Restore journal",
+          apply_restore_targets: "恢复所选目标",
+          commit_restore: "提交恢复",
+          acknowledge_restore_commit: "确认恢复提交",
+          rollback_restore: "回滚恢复"
+        },
+        statuses: {
+          start: "正在开始",
+          progress: "执行中",
+          complete: "已完成"
+        },
         target: "目标",
         impact: "影响",
         expires: "失效时间",
+        items: "{{count}} 项",
         backupExpected: "写入前会先创建备份。",
         exactApply: "执行时只提交此一次性 planId。",
+        writeBlocked: "当前存在其他受保护操作或待恢复状态，暂不能确认执行。",
+        technicalDetails: "技术详情",
         progress: "操作进度",
         starting: "正在启动受保护操作…",
         cancelOperation: "取消操作",
         cancelling: "正在取消…",
         cancelPending: "取消将在下一个安全点生效。"
       },
+      operationResult: {
+        title: "操作结果",
+        operationId: "操作 ID",
+        backupId: "受管备份 ID",
+        skippedRollouts: "跳过的锁定 rollout 文件",
+        resolveBeforeClose: "请先完成待处理的恢复，再关闭此结果。",
+        fields: {
+          targetProvider: "目标 Provider",
+          targetModel: "目标模型",
+          modelSource: "模型来源",
+          restoreOperationId: "恢复操作 ID",
+          preRestoreSnapshotId: "恢复前快照 ID",
+          restoreJournalState: "恢复 journal 状态",
+          backupDurationMs: "备份耗时（毫秒）",
+          changedSessionFiles: "已修改 rollout 文件",
+          sqliteRowsUpdated: "已更新 SQLite 行",
+          sqliteProviderRowsUpdated: "已更新 Provider 行",
+          sqliteUserEventRowsUpdated: "已更新用户事件行",
+          sqliteCwdRowsUpdated: "已更新工作区行",
+          updatedWorkspaceRoots: "已更新工作区根目录",
+          savedWorkspaceRootCount: "已保存工作区根目录",
+          restoreVersion: "恢复格式版本",
+          resolvedOperationCount: "已解决操作数",
+          commitAcknowledgementRecovered: "已恢复提交确认"
+        },
+        completed: {
+          title: "已完成",
+          description: "受保护操作已进入耐久的完成状态。"
+        },
+        partial: {
+          title: "部分完成",
+          description: "已提交的更改已持久化，但仍有一个或多个锁定的 rollout 文件被跳过。"
+        },
+        failedRolledBack: {
+          title: "失败并已回滚",
+          description: "操作失败，且先前状态已成功恢复。"
+        },
+        recoveryRequired: {
+          title: "需要恢复",
+          description: "仍有未解决的耐久 journal；完成恢复前将继续阻止写操作。"
+        },
+        cancelled: {
+          title: "已取消",
+          description: "操作已在安全取消点停止。"
+        },
+        stale: {
+          title: "计划已失效",
+          description: "生成计划后受保护状态发生变化；重试前请重新生成并审核计划。"
+        }
+      },
       validation: {
         required: "此项必填。",
-        keep: "请输入 0 到 1000 的整数。",
+        keep: "请输入 1 到 1000 的整数。",
         provider: "请输入有效的 Provider ID。",
         model: "显式模式必须填写模型名称。",
         restore: "至少选择一种恢复内容。",

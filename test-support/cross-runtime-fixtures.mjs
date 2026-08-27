@@ -36,6 +36,44 @@ const physicalPathKey = (value) => process.platform === "win32"
   ? path.resolve(value).toLowerCase()
   : path.resolve(value);
 
+function windowsShortDirectoryPath(directory) {
+  assert.equal(process.platform, "win32");
+  const executable = path.join(
+    process.env.SystemRoot ?? "C:\\Windows",
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe"
+  );
+  const command = [
+    "$fso = New-Object -ComObject Scripting.FileSystemObject",
+    "$folder = $fso.GetFolder($env:CPS_SHORT_PATH_TARGET)",
+    "$folder.ShortPath"
+  ].join("; ");
+  const result = spawnSync(executable, [
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    command
+  ], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    windowsHide: true,
+    env: { ...process.env, CPS_SHORT_PATH_TARGET: directory }
+  });
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.status, 0, [result.stdout, result.stderr].filter(Boolean).join("\n"));
+  const shortPath = result.stdout.trim();
+  assert.equal(path.isAbsolute(shortPath), true, "PowerShell must return an absolute 8.3 alias");
+  assert.notEqual(
+    physicalPathKey(shortPath),
+    physicalPathKey(directory),
+    "The Windows volume must expose an actual short-path alias for this fixture"
+  );
+  return shortPath;
+}
+
 function digest(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
@@ -608,6 +646,183 @@ test("Restore v2 crash recovery is bidirectional across Node and .NET", async ()
       node: { recoveredDotnetCrash: true },
       dotnet: { recoveredNodeCrash: true },
       decision: "Each runtime safely resolved the other runtime's applying Restore journal."
+    });
+  });
+  assert.equal(evidence.status, "matched");
+});
+
+test("Restore v2 recovery accepts real Windows 8.3 aliases across Node and .NET", {
+  skip: process.platform !== "win32"
+}, async () => {
+  await Promise.all([fs.access(fixtureHostDll), fs.access(crashHostDll)]);
+  const fixtureRoot = path.join(staticRoot, "bidirectional-backup-roundtrip");
+  const evidence = await runFixtureInTemp(fixtureRoot, async (fixture) => {
+    const nodeToDotnet = await createCase(fixture, "node-short-alias-to-dotnet");
+    const nodeSource = await runSync({ codexHome: nodeToDotnet.codexHome, provider: "openai" });
+    runProcess(process.execPath, [
+      nodeRestoreCrashHost,
+      nodeToDotnet.codexHome,
+      nodeSource.backupDir,
+      "after_restore_prepared_before_applying",
+      "--with-database"
+    ], { expectCrash: true });
+    const [nodePending] = await restoreJournals(nodeToDotnet.codexHome);
+    const nodePendingBytes = await fs.readFile(nodePending.filePath);
+    const recoveredByDotnet = runDotnet(
+      "restore-v2",
+      windowsShortDirectoryPath(nodeToDotnet.codexHome),
+      windowsShortDirectoryPath(nodeSource.backupDir)
+    );
+    assert.equal(recoveredByDotnet.RestoreJournalState, "completed");
+    assert.deepEqual(recoveredByDotnet.ResolvedOperationIds, [nodePending.operationId]);
+    assert.deepEqual(await fs.readFile(nodePending.filePath), nodePendingBytes);
+    await assertRestored(nodeToDotnet, nodeSource.backupDir, fixture.manifest.expected.journalTerminal);
+
+    const dotnetToNode = await createCase(fixture, "dotnet-short-alias-to-node");
+    const dotnetSource = runDotnet("sync", dotnetToNode.codexHome, "openai");
+    runProcess("dotnet", [
+      crashHostDll,
+      "restore-v2",
+      dotnetToNode.codexHome,
+      dotnetSource.BackupDir,
+      "after_restore_prepared_before_applying"
+    ], { expectCrash: true });
+    const [dotnetPending] = await restoreJournals(dotnetToNode.codexHome);
+    const dotnetPendingBytes = await fs.readFile(dotnetPending.filePath);
+    const recoveredByNode = await runRestore({
+      codexHome: windowsShortDirectoryPath(dotnetToNode.codexHome),
+      backupDir: windowsShortDirectoryPath(dotnetSource.BackupDir)
+    });
+    assert.equal(recoveredByNode.restoreJournalState, "completed");
+    assert.deepEqual(recoveredByNode.resolvedOperationIds, [dotnetPending.operationId]);
+    assert.deepEqual(await fs.readFile(dotnetPending.filePath), dotnetPendingBytes);
+    await assertRestored(dotnetToNode, dotnetSource.BackupDir, fixture.manifest.expected.journalTerminal);
+
+    const nodeAliasCreated = await createCase(fixture, "node-created-via-short-alias");
+    const nodeAliasSource = await runSync({ codexHome: nodeAliasCreated.codexHome, provider: "openai" });
+    runProcess(process.execPath, [
+      nodeRestoreCrashHost,
+      windowsShortDirectoryPath(nodeAliasCreated.codexHome),
+      windowsShortDirectoryPath(nodeAliasSource.backupDir),
+      "after_restore_prepared_before_applying",
+      "--with-database"
+    ], { expectCrash: true });
+    const [nodeAliasPending] = await restoreJournals(nodeAliasCreated.codexHome);
+    const nodeAliasPhysical = await fs.realpath(nodeAliasSource.backupDir);
+    assert.equal(
+      physicalPathKey(await fs.realpath(nodeAliasPending.prepared.sourceBackup.backupDir)),
+      physicalPathKey(nodeAliasPhysical)
+    );
+    assert.equal(nodeAliasPending.prepared.sourceBackup.backupId, path.basename(nodeAliasPhysical));
+    const nodeAliasRecoveredByDotnet = runDotnet(
+      "restore-v2",
+      nodeAliasCreated.codexHome,
+      nodeAliasSource.backupDir
+    );
+    assert.equal(nodeAliasRecoveredByDotnet.RestoreJournalState, "completed");
+    assert.deepEqual(nodeAliasRecoveredByDotnet.ResolvedOperationIds, [nodeAliasPending.operationId]);
+
+    const dotnetAliasCreated = await createCase(fixture, "dotnet-created-via-short-alias");
+    const dotnetAliasSource = runDotnet("sync", dotnetAliasCreated.codexHome, "openai");
+    runProcess("dotnet", [
+      crashHostDll,
+      "restore-v2",
+      windowsShortDirectoryPath(dotnetAliasCreated.codexHome),
+      windowsShortDirectoryPath(dotnetAliasSource.BackupDir),
+      "after_restore_prepared_before_applying"
+    ], { expectCrash: true });
+    const [dotnetAliasPending] = await restoreJournals(dotnetAliasCreated.codexHome);
+    const dotnetAliasPhysical = await fs.realpath(dotnetAliasSource.BackupDir);
+    assert.equal(
+      physicalPathKey(await fs.realpath(dotnetAliasPending.prepared.sourceBackup.backupDir)),
+      physicalPathKey(dotnetAliasPhysical)
+    );
+    assert.equal(dotnetAliasPending.prepared.sourceBackup.backupId, path.basename(dotnetAliasPhysical));
+    const dotnetAliasRecoveredByNode = await runRestore({
+      codexHome: dotnetAliasCreated.codexHome,
+      backupDir: dotnetAliasSource.BackupDir
+    });
+    assert.equal(dotnetAliasRecoveredByNode.restoreJournalState, "completed");
+    assert.deepEqual(dotnetAliasRecoveredByNode.resolvedOperationIds, [dotnetAliasPending.operationId]);
+
+    return createRuntimeDifference({
+      fixtureId: "restore-v2-windows-path-alias",
+      status: "matched",
+      node: {
+        recoveredDotnetPendingViaShortAlias: true,
+        createdPendingViaShortAliasRecoveredByDotnet: true
+      },
+      dotnet: {
+        recoveredNodePendingViaShortAlias: true,
+        createdPendingViaShortAliasRecoveredByNode: true
+      },
+      decision: "Both runtimes created and recovered the other runtime's pending Restore through actual Windows 8.3 aliases."
+    });
+  });
+  assert.equal(evidence.status, "matched");
+});
+
+test("Restore v2 recovery binds Windows junction aliases at creation across Node and .NET", {
+  skip: process.platform !== "win32"
+}, async () => {
+  await Promise.all([fs.access(fixtureHostDll), fs.access(crashHostDll)]);
+  const fixtureRoot = path.join(staticRoot, "bidirectional-backup-roundtrip");
+  const evidence = await runFixtureInTemp(fixtureRoot, async (fixture) => {
+    const nodeToDotnet = await createCase(fixture, "node-junction-create-to-dotnet");
+    const nodeSource = await runSync({ codexHome: nodeToDotnet.codexHome, provider: "openai" });
+    const nodeSourceAlias = path.join(path.dirname(nodeToDotnet.codexHome), "source-backup-junction");
+    await fs.symlink(nodeSource.backupDir, nodeSourceAlias, "junction");
+    runProcess(process.execPath, [
+      nodeRestoreCrashHost,
+      nodeToDotnet.codexHome,
+      nodeSourceAlias,
+      "after_restore_prepared_before_applying",
+      "--with-database"
+    ], { expectCrash: true });
+    const [nodePending] = await restoreJournals(nodeToDotnet.codexHome);
+    assert.equal(
+      physicalPathKey(await fs.realpath(nodePending.prepared.sourceBackup.backupDir)),
+      physicalPathKey(await fs.realpath(nodeSource.backupDir))
+    );
+    const nodeRecoveredByDotnet = runDotnet(
+      "restore-v2",
+      nodeToDotnet.codexHome,
+      nodeSource.backupDir
+    );
+    assert.equal(nodeRecoveredByDotnet.RestoreJournalState, "completed");
+    assert.deepEqual(nodeRecoveredByDotnet.ResolvedOperationIds, [nodePending.operationId]);
+    await assertRestored(nodeToDotnet, nodeSource.backupDir, fixture.manifest.expected.journalTerminal);
+
+    const dotnetToNode = await createCase(fixture, "dotnet-junction-create-to-node");
+    const dotnetSource = runDotnet("sync", dotnetToNode.codexHome, "openai");
+    const dotnetSourceAlias = path.join(path.dirname(dotnetToNode.codexHome), "source-backup-junction");
+    await fs.symlink(dotnetSource.BackupDir, dotnetSourceAlias, "junction");
+    runProcess("dotnet", [
+      crashHostDll,
+      "restore-v2",
+      dotnetToNode.codexHome,
+      dotnetSourceAlias,
+      "after_restore_prepared_before_applying"
+    ], { expectCrash: true });
+    const [dotnetPending] = await restoreJournals(dotnetToNode.codexHome);
+    assert.equal(
+      physicalPathKey(await fs.realpath(dotnetPending.prepared.sourceBackup.backupDir)),
+      physicalPathKey(await fs.realpath(dotnetSource.BackupDir))
+    );
+    const dotnetRecoveredByNode = await runRestore({
+      codexHome: dotnetToNode.codexHome,
+      backupDir: dotnetSource.BackupDir
+    });
+    assert.equal(dotnetRecoveredByNode.restoreJournalState, "completed");
+    assert.deepEqual(dotnetRecoveredByNode.resolvedOperationIds, [dotnetPending.operationId]);
+    await assertRestored(dotnetToNode, dotnetSource.BackupDir, fixture.manifest.expected.journalTerminal);
+
+    return createRuntimeDifference({
+      fixtureId: "restore-v2-windows-junction-alias",
+      status: "matched",
+      node: { createdThroughJunctionRecoveredByDotnet: true },
+      dotnet: { createdThroughJunctionRecoveredByNode: true },
+      decision: "Both runtimes persisted physical Restore source identity when the pending journal was created through a Windows junction."
     });
   });
   assert.equal(evidence.status, "matched");

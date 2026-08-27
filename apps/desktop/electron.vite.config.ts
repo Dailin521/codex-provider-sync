@@ -15,6 +15,7 @@ export default defineConfig(({ mode }) => ({
   main: {
     define: {
       __CPS_DESKTOP_TEST_BUILD__: JSON.stringify(mode === "test"),
+      __CPS_DESKTOP_FORCE_BETTER_SQLITE3__: JSON.stringify(mode === "test"),
       __CPS_DESKTOP_BUILD_ID__: JSON.stringify(desktopBuildId)
     },
     ssr: {
@@ -42,6 +43,7 @@ export default defineConfig(({ mode }) => ({
   preload: {
     define: {
       __CPS_DESKTOP_TEST_BUILD__: JSON.stringify(mode === "test"),
+      __CPS_DESKTOP_FORCE_BETTER_SQLITE3__: "false",
       __CPS_DESKTOP_BUILD_ID__: JSON.stringify(desktopBuildId)
     },
     ssr: {
