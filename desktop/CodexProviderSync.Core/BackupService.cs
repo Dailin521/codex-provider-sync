@@ -305,6 +305,236 @@ public sealed class BackupService
         };
     }
 
+    internal async Task<RestoreBackupPlan> PrepareRestoreBackupAsync(
+        string backupDir,
+        CodexStorageLayout storage,
+        RestoreBackupOptions options,
+        string? expectedStateDbTargetPath = null,
+        CancellationToken cancellationToken = default)
+    {
+        storage.EnsureSqliteAccessSupported("restore");
+        string codexHome = storage.CodexHome;
+        string normalizedBackupDir = Path.GetFullPath(backupDir);
+        string metadataPath = Path.Combine(normalizedBackupDir, "metadata.json");
+        BackupMetadataFile metadata = JsonSerializer.Deserialize<BackupMetadataFile>(
+            await File.ReadAllTextAsync(metadataPath, cancellationToken),
+            JsonOptions()) ?? throw new InvalidOperationException($"Backup metadata is invalid: {backupDir}");
+        if (!string.Equals(metadata.Namespace, AppConstants.BackupNamespace, StringComparison.Ordinal)
+            || metadata.Version is not (1 or 2))
+        {
+            throw new InvalidOperationException($"Unsupported backup metadata in {metadataPath}.");
+        }
+        if (!PathsEqual(metadata.CodexHome, codexHome))
+        {
+            throw new InvalidOperationException($"Backup was created for {metadata.CodexHome}, not {codexHome}.");
+        }
+
+        List<RestoreBackupTarget> targets = [];
+        if (options.RestoreConfig)
+        {
+            ValidateGlobalStatePresenceMetadata(metadata);
+            string configSource = Path.Combine(normalizedBackupDir, "config.toml");
+            if (File.Exists(configSource))
+            {
+                targets.Add(new RestoreBackupTarget(
+                    "config",
+                    Path.Combine(codexHome, "config.toml"),
+                    configSource,
+                    "copy"));
+            }
+            foreach (string fileName in new[]
+            {
+                AppConstants.GlobalStateFileBasename,
+                AppConstants.GlobalStateBackupFileBasename
+            })
+            {
+                string sourcePath = Path.Combine(normalizedBackupDir, fileName);
+                bool? originallyPresent = ResolveGlobalStatePresence(metadata, fileName);
+                if (originallyPresent == true && !File.Exists(sourcePath))
+                {
+                    throw new InvalidOperationException(
+                        $"Backup declares an original file but the backup copy is missing: {sourcePath}");
+                }
+                string sourceAction = originallyPresent == false
+                    ? "delete"
+                    : (originallyPresent == true || File.Exists(sourcePath) ? "copy" : "preserve");
+                targets.Add(new RestoreBackupTarget(
+                    "globalState",
+                    Path.Combine(codexHome, fileName),
+                    sourcePath,
+                    sourceAction));
+            }
+        }
+
+        string? targetSqliteHome = null;
+        string? stateDbTargetPath = null;
+        if (options.RestoreDatabase)
+        {
+            StateDbLocation? stateDb = storage.StateDbLocation ?? _sqliteStateService.DetectStateDb(storage);
+            if (stateDb is null && storage.HasConfiguredSqliteHome)
+            {
+                throw new InvalidOperationException(
+                    $"state_5.sqlite not found in SQLite home {storage.SqliteHome}.");
+            }
+            targetSqliteHome = ResolveRestoreSqliteHome(storage, metadata, stateDb);
+            bool sqliteHomeRelocation = metadata.Version >= 2
+                && !string.IsNullOrWhiteSpace(metadata.SqliteHome)
+                && !PathsEqual(metadata.SqliteHome, targetSqliteHome);
+            if (sqliteHomeRelocation && !options.AllowSqliteHomeRelocation)
+            {
+                throw new InvalidOperationException(
+                    $"Backup SQLite home is {metadata.SqliteHome}, but the current target is {targetSqliteHome}. "
+                    + "Confirm SQLite Home relocation before restoring to a different location.");
+            }
+            if (sqliteHomeRelocation && options.RestoreConfig)
+            {
+                throw new InvalidOperationException(
+                    "Cannot restore config.toml while relocating SQLite home. "
+                    + "Disable config restore to preserve the current target configuration.");
+            }
+            if (stateDb is not null)
+            {
+                await _sqliteStateService.AssertSqliteWritableAsync(storage with { StateDbLocation = stateDb });
+            }
+
+            IReadOnlyList<string> databaseFiles = metadata.Version >= 2
+                ? metadata.SqliteDbFiles ?? []
+                : metadata.DbFiles ?? [];
+            string[] mainFiles = databaseFiles
+                .Where(static fileName => Path.GetFileName(fileName) == AppConstants.DbFileBasename)
+                .ToArray();
+            if (mainFiles.Length != 1)
+            {
+                throw new InvalidOperationException(
+                    mainFiles.Length == 0
+                        ? "Backup does not contain state_5.sqlite. Disable database restore to restore the remaining data."
+                        : "Backup must contain exactly one state_5.sqlite restore source.");
+            }
+            string databaseBackupRoot = metadata.Version >= 2
+                ? Path.Combine(normalizedBackupDir, "db", "sqlite-home")
+                : Path.Combine(normalizedBackupDir, "db");
+            string restoreRoot = metadata.Version >= 2 ? targetSqliteHome : codexHome;
+            string fileName = mainFiles[0];
+            string sourcePath = Path.Combine(databaseBackupRoot, fileName);
+            if (!File.Exists(sourcePath))
+            {
+                throw new InvalidOperationException($"Backup declares a missing SQLite file: {sourcePath}");
+            }
+            stateDbTargetPath = metadata.Version >= 2
+                ? RestoreSqliteTargetPath(restoreRoot, fileName)
+                : RestoreDbTargetPath(restoreRoot, fileName);
+            if (expectedStateDbTargetPath is not null
+                && !PathsEqual(stateDbTargetPath, expectedStateDbTargetPath))
+            {
+                throw new InvalidOperationException(
+                    "The resolved State DB restore target changed after its resource lock was selected.");
+            }
+            targets.Add(new RestoreBackupTarget(
+                "sqlite",
+                stateDbTargetPath,
+                sourcePath,
+                "copy"));
+        }
+
+        SessionBackupManifest? sessionManifest = null;
+        if (options.RestoreSessions)
+        {
+            string sessionManifestPath = Path.Combine(normalizedBackupDir, "session-meta-backup.json");
+            sessionManifest = JsonSerializer.Deserialize<SessionBackupManifest>(
+                await File.ReadAllTextAsync(sessionManifestPath, cancellationToken),
+                JsonOptions()) ?? throw new InvalidOperationException($"Session backup manifest is invalid: {backupDir}");
+            ValidateSessionManifest(sessionManifest, codexHome, normalizedBackupDir);
+            sessionManifest = await SelectSessionEntriesForRestoreAsync(normalizedBackupDir, sessionManifest);
+            await _sessionRolloutService.AssertSessionFilesWritableAsync(
+                sessionManifest.Files.Select(static entry => entry.Path));
+            targets.AddRange(sessionManifest.Files.Select(entry => new RestoreBackupTarget(
+                "rollout",
+                Path.GetFullPath(entry.Path),
+                null,
+                "metadata",
+                entry)));
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        return new RestoreBackupPlan(
+            normalizedBackupDir,
+            storage,
+            options,
+            metadata,
+            targetSqliteHome,
+            stateDbTargetPath,
+            targets);
+    }
+
+    internal async Task ApplyRestoreTargetAsync(
+        RestoreBackupPlan plan,
+        RestoreBackupTarget target,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        switch (target.Kind)
+        {
+            case "config":
+                if (target.SourcePath is null)
+                {
+                    throw new InvalidOperationException("Restore config target has no source.");
+                }
+                await AtomicFile.CopyAsync(target.SourcePath, target.TargetPath, overwrite: true, cancellationToken);
+                break;
+            case "globalState":
+                if (target.SourceAction == "delete")
+                {
+                    if (File.Exists(target.TargetPath))
+                    {
+                        File.Delete(target.TargetPath);
+                    }
+                }
+                else if (target.SourceAction == "copy")
+                {
+                    if (target.SourcePath is null
+                        || !await AtomicFile.CopyAsync(
+                            target.SourcePath,
+                            target.TargetPath,
+                            overwrite: true,
+                            cancellationToken))
+                    {
+                        throw new InvalidOperationException(
+                            $"Restore global-state source is missing: {target.SourcePath}");
+                    }
+                }
+                else if (target.SourceAction != "preserve")
+                {
+                    throw new InvalidOperationException(
+                        $"Unsupported global-state Restore action: {target.SourceAction}");
+                }
+                break;
+            case "sqlite":
+                if (target.SourcePath is null)
+                {
+                    throw new InvalidOperationException("Restore SQLite target has no source.");
+                }
+                await _sqliteStateService.RestoreSqliteOnlineBackupAsync(
+                    target.SourcePath,
+                    target.TargetPath);
+                break;
+            case "rollout":
+                if (target.SessionEntry is null)
+                {
+                    throw new InvalidOperationException("Restore rollout target has no manifest entry.");
+                }
+                string verifiedPath = ValidateSessionRestorePath(plan.Storage.CodexHome, target.TargetPath);
+                if (!PathsEqual(verifiedPath, target.SessionEntry.Path))
+                {
+                    throw new InvalidOperationException("Restore rollout target changed after validation.");
+                }
+                await _sessionRolloutService.AssertSessionFilesWritableAsync([verifiedPath]);
+                await _sessionRolloutService.RestoreSessionChangesAsync([target.SessionEntry]);
+                break;
+            default:
+                throw new InvalidOperationException($"Unsupported Restore target kind: {target.Kind}");
+        }
+    }
+
     internal async Task<string> ResolveRestoreStateDbTargetPathAsync(
         string backupDir,
         CodexStorageLayout storage,
@@ -721,9 +951,18 @@ public sealed class BackupService
     {
         string backupRoot = AppConstants.DefaultBackupRoot(codexHome);
         IReadOnlyList<PendingTransactionInfo> pending = await FileTransactionJournal.FindPendingAsync(codexHome);
+        RestoreJournalScan restoreScan = await RestoreJournalService.ScanAsync(codexHome);
+        if (restoreScan.PruneReferencesUnverifiable)
+        {
+            // An unreadable Restore journal may reference a source backup that
+            // cannot be reconstructed safely. Prune is intentionally a no-op
+            // until explicit recovery resolves that evidence.
+            return [];
+        }
         HashSet<string> protectedBackups = new(
             pending.Select(static transaction => Path.GetFullPath(transaction.BackupDir)),
             PathComparer);
+        protectedBackups.UnionWith(restoreScan.ProtectedDirectories.Select(Path.GetFullPath));
         string? preserved = string.IsNullOrWhiteSpace(preservedBackupDirectory)
             ? null
             : Path.GetFullPath(preservedBackupDirectory);
@@ -812,7 +1051,7 @@ public sealed class BackupService
         }
     }
 
-    private static string ValidateSessionRestorePath(string codexHome, string candidatePath)
+    internal static string ValidateSessionRestorePath(string codexHome, string candidatePath)
     {
         if (string.IsNullOrWhiteSpace(candidatePath))
         {
@@ -1169,3 +1408,19 @@ public sealed class BackupService
 }
 
 internal sealed record BackupRecoveryCoverage(bool Config, bool Database, bool Sessions);
+
+internal sealed record RestoreBackupTarget(
+    string Kind,
+    string TargetPath,
+    string? SourcePath,
+    string SourceAction,
+    SessionBackupManifestEntry? SessionEntry = null);
+
+internal sealed record RestoreBackupPlan(
+    string BackupDirectory,
+    CodexStorageLayout Storage,
+    RestoreBackupOptions Options,
+    BackupMetadataFile Metadata,
+    string? TargetSqliteHome,
+    string? StateDbTargetPath,
+    IReadOnlyList<RestoreBackupTarget> Targets);

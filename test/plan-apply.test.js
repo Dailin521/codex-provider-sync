@@ -103,6 +103,33 @@ test("prepareSync returns schema v1 summary and applySync consumes it exactly on
   }
 });
 
+test("a prepared manual plan has priority over a Watch Apply without weakening single consumption", async () => {
+  const value = await makeFixture();
+  try {
+    const manualPlan = await prepareSync({ codexHome: value.codexHome });
+    const watchPlan = await prepareSync({ codexHome: value.codexHome, __actor: "watch" });
+
+    await assert.rejects(
+      applySync({ schemaVersion: 1, planId: watchPlan.planId }),
+      (error) => error?.code === "OPERATION_BUSY"
+        && error?.details?.busyScope === "codex-home"
+        && error?.details?.reason === "manual-intent"
+    );
+    assert.equal(await backupCount(value.codexHome), 0);
+
+    const applied = await applySync({ schemaVersion: 1, planId: manualPlan.planId });
+    assert.equal(applied.outcome, "completed");
+    assert.equal(await backupCount(value.codexHome), 1);
+
+    await assert.rejects(
+      applySync({ schemaVersion: 1, planId: watchPlan.planId }),
+      (error) => error?.code === "PLAN_EXPIRED"
+    );
+  } finally {
+    await fs.rm(value.root, { recursive: true, force: true });
+  }
+});
+
 test("Apply publishes one operation id, projects progress, and cancels before backup", async () => {
   const value = await makeFixture();
   const controller = new AbortController();

@@ -12,8 +12,10 @@ import {
   type StatusSnapshot
 } from "@codex-provider-sync/contracts";
 import {
+  isDesktopManagedMethod,
   isDesktopReadMethod,
   isDesktopSyncSwitchMethod,
+  type DesktopManagedMethod,
   type DesktopReadMethod,
   type DesktopRuntimeMethod,
   type DesktopSyncSwitchMethod
@@ -47,6 +49,11 @@ export interface RuntimeUtilityHandle {
 export type RuntimeUtilitySpawner = (
   identity: ExpectedRuntimeIdentity
 ) => RuntimeUtilityHandle;
+
+export interface RuntimeRestartInstallLease {
+  waitForWrites(): Promise<void>;
+  release(): void;
+}
 
 export interface CoreRuntimeSupervisorOptions {
   appVersion: string;
@@ -87,7 +94,7 @@ function profileKey(profile: ProfileSelector): string {
 }
 
 function isApplyMethod(method: DesktopRuntimeMethod): boolean {
-  return method === "applySync" || method === "applySwitch";
+  return method === "applySync" || method === "applySwitch" || method === "applyRestore";
 }
 
 export class CoreRuntimeSupervisor {
@@ -112,6 +119,9 @@ export class CoreRuntimeSupervisor {
   #helloReject: ((error: RuntimeActivationError) => void) | null = null;
   #preflightReadsAfterCrash = false;
   #lastHandshakeAt: string | null = null;
+  #restartInstallGateClosed = false;
+  #admittedWriteCount = 0;
+  readonly #writeDrainWaiters = new Set<() => void>();
 
   constructor(options: CoreRuntimeSupervisorOptions) {
     this.#appVersion = options.appVersion;
@@ -125,19 +135,59 @@ export class CoreRuntimeSupervisor {
     state: RuntimeSupervisorState;
     generation: number;
     recoveryBlocked: boolean;
+    writeInProgress: boolean;
     lastHandshakeAt: string | null;
   }> {
     return Object.freeze({
       state: this.#state,
       generation: this.#generation,
       recoveryBlocked: [...this.#recoveryByProfile.values()].some(Boolean),
+      writeInProgress: this.#admittedWriteCount > 0
+        || [...this.#pending.values()].some((pending) => pending.isWrite),
       lastHandshakeAt: this.#lastHandshakeAt
+    });
+  }
+
+  tryBeginRestartInstall(): RuntimeRestartInstallLease | null {
+    if (this.#disposed
+        || this.#state === "shutting-down"
+        || this.#shutdownPromise
+        || this.#restartInstallGateClosed) return null;
+    this.#restartInstallGateClosed = true;
+    let released = false;
+    return Object.freeze({
+      waitForWrites: async () => {
+        if (released || this.#admittedWriteCount === 0) return;
+        await new Promise<void>((resolve) => this.#writeDrainWaiters.add(resolve));
+      },
+      release: () => {
+        if (released) return;
+        released = true;
+        this.#restartInstallGateClosed = false;
+      }
     });
   }
 
   subscribeOperation(listener: (event: CoreOperationEventEnvelope) => void): () => void {
     this.#operationListeners.add(listener);
     return () => this.#operationListeners.delete(listener);
+  }
+
+  async verifyProfilesSafeForRestart(
+    profiles: readonly ProfileSelector[]
+  ): Promise<"clear" | "blocked" | "unverifiable"> {
+    if (profiles.length === 0 || this.snapshot.writeInProgress) return "unverifiable";
+    try {
+      for (const profile of profiles) {
+        await this.#ensureReady(profile, false);
+        this.#invalidateProfilePreflight(profile);
+        await this.#ensureProfilePreflight(profile);
+        if (this.#recoveryByProfile.get(profileKey(profile)) === true) return "blocked";
+      }
+      return this.snapshot.writeInProgress ? "unverifiable" : "clear";
+    } catch {
+      return "unverifiable";
+    }
   }
 
   async request<M extends DesktopReadMethod>(
@@ -163,16 +213,52 @@ export class CoreRuntimeSupervisor {
     if (!isDesktopSyncSwitchMethod(request.method) || request.operationId !== undefined) {
       return createCoreFailureEnvelope(request, createPublicCoreErrorDto("PERMISSION_DENIED"));
     }
-    try {
-      await this.#ensureReady(profile, true);
-      if (this.#recoveryByProfile.get(profileKey(profile)) === true) {
-        throw new RuntimeActivationError("PENDING_TRANSACTION");
-      }
-    } catch (error) {
-      const code = error instanceof RuntimeActivationError ? error.code : "INTERNAL_ERROR";
-      return createCoreFailureEnvelope(request, createPublicCoreErrorDto(code));
+    return this.requestManaged(request, profile);
+  }
+
+  async requestManaged<M extends DesktopManagedMethod>(
+    request: CoreRequestEnvelope<M>,
+    profile: ProfileSelector,
+    options: {
+      allowRecoveryBlocked?: boolean;
+    } = {}
+  ): Promise<CoreResponseEnvelope<M>> {
+    if (!isDesktopManagedMethod(request.method) || request.operationId !== undefined) {
+      return createCoreFailureEnvelope(request, createPublicCoreErrorDto("PERMISSION_DENIED"));
     }
-    return this.#dispatch(request, true) as Promise<CoreResponseEnvelope<M>>;
+    const isWrite = request.method !== "getWatchStatus";
+    const releaseAdmission = isWrite ? this.#tryAdmitWrite() : null;
+    if (isWrite && !releaseAdmission) {
+      return createCoreFailureEnvelope(request, createPublicCoreErrorDto("OPERATION_BUSY", {
+        details: { busyScope: "codex-home" }
+      }));
+    }
+    try {
+      try {
+        await this.#ensureReady(profile, isWrite);
+        if (!options.allowRecoveryBlocked
+            && this.#recoveryByProfile.get(profileKey(profile)) === true) {
+          throw new RuntimeActivationError("PENDING_TRANSACTION");
+        }
+      } catch (error) {
+        const code = error instanceof RuntimeActivationError ? error.code : "INTERNAL_ERROR";
+        return createCoreFailureEnvelope(request, createPublicCoreErrorDto(code));
+      }
+      const response = await this.#dispatch(request, isWrite) as CoreResponseEnvelope<M>;
+      if (request.method === "applyRestore") {
+        this.#invalidateProfilePreflight(profile);
+        if (response.ok) {
+          try {
+            await this.#ensureProfilePreflight(profile);
+          } catch {
+            this.#recoveryByProfile.set(profileKey(profile), true);
+          }
+        }
+      }
+      return response;
+    } finally {
+      releaseAdmission?.();
+    }
   }
 
   cancel(requestId: string, operationId?: string): boolean {
@@ -250,6 +336,23 @@ export class CoreRuntimeSupervisor {
     this.#failAllPending("INTERNAL_ERROR");
     this.#clearRuntimeCaches();
     this.#state = "stopped";
+  }
+
+  #tryAdmitWrite(): (() => void) | null {
+    if (this.#restartInstallGateClosed || this.#disposed || this.#state === "shutting-down") {
+      return null;
+    }
+    this.#admittedWriteCount += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.#admittedWriteCount -= 1;
+      if (this.#admittedWriteCount !== 0) return;
+      const waiters = [...this.#writeDrainWaiters];
+      this.#writeDrainWaiters.clear();
+      for (const resolve of waiters) resolve();
+    };
   }
 
   async #ensureReady(profile: ProfileSelector, requireWritePreflight: boolean): Promise<void> {
@@ -333,6 +436,14 @@ export class CoreRuntimeSupervisor {
       this.#profilePreflights.set(generationKey, preflight);
     }
     await preflight;
+  }
+
+  #invalidateProfilePreflight(profile: ProfileSelector): void {
+    const key = profileKey(profile);
+    for (const cached of this.#profilePreflights.keys()) {
+      if (cached.endsWith(`:${key}`)) this.#profilePreflights.delete(cached);
+    }
+    this.#recoveryByProfile.delete(key);
   }
 
   async #preflight(profile: ProfileSelector, key: string, generation: number): Promise<void> {
@@ -483,7 +594,11 @@ export class CoreRuntimeSupervisor {
     });
     if (frame.envelope.event === "operation-started") {
       if (pending.operationId !== undefined) throw new Error("Duplicate operation-started event.");
-      const expectedOperation = pending.request.method === "applySync" ? "sync" : "switch";
+      const expectedOperation = pending.request.method === "applySync"
+        ? "sync"
+        : pending.request.method === "applySwitch"
+          ? "switch"
+          : "restore";
       if (frame.envelope.operation !== expectedOperation) {
         throw new Error("Runtime operation kind mismatch.");
       }

@@ -32,6 +32,7 @@
     "@codex-provider-sync/core": "0.0.0",
     "@codex-provider-sync/core-client": "0.0.0",
     "@codex-provider-sync/design-system": "0.0.0",
+    "electron-updater": "6.8.9",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },

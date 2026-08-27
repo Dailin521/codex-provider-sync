@@ -45,7 +45,11 @@ function statusResult({ pending = false, selectedProfile = profile } = {}) {
 }
 
 function planResult(request) {
-  const operation = request.method === "prepareSwitch" ? "switch" : "sync";
+  const operation = request.method === "prepareSwitch"
+    ? "switch"
+    : request.method === "prepareRestore"
+      ? "restore"
+      : "sync";
   return {
     schemaVersion: 1,
     planId: "p".repeat(48),
@@ -60,7 +64,10 @@ function planResult(request) {
     configRevision: "config-r1",
     rolloutRevision: "rollout-r1",
     stateDbRevision: "db-r1",
-    target: { provider: operation === "sync" ? "openai" : request.payload.provider },
+    ...(operation === "restore" ? { backupRevision: "backup-r1" } : {}),
+    target: operation === "restore"
+      ? { backupId: request.payload.backupId }
+      : { provider: operation === "sync" ? "openai" : request.payload.provider },
     impact: { backupExpected: true },
     warnings: [],
     requiresConfirmation: true
@@ -122,7 +129,8 @@ class FakeUtility {
       const request = frame.envelope;
       if (request.method === "getStatus") {
         const response = createCoreSuccessEnvelope(request, statusResult({
-          pending: this.behavior.pendingStatus === true,
+          pending: this.behavior.pendingStatus === true
+            || this.behavior.pendingProfiles?.includes(request.payload.profile.profileId),
           selectedProfile: this.behavior.wrongStatusProfile
             ? { profileId: "wrong", profileRevision: "wrong" }
             : request.payload.profile
@@ -135,12 +143,16 @@ class FakeUtility {
         this.emitMessage(createRuntimeResponseFrame(frame.generation, frame.dispatchId, response));
         return;
       }
-      if (request.method === "prepareSync" || request.method === "prepareSwitch") {
+      if (request.method === "prepareSync"
+          || request.method === "prepareSwitch"
+          || request.method === "prepareRestore") {
         const response = createCoreSuccessEnvelope(request, planResult(request));
         this.emitMessage(createRuntimeResponseFrame(frame.generation, frame.dispatchId, response));
         return;
       }
-      if (request.method === "applySync" || request.method === "applySwitch") {
+      if (request.method === "applySync"
+          || request.method === "applySwitch"
+          || request.method === "applyRestore") {
         if (this.behavior.holdApplyBeforeStart) return;
         if (this.behavior.failApplyBeforeStart) {
           const response = createCoreFailureEnvelope(
@@ -151,7 +163,11 @@ class FakeUtility {
           return;
         }
         this.applyFrames.set(frame.dispatchId, frame);
-        const operation = request.method === "applySync" ? "sync" : "switch";
+        const operation = request.method === "applySync"
+          ? "sync"
+          : request.method === "applySwitch"
+            ? "switch"
+            : "restore";
         this.emitMessage(createRuntimeOperationEventFrame(
           frame.generation,
           frame.dispatchId,
@@ -176,6 +192,43 @@ class FakeUtility {
           result: { targetProvider: "openai" }
         }, operationId);
         this.emitMessage(createRuntimeResponseFrame(frame.generation, frame.dispatchId, response));
+        return;
+      }
+      if (request.method === "pruneBackups") {
+        this.emitMessage(createRuntimeResponseFrame(
+          frame.generation,
+          frame.dispatchId,
+          createCoreSuccessEnvelope(request, {
+            deletedCount: 0,
+            remainingCount: request.payload.keepCount,
+            freedBytes: 0
+          })
+        ));
+        return;
+      }
+      if (request.method === "startWatch"
+          || request.method === "stopWatch"
+          || request.method === "getWatchStatus") {
+        const watch = {
+          schemaVersion: 1,
+          watchId: request.payload.watchId ?? "22222222-2222-4222-8222-222222222222",
+          status: request.method === "stopWatch" ? "stopped" : "running",
+          startedAt: "2026-08-26T00:00:00.000Z",
+          stoppedAt: request.method === "stopWatch" ? "2026-08-26T00:01:00.000Z" : null,
+          stopReason: request.method === "stopWatch" ? "manual" : null,
+          includeStateDb: true,
+          once: false
+        };
+        this.emitMessage(createRuntimeResponseFrame(
+          frame.generation,
+          frame.dispatchId,
+          createCoreSuccessEnvelope(
+            request,
+            request.method === "getWatchStatus" && !request.payload.watchId
+              ? { schemaVersion: 1, watches: [watch] }
+              : watch
+          )
+        ));
       }
     };
     if (this.behavior.responseDelayMs) setTimeout(respond, this.behavior.responseDelayMs);
@@ -213,6 +266,24 @@ function applyRequest(requestId = "apply-1") {
   );
 }
 
+function restorePrepareRequest(requestId = "restore-prepare") {
+  return createCoreRequestEnvelope("prepareRestore", {
+    profile,
+    backupId: "managed",
+    restoreConfig: true,
+    restoreDatabase: true,
+    restoreSessions: true
+  }, requestId);
+}
+
+function restoreApplyRequest(requestId = "restore-apply") {
+  return createCoreRequestEnvelope(
+    "applyRestore",
+    { schemaVersion: 1, planId: "p".repeat(48) },
+    requestId
+  );
+}
+
 test("runtime handshake completes before the first read", async () => {
   const children = [];
   const supervisor = new CoreRuntimeSupervisor({
@@ -240,6 +311,35 @@ test("first cold-start write preflights Status before Prepare", async () => {
   );
 });
 
+test("restart safety force-preflights every known profile and fails closed", async () => {
+  const second = { profileId: "secondary", profileRevision: "profile-r2" };
+  for (const scenario of ["clear", "blocked", "unverifiable"]) {
+    const children = [];
+    const supervisor = new CoreRuntimeSupervisor({
+      appVersion: "0.5.0",
+      spawnUtility(identity) {
+        const child = new FakeUtility(identity, scenario === "blocked"
+          ? { pendingProfiles: [second.profileId] }
+          : scenario === "unverifiable"
+            ? { wrongStatusProfile: true }
+            : {});
+        children.push(child);
+        return child;
+      }
+    });
+    assert.equal(
+      await supervisor.verifyProfilesSafeForRestart([profile, second]),
+      scenario
+    );
+    const methods = children[0].messages
+      .filter((frame) => frame.kind === "request")
+      .map((frame) => frame.envelope.method);
+    assert.equal(methods.every((method) => method === "getStatus"), true);
+    assert.equal(methods.length, scenario === "unverifiable" ? 1 : 2);
+    await supervisor.shutdown();
+  }
+});
+
 test("pending recovery blocks cold-start writes but preserves reads", async () => {
   const children = [];
   const supervisor = new CoreRuntimeSupervisor({
@@ -254,6 +354,104 @@ test("pending recovery blocks cold-start writes but preserves reads", async () =
     children[0].messages.filter((frame) => frame.kind === "request").map((frame) => frame.envelope.method),
     ["getStatus", "listBackups"]
   );
+});
+
+test("Restore and Prune may converge recovery while starting Watch remains blocked", async () => {
+  const children = [];
+  const supervisor = new CoreRuntimeSupervisor({
+    appVersion: "0.5.0",
+    spawnUtility(identity) {
+      const child = new FakeUtility(identity, { pendingStatus: true });
+      children.push(child);
+      return child;
+    }
+  });
+  const restore = await supervisor.requestManaged(restorePrepareRequest(), profile, {
+    allowRecoveryBlocked: true
+  });
+  assert.equal(restore.ok, true);
+  const prune = await supervisor.requestManaged(
+    createCoreRequestEnvelope("pruneBackups", { profile, keepCount: 5 }, "prune-recovery"),
+    profile,
+    { allowRecoveryBlocked: true }
+  );
+  assert.equal(prune.ok, true);
+  const watch = await supervisor.requestManaged(
+    createCoreRequestEnvelope("startWatch", { profile, includeStateDb: true }, "watch-recovery"),
+    profile
+  );
+  assert.equal(watch.ok, false);
+  assert.equal(watch.error.code, "PENDING_TRANSACTION");
+  assert.equal(supervisor.snapshot.recoveryBlocked, true);
+  assert.deepEqual(
+    children[0].messages.filter((frame) => frame.kind === "request").map((frame) => frame.envelope.method),
+    ["getStatus", "prepareRestore", "pruneBackups"]
+  );
+});
+
+test("Restore Apply lifecycle is cancellable and blocks update installation while in flight", async () => {
+  const children = [];
+  const events = [];
+  const supervisor = new CoreRuntimeSupervisor({
+    appVersion: "0.5.0",
+    spawnUtility(identity) {
+      const child = new FakeUtility(identity, { holdApply: true });
+      children.push(child);
+      return child;
+    }
+  });
+  supervisor.subscribeOperation((event) => events.push(event));
+  const applying = supervisor.requestManaged(restoreApplyRequest(), profile, {
+    allowRecoveryBlocked: true
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(supervisor.snapshot.writeInProgress, true);
+  assert.deepEqual(events.map((event) => [event.event, event.operation]), [
+    ["operation-started", "restore"],
+    ["progress", undefined]
+  ]);
+  assert.equal(supervisor.cancel("restore-apply", operationId), true);
+  const response = await applying;
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, "OPERATION_CANCELLED");
+  assert.equal(supervisor.snapshot.writeInProgress, false);
+  assert.equal(children[0].messages.at(-1).kind, "cancel");
+});
+
+test("restart install gate drains an admitted Watch and rejects later managed writes", async () => {
+  const children = [];
+  const supervisor = new CoreRuntimeSupervisor({
+    appVersion: "0.5.0",
+    spawnUtility(identity) {
+      const child = new FakeUtility(identity, { responseDelayMs: 25 });
+      children.push(child);
+      return child;
+    }
+  });
+  const firstWatch = supervisor.requestManaged(
+    createCoreRequestEnvelope("startWatch", { profile, includeStateDb: true }, "watch-before-restart"),
+    profile
+  );
+  assert.equal(supervisor.snapshot.writeInProgress, true);
+  const restartLease = supervisor.tryBeginRestartInstall();
+  assert.ok(restartLease);
+  let drained = false;
+  const drain = restartLease.waitForWrites().then(() => { drained = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(drained, false);
+  const rejected = await supervisor.requestManaged(
+    createCoreRequestEnvelope("startWatch", { profile, includeStateDb: true }, "watch-after-restart"),
+    profile
+  );
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.error.code, "OPERATION_BUSY");
+  assert.equal(rejected.error.details.busyScope, "codex-home");
+  assert.equal((await firstWatch).ok, true);
+  await drain;
+  assert.equal(drained, true);
+  assert.equal(supervisor.snapshot.writeInProgress, false);
+  restartLease.release();
+  await supervisor.shutdown();
 });
 
 test("apply lifecycle is correlated and cancellation waits for the terminal response", async () => {
@@ -347,7 +545,7 @@ test("unknown dispatch operation event fails the generation closed", async () =>
   assert.equal(supervisor.snapshot.state, "crashed");
 });
 
-test("incompatible C6-only capability hello fails before business dispatch", async () => {
+test("incompatible read-only capability hello fails before C8 business dispatch", async () => {
   const children = [];
   const supervisor = new CoreRuntimeSupervisor({
     appVersion: "0.5.0",

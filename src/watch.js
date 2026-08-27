@@ -243,6 +243,13 @@ export async function runWatch({
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        const isRecoveryBlocked = error?.code === "RECOVERY_REQUIRED"
+          || error?.code === "PENDING_TRANSACTION";
+        if (isRecoveryBlocked) {
+          log(`[${new Date().toISOString()}] Watcher stopped: explicit recovery is required.`);
+          await shutdown("recovery-required", task);
+          return;
+        }
         // SQLite being in use is a normal transient condition while Codex
         // is actively writing. Don't crash; just retry on the next event.
         const isTypedSqliteBusy = error?.code === "SQLITE_BUSY";

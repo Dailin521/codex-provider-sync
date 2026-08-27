@@ -74,11 +74,31 @@ import {
   findPendingTransactions,
   getAppliedJournalTargets,
   getStartedJournalTargets,
-  readTransactionJournal,
-  markBackupTransactionRolledBack
+  readTransactionJournal
 } from "./transaction-journal.js";
+import {
+  acknowledgePendingRestore,
+  captureRestoreSourceIdentity,
+  executeRestoreV2,
+  restoreJournalCoverageIsComplete,
+  restoreJournalMatchesPhysicalHome,
+  restoreJournalMatchesSource
+} from "./restore-v2.js";
 
 const planLedger = new PlanLedger();
+
+function issuePreparedPlan(operation, summary, internal) {
+  const plan = planLedger.issue(operation, summary, internal);
+  if (internal.actor === "manual") {
+    operationCoordinator.registerManualIntent(
+      internal.codexHome,
+      plan.planId,
+      plan.expiresAt,
+      internal.platform
+    );
+  }
+  return plan;
+}
 
 function pathComparisonKey(value) {
   const resolved = path.resolve(value);
@@ -448,7 +468,10 @@ async function scanStatus({
     rolloutScanComplete: lockedPaths.length === 0,
     pendingTransactions: pendingTransactions.map((transaction) => ({
       operationId: transaction.operationId ?? null,
+      operationKind: transaction.operationKind ?? "sync",
       state: transaction.state,
+      sourceBackupId: transaction.prepared?.sourceBackup?.backupId ?? path.basename(transaction.backupDir),
+      preRestoreSnapshotId: transaction.prepared?.preRestoreSnapshot?.backupId ?? null,
       backupDir: transaction.backupDir,
       journalPath: transaction.filePath
     }))
@@ -509,7 +532,10 @@ async function blockedStatus(codexHome, profile, operation, platform, details = 
       const pendingTransactions = await findPendingTransactions(codexHome);
       status.pendingTransactions = pendingTransactions.map((transaction) => ({
         operationId: transaction.operationId ?? null,
+        operationKind: transaction.operationKind ?? "sync",
         state: transaction.state,
+        sourceBackupId: transaction.prepared?.sourceBackup?.backupId ?? path.basename(transaction.backupDir),
+        preRestoreSnapshotId: transaction.prepared?.preRestoreSnapshot?.backupId ?? null,
         backupDir: transaction.backupDir,
         journalPath: transaction.filePath
       }));
@@ -727,7 +753,7 @@ async function verifyExpectedPlanState({
   platform,
   backupDir = null
 }) {
-  if (!expectedPlanState) return;
+  if (!expectedPlanState) return null;
   let currentProfile = expectedPlanState.profile;
   if (typeof expectedPlanState.profileResolver === "function") {
     try {
@@ -760,6 +786,7 @@ async function verifyExpectedPlanState({
       details: { reason }
     });
   }
+  return actual;
 }
 
 async function runSyncCore({
@@ -1386,6 +1413,8 @@ async function runRestoreCore({
   allowSqliteHomeRelocation = false,
   platform,
   faultInjector,
+  signal,
+  onProgress,
   expectedPlanState
 }) {
   if (!backupDir) {
@@ -1403,6 +1432,7 @@ async function runRestoreCore({
   }
   const releaseLock = await acquireLock(codexHome, "restore");
   let releaseStateDbLock = null;
+  let stateDbResource = null;
   try {
     const configText = await readConfigText(path.join(codexHome, "config.toml"));
     if (!expectedPlanState && expectedConfigText !== undefined && configText !== expectedConfigText) {
@@ -1419,20 +1449,11 @@ async function runRestoreCore({
     const normalizedBackupDir = path.resolve(backupDir);
     if (restoreDatabase) {
       const stateDbTargetPath = await resolveRestoreStateDbTargetPath(normalizedBackupDir, storage);
-      ({ release: releaseStateDbLock } = await acquireStateDbLock(
+      ({ release: releaseStateDbLock, resource: stateDbResource } = await acquireStateDbLock(
         stateDbTargetPath,
         "restore",
         { platform }
       ));
-    }
-    const foreignPending = (await findPendingTransactions(codexHome))
-      .filter((transaction) => pathComparisonKey(transaction.backupDir) !== pathComparisonKey(normalizedBackupDir));
-    if (foreignPending.length > 0) {
-      throw new CoreError(
-        "RECOVERY_REQUIRED",
-        "An unrelated unfinished transaction must be resolved before this restore.",
-        { suggestedAction: "Restore the transaction-bound managed backup before starting another write." }
-      );
     }
     await verifyExpectedPlanState({
       expectedPlanState,
@@ -1442,6 +1463,85 @@ async function runRestoreCore({
       platform,
       backupDir: normalizedBackupDir
     });
+    const sourceBackup = {
+      backupId: path.basename(normalizedBackupDir),
+      backupDir: normalizedBackupDir,
+      revision: await captureRestoreSourceIdentity(normalizedBackupDir)
+    };
+    const requestedKinds = [
+      ...(restoreConfig ? ["config", "globalState"] : []),
+      ...(restoreDatabase ? ["sqlite"] : []),
+      ...(restoreSessions ? ["rollout"] : [])
+    ];
+    const pending = await findPendingTransactions(codexHome);
+    const legacyPending = pending.filter((transaction) => transaction.operationKind !== "restore");
+    const restorePending = pending.filter((transaction) => transaction.operationKind === "restore");
+    const foreignLegacy = legacyPending.filter(
+      (transaction) => pathComparisonKey(transaction.backupDir) !== pathComparisonKey(normalizedBackupDir)
+    );
+    const boundRestore = [];
+    const foreignRestore = [];
+    for (const transaction of restorePending) {
+      const preparedSource = transaction.prepared?.sourceBackup;
+      const physicalHomeMatches = await restoreJournalMatchesPhysicalHome(
+        transaction,
+        storage.codexHome,
+        platform
+      );
+      const committedSourceLocationMatches = transaction.state === "committed-pending-ack"
+        && preparedSource?.backupId === sourceBackup.backupId
+        && typeof preparedSource?.backupDir === "string"
+        && pathComparisonKey(preparedSource.backupDir) === pathComparisonKey(sourceBackup.backupDir);
+      if ((restoreJournalMatchesSource(transaction, sourceBackup, platform)
+          || committedSourceLocationMatches)
+          && physicalHomeMatches
+          && restoreJournalCoverageIsComplete(transaction, requestedKinds)) {
+        boundRestore.push(transaction);
+      } else {
+        foreignRestore.push(transaction);
+      }
+    }
+    if (foreignLegacy.length > 0 || foreignRestore.length > 0) {
+      throw new CoreError(
+        "RECOVERY_REQUIRED",
+        "An unrelated unfinished transaction must be resolved before this restore.",
+        {
+          details: { operationKind: "restore", foreignPendingCount: foreignLegacy.length + foreignRestore.length },
+          suggestedAction: "Restore the transaction-bound managed backup before starting another write."
+        }
+      );
+    }
+    const committedPendingAck = boundRestore.filter(
+      (transaction) => transaction.state === "committed-pending-ack" && !transaction.invalidTail
+    );
+    if (committedPendingAck.length > 0) {
+      if (committedPendingAck.length !== 1 || boundRestore.length !== 1) {
+        throw new CoreError(
+          "RECOVERY_REQUIRED",
+          "Multiple Restore acknowledgements cannot be reconciled automatically.",
+          { details: { operationKind: "restore" } }
+        );
+      }
+      const acknowledgement = await acknowledgePendingRestore(committedPendingAck[0], {
+        faultInjector,
+        stateDbResource,
+        storage,
+        onProgress,
+        platform
+      });
+      const metadata = JSON.parse(
+        await fs.readFile(path.join(normalizedBackupDir, "metadata.json"), "utf8")
+      );
+      return {
+        ...metadata,
+        restoreVersion: 2,
+        restoreOperationId: acknowledgement.completed.operationId,
+        preRestoreSnapshotId: acknowledgement.manifest.preRestoreSnapshot.backupId,
+        restoreJournalState: "completed",
+        commitAcknowledgementRecovered: true,
+        resolvedOperationIds: acknowledgement.manifest.resolvesOperationIds ?? []
+      };
+    }
     let boundJournal = null;
     try {
       boundJournal = await readTransactionJournal(
@@ -1499,14 +1599,23 @@ async function runRestoreCore({
         throw error;
       }
     }
-    const result = await restoreBackup(normalizedBackupDir, storage, {
+    const result = await executeRestoreV2({
+      storage,
+      sourceBackup,
       restoreConfig,
       restoreDatabase,
       restoreSessions,
-      allowSqliteHomeRelocation
+      allowSqliteHomeRelocation,
+      stateDbResource,
+      resolvesOperationIds: boundRestore
+        .map((transaction) => transaction.operationId)
+        .filter((value) => typeof value === "string" && value.length > 0),
+      faultInjector,
+      signal,
+      onProgress,
+      platform
     });
-    await markBackupTransactionRolledBack(normalizedBackupDir);
-    // The restore and its journal marker are already durable. Refreshing the
+    // The Restore and its journals are already durable. Refreshing the
     // inventory only corrects metadata.json bookkeeping, so surface a failure as
     // a warning instead of reporting a completed restore as failed.
     try {
@@ -1669,7 +1778,7 @@ async function issueSyncLikePlan(operation, options, switchIntent = null) {
         faultInjector: options.faultInjector,
         signal: options.signal
       };
-  return planLedger.issue(operation, summary, {
+  return issuePreparedPlan(operation, summary, {
     codexHome: context.codexHome,
     platform: options.platform,
     actor: options.__actor === "watch" ? "watch" : "manual",
@@ -1785,11 +1894,11 @@ export async function prepareRestore(options = {}) {
       stateDbFilesToChange: restoreDatabase ? 1 : 0,
       configFilesToChange: restoreConfig ? 1 : 0,
       lockedRolloutFiles: context.revisions.lockedRolloutFiles,
-      backupExpected: false
+      backupExpected: true
     },
     warnings
   };
-  return planLedger.issue("restore", summary, {
+  return issuePreparedPlan("restore", summary, {
     codexHome: context.codexHome,
     platform: options.platform,
     actor: "manual",
@@ -1802,7 +1911,9 @@ export async function prepareRestore(options = {}) {
       restoreSessions,
       allowSqliteHomeRelocation: Boolean(options.allowSqliteHomeRelocation),
       platform: options.platform,
-      faultInjector: options.faultInjector
+      faultInjector: options.faultInjector,
+      signal: options.signal,
+      onProgress: options.onProgress
     },
     expectedPlanState: {
       profile: context.profile,
@@ -1889,6 +2000,7 @@ async function applyPrepared(input, operation, execute, control = {}) {
   const internal = entry.internal;
   const active = operationCoordinator.begin(internal.codexHome, operation, {
     actor: internal.actor,
+    planId: input.planId,
     platform: internal.platform
   });
   notifyOperationStarted(control.onOperationStarted, {

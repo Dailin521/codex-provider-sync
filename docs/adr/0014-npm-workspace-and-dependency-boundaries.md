@@ -2,8 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-08-25
-- Amended: 2026-08-26 (C5 shared UI/Web runtime and C6 Electron read-only runtime)
-- Scope: vNext C4 workspace baseline, C5 shared UI/Web and C6 Electron dependency boundaries
+- Amended: 2026-08-27 (C8 Main-only updater runtime)
+- Scope: vNext C4 workspace baseline, C5 shared UI/Web, C6 Electron and C8 updater dependency boundaries
 
 ## Context
 
@@ -52,12 +52,15 @@ C6 的 Electron、electron-vite、electron-builder、Desktop Vite/React plugin �
 | Electron | `44.0.0` | C6 解析时最新 stable，并处于 Electron 官方支持线；只在 Desktop workspace |
 | `electron-vite` | `5.0.0` | C6 最新 stable；peer 支持 Vite 5～7，与 Desktop Vite 7.3.6 闭合 |
 | `electron-builder` | `26.15.7` | C6 最新 stable；先提供三平台 unpacked Alpha 构建，发布目标与 native fallback 留到 C9 |
+| `electron-updater` | `6.8.9` | C8 解析时最新 stable，非 `next`/preview；仅 Desktop production Main 使用，与 `electron-builder` 的 GitHub provider 元数据闭合 |
 | Desktop Vite / React plugin | `vite 7.3.6`、`@vitejs/plugin-react 5.2.0` | `electron-vite 5.0.0` 的兼容组合；与 Web workspace 的 Vite 8/plugin 6 分开锁定 |
 | `better-sqlite3` | `8.7.0` | 保留现有根 optional fallback；更新版本不满足根 Node 16 合同，不在 C4 强升 |
 
 所有直接 dependency/devDependency/optionalDependency/peerDependency 使用精确版本，不使用 `^`、`~`、`workspace:*`、`file:` 或未锁定 URL。传递依赖由唯一 lockfile 锁定。候选经 `npm audit --omit=dev --audit-level=moderate` 与全树 `npm audit --audit-level=high` 检查；任一不合格候选不得进入 checkpoint。
 
 Electron、electron-vite 与 electron-builder 已在 C6 按上述规则解析；`better-sqlite3` 的 Electron ABI fallback、`asarUnpack` 与发布级 native driver matrix 仍由 C9 解析和验证。不得把 Electron 写入根 manifest。
+
+C8 增加的 `electron-updater` 只能由 `apps/desktop/src/main/updater.ts` 动态加载；Renderer、Preload、Utility、共享 UI 和 Core 不得导入 updater、指定 URL/channel 或接触原始 `UpdateInfo`。安装前由同一 `CoreRuntimeSupervisor` 同步关闭 restart gate，排空已 admission 的写请求，再执行 active Watch 与全部 Profile recovery 复核；失败路径必须重新开放 gate。C8 实现受控状态机与安装门禁，但 `apps/desktop` 版本仍为 `0.0.0` 时发布通道保持 disabled；实际版本注入、签名、更新 metadata 与真实跨版本升级 smoke 属于 C9/C10 发布门禁，不因依赖已接入而视为已发布。
 
 ## Invariants
 

@@ -79,14 +79,21 @@ Fixture 不是用户数据样本，严禁从真实 `~/.codex`、认证文件或�
 | `lock-unverifiable` | future protocol、损坏 owner、进程启动身份不可读、ABA/目录身份变化 | fail closed，返回 `LOCK_UNVERIFIABLE`；不得误报普通 Busy，不得自动删除不可证明归属的锁 |
 | `external-write-status-snapshot` | 真实第二进程持有 Home→State 双锁，或另一 Home 只持共享 State DB 锁，并在锁内改变 config/SQLite | Core 与 Local Web 不扫描中间态；有缓存时逐字段保留最后完整 snapshot 并附 operation，无缓存时 `rolloutScanComplete:false`；不可验证锁不得显示 aligned/healthy |
 | `plan-ledger-replay-expiry` | Plan 过期、重放、跨 operation、重启失效、篡改 apply payload | 只允许当前进程内 10 分钟单次消费；失效返回 `PLAN_EXPIRED`，附加字段返回 `INVALID_INPUT`，均无 Backup/Journal/mutation |
+| `plan-ledger-abandoned-expiry` | Prepare 后调用方离开且没有 consume/waiter；同一 Home 有多个不同 expiry 的人工 intent | 单一最早到期 timer 自治清理并 rearm，不阻止进程退出；Watch 在最后 intent 到期后只恢复一次，不产生每 waiter timer |
 | `watch-manual-priority` | 单一文件事件触发 Watch，但人工 Apply 已持有本进程协调器；等待期间继续产生重复事件 | Watch 不并发、不计失败；保留并合并 reasons，人工 operation completion 后恰运行一次 follow-up；stop 后 callback 不再 Apply |
 | `pending-journal` | Managed Backup 中存在未终结 Journal | Status 可读并暴露恢复证据；Sync/Switch 被 `PENDING_TRANSACTION`/`RECOVERY_REQUIRED` 阻断。Prune 仍可作为 recovery-safe maintenance 执行，但必须保护所有 Pending Journal 引用的备份 |
 | `foreign-pending-restore` | Node 创建 Pending Journal/Backup 后由 .NET Restore，及反方向 | 两个方向都只按受管清单恢复，清除 Pending 前必须落入合法 terminal；差异需显式裁决 |
 | `restore-mid-failure` | Restore 在某一目标已替换后注入失败 | 不能报告成功；必须完整补偿，或保留可操作证据并返回 `RECOVERY_REQUIRED`，不得留下无 Journal 的半恢复状态 |
 | `restore-v2-pre-snapshot-failure` | Restore v2 的恢复前 snapshot 在任何目标 mutation 前失败 | `BACKUP_FAILED` 或更具体失败；不创建 restore mutation，source backup 与原始目标 Hash 不变 |
 | `restore-v2-journal-crash-matrix` | Restore v2 在 prepared/applying/committing/committed-pending-ack/rollback-pending 和 ack 窗口终止 | 非 terminal 阻断普通写并可由 pre-restore snapshot 或目标 hash 显式收敛；completed/rolled-back/recovery-required 经重新读取确认，不能反向改写 terminal |
-| `restore-v2-foreign-pending` | Node 与 .NET 用对方 source backup 的 pending journal 触发 Restore v2 | 先验证 foreign manifest/journal 与目标边界；当前 Restore 仍创建自身 snapshot/journal；未知版本 fail closed |
+| `restore-v2-foreign-pending` | Node 或 .NET 留下 Restore v2 pending，另一运行时选择不同 source backup 尝试 Restore | 在新 snapshot/journal/mutation 前返回 `RECOVERY_REQUIRED`；foreign raw journal、全部受管 backup inventory 与业务 Hash 不变；未知版本同样 fail closed |
+| `restore-v2-resolver-projection` | 一运行时留下同 source pending，另一运行时以相同 source、持久化物理 Home 和完整 target coverage 显式 Restore | pending、resolver 与当前 locked Home 的稳定物理 identity 全部匹配时，新 Restore 创建独立 snapshot/journal 并耐久到 `completed`；旧 raw journal 不改写，由 exact `resolvesOperationIds` 投影为已解决；Prune 继续保护旧证据 |
+| `restore-v2-manifest-prepared-binding` | 重写 snapshot manifest 的 source/storage/resolver/target 或 snapshot 目录并同步重算 `prepared.manifestSha256` | Node 与 .NET 都在 compensation/ack 前返回 `RECOVERY_REQUIRED`；不读取替换 snapshot、不补偿、不确认完成，业务 Hash 与 source backup 不变 |
+| `restore-v2-persisted-physical-home-binding` | pending 持久化 Home A；相同 lexical Home 经 junction/reparse 换接到 B，或 resolver 持久化 B | B 上 Restore 在新 snapshot/mutation 前返回 `RECOVERY_REQUIRED`；A 的 raw journal 不改写，completed resolver 不能隐藏它；Node↔.NET 双向一致 |
+| `restore-v2-windows-path-alias` | 同一 Windows 物理 Home/source 分别以 8.3 短路径与长路径写入 journal | persisted physical identity 与当前 locked Home 通过稳定 realpath、不区分大小写匹配；无法证明时 fail closed，不以 lexical 字符串或换接后的当前目标放行 |
+| `restore-v2-reparse-swap` | snapshot/apply 后把 rollout 或其父目录换成指向 Home 外的 junction/symlink，再进入 compensation/ack | 每个 mutation/ack 边界重新验证物理 Home 与 reparse segment；外部目标字节不变，journal 进入 `recovery-required`，不得按相同内容 hash 误确认 |
 | `restore-v2-ack-reconciliation` | `committed-pending-ack` 已持久化但 API acknowledgement/observer 失败 | 不把已提交 Restore 报为可回滚失败；重新读取 journal 与目标 Hash 后收敛到 `completed` 或 `recovery-required` |
+| `desktop-update-install-gate` | Update 已下载，同时注入已入场但未 dispatch 的 write、后续 write、active Watch、pending recovery、无法验证 Profile、installer 异常或安装竞争 | Supervisor 同步关闭 gate，计入并排空已 admission 的写，拒绝后续写，再强制刷新全部 Profile Status；任一条件不安全或 installer 失败都不退出并重新开放 gate。IPC 为 null-only，DTO 不含 URL/path/release notes/raw error |
 | `bidirectional-backup-roundtrip` | Node Backup→.NET Restore；.NET Backup→Node Restore | 两个方向恢复到等价语义状态；正文和不应变化字段逐字节一致；Metadata v1/v2 兼容边界明确 |
 | `journal-crash-matrix` | 在 prepared/applying/applied/commit/rollback 及 ack 窗口真实终止进程 | durable terminal 优先；非 terminal 阻断后续写；不得对 committed 状态补回滚事件；显式 Restore 可收敛 |
 | `rollback-recovery-required` | mutation 后使自动 rollback 的一个或多个目标失败 | 原始错误与所有 rollback error 均保留；Backup、completed/uncompleted targets 和 `RECOVERY_REQUIRED` 可用于人工恢复 |
@@ -96,6 +103,8 @@ Fixture 不是用户数据样本，严禁从真实 `~/.codex`、认证文件或�
 V1/C3 的 executable mapping：Plan/revision 见 `test/plan-ledger.test.js`、`test/operation-revision.test.js`、`test/plan-apply.test.js`；Node 锁与外部 Status 见 `test/state-db-lock.test.js`、`test/status-coordination.test.js`；Watch 见 `test/watch.test.js`；Web transport 见 `test/web-server.test.js`；.NET 与跨运行时锁见 `StateDbLockResourceTests`、`DualResourceLockIntegrationTests`、`CrossRuntimeStateDbLockTests`、`LockServiceTests`。C5 的双向 backup/foreign pending executable mapping 为 `test-support/cross-runtime-fixtures.mjs`、`test-support/cross-runtime-node-crash-host.mjs`、`.NET FixtureHost` 与既有 `.NET CrashHost`；完整命令与结果记录在 `evidence/C5_SHARED_UI_WEB_2026-08-26.md`。
 
 C7 的 executable mapping 为 `test-support/desktop-sync-switch-fixture.mjs`、`apps/desktop/e2e/desktop-sync-switch.spec.mjs`、`apps/desktop/tests/ipc-router.test.mjs`、`runtime-supervisor.test.mjs` 与 `test/plan-apply.test.js`。它使用临时 Home、真实 SQLite、Windows `FileShare.None`、受控 test-build Utility 终止和完整目标 Hash/语义快照；生产 Core host control 不包含故障注入能力。当前 Windows 主机的 Ubuntu 因 WSL `ext4.vhdx` 缺失无法启动，因此 `wsl-unc-unchanged-hash` 仅按明确原因 Skip，仍是远端/修复后本机必须闭合的 C7 门槛；详见 `evidence/C7_ELECTRON_SYNC_SWITCH_2026-08-26.md`。
+
+C8 的 executable mapping 为 `test/restore-v2-state-machine.test.js`、`RestoreJournalServiceTests`、`RestoreV2IntegrationTests`、`test-support/cross-runtime-fixtures.mjs`、Node/.NET CrashHost、`test/watch.test.js`、`test/operation-coordinator.test.js`、`apps/desktop/tests/updater.test.mjs`、Desktop contracts/unit tests 与隐藏模式 Electron E2E。跨运行时 harness 覆盖 applying/prepared/committing/rollback-pending、commit ack、foreign pending、unknown schema、Windows 物理路径 alias、manifest/prepared 全量绑定和 persisted physical Home mismatch；原 journal 保留与 resolver projection 是显式裁决，不再把 raw 非终态伪报为 `rolled-back`。Updater fixture 只使用注入 port，不访问真实 Release；C9 必须另做签名产物的检查/下载/重启升级 smoke。
 
 ## 6. Restore、Backup 与 Prune
 

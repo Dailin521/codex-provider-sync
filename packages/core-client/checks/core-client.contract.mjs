@@ -4,7 +4,9 @@ import test from "node:test";
 import {
   CoreClientError,
   CoreTransportError,
+  DESKTOP_MAINTENANCE_METHODS,
   DESKTOP_READ_METHODS,
+  DESKTOP_RESTORE_METHODS,
   DESKTOP_SYNC_SWITCH_METHODS,
   DesktopCoreClient,
   HttpCoreClient,
@@ -238,6 +240,8 @@ test("DesktopCoreClient reuses the Core envelope through one read-only bridge", 
       };
     },
     async requestSyncSwitch() { throw new Error("unexpected write"); },
+    async requestRestore() { throw new Error("unexpected restore"); },
+    async requestMaintenance() { throw new Error("unexpected maintenance"); },
     subscribeOperation() { return () => {}; },
     async cancelOperation() { return { accepted: false }; }
   }, { requestIdFactory: () => "desktop-status" });
@@ -257,10 +261,11 @@ test("DesktopCoreClient reuses the Core envelope through one read-only bridge", 
   ]);
 });
 
-test("DesktopCoreClient allows only C7 Sync/Switch and forwards lifecycle cancellation", async () => {
+test("DesktopCoreClient routes the exact C8 surface and forwards lifecycle cancellation", async () => {
   let calls = 0;
   let listener = null;
   const cancellations = [];
+  const routed = [];
   let finishApply;
   const client = new DesktopCoreClient({
     async requestReadOnly() {
@@ -269,6 +274,7 @@ test("DesktopCoreClient allows only C7 Sync/Switch and forwards lifecycle cancel
     },
     async requestSyncSwitch(request) {
       calls += 1;
+      routed.push(request.method);
       if (request.method === "prepareSync") {
         return {
           protocolVersion: 1,
@@ -307,10 +313,57 @@ test("DesktopCoreClient allows only C7 Sync/Switch and forwards lifecycle cancel
         }
       }); });
     },
+    async requestRestore(request) {
+      calls += 1;
+      routed.push(request.method);
+      return {
+        protocolVersion: 1,
+        requestId: request.requestId,
+        ok: true,
+        result: {
+          schemaVersion: 1,
+          planId: "r".repeat(32),
+          operation: "restore",
+          createdAt: "2026-08-26T00:00:00.000Z",
+          expiresAt: "2026-08-26T00:10:00.000Z",
+          profile: { id: "default", revision: "r1" },
+          storageRevision: "storage",
+          configRevision: "config",
+          rolloutRevision: "rollout",
+          stateDbRevision: "state-db",
+          backupRevision: "backup",
+          target: { backupId: "managed" },
+          impact: { backupExpected: true },
+          warnings: [],
+          requiresConfirmation: true
+        }
+      };
+    },
+    async requestMaintenance(request) {
+      calls += 1;
+      routed.push(request.method);
+      return {
+        protocolVersion: 1,
+        requestId: request.requestId,
+        ok: true,
+        result: request.method === "pruneBackups"
+          ? { deletedCount: 0, remainingCount: 1, freedBytes: 0 }
+          : {
+              schemaVersion: 1,
+              watchId: "11111111-1111-4111-8111-111111111112",
+              status: "running",
+              startedAt: "2026-08-26T00:00:00.000Z",
+              stoppedAt: null,
+              stopReason: null,
+              includeStateDb: true,
+              once: false
+            }
+      };
+    },
     subscribeOperation(next) { listener = next; return () => { listener = null; }; },
     async cancelOperation(input) { cancellations.push(input); return { accepted: true }; }
   }, { requestIdFactory: (() => {
-    const ids = ["desktop-prepare", "desktop-apply"];
+    const ids = ["desktop-prepare", "desktop-apply", "desktop-restore", "desktop-prune", "desktop-watch"];
     return () => ids.shift() ?? `desktop-denied-${calls}`;
   })() });
   const plan = await client.prepareSync({ ...profile, keepCount: 5 });
@@ -352,19 +405,35 @@ test("DesktopCoreClient allows only C7 Sync/Switch and forwards lifecycle cancel
   await assert.rejects(applying, (error) => (
     error instanceof CoreClientError && error.code === "OPERATION_CANCELLED"
   ));
-  await assert.rejects(
-    client.applyRestore({ schemaVersion: 1, planId: "plan-denied" }),
-    (error) => error instanceof CoreClientError && error.code === "PERMISSION_DENIED"
-  );
-  await assert.rejects(
-    client.startWatch(profile),
-    (error) => error instanceof CoreClientError && error.code === "PERMISSION_DENIED"
-  );
+  const restore = await client.prepareRestore({
+    ...profile,
+    backupId: "managed",
+    restoreConfig: true,
+    restoreDatabase: true,
+    restoreSessions: true
+  });
+  assert.equal(restore.operation, "restore");
+  assert.equal((await client.pruneBackups({ ...profile, keepCount: 5 })).remainingCount, 1);
+  assert.equal((await client.startWatch({ ...profile, includeStateDb: true })).status, "running");
   assert.deepEqual(DESKTOP_SYNC_SWITCH_METHODS, [
     "prepareSync",
     "applySync",
     "prepareSwitch",
     "applySwitch"
   ]);
-  assert.equal(calls, 2);
+  assert.deepEqual(DESKTOP_RESTORE_METHODS, ["prepareRestore", "applyRestore"]);
+  assert.deepEqual(DESKTOP_MAINTENANCE_METHODS, [
+    "pruneBackups",
+    "startWatch",
+    "stopWatch",
+    "getWatchStatus"
+  ]);
+  assert.deepEqual(routed, [
+    "prepareSync",
+    "applySync",
+    "prepareRestore",
+    "pruneBackups",
+    "startWatch"
+  ]);
+  assert.equal(calls, 5);
 });

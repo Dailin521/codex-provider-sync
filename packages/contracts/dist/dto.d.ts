@@ -179,13 +179,64 @@ export interface WatchStatusList {
     schemaVersion: ContractSchemaVersion;
     watches: WatchSnapshot[];
 }
+export interface DiagnosticsRuntime {
+    node: string;
+    platform: string;
+    arch: string;
+}
+export type DiagnosticsSqliteHomeSource = "cli" | "config" | "env" | "default" | "unknown";
+export interface DiagnosticsStorage {
+    sqliteHomeSource: DiagnosticsSqliteHomeSource;
+    stateDbFound: boolean;
+    sqliteSupported: boolean;
+}
+export interface DiagnosticsProviderDistribution {
+    sessions: Record<string, number>;
+    archived_sessions: Record<string, number>;
+}
+export interface DiagnosticsSqliteDistribution extends DiagnosticsProviderDistribution {
+    unreadable?: true;
+}
+export interface DiagnosticsProvider {
+    current: string;
+    implicit: boolean;
+    configured: string[];
+    rolloutCounts: DiagnosticsProviderDistribution;
+    sqliteCounts: DiagnosticsSqliteDistribution | null;
+}
+export type DiagnosticsTransactionState = "prepared" | "applying" | "applied" | "skipped" | "committing" | "committed-pending-ack" | "rollback-pending" | "rollingBack" | "recovery-required" | "recoveryRequired" | "unknown";
+export interface DiagnosticsPendingTransaction {
+    operationId: string | null;
+    operationKind: "sync" | "switch" | "restore";
+    state: DiagnosticsTransactionState;
+    sourceBackupId: string | null;
+    preRestoreSnapshotId: string | null;
+}
+export interface DiagnosticsOperationState {
+    operationId?: string;
+    operation?: "sync" | "switch" | "restore" | "prune" | "watch" | "unknown";
+    actor?: "manual" | "watch" | "external";
+    startedAt?: string;
+    busyScope?: "codex-home" | "state-db";
+    lockState?: string;
+    errorCode?: string;
+}
+export interface DiagnosticsSafety {
+    storageRevision?: string;
+    pendingRecovery: boolean;
+    pendingTransactions: DiagnosticsPendingTransaction[];
+    operationInProgress: DiagnosticsOperationState | null;
+    rolloutScanComplete: boolean;
+    lockedRolloutCount: number;
+    projectThreadVisibilityAvailable: boolean;
+}
 export interface DiagnosticsSnapshot {
     schemaVersion: ContractSchemaVersion;
     generatedAt: string;
-    runtime: JsonObject;
-    storage: JsonObject;
-    provider: JsonObject;
-    safety: JsonObject;
+    runtime: DiagnosticsRuntime;
+    storage: DiagnosticsStorage;
+    provider: DiagnosticsProvider;
+    safety: DiagnosticsSafety;
 }
 export interface ProgressEvent {
     stage: string;

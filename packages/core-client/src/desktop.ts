@@ -31,14 +31,38 @@ export const DESKTOP_SYNC_SWITCH_METHODS = Object.freeze([
 ] as const satisfies readonly CoreMethodName[]);
 
 export type DesktopSyncSwitchMethod = typeof DESKTOP_SYNC_SWITCH_METHODS[number];
-export type DesktopRuntimeMethod = DesktopReadMethod | DesktopSyncSwitchMethod;
+
+export const DESKTOP_RESTORE_METHODS = Object.freeze([
+  "prepareRestore",
+  "applyRestore"
+] as const satisfies readonly CoreMethodName[]);
+
+export type DesktopRestoreMethod = typeof DESKTOP_RESTORE_METHODS[number];
+
+export const DESKTOP_MAINTENANCE_METHODS = Object.freeze([
+  "pruneBackups",
+  "startWatch",
+  "stopWatch",
+  "getWatchStatus"
+] as const satisfies readonly CoreMethodName[]);
+
+export type DesktopMaintenanceMethod = typeof DESKTOP_MAINTENANCE_METHODS[number];
+export type DesktopManagedMethod =
+  | DesktopSyncSwitchMethod
+  | DesktopRestoreMethod
+  | DesktopMaintenanceMethod;
+export type DesktopRuntimeMethod = DesktopReadMethod | DesktopManagedMethod;
 export const DESKTOP_RUNTIME_METHODS = Object.freeze([
   ...DESKTOP_READ_METHODS,
-  ...DESKTOP_SYNC_SWITCH_METHODS
+  ...DESKTOP_SYNC_SWITCH_METHODS,
+  ...DESKTOP_RESTORE_METHODS,
+  ...DESKTOP_MAINTENANCE_METHODS
 ] as const satisfies readonly DesktopRuntimeMethod[]);
 
 const DESKTOP_READ_METHOD_SET = new Set<CoreMethodName>(DESKTOP_READ_METHODS);
 const DESKTOP_SYNC_SWITCH_METHOD_SET = new Set<CoreMethodName>(DESKTOP_SYNC_SWITCH_METHODS);
+const DESKTOP_RESTORE_METHOD_SET = new Set<CoreMethodName>(DESKTOP_RESTORE_METHODS);
+const DESKTOP_MAINTENANCE_METHOD_SET = new Set<CoreMethodName>(DESKTOP_MAINTENANCE_METHODS);
 
 export function isDesktopReadMethod(method: CoreMethodName): method is DesktopReadMethod {
   return DESKTOP_READ_METHOD_SET.has(method);
@@ -50,8 +74,24 @@ export function isDesktopSyncSwitchMethod(
   return DESKTOP_SYNC_SWITCH_METHOD_SET.has(method);
 }
 
+export function isDesktopRestoreMethod(method: CoreMethodName): method is DesktopRestoreMethod {
+  return DESKTOP_RESTORE_METHOD_SET.has(method);
+}
+
+export function isDesktopMaintenanceMethod(
+  method: CoreMethodName
+): method is DesktopMaintenanceMethod {
+  return DESKTOP_MAINTENANCE_METHOD_SET.has(method);
+}
+
+export function isDesktopManagedMethod(method: CoreMethodName): method is DesktopManagedMethod {
+  return isDesktopSyncSwitchMethod(method)
+    || isDesktopRestoreMethod(method)
+    || isDesktopMaintenanceMethod(method);
+}
+
 export function isDesktopRuntimeMethod(method: CoreMethodName): method is DesktopRuntimeMethod {
-  return isDesktopReadMethod(method) || isDesktopSyncSwitchMethod(method);
+  return isDesktopReadMethod(method) || isDesktopManagedMethod(method);
 }
 
 export interface DesktopCancelOperationInput {
@@ -68,6 +108,12 @@ export interface DesktopCoreBridge {
     envelope: CoreRequestEnvelope<M>
   ): Promise<unknown>;
   requestSyncSwitch<M extends DesktopSyncSwitchMethod>(
+    envelope: CoreRequestEnvelope<M>
+  ): Promise<unknown>;
+  requestRestore<M extends DesktopRestoreMethod>(
+    envelope: CoreRequestEnvelope<M>
+  ): Promise<unknown>;
+  requestMaintenance<M extends DesktopMaintenanceMethod>(
     envelope: CoreRequestEnvelope<M>
   ): Promise<unknown>;
   subscribeOperation(listener: (event: CoreOperationEventEnvelope) => void): () => void;
@@ -117,11 +163,26 @@ class DesktopCoreTransport implements CoreTransport {
       });
     }
 
-    const isApply = envelope.method === "applySync" || envelope.method === "applySwitch";
-    if (!isApply) {
-      const request = this.#bridge.requestSyncSwitch(
-        envelope as CoreRequestEnvelope<DesktopSyncSwitchMethod>
+    const requestManaged = (): Promise<unknown> => {
+      if (isDesktopSyncSwitchMethod(envelope.method)) {
+        return this.#bridge.requestSyncSwitch(
+          envelope as CoreRequestEnvelope<DesktopSyncSwitchMethod>
+        );
+      }
+      if (isDesktopRestoreMethod(envelope.method)) {
+        return this.#bridge.requestRestore(
+          envelope as CoreRequestEnvelope<DesktopRestoreMethod>
+        );
+      }
+      return this.#bridge.requestMaintenance(
+        envelope as CoreRequestEnvelope<DesktopMaintenanceMethod>
       );
+    };
+    const isApply = envelope.method === "applySync"
+      || envelope.method === "applySwitch"
+      || envelope.method === "applyRestore";
+    if (!isApply) {
+      const request = requestManaged();
       if (!options.signal) return request;
       return new Promise((resolve, reject) => {
         const onAbort = () => reject(abortError());
@@ -151,9 +212,7 @@ class DesktopCoreTransport implements CoreTransport {
       void this.#bridge.cancelOperation({ requestId: envelope.requestId, operationId });
     };
     options.signal?.addEventListener("abort", onAbort, { once: true });
-    const request = this.#bridge.requestSyncSwitch(
-      envelope as CoreRequestEnvelope<DesktopSyncSwitchMethod>
-    );
+    const request = requestManaged();
     return new Promise((resolve, reject) => {
       void request.then(resolve, reject).finally(() => {
         options.signal?.removeEventListener("abort", onAbort);

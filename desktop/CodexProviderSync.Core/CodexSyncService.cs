@@ -13,6 +13,7 @@ public sealed class CodexSyncService
     private readonly SqliteStateService _sqliteStateService;
     private readonly GlobalStateService _globalStateService;
     private readonly BackupService _backupService;
+    private readonly RestoreV2Service _restoreV2Service;
     private readonly LockService _lockService;
     private readonly ProviderDiscoveryService _providerDiscoveryService;
     private readonly CodexStorageLayoutService _storageLayoutService;
@@ -49,6 +50,10 @@ public sealed class CodexSyncService
         _providerDiscoveryService = providerDiscoveryService;
         _storageLayoutService = new CodexStorageLayoutService(codexHomeService, configFileService);
         _backupService = new BackupService(sessionRolloutService, sqliteStateService);
+        _restoreV2Service = new RestoreV2Service(
+            _backupService,
+            sessionRolloutService,
+            sqliteStateService);
     }
 
     public async Task<StatusSnapshot> GetStatusAsync(
@@ -242,6 +247,7 @@ public sealed class CodexSyncService
         BackupSummary backupSummary = await _backupService.GetBackupSummaryAsync(codexHome);
         long backupSummaryDurationMs = ElapsedMilliseconds(backupSummaryStarted);
         IReadOnlyList<PendingTransactionInfo> pendingTransactions = await FileTransactionJournal.FindPendingAsync(codexHome);
+        IReadOnlyList<RestoreJournalInfo> pendingRestores = await RestoreJournalService.FindBlockingAsync(codexHome);
 
         return new StatusSnapshot
         {
@@ -271,6 +277,14 @@ public sealed class CodexSyncService
                     item.State,
                     item.BackupDir,
                     item.JournalPath))
+                .Concat(pendingRestores.Select(static item => new TransactionRecoveryInfo(
+                    item.OperationId,
+                    item.State,
+                    item.SnapshotDir,
+                    item.JournalPath)
+                {
+                    OperationKind = "restore"
+                }))
                 .ToArray(),
             RolloutScanComplete = rolloutInfo.LockedPaths.Count == 0
                 && rolloutInfo.UnreadablePaths.Count == 0,
@@ -1636,20 +1650,40 @@ public sealed class CodexSyncService
             CoreWriteSnapshotBuilder.AssertExactMatch(expectedSnapshot, actualSnapshot);
             AssertSnapshotFresh(snapshotExpiresAtUtc);
         }
-        // BackupService currently exposes an atomic restore operation rather
-        // than per-file cancellation. Honor cancellation until the mutation
-        // boundary, then let that authoritative operation finish and report
-        // its real result instead of returning a false cancelled outcome.
         cancellationToken.ThrowIfCancellationRequested();
-        RestoreResult result = await _backupService.RestoreBackupAsync(
-            preparation.BackupDirectory,
-            preparation.Storage,
-            preparation.Options,
-            expectedStateDbTargetPath: preparation.StateDbTargetPath);
-        await FileTransactionJournal.MarkBackupRolledBackAsync(
-            preparation.BackupDirectory,
-            codexHome,
-            result.TargetProvider);
+        _restoreV2Service.FaultInjector = FaultInjector;
+        RestoreResult result;
+        if (preparation.PendingCommitAcknowledgement is { } pendingAcknowledgement)
+        {
+            RestoreJournalInfo completed = await _restoreV2Service.AcknowledgePendingAsync(
+                pendingAcknowledgement,
+                preparation.Storage,
+                lockedStateDb,
+                cancellationToken);
+            result = new RestoreResult
+            {
+                CodexHome = preparation.Storage.CodexHome,
+                BackupDir = preparation.BackupDirectory,
+                TargetProvider = preparation.RestorePlan.Metadata.TargetProvider,
+                CreatedAt = preparation.RestorePlan.Metadata.CreatedAt,
+                ChangedSessionFiles = preparation.RestorePlan.Metadata.ChangedSessionFiles,
+                RestoreVersion = 2,
+                RestoreOperationId = completed.OperationId,
+                PreRestoreSnapshotId = completed.Prepared?.PreRestoreSnapshot.BackupId,
+                RestoreJournalState = completed.State,
+                CommitAcknowledgementRecovered = true,
+                ResolvedOperationIds = completed.Prepared?.ResolvesOperationIds ?? []
+            };
+        }
+        else
+        {
+            result = await _restoreV2Service.ExecuteAsync(
+                preparation.RestorePlan,
+                preparation.SourceBackup,
+                lockedStateDb,
+                preparation.ResolvesOperationIds,
+                cancellationToken);
+        }
         // The restore and its journal marker are already durable. Refreshing the
         // inventory only corrects metadata.json bookkeeping, so surface a
         // failure as a warning instead of reporting a completed restore as
@@ -1668,7 +1702,13 @@ public sealed class CodexSyncService
                 TargetProvider = result.TargetProvider,
                 CreatedAt = result.CreatedAt,
                 ChangedSessionFiles = result.ChangedSessionFiles,
-                BackupInventoryWarning = $"Backup inventory refresh failed: {error.Message}"
+                BackupInventoryWarning = $"Backup inventory refresh failed: {error.Message}",
+                RestoreVersion = result.RestoreVersion,
+                RestoreOperationId = result.RestoreOperationId,
+                PreRestoreSnapshotId = result.PreRestoreSnapshotId,
+                RestoreJournalState = result.RestoreJournalState,
+                CommitAcknowledgementRecovered = result.CommitAcknowledgementRecovered,
+                ResolvedOperationIds = result.ResolvedOperationIds
             };
         }
     }
@@ -1692,6 +1732,15 @@ public sealed class CodexSyncService
                 storage,
                 options)
             : null;
+        RestoreBackupPlan restorePlan = await _backupService.PrepareRestoreBackupAsync(
+            normalizedBackupDir,
+            storage,
+            options,
+            expectedStateDbTargetPath: stateDbTargetPath,
+            cancellationToken);
+        RestoreBackupIdentity sourceBackup = await RestoreV2Service.CaptureSourceIdentityAsync(
+            normalizedBackupDir,
+            cancellationToken);
         IReadOnlyList<PendingTransactionInfo> pending = await FileTransactionJournal.FindPendingAsync(codexHome);
         PendingTransactionInfo[] foreignPending = pending
             .Where(transaction => !PathComparer.Equals(
@@ -1707,6 +1756,57 @@ public sealed class CodexSyncService
                 foreignPending);
         }
         await EnsurePendingRecoveryCoverageAsync(normalizedBackupDir, codexHome, options);
+        IReadOnlyList<RestoreJournalInfo> pendingRestores =
+            await RestoreJournalService.FindBlockingAsync(codexHome, cancellationToken);
+        string[] requestedKinds = restorePlan.Targets
+            .Select(static target => target.Kind)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        List<RestoreJournalInfo> boundRestores = [];
+        List<RestoreJournalInfo> foreignRestores = [];
+        foreach (RestoreJournalInfo transaction in pendingRestores)
+        {
+            RestoreBackupIdentity? preparedSource = transaction.Prepared?.SourceBackup;
+            bool physicalHomeMatches = RestoreV2Service.JournalMatchesCurrentPhysicalHome(
+                transaction,
+                storage);
+            bool sourceMatches = preparedSource is not null
+                && preparedSource.BackupId == sourceBackup.BackupId
+                && PathsEqual(preparedSource.BackupDir, sourceBackup.BackupDir)
+                && preparedSource.Revision == sourceBackup.Revision;
+            bool committedLocationMatches = transaction.State == "committed-pending-ack"
+                && preparedSource is not null
+                && preparedSource.BackupId == sourceBackup.BackupId
+                && PathsEqual(preparedSource.BackupDir, sourceBackup.BackupDir);
+            bool coverageComplete = transaction.Prepared?.RequiredTargetKinds.All(
+                kind => requestedKinds.Contains(kind, StringComparer.Ordinal)) == true;
+            if ((sourceMatches || committedLocationMatches)
+                && physicalHomeMatches
+                && coverageComplete)
+            {
+                boundRestores.Add(transaction);
+            }
+            else
+            {
+                foreignRestores.Add(transaction);
+            }
+        }
+        if (foreignRestores.Count > 0)
+        {
+            throw new RecoveryRequiredException(
+                "An unrelated unfinished Restore transaction must be resolved before this backup can be used.",
+                foreignRestores.Select(static item => item.SnapshotDir).ToArray());
+        }
+        RestoreJournalInfo[] committedPendingAcknowledgements = boundRestores
+            .Where(static item => item.State == "committed-pending-ack" && !item.InvalidTail)
+            .ToArray();
+        if (committedPendingAcknowledgements.Length > 0
+            && (committedPendingAcknowledgements.Length != 1 || boundRestores.Count != 1))
+        {
+            throw new RecoveryRequiredException(
+                "Multiple Restore acknowledgements cannot be reconciled automatically.",
+                boundRestores.Select(static item => item.SnapshotDir).ToArray());
+        }
         cancellationToken.ThrowIfCancellationRequested();
         return new RestorePreparation(
             codexHome,
@@ -1714,7 +1814,15 @@ public sealed class CodexSyncService
             normalizedBackupDir,
             options,
             storage,
-            stateDbTargetPath);
+            stateDbTargetPath,
+            restorePlan,
+            sourceBackup,
+            boundRestores
+                .Select(static item => item.OperationId)
+                .Where(static value => !string.IsNullOrWhiteSpace(value))
+                .Cast<string>()
+                .ToArray(),
+            committedPendingAcknowledgements.SingleOrDefault());
     }
 
     private async Task<CoreWritePlanSnapshot> BuildRestorePlanSnapshotAsync(
@@ -2015,6 +2123,11 @@ public sealed class CodexSyncService
         return storage with { StateDbLocation = stateDb };
     }
 
+    private static bool PathsEqual(string left, string right) => string.Equals(
+        Path.GetFullPath(left),
+        Path.GetFullPath(right),
+        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+
     private async Task<(StateDbLockResource? Resource, LockHandle? Handle)> AcquireCurrentStateDbLockAsync(
         string codexHome,
         string? explicitSqliteHome,
@@ -2137,5 +2250,9 @@ public sealed class CodexSyncService
         string BackupDirectory,
         RestoreBackupOptions Options,
         CodexStorageLayout Storage,
-        string? StateDbTargetPath);
+        string? StateDbTargetPath,
+        RestoreBackupPlan RestorePlan,
+        RestoreBackupIdentity SourceBackup,
+        IReadOnlyList<string> ResolvesOperationIds,
+        RestoreJournalInfo? PendingCommitAcknowledgement);
 }

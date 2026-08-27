@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   APP_ROUTES,
   APP_UI_MIGRATION_STATE,
+  DESKTOP_C8_APP_UI_CAPABILITIES,
   FULL_APP_UI_CAPABILITIES,
   READ_ONLY_APP_UI_CAPABILITIES,
   SYNC_SWITCH_APP_UI_CAPABILITIES,
@@ -28,7 +29,7 @@ test("app-ui owns the complete target navigation vocabulary", () => {
   assert.equal(APP_UI_MIGRATION_STATE, "shared-ui-c5");
 });
 
-test("shared UI exposes explicit read-only and C7 Sync/Switch capability profiles", async () => {
+test("shared UI exposes explicit read-only, C7, and C8 capability profiles", async () => {
   assert.deepEqual(READ_ONLY_APP_UI_CAPABILITIES, {
     sync: false,
     switchProvider: false,
@@ -37,7 +38,9 @@ test("shared UI exposes explicit read-only and C7 Sync/Switch capability profile
     watch: false,
     manageProfiles: false,
     revealProfilePaths: false,
-    forgetBrowser: false
+    forgetBrowser: false,
+    exportDiagnostics: false,
+    viewUpdateStatus: false
   });
   assert.equal(Object.values(FULL_APP_UI_CAPABILITIES).every(Boolean), true);
   assert.equal(Object.isFrozen(READ_ONLY_APP_UI_CAPABILITIES), true);
@@ -49,14 +52,35 @@ test("shared UI exposes explicit read-only and C7 Sync/Switch capability profile
     watch: false,
     manageProfiles: false,
     revealProfilePaths: false,
-    forgetBrowser: false
+    forgetBrowser: false,
+    exportDiagnostics: false,
+    viewUpdateStatus: false
   });
   assert.equal(Object.isFrozen(SYNC_SWITCH_APP_UI_CAPABILITIES), true);
+  assert.deepEqual(DESKTOP_C8_APP_UI_CAPABILITIES, {
+    sync: true,
+    switchProvider: true,
+    restore: true,
+    pruneBackups: true,
+    watch: true,
+    manageProfiles: false,
+    revealProfilePaths: false,
+    forgetBrowser: false,
+    exportDiagnostics: true,
+    viewUpdateStatus: true
+  });
+  assert.equal(Object.isFrozen(DESKTOP_C8_APP_UI_CAPABILITIES), true);
   const appSource = await fs.readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
   assert.match(appSource, /route === "sync" && capabilities\.sync/);
   assert.match(appSource, /enabled: capabilities\.watch/);
   assert.match(appSource, /canRestore=\{capabilities\.restore\}/);
   assert.match(appSource, /canManage=\{capabilities\.manageProfiles\}/);
+  assert.match(appSource, /capabilities\.exportDiagnostics/);
+  assert.match(appSource, /capabilities\.viewUpdateStatus/);
+  assert.match(appSource, /host\.checkForUpdates/);
+  assert.match(appSource, /host\.downloadUpdate/);
+  assert.match(appSource, /host\.installUpdate/);
+  assert.match(appSource, /recoveryWriteDisabled/);
 });
 
 test("shared UI translations and write forms keep one strict schema", () => {

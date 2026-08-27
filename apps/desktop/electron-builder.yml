@@ -8,3 +8,8 @@ files:
   - package.json
 extraMetadata:
   main: out/main/index.js
+publish:
+  - provider: github
+    owner: Dailin521
+    repo: codex-provider-sync
+    releaseType: release

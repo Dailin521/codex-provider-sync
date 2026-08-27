@@ -253,6 +253,144 @@ function isProviderDistribution(value) {
         return false;
     return Object.values(value).every((counts) => (isRecord(counts) && Object.values(counts).every(isNonNegativeInteger)));
 }
+const DIAGNOSTIC_TRANSACTION_STATES = new Set([
+    "prepared",
+    "applying",
+    "applied",
+    "skipped",
+    "committing",
+    "committed-pending-ack",
+    "rollback-pending",
+    "rollingBack",
+    "recovery-required",
+    "recoveryRequired",
+    "unknown"
+]);
+function isDiagnosticIdentifier(value) {
+    return typeof value === "string"
+        && /^[A-Za-z0-9._()-]{1,200}$/.test(value);
+}
+function isUuid(value) {
+    return typeof value === "string"
+        && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+function isDiagnosticCountMap(value) {
+    if (!isRecord(value) || Object.keys(value).length > 512)
+        return false;
+    return Object.entries(value).every(([provider, count]) => isDiagnosticIdentifier(provider) && isNonNegativeInteger(count));
+}
+function isDiagnosticDistribution(value, allowUnreadable = false) {
+    if (!isRecord(value)
+        || !exactObjectKeys(value, allowUnreadable
+            ? ["sessions", "archived_sessions", "unreadable"]
+            : ["sessions", "archived_sessions"])
+        || !("sessions" in value)
+        || !("archived_sessions" in value)
+        || !isDiagnosticCountMap(value.sessions)
+        || !isDiagnosticCountMap(value.archived_sessions)) {
+        return false;
+    }
+    return !allowUnreadable || value.unreadable === undefined || value.unreadable === true;
+}
+function isDiagnosticPendingTransaction(value) {
+    return isRecord(value)
+        && Object.keys(value).sort().join(",")
+            === "operationId,operationKind,preRestoreSnapshotId,sourceBackupId,state"
+        && (value.operationId === null || isUuid(value.operationId))
+        && ["sync", "switch", "restore"].includes(String(value.operationKind))
+        && DIAGNOSTIC_TRANSACTION_STATES.has(String(value.state))
+        && (value.sourceBackupId === null || isDiagnosticIdentifier(value.sourceBackupId))
+        && (value.preRestoreSnapshotId === null
+            || isDiagnosticIdentifier(value.preRestoreSnapshotId));
+}
+function isDiagnosticOperationState(value) {
+    if (value === null)
+        return true;
+    if (!isRecord(value)
+        || !exactObjectKeys(value, [
+            "operationId",
+            "operation",
+            "actor",
+            "startedAt",
+            "busyScope",
+            "lockState",
+            "errorCode"
+        ])) {
+        return false;
+    }
+    return (value.operationId === undefined || isUuid(value.operationId))
+        && (value.operation === undefined
+            || ["sync", "switch", "restore", "prune", "watch", "unknown"].includes(String(value.operation)))
+        && (value.actor === undefined || ["manual", "watch", "external"].includes(String(value.actor)))
+        && (value.startedAt === undefined
+            || (isNonEmptyString(value.startedAt) && value.startedAt.length <= 64))
+        && (value.busyScope === undefined || ["codex-home", "state-db"].includes(String(value.busyScope)))
+        && (value.lockState === undefined
+            || (isDiagnosticIdentifier(value.lockState) && value.lockState.length <= 80))
+        && (value.errorCode === undefined
+            || (typeof value.errorCode === "string" && /^[A-Z0-9_]{1,80}$/.test(value.errorCode)));
+}
+function assertDiagnosticsSnapshot(value) {
+    const diagnostics = requireSchemaObject(value, "DiagnosticsSnapshot");
+    const runtime = isRecord(diagnostics.runtime) ? diagnostics.runtime : null;
+    const storage = isRecord(diagnostics.storage) ? diagnostics.storage : null;
+    const provider = isRecord(diagnostics.provider) ? diagnostics.provider : null;
+    const safety = isRecord(diagnostics.safety) ? diagnostics.safety : null;
+    const valid = exactObjectKeys(diagnostics, [
+        "schemaVersion",
+        "generatedAt",
+        "runtime",
+        "storage",
+        "provider",
+        "safety"
+    ])
+        && isNonEmptyString(diagnostics.generatedAt)
+        && diagnostics.generatedAt.length <= 64
+        && runtime !== null
+        && Object.keys(runtime).sort().join(",") === "arch,node,platform"
+        && [runtime.node, runtime.platform, runtime.arch].every((entry) => typeof entry === "string" && /^[A-Za-z0-9._-]{1,80}$/.test(entry))
+        && storage !== null
+        && Object.keys(storage).sort().join(",")
+            === "sqliteHomeSource,sqliteSupported,stateDbFound"
+        && ["cli", "config", "env", "default", "unknown"].includes(String(storage.sqliteHomeSource))
+        && typeof storage.stateDbFound === "boolean"
+        && typeof storage.sqliteSupported === "boolean"
+        && provider !== null
+        && Object.keys(provider).sort().join(",")
+            === "configured,current,implicit,rolloutCounts,sqliteCounts"
+        && isDiagnosticIdentifier(provider.current)
+        && typeof provider.implicit === "boolean"
+        && Array.isArray(provider.configured)
+        && provider.configured.length <= 256
+        && provider.configured.every(isDiagnosticIdentifier)
+        && isDiagnosticDistribution(provider.rolloutCounts)
+        && (provider.sqliteCounts === null
+            || isDiagnosticDistribution(provider.sqliteCounts, true))
+        && safety !== null
+        && exactObjectKeys(safety, [
+            "storageRevision",
+            "pendingRecovery",
+            "pendingTransactions",
+            "operationInProgress",
+            "rolloutScanComplete",
+            "lockedRolloutCount",
+            "projectThreadVisibilityAvailable"
+        ])
+        && (safety.storageRevision === undefined
+            || (typeof safety.storageRevision === "string"
+                && /^[A-Za-z0-9_-]{1,256}$/.test(safety.storageRevision)))
+        && typeof safety.pendingRecovery === "boolean"
+        && Array.isArray(safety.pendingTransactions)
+        && safety.pendingTransactions.length <= 256
+        && safety.pendingTransactions.every(isDiagnosticPendingTransaction)
+        && isDiagnosticOperationState(safety.operationInProgress)
+        && typeof safety.rolloutScanComplete === "boolean"
+        && isNonNegativeInteger(safety.lockedRolloutCount)
+        && typeof safety.projectThreadVisibilityAvailable === "boolean";
+    if (!valid) {
+        throw new ContractValidationError("INVALID_INPUT", "Invalid DiagnosticsSnapshot.");
+    }
+}
 function isHistorySummary(value) {
     if (!isRecord(value))
         return false;
@@ -428,18 +566,7 @@ export function assertCoreMethodOutput(method, value) {
             return;
         }
         case "getDiagnostics": {
-            const diagnostics = requireSchemaObject(value, "DiagnosticsSnapshot");
-            if (!isNonEmptyString(diagnostics.generatedAt)
-                || !isRecord(diagnostics.runtime)
-                || !isJsonValue(diagnostics.runtime)
-                || !isRecord(diagnostics.storage)
-                || !isJsonValue(diagnostics.storage)
-                || !isRecord(diagnostics.provider)
-                || !isJsonValue(diagnostics.provider)
-                || !isRecord(diagnostics.safety)
-                || !isJsonValue(diagnostics.safety)) {
-                throw new ContractValidationError("INVALID_INPUT", "Invalid DiagnosticsSnapshot.");
-            }
+            assertDiagnosticsSnapshot(value);
             return;
         }
         default:

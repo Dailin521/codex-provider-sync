@@ -64,7 +64,8 @@ import {
   FULL_APP_UI_CAPABILITIES,
   type AppUiCapabilities,
   type AppUiProps,
-  type HostProfile
+  type HostProfile,
+  type HostUpdateStatus
 } from "./types.js";
 import { Badge, Button, Card, Dialog, Field, Input, ToastProvider, cn, useToast } from "./ui.js";
 
@@ -452,12 +453,26 @@ function ProfilesPage({
   );
 }
 
-function DiagnosticsPage({ diagnostics, loading, refresh }: { diagnostics?: DiagnosticsSnapshot; loading: boolean; refresh(): void }) {
+function DiagnosticsPage({
+  diagnostics,
+  loading,
+  exporting,
+  canExport,
+  refresh,
+  exportBundle
+}: {
+  diagnostics?: DiagnosticsSnapshot;
+  loading: boolean;
+  exporting: boolean;
+  canExport: boolean;
+  refresh(): void;
+  exportBundle(): void;
+}) {
   const { t } = useTranslation();
   const sections = diagnostics ? [["runtime", diagnostics.runtime], ["storage", diagnostics.storage], ["provider", diagnostics.provider], ["safety", diagnostics.safety]] as const : [];
   return (
     <Fragment>
-      <PageHeading title={t("diagnostics.title")} subtitle={t("diagnostics.subtitle")} action={<Button disabled={loading} onClick={refresh} type="button" variant="secondary"><RefreshCw size={16} />{t("common.refresh")}</Button>} />
+      <PageHeading title={t("diagnostics.title")} subtitle={t("diagnostics.subtitle")} action={<div className="flex flex-wrap gap-2"><Button disabled={loading} onClick={refresh} type="button" variant="secondary"><RefreshCw size={16} />{t("common.refresh")}</Button>{canExport ? <Button disabled={exporting || !diagnostics} onClick={exportBundle} type="button"><ArchiveRestore size={16} />{exporting ? t("diagnostics.exporting") : t("diagnostics.export")}</Button> : null}</div>} />
       <div className="grid gap-4 lg:grid-cols-2">{sections.map(([key, value]) => <Card key={key}><h2 className="mb-3 font-semibold">{t(`diagnostics.${key}`)}</h2><pre className="overflow-auto whitespace-pre-wrap break-words rounded-lg bg-[var(--surface)] p-4 text-xs leading-5">{JSON.stringify(value, null, 2)}</pre></Card>)}</div>
     </Fragment>
   );
@@ -469,7 +484,17 @@ function activeWatch(value: WatchSnapshot | WatchStatusList | undefined): WatchS
   return value;
 }
 
-function SettingsPage({ props, profile, capabilities }: { props: AppUiProps; profile: HostProfile; capabilities: AppUiCapabilities }) {
+function SettingsPage({
+  props,
+  profile,
+  capabilities,
+  recoveryBlocked
+}: {
+  props: AppUiProps;
+  profile: HostProfile;
+  capabilities: AppUiCapabilities;
+  recoveryBlocked: boolean;
+}) {
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const [theme, setTheme] = useState(props.preferences.getTheme() ?? props.initialTheme);
@@ -477,6 +502,28 @@ function SettingsPage({ props, profile, capabilities }: { props: AppUiProps; pro
   const currentWatch = activeWatch(watch.data);
   const start = useMutation({ mutationFn: () => props.core.startWatch({ profile: profileSelector(profile), includeStateDb: true }), onSuccess: () => queryClient.invalidateQueries({ queryKey: ["watch-status"] }) });
   const stop = useMutation({ mutationFn: (watchId: string) => props.core.stopWatch({ watchId }), onSuccess: () => queryClient.invalidateQueries({ queryKey: ["watch-status"] }) });
+  const update = useQuery({
+    queryKey: ["desktop-update-status"],
+    queryFn: ({ signal }) => props.host.getUpdateStatus?.(signal),
+    enabled: capabilities.viewUpdateStatus && Boolean(props.host.getUpdateStatus),
+    refetchInterval: capabilities.viewUpdateStatus ? 3000 : false
+  });
+  const storeUpdate = (value: HostUpdateStatus) => queryClient.setQueryData(
+    ["desktop-update-status"],
+    value
+  );
+  const checkUpdate = useMutation({
+    mutationFn: () => props.host.checkForUpdates?.() ?? Promise.reject(new Error("Update check unavailable.")),
+    onSuccess: storeUpdate
+  });
+  const downloadUpdate = useMutation({
+    mutationFn: () => props.host.downloadUpdate?.() ?? Promise.reject(new Error("Update download unavailable.")),
+    onSuccess: storeUpdate
+  });
+  const installUpdate = useMutation({
+    mutationFn: () => props.host.installUpdate?.() ?? Promise.reject(new Error("Update install unavailable.")),
+    onSuccess: storeUpdate
+  });
   const setLocale = async (locale: "zh-CN" | "en") => { props.preferences.setLocale(locale); await i18n.changeLanguage(locale); };
   const applyTheme = (value: "system" | "light" | "dark") => {
     setTheme(value);
@@ -489,7 +536,8 @@ function SettingsPage({ props, profile, capabilities }: { props: AppUiProps; pro
       <div className="grid gap-4 lg:grid-cols-2">
         <Card><Field label={t("settings.language")}><select className="min-h-10 rounded-lg border border-[var(--border)] bg-[var(--input)] px-3" onChange={(event) => void setLocale(event.target.value as "zh-CN" | "en")} value={i18n.language === "zh-CN" ? "zh-CN" : "en"}><option value="zh-CN">简体中文</option><option value="en">English</option></select></Field><div className="mt-3 flex items-center gap-2 text-xs text-[var(--muted)]"><Languages size={15} />{t("settings.englishFallback")}</div></Card>
         <Card><Field label={t("settings.theme")}><div className="grid grid-cols-3 gap-2">{(["system", "light", "dark"] as const).map((value) => <Button aria-pressed={theme === value} key={value} onClick={() => applyTheme(value)} type="button" variant={theme === value ? "primary" : "secondary"}>{value === "system" ? <Globe2 size={16} /> : value === "light" ? <Sun size={16} /> : <Moon size={16} />}{t(`settings.${value}`)}</Button>)}</div></Field></Card>
-        {capabilities.watch ? <Card><h2 className="font-semibold">{t("settings.watch")}</h2><div className="mt-3 flex items-center justify-between gap-3"><div><Badge tone={currentWatch?.status === "running" ? "success" : "neutral"}>{currentWatch?.status ?? t("common.none")}</Badge>{currentWatch ? <div className="mt-2 font-mono text-xs text-[var(--muted)]">{currentWatch.watchId}</div> : null}</div>{currentWatch?.status === "running" ? <Button disabled={stop.isPending} onClick={() => stop.mutate(currentWatch.watchId)} type="button" variant="secondary">{t("settings.watchStop")}</Button> : <Button disabled={start.isPending} onClick={() => start.mutate()} type="button"><Play size={16} />{t("settings.watchStart")}</Button>}</div></Card> : null}
+        {capabilities.watch ? <Card><h2 className="font-semibold">{t("settings.watch")}</h2><div className="mt-3 flex items-center justify-between gap-3"><div><Badge tone={currentWatch?.status === "running" ? "success" : "neutral"}>{currentWatch?.status ?? t("common.none")}</Badge>{currentWatch ? <div className="mt-2 font-mono text-xs text-[var(--muted)]">{currentWatch.watchId}</div> : null}</div>{currentWatch?.status === "running" ? <Button disabled={stop.isPending} onClick={() => stop.mutate(currentWatch.watchId)} type="button" variant="secondary">{t("settings.watchStop")}</Button> : <Button disabled={start.isPending || recoveryBlocked} onClick={() => start.mutate()} type="button"><Play size={16} />{t("settings.watchStart")}</Button>}</div>{recoveryBlocked && currentWatch?.status !== "running" ? <p className="mt-3 text-xs text-[var(--danger)]">{t("settings.watchRecoveryBlocked")}</p> : null}</Card> : null}
+        {capabilities.viewUpdateStatus && props.host.getUpdateStatus ? <Card><h2 className="font-semibold">{t("settings.update")}</h2><div className="mt-3"><Badge tone={update.data?.state === "error" || Boolean(update.data?.installBlockedReason) ? "warning" : update.data?.state === "downloaded" ? "success" : "neutral"}>{update.isPending ? t("common.loading") : update.data ? t(`settings.updateStatus.${update.data.state}`) : t("common.unknown")}</Badge>{update.data?.version ? <p className="mt-3 text-sm">{t("settings.updateVersion", { version: update.data.version })}</p> : null}{update.data?.progressPercent !== undefined ? <p className="mt-2 text-sm text-[var(--muted)]">{t("settings.updateProgress", { percent: update.data.progressPercent })}</p> : null}{update.data?.reason ? <p className="mt-3 text-sm text-[var(--muted)]">{t(`settings.updateReason.${update.data.reason}`)}</p> : null}{update.data?.installBlockedReason ? <p className="mt-3 text-sm text-[var(--danger)]">{t(`settings.updateBlocked.${update.data.installBlockedReason}`)}</p> : null}<div className="mt-4 flex flex-wrap gap-2">{update.data && ["idle", "not-available", "error"].includes(update.data.state) && props.host.checkForUpdates ? <Button disabled={checkUpdate.isPending} onClick={() => checkUpdate.mutate()} type="button" variant="secondary">{t("settings.updateCheck")}</Button> : null}{update.data?.state === "available" && props.host.downloadUpdate ? <Button disabled={downloadUpdate.isPending} onClick={() => downloadUpdate.mutate()} type="button">{t("settings.updateDownload")}</Button> : null}{update.data?.state === "downloaded" && props.host.installUpdate ? <Button disabled={!update.data.installAllowed || installUpdate.isPending} onClick={() => installUpdate.mutate()} type="button">{t("settings.updateInstall")}</Button> : null}</div></div></Card> : null}
         {capabilities.forgetBrowser ? <Card><h2 className="font-semibold">{t("settings.forget")}</h2><p className="mt-2 text-sm text-[var(--muted)]">{t("settings.forgetHint")}</p><Button className="mt-4" onClick={() => void (props.onForgetBrowser?.() ?? props.host.forgetBrowser?.())} type="button" variant="danger">{t("settings.forget")}</Button></Card> : null}
       </div>
     </Fragment>
@@ -568,6 +616,7 @@ function AppContent({ props }: { props: AppUiProps }) {
   });
   const status = statusQuery.data;
   const writeDisabled = !profile || status?.pendingRecovery === true || mutationCount > 0;
+  const recoveryWriteDisabled = !profile || mutationCount > 0;
   const backupsQuery = useQuery({
     queryKey: ["backups", profile?.id, profile?.revision],
     queryFn: ({ signal }) => props.core.listBackups({ profile: profileSelector(profile) }, { signal }),
@@ -656,6 +705,23 @@ function AppContent({ props }: { props: AppUiProps }) {
       toast.push({ title: t("global.failed"), description: safeErrorText(error, t("global.unexpected")), tone: "danger" });
     }
   }, [profile, props.core, refreshAfterWrite, t, toast]);
+  const exportDiagnostics = useMutation({
+    mutationFn: async () => {
+      if (!profile || !props.host.exportDiagnostics) throw new Error("Diagnostics export is unavailable.");
+      return props.host.exportDiagnostics(profileSelector(profile));
+    },
+    onSuccess: (result) => {
+      toast.push({
+        title: result.status === "created"
+          ? t("diagnostics.exportCreated")
+          : result.status === "cancelled"
+            ? t("diagnostics.exportCancelled")
+            : t("diagnostics.exportFailed"),
+        tone: result.status === "created" ? "success" : result.status === "cancelled" ? "warning" : "danger"
+      });
+    },
+    onError: () => toast.push({ title: t("diagnostics.exportFailed"), tone: "danger" })
+  });
 
   const configuredProviders = status?.configuredProviders && Array.isArray(status.configuredProviders)
     ? status.configuredProviders.filter((value): value is string => typeof value === "string")
@@ -664,11 +730,11 @@ function AppContent({ props }: { props: AppUiProps }) {
     : route === "overview" ? <OverviewPage loading={statusQuery.isFetching} refresh={() => void statusQuery.refetch()} status={status} />
     : route === "sync" && capabilities.sync ? <SyncPage disabled={writeDisabled} prepare={(values, trigger) => prepare(() => props.core.prepareSync({ profile: profileSelector(profile), keepCount: values.keepCount }), trigger)} />
     : route === "switch-provider" && capabilities.switchProvider ? <SwitchPage disabled={writeDisabled} prepare={(values, trigger) => prepare(() => props.core.prepareSwitch({ profile: profileSelector(profile), provider: values.provider, modelMode: values.modelMode as SwitchModelMode, ...(values.modelMode === "explicit" ? { model: values.model } : {}), keepCount: values.keepCount }), trigger)} providers={configuredProviders} />
-    : route === "backups-restore" ? <BackupsPage backups={backupsQuery.data?.backups ?? []} canPrune={capabilities.pruneBackups} canRestore={capabilities.restore} disabled={writeDisabled} loading={backupsQuery.isPending} prepare={(values, trigger) => prepare(() => props.core.prepareRestore({ profile: profileSelector(profile), backupId: values.backupId, restoreConfig: values.restoreConfig, restoreDatabase: values.restoreDatabase, restoreSessions: values.restoreSessions, ...(values.allowSqliteHomeRelocation ? { allowSqliteHomeRelocation: true, relocationTargetProfileId: values.relocationTargetProfileId } : {}) }), trigger)} profile={profile} profiles={profiles} prune={prune} />
+    : route === "backups-restore" ? <BackupsPage backups={backupsQuery.data?.backups ?? []} canPrune={capabilities.pruneBackups} canRestore={capabilities.restore} disabled={recoveryWriteDisabled} loading={backupsQuery.isPending} prepare={(values, trigger) => prepare(() => props.core.prepareRestore({ profile: profileSelector(profile), backupId: values.backupId, restoreConfig: values.restoreConfig, restoreDatabase: values.restoreDatabase, restoreSessions: values.restoreSessions, ...(values.allowSqliteHomeRelocation ? { allowSqliteHomeRelocation: true, relocationTargetProfileId: values.relocationTargetProfileId } : {}) }), trigger)} profile={profile} profiles={profiles} prune={prune} />
     : route === "history" ? <HistoryPage core={props.core} profile={profile} />
     : route === "profiles" ? <ProfilesPage canManage={capabilities.manageProfiles} host={props.host} profiles={profiles} refresh={() => profilesQuery.refetch()} revealPaths={capabilities.revealProfilePaths} />
-    : route === "diagnostics" ? <DiagnosticsPage diagnostics={diagnosticsQuery.data} loading={diagnosticsQuery.isFetching} refresh={() => void diagnosticsQuery.refetch()} />
-    : route === "settings" ? <SettingsPage capabilities={capabilities} profile={profile} props={props} />
+    : route === "diagnostics" ? <DiagnosticsPage canExport={capabilities.exportDiagnostics && Boolean(props.host.exportDiagnostics)} diagnostics={diagnosticsQuery.data} exportBundle={() => exportDiagnostics.mutate()} exporting={exportDiagnostics.isPending} loading={diagnosticsQuery.isFetching} refresh={() => void diagnosticsQuery.refetch()} />
+    : route === "settings" ? <SettingsPage capabilities={capabilities} profile={profile} props={props} recoveryBlocked={status?.pendingRecovery === true} />
     : <OverviewPage loading={statusQuery.isFetching} refresh={() => void statusQuery.refetch()} status={status} />;
 
   return (

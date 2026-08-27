@@ -32,7 +32,9 @@ export class PlanLedger {
   constructor({
     now = () => Date.now(),
     randomId = () => randomBytes(32).toString("base64url"),
-    ttlMs = DEFAULT_PLAN_TTL_MS
+    ttlMs = DEFAULT_PLAN_TTL_MS,
+    setTimeoutImpl = setTimeout,
+    clearTimeoutImpl = clearTimeout
   } = {}) {
     if (typeof now !== "function" || typeof randomId !== "function") {
       throw new TypeError("PlanLedger clock and random id source must be functions.");
@@ -43,7 +45,37 @@ export class PlanLedger {
     this.now = now;
     this.randomId = randomId;
     this.ttlMs = ttlMs;
+    this.setTimeoutImpl = setTimeoutImpl;
+    this.clearTimeoutImpl = clearTimeoutImpl;
     this.entries = new Map();
+    this.expiryTimer = null;
+  }
+
+  _sweepExpired() {
+    const now = this.now();
+    for (const [planId, entry] of this.entries) {
+      if (now >= entry.expiresAtMs) this.entries.delete(planId);
+    }
+  }
+
+  _clearExpiryTimer() {
+    if (this.expiryTimer !== null) this.clearTimeoutImpl(this.expiryTimer);
+    this.expiryTimer = null;
+  }
+
+  _armExpiryTimer() {
+    this._clearExpiryTimer();
+    this._sweepExpired();
+    if (this.entries.size === 0) return;
+    const earliestExpiry = Math.min(...[...this.entries.values()].map((entry) => entry.expiresAtMs));
+    const timer = this.setTimeoutImpl(() => {
+      if (this.expiryTimer !== timer) return;
+      this.expiryTimer = null;
+      this._sweepExpired();
+      this._armExpiryTimer();
+    }, Math.max(0, earliestExpiry - this.now()));
+    timer?.unref?.();
+    this.expiryTimer = timer;
   }
 
   issue(operation, summary, internal) {
@@ -51,6 +83,7 @@ export class PlanLedger {
       throw new TypeError(`Unsupported plan operation: ${String(operation)}`);
     }
     const createdAtMs = this.now();
+    this._sweepExpired();
     const planId = this.randomId();
     if (typeof planId !== "string" || !/^[A-Za-z0-9_-]{32,128}$/.test(planId)) {
       throw new TypeError("Plan id source returned an invalid opaque id.");
@@ -73,6 +106,7 @@ export class PlanLedger {
       summary: issuedSummary,
       internal
     });
+    this._armExpiryTimer();
     return issuedSummary;
   }
 
@@ -99,11 +133,13 @@ export class PlanLedger {
     // filesystem lock. A failed, stale, busy, or cancelled Apply cannot replay
     // an old confirmation.
     this.entries.delete(input.planId);
+    this._armExpiryTimer();
     if (this.now() >= entry.expiresAtMs) throw unavailablePlan();
     return entry;
   }
 
   get size() {
+    this._sweepExpired();
     return this.entries.size;
   }
 }

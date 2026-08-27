@@ -152,6 +152,32 @@ test("trusted profile selection never falls back to the process default Codex Ho
     assert.doesNotMatch(JSON.stringify(plan), /private-project|synthetic-ciphertext/);
     assert.equal(diagnostics.storage.sqliteHomeSource, "default");
     assert.equal("codexHome" in diagnostics.storage, false);
+    assert.deepEqual(Object.keys(diagnostics.runtime).sort(), ["arch", "node", "platform"]);
+    assert.deepEqual(
+      Object.keys(diagnostics.storage).sort(),
+      ["sqliteHomeSource", "sqliteSupported", "stateDbFound"]
+    );
+    assert.deepEqual(
+      Object.keys(diagnostics.provider).sort(),
+      ["configured", "current", "implicit", "rolloutCounts", "sqliteCounts"]
+    );
+    assert.deepEqual(
+      Object.keys(diagnostics.safety).sort(),
+      [
+        "lockedRolloutCount",
+        "operationInProgress",
+        "pendingRecovery",
+        "pendingTransactions",
+        "projectThreadVisibilityAvailable",
+        "rolloutScanComplete",
+        "storageRevision"
+      ]
+    );
+    assert.doesNotMatch(
+      JSON.stringify(diagnostics),
+      new RegExp(selectedHome.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")
+    );
+    assert.doesNotMatch(JSON.stringify(diagnostics), /private-project|synthetic-ciphertext/i);
     assert.equal(pruned.deletedCount, 0);
     assert.equal(selectors.length, 6);
     assert.equal(selectors.every((selector) => selector.profileId === "selected"), true);

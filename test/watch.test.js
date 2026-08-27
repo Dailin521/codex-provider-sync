@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { getWatchStatus, runWatch, startWatch, stopWatch } from "../src/watch.js";
+import { OperationCoordinator } from "../src/operation-coordinator.js";
 
 delete process.env.CODEX_SQLITE_HOME;
 
@@ -351,6 +352,72 @@ test("runWatch cancels its manual-completion subscription when stopped", async (
   await new Promise((resolve) => setTimeout(resolve, 80));
   assert.equal(attempts, 1, "a stopped watcher must not apply after completion notification");
   await fs.rm(root, { recursive: true, force: true });
+});
+
+test("runWatch retries one retained batch when a prepared manual intent expires", async () => {
+  const { root, codexHome } = await makeTempCodexHome();
+  const configPath = path.join(codexHome, "config.toml");
+  let operationSequence = 0;
+  const coordinator = new OperationCoordinator({
+    randomOperationId: () => `watch-${++operationSequence}`
+  });
+  coordinator.registerManualIntent(codexHome, "abandoned-plan", Date.now() + 80);
+  let attempts = 0;
+  const handle = await runWatch({
+    codexHome,
+    debounceMs: 10,
+    includeStateDb: false,
+    onLog: () => {},
+    manualOperationWaiter: () => coordinator.waitForManualOperation(codexHome),
+    onSync: async () => {
+      attempts += 1;
+      const active = coordinator.begin(codexHome, "sync", { actor: "watch" });
+      coordinator.end(codexHome, active.operationId);
+      return { targetProvider: "openai", changedSessionFiles: 0, sqliteRowsUpdated: 0 };
+    }
+  });
+
+  try {
+    await fs.writeFile(configPath, 'model_provider = "manual-intent"\n', "utf8");
+    await waitUntil(() => attempts === 1, "Watch did not observe the prepared manual intent");
+    await waitUntil(() => attempts === 2, "Watch did not resume after manual intent expiry");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(attempts, 2, "the retained batch must be applied exactly once after expiry");
+  } finally {
+    await handle.stop();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("runWatch stops immediately when explicit recovery is required", async () => {
+  for (const code of ["RECOVERY_REQUIRED", "PENDING_TRANSACTION"]) {
+    const { root, codexHome } = await makeTempCodexHome();
+    const configPath = path.join(codexHome, "config.toml");
+    let attempts = 0;
+    const handle = await runWatch({
+      codexHome,
+      debounceMs: 10,
+      includeStateDb: false,
+      onLog: () => {},
+      onSync: async () => {
+        attempts += 1;
+        const error = new Error("fixture recovery blocker");
+        error.code = code;
+        throw error;
+      }
+    });
+    try {
+      await fs.writeFile(configPath, `model_provider = "${code}"\n`, "utf8");
+      assert.equal(await handle.done, "recovery-required", code);
+      assert.equal(attempts, 1, code);
+      await fs.writeFile(configPath, 'model_provider = "after-stop"\n', "utf8");
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      assert.equal(attempts, 1, `${code} must stop all later Watch applies`);
+    } finally {
+      await handle.stop();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }
 });
 
 test("startWatch exposes registry status and stopWatch is idempotent", async () => {

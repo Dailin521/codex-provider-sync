@@ -183,14 +183,17 @@ async function switchProvider(page, { provider, mode, model }) {
   await confirmPlan(page);
 }
 
-test("Electron performs Sync and all three Switch model modes through the narrow C7 bridge", async () => {
+test("Electron performs Sync, Switch, Restore, Prune, Watch, Diagnostics, and Update status through the narrow C8 bridge", async () => {
   test.setTimeout(120_000);
   const fixture = await createDesktopSyncSwitchFixture();
   const baseline = await fixture.snapshotTargets();
   let electronApp;
   let syncBackupId;
   try {
-    electronApp = await launchDesktop(fixture);
+    const diagnosticsTarget = path.join(fixture.fixtureRoot, "diagnostics.zip");
+    electronApp = await launchDesktop(fixture, {
+      CPS_DESKTOP_DIAGNOSTICS_TARGET: diagnosticsTarget
+    });
     const page = await electronApp.firstWindow();
     await expect(page).toHaveURL("cps-app://app/index.html");
     await expect(page.getByText("openai", { exact: true }).first()).toBeVisible();
@@ -237,13 +240,32 @@ test("Electron performs Sync and all three Switch model modes through the narrow
     expect(JSON.stringify(events)).not.toMatch(/codex-home|state_5\.sqlite|backupDir|messageBody/i);
 
     await page.getByRole("button", { name: "Backups / Restore" }).click();
-    await expect(page.getByRole("main").getByRole("button", { name: /restore/i })).toHaveCount(0);
-    await expect(page.getByRole("main").getByRole("button", { name: /prune/i })).toHaveCount(0);
-    await electronApp.close();
-    electronApp = undefined;
-    const restored = await fixture.restoreManagedBackup(syncBackupId);
-    expect(restored.outcome).toBe("completed");
+    await page.getByRole("button", { name: new RegExp(syncBackupId) }).click();
+    await page.getByRole("button", { name: "Prepare restore" }).click();
+    await confirmPlan(page);
     expect((await fixture.snapshotTargets()).hash).toBe(baseline.hash);
+
+    await page.getByLabel("Keep newest backups").fill("2");
+    await page.getByRole("button", { name: "Prune older backups" }).click();
+    await expect(page.getByText("Operation completed.", { exact: true }).last()).toBeVisible();
+
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("button", { name: "Start watch" }).click();
+    await expect(page.getByRole("button", { name: "Stop watch" })).toBeVisible();
+    await page.getByRole("button", { name: "Stop watch" }).click();
+    await expect(page.getByRole("button", { name: "Start watch" })).toBeVisible();
+    await expect(page.getByText("Updates", { exact: true })).toBeVisible();
+    await expect(page.getByText("Update checks are available only in a packaged build.", { exact: true })).toBeVisible();
+
+    await page.getByRole("button", { name: "Diagnostics" }).click();
+    await page.getByRole("button", { name: "Export redacted bundle" }).click();
+    await expect(page.getByText("Redacted diagnostics bundle created.", { exact: true })).toBeVisible();
+    const diagnostics = await fs.readFile(diagnosticsTarget);
+    expect(diagnostics.toString("utf8")).not.toContain(fixture.codexHome);
+    expect(diagnostics.toString("utf8")).not.toMatch(/auth\.json|encrypted_content|message body/i);
+
+    const eventsAfterRestore = await page.evaluate(() => globalThis.__c7OperationEvents);
+    expect(eventsAfterRestore.filter((event) => event.event === "operation-started")).toHaveLength(5);
   } finally {
     await electronApp?.close();
     await fixture.close();

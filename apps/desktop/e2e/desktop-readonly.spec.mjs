@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -11,8 +12,9 @@ const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const packagedExecutable = process.env.CPS_DESKTOP_EXECUTABLE;
 const electronExecutable = packagedExecutable || require("electron");
 
-test("secure desktop exposes C7 Sync/Switch narrowly and blocks writes during recovery", async () => {
+test("secure desktop exposes the C8 surface narrowly and blocks ordinary writes during recovery", async () => {
   const fixture = await createDesktopReadOnlyFixture();
+  const diagnosticsTarget = path.join(fixture.fixtureRoot, "diagnostics.zip");
   let electronApp;
   try {
     electronApp = await electron.launch({
@@ -26,6 +28,7 @@ test("secure desktop exposes C7 Sync/Switch narrowly and blocks writes during re
         CPS_DESKTOP_CODEX_HOME: fixture.codexHome,
         CPS_DESKTOP_USER_DATA: fixture.userData,
         CPS_DESKTOP_WINDOW_DISPLAY: "hidden",
+        CPS_DESKTOP_DIAGNOSTICS_TARGET: diagnosticsTarget,
         ELECTRON_ENABLE_SECURITY_WARNINGS: "true"
       }
     });
@@ -53,6 +56,7 @@ test("secure desktop exposes C7 Sync/Switch narrowly and blocks writes during re
       buffer: typeof globalThis.Buffer,
       bridgeKeys: Object.keys(window.codexProvider).sort(),
       coreKeys: Object.keys(window.codexProvider.core).sort(),
+      updateKeys: Object.keys(window.codexProvider.updates).sort(),
       frozen: Object.isFrozen(window.codexProvider) && Object.isFrozen(window.codexProvider.core),
       csp: document.querySelector('meta[http-equiv="Content-Security-Policy"]')?.getAttribute("content")
     }));
@@ -60,8 +64,16 @@ test("secure desktop exposes C7 Sync/Switch narrowly and blocks writes during re
       process: "undefined",
       require: "undefined",
       buffer: "undefined",
-      bridgeKeys: ["core", "profiles", "test", "version"],
-      coreKeys: ["cancelOperation", "requestReadOnly", "requestSyncSwitch", "subscribeOperation"],
+      bridgeKeys: ["core", "diagnostics", "profiles", "test", "updates", "version"],
+      coreKeys: [
+        "cancelOperation",
+        "requestMaintenance",
+        "requestReadOnly",
+        "requestRestore",
+        "requestSyncSwitch",
+        "subscribeOperation"
+      ],
+      updateKeys: ["check", "download", "getStatus", "install"],
       frozen: true
     });
     expect(rendererBoundary.csp).toContain("script-src 'self'");
@@ -74,9 +86,8 @@ test("secure desktop exposes C7 Sync/Switch narrowly and blocks writes during re
     await expect(page.getByRole("button", { name: "Switch Provider" })).toBeVisible();
 
     await page.getByRole("button", { name: "Backups / Restore" }).click();
-    await expect(page.getByText(/read-only/i)).toBeVisible();
-    await expect(page.getByRole("main").getByRole("button", { name: /restore/i })).toHaveCount(0);
-    await expect(page.getByRole("main").getByRole("button", { name: /prune/i })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Prepare restore" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Prune older backups" })).toBeVisible();
 
     await page.getByRole("button", { name: "Profiles" }).click();
     await expect(page.getByText(/profile IDs and revisions only/i)).toBeVisible();
@@ -85,6 +96,24 @@ test("secure desktop exposes C7 Sync/Switch narrowly and blocks writes during re
     await page.getByRole("button", { name: "Diagnostics" }).click();
     await expect(page.getByText(/runtime/i).first()).toBeVisible();
     await expect(page.locator("body")).not.toContainText(fixture.codexHome);
+    await page.getByRole("button", { name: "Export redacted bundle" }).click();
+    await expect(page.getByText("Redacted diagnostics bundle created.", { exact: true })).toBeVisible();
+    const diagnosticsArchive = await fs.readFile(diagnosticsTarget);
+    expect(diagnosticsArchive.toString("utf8")).not.toContain(fixture.codexHome);
+    expect(diagnosticsArchive.toString("utf8")).not.toContain("C6_DESKTOP_BODY_ONLY_MARKER");
+
+    await page.getByRole("button", { name: "Settings" }).click();
+    await expect(page.getByText("Updates", { exact: true })).toBeVisible();
+    await expect(page.getByText("Update checks are available only in a packaged build.", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Start watch" })).toBeDisabled();
+    const updateStatus = await page.evaluate(() => window.codexProvider.updates.getStatus());
+    expect(updateStatus).toEqual({
+      schemaVersion: 2,
+      state: "disabled",
+      reason: "not-packaged",
+      installAllowed: false
+    });
+    expect(JSON.stringify(updateStatus)).not.toMatch(/url|path|releaseNotes|token/i);
 
     await page.getByRole("button", { name: "History" }).click();
     await expect(page.locator("body")).not.toContainText("C6_DESKTOP_BODY_ONLY_MARKER");

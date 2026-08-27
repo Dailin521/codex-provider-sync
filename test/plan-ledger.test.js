@@ -17,6 +17,45 @@ function fixtureLedger() {
   return { ledger, advance: (milliseconds) => { now += milliseconds; } };
 }
 
+function scheduledFixtureLedger() {
+  let now = Date.parse("2026-08-25T00:00:00.000Z");
+  let sequence = 0;
+  const timers = new Set();
+  const ledger = new PlanLedger({
+    now: () => now,
+    ttlMs: 100,
+    randomId: () => `scheduled_${String(sequence += 1).padStart(40, "0")}`,
+    setTimeoutImpl(callback, delay) {
+      const timer = {
+        callback,
+        dueAt: now + delay,
+        unrefCalled: false,
+        unref() { this.unrefCalled = true; }
+      };
+      timers.add(timer);
+      return timer;
+    },
+    clearTimeoutImpl(timer) {
+      timers.delete(timer);
+    }
+  });
+  return {
+    ledger,
+    timers,
+    advance(milliseconds) {
+      now += milliseconds;
+      while (true) {
+        const timer = [...timers]
+          .filter((entry) => entry.dueAt <= now)
+          .sort((left, right) => left.dueAt - right.dueAt)[0];
+        if (!timer) break;
+        timers.delete(timer);
+        timer.callback();
+      }
+    }
+  };
+}
+
 test("PlanLedger issues immutable schema v1 summaries with a ten-minute TTL", () => {
   const { ledger } = fixtureLedger();
   const summary = ledger.issue("sync", {
@@ -75,3 +114,15 @@ test("PlanLedger expires plans and rejects tampered Apply payloads without consu
   assert.equal(ledger.size, 0);
 });
 
+test("PlanLedger autonomously discards abandoned plans without keeping the process alive", () => {
+  const { ledger, timers, advance } = scheduledFixtureLedger();
+  ledger.issue("sync", { profile: {}, target: {}, impact: {}, warnings: [] }, {});
+  assert.equal(ledger.size, 1);
+  assert.equal(timers.size, 1);
+  assert.equal([...timers][0].unrefCalled, true);
+
+  advance(100);
+
+  assert.equal(ledger.size, 0);
+  assert.equal(timers.size, 0);
+});

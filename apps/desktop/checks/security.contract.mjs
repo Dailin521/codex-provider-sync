@@ -30,7 +30,7 @@ test("Renderer has no Node, Electron, filesystem, Core or arbitrary IPC imports"
   assert.doesNotMatch(text, /@codex-provider-sync\/core(?:["'/])/);
   assert.doesNotMatch(text, /ipcRenderer|BrowserWindow|child_process|node:fs|node:path/);
   assert.match(text, /DesktopCoreClient/);
-  assert.match(text, /SYNC_SWITCH_APP_UI_CAPABILITIES/);
+  assert.match(text, /DESKTOP_C8_APP_UI_CAPABILITIES/);
 });
 
 test("Preload exposes one frozen purpose-built bridge and no raw IPC surface", async () => {
@@ -38,6 +38,13 @@ test("Preload exposes one frozen purpose-built bridge and no raw IPC surface", a
   assert.match(source, /exposeInMainWorld\("codexProvider"/);
   assert.match(source, /requestReadOnly/);
   assert.match(source, /requestSyncSwitch/);
+  assert.match(source, /requestRestore/);
+  assert.match(source, /requestMaintenance/);
+  assert.match(source, /diagnosticsExport/);
+  assert.match(source, /updateStatus/);
+  assert.match(source, /updateCheck/);
+  assert.match(source, /updateDownload/);
+  assert.match(source, /updateInstall/);
   assert.match(source, /subscribeOperation/);
   assert.match(source, /cancelOperation/);
   assert.match(source, /ipcRenderer\.on\(DESKTOP_IPC_CHANNELS\.operationEvent/);
@@ -70,27 +77,60 @@ test("Main security policy fixes the BrowserWindow, CSP, protocol and deny defau
   assert.match(security, /will-attach-webview/);
 });
 
-test("Utility imports only the Core public package and C7 exact Sync/Switch methods", async () => {
+test("Utility imports only the Core public package and the exact C8 method surface", async () => {
   const runtime = await read("src/runtime/host.ts");
   const protocol = await read("src/shared/runtime-protocol.ts");
   const clientPolicy = await read("../../packages/core-client/src/desktop.ts");
   assert.match(runtime, /from "@codex-provider-sync\/core"/);
   assert.doesNotMatch(runtime, /src\/(?:public-api|service|backup|locking|history|watch)/);
   assert.doesNotMatch(runtime, /\.\.\/main\//);
-  for (const allowed of ["prepareSync", "applySync", "prepareSwitch", "applySwitch"]) {
-    assert.match(clientPolicy, new RegExp(`\\"${allowed}\\"`));
-  }
-  for (const denied of [
+  for (const allowed of [
+    "prepareSync",
+    "applySync",
+    "prepareSwitch",
+    "applySwitch",
     "prepareRestore",
     "applyRestore",
     "pruneBackups",
     "startWatch",
     "stopWatch",
     "getWatchStatus"
-  ]) assert.doesNotMatch(clientPolicy, new RegExp(`\\"${denied}\\"`));
+  ]) {
+    assert.match(clientPolicy, new RegExp(`\\"${allowed}\\"`));
+  }
+  assert.doesNotMatch(clientPolicy, /runSync|runSwitch|runRestore|runWatch/);
   assert.match(protocol, /dispatchId/);
   assert.match(protocol, /operation-event/);
   assert.match(protocol, /RuntimeCancelFrame/);
+});
+
+test("Diagnostics export is fixed-entry and updates stay in one narrow Main-only controller", async () => {
+  const diagnostics = await read("src/main/diagnostics-export.ts");
+  const policy = await read("src/main/update-policy.ts");
+  const updates = await read("src/main/updater.ts");
+  const bridge = await read("src/shared/bridge.ts");
+  for (const entry of [
+    "app-info.json",
+    "status-summary.json",
+    "storage-layout.json",
+    "pending-transaction-summary.json",
+    "recent-redacted-logs/README.txt"
+  ]) assert.match(diagnostics, new RegExp(entry.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(diagnostics, /auth\.json|encrypted_content|rollout-.*\.jsonl|state_5\.sqlite/);
+  assert.doesNotMatch(policy, /electron-updater|autoUpdater|node:https|node:http|\bfetch\s*\(|downloadUpdate|quitAndInstall/);
+  assert.match(updates, /import\("electron-updater"\)/);
+  assert.match(updates, /autoDownload = false/);
+  assert.match(updates, /autoInstallOnAppQuit = false/);
+  assert.match(updates, /quitAndInstall\(false, true\)/);
+  assert.doesNotMatch(updates, /setFeedURL|node:https|node:http|\bfetch\s*\(/);
+  assert.doesNotMatch(bridge, /url|channel|filePath|targetPath|releaseNotes/);
+  const sourceFiles = await filesUnder("src");
+  const updaterImports = [];
+  for (const file of sourceFiles) {
+    const source = await fs.readFile(file, "utf8");
+    if (source.includes("electron-updater")) updaterImports.push(path.relative(desktopRoot, file));
+  }
+  assert.deepEqual(updaterImports, [path.join("src", "main", "updater.ts")]);
 });
 
 test("electron-vite emits a CJS sandbox preload and keeps source maps disabled", async () => {

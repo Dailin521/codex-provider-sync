@@ -39,7 +39,9 @@ for (const forbidden of [
   "desktop E2E fault gate",
   "cps:v1:test:crash-runtime",
   "requestRaw",
-  "crashRuntime"
+  "crashRuntime",
+  "setFeedURL",
+  "example.invalid"
 ]) {
   assert.doesNotMatch(processText, new RegExp(forbidden), `Production Electron output contains ${forbidden}.`);
 }
@@ -52,5 +54,18 @@ assert.deepEqual(
   ["electron"],
   "Sandbox preload requires something other than Electron."
 );
+
+const main = await fs.readFile(path.join(outputRoot, "main", "index.js"), "utf8");
+const runtime = await fs.readFile(path.join(outputRoot, "main", "runtime.js"), "utf8");
+const renderer = (await Promise.all(
+  files
+    .filter((file) => path.relative(outputRoot, file).replaceAll("\\", "/").startsWith("renderer/")
+      && /\.(?:js|html)$/.test(file))
+    .map((file) => fs.readFile(file, "utf8"))
+)).join("\n");
+assert.match(main, /electron-updater/, "Production Main is missing the controlled updater.");
+assert.doesNotMatch(preload, /electron-updater|autoUpdater|quitAndInstall/);
+assert.doesNotMatch(runtime, /electron-updater|autoUpdater|quitAndInstall/);
+assert.doesNotMatch(renderer, /electron-updater|autoUpdater|quitAndInstall|setFeedURL/);
 
 process.stdout.write("Production Electron bundle boundary verified.\n");

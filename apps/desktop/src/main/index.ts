@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   app,
   BrowserWindow,
+  dialog,
   ipcMain,
   protocol,
   screen,
@@ -15,10 +16,12 @@ import {
   DESKTOP_APP_ORIGIN
 } from "../shared/constants.js";
 import { createElectronUtilitySpawner } from "./electron-utility.js";
+import { DesktopDiagnosticsExporter } from "./diagnostics-export.js";
 import { registerDesktopIpc } from "./ipc-router.js";
 import { DesktopProfileRepository } from "../profiles/repository.js";
 import { CoreRuntimeSupervisor } from "./runtime-supervisor.js";
 import { createSecureWebPreferences } from "./security-policy.js";
+import { DesktopUpdateController } from "./updater.js";
 import {
   registerDesktopProtocol,
   registerDesktopScheme,
@@ -45,6 +48,8 @@ if (!app.requestSingleInstanceLock()) {
   let removeIpc: (() => void) | null = null;
   let removeTestIpc: (() => void) | null = null;
   let removeSecurity: (() => void) | null = null;
+  let updates: DesktopUpdateController | null = null;
+  let activeWatchCount = 0;
   let quitting = false;
 
   const defaultCodexHome = path.resolve(
@@ -105,12 +110,54 @@ if (!app.requestSingleInstanceLock()) {
         ...(defaultSqliteHome ? { defaultSqliteHome } : {})
       })
     });
+    const diagnosticsExporter = new DesktopDiagnosticsExporter({
+      appVersion: app.getVersion(),
+      isPackaged: app.isPackaged
+    });
+    updates = new DesktopUpdateController({
+      isPackaged: app.isPackaged,
+      platform: process.platform,
+      arch: process.arch,
+      appVersion: app.getVersion(),
+      configured: app.getVersion() !== "0.0.0",
+      supervisor,
+      hasActiveWatches: () => activeWatchCount > 0,
+      verifyRecoveryState: () => supervisor!.verifyProfilesSafeForRestart(
+        profiles.list().map((profile) => ({
+          profileId: profile.id,
+          profileRevision: profile.revision
+        }))
+      )
+    });
     removeIpc = registerDesktopIpc({
       ipcMain,
       getWindow: () => mainWindow,
       rendererOrigin: DESKTOP_APP_ORIGIN,
       profiles,
-      supervisor
+      supervisor,
+      updates,
+      onActiveWatchCountChanged(count) {
+        activeWatchCount = count;
+      },
+      diagnosticsExporter,
+      async selectDiagnosticsTarget() {
+        if (e2eEnabled && process.env.CPS_DESKTOP_DIAGNOSTICS_TARGET) {
+          return path.resolve(process.env.CPS_DESKTOP_DIAGNOSTICS_TARGET);
+        }
+        const options = {
+          title: "Export redacted diagnostics",
+          defaultPath: path.join(
+            app.getPath("downloads"),
+            `codex-provider-diagnostics-${new Date().toISOString().slice(0, 10)}.zip`
+          ),
+          filters: [{ name: "ZIP archive", extensions: ["zip"] }],
+          properties: ["showOverwriteConfirmation" as const]
+        };
+        const result = mainWindow
+          ? await dialog.showSaveDialog(mainWindow, options)
+          : await dialog.showSaveDialog(options);
+        return result.canceled || !result.filePath ? null : result.filePath;
+      }
     });
     if (e2eEnabled) {
       const { registerDesktopTestHooks } = await import("./e2e-hooks.js");
@@ -122,6 +169,7 @@ if (!app.requestSingleInstanceLock()) {
       });
     }
     mainWindow = await createWindow();
+    updates.scheduleInitialCheck();
 
     if (e2eEnabled) {
       Object.defineProperty(globalThis, "__CPS_DESKTOP_TEST__", {
@@ -157,6 +205,7 @@ if (!app.requestSingleInstanceLock()) {
     event.preventDefault();
     quitting = true;
     void (async () => {
+      updates?.dispose();
       await supervisor?.shutdown();
       removeTestIpc?.();
       removeIpc?.();

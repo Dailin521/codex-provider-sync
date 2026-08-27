@@ -28,6 +28,7 @@ import {
   getStartedJournalTargets,
   readTransactionJournal
 } from "./transaction-journal.js";
+import { findRestoreJournals } from "./restore-journal.js";
 import { syncDirectory, writeFileAtomic } from "./atomic-file.js";
 
 const SESSION_CANONICAL_TARGET = Symbol("codex-provider-sync.session-canonical-target");
@@ -49,7 +50,7 @@ async function copyIfPresent(sourcePath, destinationPath) {
   return true;
 }
 
-async function copyFileAtomic(sourcePath, destinationPath) {
+export async function copyFileAtomic(sourcePath, destinationPath) {
   const fullDestination = path.resolve(destinationPath);
   const directory = path.dirname(fullDestination);
   const tempPath = path.join(
@@ -293,6 +294,17 @@ export async function restoreGlobalStateFilesFromBackup(backupDir, codexHome, op
     }
     const sourcePath = path.join(backupDir, fileName);
     const originalPresent = metadata?.globalStateFiles?.[fileName];
+    const target = {
+      kind: "globalState",
+      targetPath,
+      sourcePath,
+      sourceAction: originalPresent === false
+        ? "delete"
+        : (originalPresent === true || await backupFileExists(sourcePath) ? "copy" : "preserve"),
+      sourcePresent: originalPresent === true
+        || (originalPresent !== false && await backupFileExists(sourcePath))
+    };
+    await options.onBeforeTarget?.(target);
     if (originalPresent === true) {
       try {
         await fs.access(sourcePath);
@@ -307,6 +319,7 @@ export async function restoreGlobalStateFilesFromBackup(backupDir, codexHome, op
       // behavior instead of deleting a file we cannot classify safely.
       await copyIfPresent(sourcePath, targetPath);
     }
+    await options.onAfterTarget?.(target);
   }
 }
 
@@ -502,13 +515,38 @@ export async function pruneBackups(codexHome, keepCount = DEFAULT_BACKUP_RETENTI
 
   const backupRoot = defaultBackupRoot(codexHome);
   const backupDirs = await listManagedBackupDirectories(backupRoot);
-  const pending = await findPendingTransactions(codexHome);
-  const protectedBackups = new Set(
-    pending.map((transaction) => pathComparisonKey(path.dirname(transaction.filePath)))
-  );
+  const [pending, restoreJournals] = await Promise.all([
+    findPendingTransactions(codexHome),
+    findRestoreJournals(codexHome)
+  ]);
+  // A completed Restore may resolve an older nonterminal journal for write
+  // admission, but that does not authorize Prune to delete its evidence.
+  // Protect every still-blocking Restore journal independently of resolution.
+  const pruneTransactions = [
+    ...pending.filter((transaction) => transaction.operationKind !== "restore"),
+    ...restoreJournals.filter((transaction) => transaction.blocking)
+  ];
+  const protectedBackups = new Set();
+  let restoreReferencesUnverifiable = false;
+  for (const transaction of pruneTransactions) {
+    protectedBackups.add(pathComparisonKey(path.dirname(transaction.filePath)));
+    for (const referencedDir of [
+      transaction.prepared?.sourceBackup?.backupDir,
+      transaction.prepared?.preRestoreSnapshot?.backupDir,
+      transaction.protectionReferences?.sourceBackupDir,
+      transaction.protectionReferences?.preRestoreSnapshotDir
+    ]) {
+      if (typeof referencedDir === "string" && path.isAbsolute(referencedDir)) {
+        protectedBackups.add(pathComparisonKey(referencedDir));
+      }
+    }
+    restoreReferencesUnverifiable ||= transaction.operationKind === "restore"
+      && transaction.protectionReferencesUnverifiable === true;
+  }
   const toDelete = backupDirs
     .slice(keepCount)
-    .filter((entry) => !protectedBackups.has(pathComparisonKey(entry.fullPath)));
+    .filter((entry) => !restoreReferencesUnverifiable
+      && !protectedBackups.has(pathComparisonKey(entry.fullPath)));
   let freedBytes = 0;
   for (const entry of toDelete) {
     freedBytes += await getBackupDirectorySize(entry.fullPath);
@@ -652,7 +690,10 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
     allowSqliteHomeRelocation = false,
     globalStateTargetPaths = null,
     sessionTargetPaths = null,
-    onBeforeSessionRestore = null
+    onBeforeSessionRestore = null,
+    onBeforeTarget = null,
+    onAfterTarget = null,
+    dryRun = false
   } = options;
   const storage = typeof storageOrCodexHome === "string"
     ? resolveStorageLayout({ codexHome: storageOrCodexHome, env: {} })
@@ -754,20 +795,95 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
   }
 
   const configBackupPath = path.join(backupDir, "config.toml");
+  const configTargetPath = path.join(codexHome, "config.toml");
+  const configSourcePresent = restoreConfig && await backupFileExists(configBackupPath);
+  const globalStateTargets = [];
+  if (restoreGlobalState) {
+    const selectedTargets = globalStateTargetPaths
+      ? new Set(globalStateTargetPaths.map(pathComparisonKey))
+      : null;
+    for (const fileName of [GLOBAL_STATE_FILE_BASENAME, GLOBAL_STATE_BACKUP_FILE_BASENAME]) {
+      const targetPath = path.join(codexHome, fileName);
+      if (selectedTargets && !selectedTargets.has(pathComparisonKey(targetPath))) {
+        continue;
+      }
+      const sourcePath = path.join(backupDir, fileName);
+      const originalPresent = metadata?.globalStateFiles?.[fileName];
+      if (originalPresent === true && !await backupFileExists(sourcePath)) {
+        throw new Error(`Backup metadata says ${fileName} was present, but its backup copy is missing.`);
+      }
+      globalStateTargets.push({
+        kind: "globalState",
+        targetPath,
+        sourcePath,
+        sourceAction: originalPresent === false
+          ? "delete"
+          : (originalPresent === true || await backupFileExists(sourcePath) ? "copy" : "preserve"),
+        sourcePresent: originalPresent === true
+          || (originalPresent !== false && await backupFileExists(sourcePath))
+      });
+    }
+  }
+  const targets = [
+    ...(configSourcePresent
+      ? [{
+          kind: "config",
+          targetPath: configTargetPath,
+          sourcePath: configBackupPath,
+          sourcePresent: true
+        }]
+      : []),
+    ...globalStateTargets,
+    ...(databaseRestorePlan
+      ? [{
+          kind: "sqlite",
+          targetPath: databaseRestorePlan.targetPath,
+          sourcePath: databaseRestorePlan.sourcePath,
+          sourcePresent: true
+        }]
+      : []),
+    ...sessionRestoreEntries.map((entry) => ({
+      kind: "rollout",
+      targetPath: entry.path,
+      sourceEntry: entry,
+      sourcePresent: true
+    }))
+  ];
+
+  if (dryRun) {
+    return {
+      metadata,
+      backupDir: path.resolve(backupDir),
+      codexHome,
+      targetSqliteHome,
+      targets
+    };
+  }
+
   if (restoreConfig) {
-    await copyIfPresent(configBackupPath, path.join(codexHome, "config.toml"));
+    if (configSourcePresent) {
+      const target = targets.find((item) => item.kind === "config");
+      await onBeforeTarget?.(target);
+      await copyFileAtomic(configBackupPath, configTargetPath);
+      await onAfterTarget?.(target);
+    }
   }
   if (restoreGlobalState) {
     await restoreGlobalStateFilesFromBackup(backupDir, codexHome, {
-      targetPaths: globalStateTargetPaths
+      targetPaths: globalStateTargetPaths,
+      onBeforeTarget,
+      onAfterTarget
     });
   }
 
   if (databaseRestorePlan) {
+    const target = targets.find((item) => item.kind === "sqlite");
+    await onBeforeTarget?.(target);
     await restoreSqliteOnlineBackup(
       databaseRestorePlan.sourcePath,
       databaseRestorePlan.targetPath
     );
+    await onAfterTarget?.(target);
   }
 
   if (restoreSessions) {
@@ -782,11 +898,30 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
             )) {
           throw new Error(`Backup session target changed after validation: ${entry.path}`);
         }
+        const target = targets.find((item) =>
+          item.kind === "rollout"
+          && pathComparisonKey(item.targetPath) === pathComparisonKey(entry.path)
+        );
+        await onBeforeTarget?.(target);
+      },
+      onRestored: async (entry) => {
+        const target = targets.find((item) =>
+          item.kind === "rollout"
+          && pathComparisonKey(item.targetPath) === pathComparisonKey(entry.path)
+        );
+        await onAfterTarget?.(target);
       }
     });
   }
 
   return metadata;
+}
+
+export async function prepareRestoreBackup(backupDir, storageOrCodexHome, options = {}) {
+  return restoreBackup(backupDir, storageOrCodexHome, {
+    ...options,
+    dryRun: true
+  });
 }
 
 async function listManagedBackupDirectories(backupRoot) {

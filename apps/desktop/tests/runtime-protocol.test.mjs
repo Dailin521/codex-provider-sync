@@ -86,7 +86,7 @@ test("runtime operation events accept only strict pathless shared envelopes", ()
   }));
 });
 
-test("runtime hello requires the exact C7 capability set and identity", () => {
+test("runtime hello requires the exact C8 capability set and identity", () => {
   const identity = {
     appVersion: "0.5.0",
     coreVersion: DESKTOP_CORE_VERSION,
@@ -108,6 +108,6 @@ test("runtime hello requires the exact C7 capability set and identity", () => {
   }, identity));
   assert.throws(() => assertRuntimeHelloFrame({
     ...hello,
-    capabilities: [...DESKTOP_RUNTIME_METHODS, "prepareRestore"]
+    capabilities: [...DESKTOP_RUNTIME_METHODS, "unknownMethod"]
   }, identity));
 });

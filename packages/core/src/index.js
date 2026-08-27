@@ -177,6 +177,73 @@ function publicOperationState(value) {
   return result;
 }
 
+const DIAGNOSTIC_IDENTIFIER = /^[A-Za-z0-9._()-]{1,200}$/;
+const DIAGNOSTIC_TRANSACTION_STATES = new Set([
+  "prepared",
+  "applying",
+  "applied",
+  "skipped",
+  "committing",
+  "committed-pending-ack",
+  "rollback-pending",
+  "rollingBack",
+  "recovery-required",
+  "recoveryRequired",
+  "unknown"
+]);
+
+/** @param {unknown} value */
+function diagnosticIdentifier(value) {
+  return typeof value === "string" && DIAGNOSTIC_IDENTIFIER.test(value) ? value : null;
+}
+
+/** @param {unknown} value */
+function diagnosticDistribution(value) {
+  const source = isRecord(value) ? value : {};
+  /** @param {unknown} counts */
+  const project = (counts) => Object.fromEntries(
+    Object.entries(isRecord(counts) ? counts : {})
+      .filter(([provider, count]) =>
+        DIAGNOSTIC_IDENTIFIER.test(provider)
+        && Number.isSafeInteger(count)
+        && Number(count) >= 0
+      )
+      .slice(0, 512)
+  );
+  return {
+    sessions: project(source.sessions),
+    archived_sessions: project(source.archived_sessions)
+  };
+}
+
+/** @param {unknown} value */
+function diagnosticOperationState(value) {
+  if (!isRecord(value)) return null;
+  /** @type {Record<string, string>} */
+  const result = {};
+  if (typeof value.operationId === "string"
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.operationId)) {
+    result.operationId = value.operationId;
+  }
+  if (typeof value.operation === "string"
+      && ["sync", "switch", "restore", "prune", "watch", "unknown"].includes(value.operation)) {
+    result.operation = value.operation;
+  }
+  if (typeof value.actor === "string"
+      && ["manual", "watch", "external"].includes(value.actor)) result.actor = value.actor;
+  if (typeof value.startedAt === "string" && value.startedAt.length <= 64) {
+    result.startedAt = value.startedAt;
+  }
+  if (typeof value.busyScope === "string"
+      && ["codex-home", "state-db"].includes(value.busyScope)) result.busyScope = value.busyScope;
+  const lockState = diagnosticIdentifier(value.lockState);
+  if (lockState && lockState.length <= 80) result.lockState = lockState;
+  if (typeof value.errorCode === "string" && /^[A-Z0-9_]{1,80}$/.test(value.errorCode)) {
+    result.errorCode = value.errorCode;
+  }
+  return result;
+}
+
 /** @param {unknown} value */
 function publicStatus(value) {
   if (!isRecord(value)) return value;
@@ -198,7 +265,12 @@ function publicStatus(value) {
   const pending = Array.isArray(value.pendingTransactions)
     ? value.pendingTransactions.filter(isRecord).map((transaction) => ({
         operationId: typeof transaction.operationId === "string" ? transaction.operationId : null,
-        state: typeof transaction.state === "string" ? transaction.state : "unknown"
+        operationKind: typeof transaction.operationKind === "string" ? transaction.operationKind : "sync",
+        state: typeof transaction.state === "string" ? transaction.state : "unknown",
+        sourceBackupId: typeof transaction.sourceBackupId === "string" ? transaction.sourceBackupId : null,
+        preRestoreSnapshotId: typeof transaction.preRestoreSnapshotId === "string"
+          ? transaction.preRestoreSnapshotId
+          : null
       }))
     : [];
   const backupSummary = isRecord(value.backupSummary) ? value.backupSummary : {};
@@ -324,10 +396,23 @@ function publicOperationResult(value) {
   for (const key of [
     "targetProvider",
     "targetModel",
-    "modelSource"
+    "modelSource",
+    "restoreOperationId",
+    "preRestoreSnapshotId",
+    "restoreJournalState"
   ]) {
     const candidate = source[key];
     if (typeof candidate === "string" || candidate === null) result[key] = candidate;
+  }
+  if (Number.isSafeInteger(source.restoreVersion) && Number(source.restoreVersion) >= 1) {
+    result.restoreVersion = Number(source.restoreVersion);
+  }
+  if (typeof source.commitAcknowledgementRecovered === "boolean") {
+    result.commitAcknowledgementRecovered = source.commitAcknowledgementRecovered;
+  }
+  if (Array.isArray(source.resolvedOperationIds)) {
+    result.resolvedOperationCount = source.resolvedOperationIds
+      .filter((entry) => typeof entry === "string" && entry.length > 0).length;
   }
   for (const [key, candidate] of Object.entries(source)) {
     if ((key.endsWith("Count") || key.endsWith("Changed") || key.endsWith("Updated") || key.endsWith("Restored"))
@@ -633,40 +718,79 @@ export function createCoreFacade({ resolveProfile }) {
       const storage = isRecord(value.storage) ? value.storage : {};
       const provider = isRecord(value.provider) ? value.provider : {};
       const safety = isRecord(value.safety) ? value.safety : {};
+      const sqliteHomeSource = typeof storage.sqliteHomeSource === "string"
+        && ["cli", "config", "env", "default"].includes(storage.sqliteHomeSource)
+        ? storage.sqliteHomeSource
+        : "unknown";
+      const sqliteCounts = provider.sqliteCounts === null
+        ? null
+        : {
+            ...diagnosticDistribution(provider.sqliteCounts),
+            ...(isRecord(provider.sqliteCounts) && provider.sqliteCounts.unreadable === true
+              ? { unreadable: true }
+              : {})
+          };
       return {
         schemaVersion: 1,
-        generatedAt: value.generatedAt,
+        generatedAt: typeof value.generatedAt === "string"
+          && Number.isFinite(Date.parse(value.generatedAt))
+          ? new Date(value.generatedAt).toISOString()
+          : new Date().toISOString(),
         runtime: {
-          ...(typeof runtime.node === "string" ? { node: runtime.node } : {}),
-          ...(typeof runtime.platform === "string" ? { platform: runtime.platform } : {}),
-          ...(typeof runtime.arch === "string" ? { arch: runtime.arch } : {})
+          node: typeof runtime.node === "string" && /^[A-Za-z0-9._-]{1,80}$/.test(runtime.node)
+            ? runtime.node
+            : "unknown",
+          platform: typeof runtime.platform === "string" && /^[A-Za-z0-9._-]{1,80}$/.test(runtime.platform)
+            ? runtime.platform
+            : "unknown",
+          arch: typeof runtime.arch === "string" && /^[A-Za-z0-9._-]{1,80}$/.test(runtime.arch)
+            ? runtime.arch
+            : "unknown"
         },
         storage: {
-          ...(typeof storage.sqliteHomeSource === "string" ? { sqliteHomeSource: storage.sqliteHomeSource } : {}),
+          sqliteHomeSource,
           stateDbFound: storage.stateDbLocation !== null,
           sqliteSupported: !isRecord(storage.sqliteAccess) || storage.sqliteAccess.supported !== false
         },
         provider: {
-          ...(typeof provider.current === "string" ? { current: provider.current } : {}),
+          current: diagnosticIdentifier(provider.current) ?? "unknown",
           implicit: provider.implicit === true,
           configured: Array.isArray(provider.configured)
-            ? provider.configured.filter((entry) => typeof entry === "string")
+            ? provider.configured.map(diagnosticIdentifier).filter(Boolean).slice(0, 256)
             : [],
-          ...(isRecord(provider.rolloutCounts) ? { rolloutCounts: provider.rolloutCounts } : {}),
-          ...(isRecord(provider.sqliteCounts) ? { sqliteCounts: provider.sqliteCounts } : {})
+          rolloutCounts: diagnosticDistribution(provider.rolloutCounts),
+          sqliteCounts
         },
         safety: {
-          ...(typeof safety.storageRevision === "string" ? { storageRevision: safety.storageRevision } : {}),
+          ...(typeof safety.storageRevision === "string"
+            && /^[A-Za-z0-9_-]{1,256}$/.test(safety.storageRevision)
+            ? { storageRevision: safety.storageRevision }
+            : {}),
           pendingRecovery: safety.pendingRecovery === true,
           pendingTransactions: Array.isArray(safety.pendingTransactions)
-            ? safety.pendingTransactions.filter(isRecord).map((transaction) => ({
-                operationId: typeof transaction.operationId === "string" ? transaction.operationId : null,
-                state: typeof transaction.state === "string" ? transaction.state : "unknown"
+            ? safety.pendingTransactions.filter(isRecord).slice(0, 256).map((transaction) => ({
+                operationId: typeof transaction.operationId === "string"
+                  && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(transaction.operationId)
+                  ? transaction.operationId
+                  : null,
+                operationKind: typeof transaction.operationKind === "string"
+                  && ["sync", "switch", "restore"].includes(transaction.operationKind)
+                  ? transaction.operationKind
+                  : "sync",
+                state: typeof transaction.state === "string"
+                  && DIAGNOSTIC_TRANSACTION_STATES.has(transaction.state)
+                  ? transaction.state
+                  : "unknown",
+                sourceBackupId: diagnosticIdentifier(transaction.sourceBackupId),
+                preRestoreSnapshotId: diagnosticIdentifier(transaction.preRestoreSnapshotId)
               }))
             : [],
-          operationInProgress: publicOperationState(safety.operationInProgress),
+          operationInProgress: diagnosticOperationState(safety.operationInProgress),
           rolloutScanComplete: safety.rolloutScanComplete === true,
-          lockedRolloutCount: Number.isSafeInteger(safety.lockedRolloutCount) ? safety.lockedRolloutCount : 0,
+          lockedRolloutCount: Number.isSafeInteger(safety.lockedRolloutCount)
+            && Number(safety.lockedRolloutCount) >= 0
+            ? safety.lockedRolloutCount
+            : 0,
           projectThreadVisibilityAvailable: safety.projectThreadVisibilityAvailable === true
         }
       };

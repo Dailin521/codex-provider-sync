@@ -1,4 +1,5 @@
 import {
+  applyRestore,
   applySwitch,
   applySync
 } from "../../../src/public-api.js";
@@ -14,6 +15,10 @@ export function applyPreparedDesktopOperationForTest(
   control,
   faultInjector
 ) {
-  const apply = method === "applySync" ? applySync : applySwitch;
+  const apply = method === "applySync"
+    ? applySync
+    : method === "applySwitch"
+      ? applySwitch
+      : applyRestore;
   return apply(input, { ...control, faultInjector });
 }

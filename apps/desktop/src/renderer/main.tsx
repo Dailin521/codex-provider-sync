@@ -1,6 +1,6 @@
 import {
   AppUi,
-  SYNC_SWITCH_APP_UI_CAPABILITIES,
+  DESKTOP_C8_APP_UI_CAPABILITIES,
   type HostClient,
   type HostProfile,
   type PreferenceStore
@@ -27,6 +27,23 @@ const host: HostClient = Object.freeze({
   async listProfiles(): Promise<HostProfile[]> {
     const value = await bridge.profiles.list();
     return value.profiles.map((profile) => ({ ...profile }));
+  },
+  async exportDiagnostics(profile: { profileId: string; profileRevision?: string }) {
+    const result = await bridge.diagnostics.export({ schemaVersion: 1, profile });
+    return { status: result.status };
+  },
+  async getUpdateStatus() {
+    const status = await bridge.updates.getStatus();
+    return { ...status };
+  },
+  async checkForUpdates() {
+    return { ...await bridge.updates.check() };
+  },
+  async downloadUpdate() {
+    return { ...await bridge.updates.download() };
+  },
+  async installUpdate() {
+    return { ...await bridge.updates.install() };
   }
 });
 
@@ -50,7 +67,7 @@ const preferences: PreferenceStore = Object.freeze({
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <AppUi
-      capabilities={SYNC_SWITCH_APP_UI_CAPABILITIES}
+      capabilities={DESKTOP_C8_APP_UI_CAPABILITIES}
       core={core}
       host={host}
       initialLocale={navigator.language.toLowerCase().startsWith("zh") ? "zh-CN" : "en"}

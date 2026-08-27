@@ -1294,6 +1294,59 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
   return { changes: summaries, lockedPaths, providerCounts, encryptedContentCounts, userEventThreadIds, threadCwdById };
 }
 
+// Capture only the metadata fields that provider-sync is allowed to restore.
+// The returned entries deliberately exclude message/tool payloads while using
+// the same manifest shape as a managed provider-only backup.
+export async function captureSessionRestoreEntries(filePaths) {
+  const entries = [];
+  const seen = new Set();
+  for (const value of filePaths ?? []) {
+    const rolloutPath = path.resolve(value);
+    const identity = process.platform === "win32" ? rolloutPath.toLowerCase() : rolloutPath;
+    if (seen.has(identity)) {
+      continue;
+    }
+    seen.add(identity);
+
+    let captured = null;
+    for (let attempt = 0; attempt < 2 && captured === null; attempt += 1) {
+      const before = await getFileSnapshot(rolloutPath);
+      const record = await readFirstLineRecord(rolloutPath);
+      const parsed = parseSessionMetaRecord(record.firstLine);
+      if (!parsed) {
+        throw new CoreError(
+          "RESTORE_VALIDATION_FAILED",
+          `Rollout does not start with a valid session_meta record: ${rolloutPath}`
+        );
+      }
+      const models = await readTurnContextModelSnapshot(rolloutPath, {
+        firstLineOffset: 0,
+        firstLineLength: record.offset
+      });
+      const after = await getFileSnapshot(rolloutPath);
+      if (before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
+        continue;
+      }
+      captured = {
+        path: rolloutPath,
+        originalFirstLine: record.firstLine,
+        originalSeparator: record.separator || "\n",
+        originalMtimeMs: after.mtimeMs,
+        originalTurnContextModels: models.originalTurnContextModels,
+        modelOnlyChange: false
+      };
+    }
+    if (captured === null) {
+      throw new CoreError(
+        "ROLLOUT_CHANGED",
+        `Rollout changed while its recovery metadata was captured: ${rolloutPath}`
+      );
+    }
+    entries.push(captured);
+  }
+  return entries;
+}
+
 export async function applySessionChanges(changes, options = {}) {
   const normalizedChanges = changes ?? [];
   const {

@@ -130,7 +130,7 @@ public sealed record StateDbLockResource(
         Path.GetFullPath(right),
         OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 
-    private static string ResolveExistingPhysicalPath(string path, bool directory)
+    internal static string ResolveExistingPhysicalPath(string path, bool directory)
     {
         if (OperatingSystem.IsWindows())
         {

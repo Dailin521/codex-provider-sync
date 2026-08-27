@@ -570,15 +570,19 @@ export async function createSqliteOnlineBackup(storageOrLocation, destinationPat
   }
 
   let db;
+  let backupPhase = "source-open";
   try {
     // Read-only is deliberate: a database that disappears after discovery
     // must fail here instead of being silently recreated as an empty file.
     db = await openDatabase(fullSourcePath, { readOnly: true });
+    backupPhase = "source-metadata";
     setBusyTimeout(db, options.busyTimeoutMs);
     const sourceMetadata = readSqliteConnectionMetadata(db);
     const driver = db.driver ?? "unknown";
+    backupPhase = "destination-backup";
     await db.backup(fullDestinationPath, options.backupOptions ?? {});
 
+    backupPhase = "destination-sync";
     const handle = await fs.open(fullDestinationPath, "r+");
     try {
       await handle.sync();
@@ -613,8 +617,13 @@ export async function createSqliteOnlineBackup(storageOrLocation, destinationPat
       `${fullDestinationPath}-wal`,
       `${fullDestinationPath}-shm`
     ].map((filePath) => fs.rm(filePath, { force: true }).catch(() => {})));
+    const phasedError = new Error(
+      `SQLite online backup failed during ${backupPhase}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error instanceof Error ? error : undefined }
+    );
+    if (typeof error?.code === "string") phasedError.code = error.code;
     throw wrapSqliteMalformedError(
-      wrapSqliteBusyError(error, "create a consistent SQLite online backup"),
+      wrapSqliteBusyError(phasedError, "create a consistent SQLite online backup"),
       "create a consistent SQLite online backup"
     );
   } finally {

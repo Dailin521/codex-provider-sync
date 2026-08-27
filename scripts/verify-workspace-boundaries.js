@@ -122,14 +122,15 @@ assert(
   "Desktop fault fixtures must remain an exact private devDependency, never a production dependency."
 );
 const approvedDesktopElectronDependencies = new Map([
-  ["electron", "44.0.0"],
-  ["electron-vite", "5.0.0"],
-  ["electron-builder", "26.15.7"]
+  ["electron", { version: "44.0.0", field: "devDependencies", checkpoint: "C6" }],
+  ["electron-vite", { version: "5.0.0", field: "devDependencies", checkpoint: "C6" }],
+  ["electron-builder", { version: "26.15.7", field: "devDependencies", checkpoint: "C6" }],
+  ["electron-updater", { version: "6.8.9", field: "dependencies", checkpoint: "C8" }]
 ]);
-for (const [name, version] of approvedDesktopElectronDependencies) {
+for (const [name, approval] of approvedDesktopElectronDependencies) {
   assert(
-    desktopManifest.devDependencies?.[name] === version,
-    `apps/desktop must pin ${name} to the reviewed C6 version ${version}.`
+    desktopManifest[approval.field]?.[name] === approval.version,
+    `apps/desktop must pin ${name} to the reviewed ${approval.checkpoint} version ${approval.version}.`
   );
 }
 for (const name of Object.keys(desktopDependencies)) {

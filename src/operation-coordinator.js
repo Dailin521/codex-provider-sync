@@ -15,12 +15,100 @@ function clone(value) {
 }
 
 export class OperationCoordinator {
-  constructor({ randomOperationId = randomUUID, now = () => Date.now() } = {}) {
+  constructor({
+    randomOperationId = randomUUID,
+    now = () => Date.now(),
+    setTimeoutImpl = setTimeout,
+    clearTimeoutImpl = clearTimeout
+  } = {}) {
     this.randomOperationId = randomOperationId;
     this.now = now;
+    this.setTimeoutImpl = setTimeoutImpl;
+    this.clearTimeoutImpl = clearTimeoutImpl;
     this.active = new Map();
     this.snapshots = new Map();
-    this.endListeners = new Map();
+    this.manualIntents = new Map();
+    this.manualIntentExpiryTimers = new Map();
+    this.manualPriorityWaiters = new Map();
+  }
+
+  _sweepManualIntents(key) {
+    const intents = this.manualIntents.get(key);
+    if (!intents) return null;
+    const now = this.now();
+    for (const [planId, expiresAtMs] of intents) {
+      if (now >= expiresAtMs) intents.delete(planId);
+    }
+    if (intents.size === 0) {
+      this.manualIntents.delete(key);
+      return null;
+    }
+    return intents;
+  }
+
+  _hasManualPriority(key) {
+    return this.active.get(key)?.actor === "manual"
+      || Boolean(this._sweepManualIntents(key)?.size);
+  }
+
+  _clearManualIntentExpiryTimer(key) {
+    const timer = this.manualIntentExpiryTimers.get(key);
+    if (timer !== undefined) this.clearTimeoutImpl(timer);
+    this.manualIntentExpiryTimers.delete(key);
+  }
+
+  _armManualIntentExpiryTimer(key) {
+    this._clearManualIntentExpiryTimer(key);
+    const intents = this._sweepManualIntents(key);
+    if (!intents?.size) return;
+    const earliestExpiry = Math.min(...intents.values());
+    const timer = this.setTimeoutImpl(() => {
+      if (this.manualIntentExpiryTimers.get(key) !== timer) return;
+      this.manualIntentExpiryTimers.delete(key);
+      this._sweepManualIntents(key);
+      this._armManualIntentExpiryTimer(key);
+      this._settleManualPriorityWaiters(key);
+    }, Math.max(0, earliestExpiry - this.now()));
+    timer?.unref?.();
+    this.manualIntentExpiryTimers.set(key, timer);
+  }
+
+  _settleManualPriorityWaiters(key) {
+    const waiters = this.manualPriorityWaiters.get(key);
+    if (!waiters) return;
+    if (this._hasManualPriority(key)) {
+      return;
+    }
+    this.manualPriorityWaiters.delete(key);
+    for (const waiter of waiters) {
+      waiter.resolve();
+    }
+  }
+
+  registerManualIntent(codexHome, planId, expiresAt, platform = process.platform) {
+    if (typeof planId !== "string" || !planId) {
+      throw new TypeError("Manual intent planId must be a non-empty string.");
+    }
+    const expiresAtMs = typeof expiresAt === "number" ? expiresAt : Date.parse(expiresAt);
+    if (!Number.isFinite(expiresAtMs)) {
+      throw new TypeError("Manual intent expiresAt must be a valid timestamp.");
+    }
+    const key = homeKey(codexHome, platform);
+    const intents = this._sweepManualIntents(key) ?? new Map();
+    intents.set(planId, expiresAtMs);
+    this.manualIntents.set(key, intents);
+    this._armManualIntentExpiryTimer(key);
+  }
+
+  releaseManualIntent(codexHome, planId, platform = process.platform) {
+    const key = homeKey(codexHome, platform);
+    const intents = this.manualIntents.get(key);
+    if (intents) {
+      intents.delete(planId);
+      if (intents.size === 0) this.manualIntents.delete(key);
+    }
+    this._armManualIntentExpiryTimer(key);
+    this._settleManualPriorityWaiters(key);
   }
 
   cacheStatus(codexHome, snapshot, platform = process.platform) {
@@ -59,52 +147,68 @@ export class OperationCoordinator {
     };
   }
 
-  begin(codexHome, operation, { actor = "manual", platform = process.platform } = {}) {
+  begin(codexHome, operation, {
+    actor = "manual",
+    planId = null,
+    platform = process.platform
+  } = {}) {
     const key = homeKey(codexHome, platform);
     if (this.active.has(key)) {
+      if (actor === "manual" && planId) {
+        this.releaseManualIntent(codexHome, planId, platform);
+      }
       throw new CoreError("OPERATION_BUSY", "Lock already exists for this Codex Home; another write operation is active.", {
         details: { busyScope: "codex-home" }
       });
     }
-    const active = Object.freeze({
-      operationId: this.randomOperationId(),
-      operation,
-      actor,
-      startedAt: new Date(this.now()).toISOString()
-    });
-    this.active.set(key, active);
-    return active;
+    if (actor === "watch" && this._sweepManualIntents(key)?.size) {
+      throw new CoreError("OPERATION_BUSY", "A confirmed manual operation has priority for this Codex Home.", {
+        details: { busyScope: "codex-home", reason: "manual-intent" }
+      });
+    }
+    try {
+      const active = Object.freeze({
+        operationId: this.randomOperationId(),
+        operation,
+        actor,
+        startedAt: new Date(this.now()).toISOString()
+      });
+      this.active.set(key, active);
+      if (actor === "manual" && planId) {
+        this.releaseManualIntent(codexHome, planId, platform);
+      }
+      return active;
+    } catch (error) {
+      if (actor === "manual" && planId) {
+        this.releaseManualIntent(codexHome, planId, platform);
+      }
+      throw error;
+    }
   }
 
   end(codexHome, operationId, platform = process.platform) {
     const key = homeKey(codexHome, platform);
     if (this.active.get(key)?.operationId !== operationId) return;
-    const completed = this.active.get(key);
     this.active.delete(key);
-    const listeners = this.endListeners.get(key);
-    if (!listeners) return;
-    this.endListeners.delete(key);
-    for (const listener of listeners) {
-      queueMicrotask(() => listener(clone(completed)));
-    }
+    this._settleManualPriorityWaiters(key);
   }
 
   waitForManualOperation(codexHome, platform = process.platform) {
     const key = homeKey(codexHome, platform);
-    if (this.active.get(key)?.actor !== "manual") return null;
-    let listener;
+    if (!this._hasManualPriority(key)) return null;
+    let waiter;
     const promise = new Promise((resolve) => {
-      listener = resolve;
-      const listeners = this.endListeners.get(key) ?? new Set();
-      listeners.add(listener);
-      this.endListeners.set(key, listeners);
+      waiter = { resolve };
+      const waiters = this.manualPriorityWaiters.get(key) ?? new Set();
+      waiters.add(waiter);
+      this.manualPriorityWaiters.set(key, waiters);
     });
     return {
       promise,
       cancel: () => {
-        const listeners = this.endListeners.get(key);
-        listeners?.delete(listener);
-        if (listeners?.size === 0) this.endListeners.delete(key);
+        const waiters = this.manualPriorityWaiters.get(key);
+        waiters?.delete(waiter);
+        if (waiters?.size === 0) this.manualPriorityWaiters.delete(key);
       }
     };
   }

@@ -1,4 +1,18 @@
+import path from "node:path";
+
 let databaseFactoryPromise = null;
+
+function nativeSqlitePath(value) {
+  if (process.platform !== "win32"
+      || typeof value !== "string"
+      || value === ":memory:"
+      || value.startsWith("file:")) {
+    return value;
+  }
+  // SQLite's Windows VFS needs the extended-length form once deeply nested
+  // managed backup/snapshot paths cross MAX_PATH.
+  return path.toNamespacedPath(path.resolve(value));
+}
 
 function normalizeImportDefault(moduleNamespace) {
   return moduleNamespace.default ?? moduleNamespace;
@@ -7,7 +21,7 @@ function normalizeImportDefault(moduleNamespace) {
 class BetterSqliteDatabase {
   constructor(Database, dbPath, options = {}) {
     this.driver = "better-sqlite3";
-    this.db = new Database(dbPath, {
+    this.db = new Database(nativeSqlitePath(dbPath), {
       readonly: Boolean(options.readOnly)
     });
   }
@@ -21,7 +35,7 @@ class BetterSqliteDatabase {
   }
 
   async backup(destinationPath, options = {}) {
-    return this.db.backup(destinationPath, options);
+    return this.db.backup(nativeSqlitePath(destinationPath), options);
   }
 
   close() {
@@ -33,7 +47,7 @@ class NodeSqliteDatabase {
   constructor(sqlite, dbPath, options = {}) {
     this.driver = "node:sqlite";
     this.sqlite = sqlite;
-    this.db = new sqlite.DatabaseSync(dbPath, options);
+    this.db = new sqlite.DatabaseSync(nativeSqlitePath(dbPath), options);
   }
 
   prepare(sql) {
@@ -45,7 +59,7 @@ class NodeSqliteDatabase {
   }
 
   async backup(destinationPath, options = {}) {
-    return this.sqlite.backup(this.db, destinationPath, options);
+    return this.sqlite.backup(this.db, nativeSqlitePath(destinationPath), options);
   }
 
   close() {

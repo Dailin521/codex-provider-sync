@@ -179,6 +179,64 @@ test("method output guards reject structurally invalid successes", () => {
   }));
 });
 
+test("DiagnosticsSnapshot is a recursive pathless allowlist", () => {
+  const diagnostics = {
+    schemaVersion: 1,
+    generatedAt: "2026-08-27T00:00:00.000Z",
+    runtime: { node: "v24.0.0", platform: "win32", arch: "x64" },
+    storage: { sqliteHomeSource: "default", stateDbFound: true, sqliteSupported: true },
+    provider: {
+      current: "openai",
+      implicit: false,
+      configured: ["openai", "relay-v2"],
+      rolloutCounts: { sessions: { openai: 2 }, archived_sessions: {} },
+      sqliteCounts: { sessions: { openai: 2 }, archived_sessions: {}, unreadable: true }
+    },
+    safety: {
+      storageRevision: "revision_1",
+      pendingRecovery: true,
+      pendingTransactions: [{
+        operationId: "11111111-1111-4111-8111-111111111111",
+        operationKind: "restore",
+        state: "committed-pending-ack",
+        sourceBackupId: "provider-sync-source",
+        preRestoreSnapshotId: "restore-v2-snapshot"
+      }],
+      operationInProgress: {
+        operationId: "22222222-2222-4222-8222-222222222222",
+        operation: "restore",
+        actor: "manual",
+        startedAt: "2026-08-27T00:00:00.000Z",
+        busyScope: "codex-home"
+      },
+      rolloutScanComplete: true,
+      lockedRolloutCount: 0,
+      projectThreadVisibilityAvailable: true
+    }
+  };
+  assert.doesNotThrow(() => assertCoreMethodOutput("getDiagnostics", diagnostics));
+
+  for (const [section, field] of [
+    ["runtime", "path"],
+    ["storage", "codexHome"],
+    ["provider", "token"],
+    ["safety", "message"]
+  ]) {
+    const mutated = structuredClone(diagnostics);
+    mutated[section][field] = "C:/private/secret";
+    assert.throws(() => assertCoreMethodOutput("getDiagnostics", mutated), `${section}.${field}`);
+  }
+  const pendingLeak = structuredClone(diagnostics);
+  pendingLeak.safety.pendingTransactions[0].journalPath = "C:/private/journal";
+  assert.throws(() => assertCoreMethodOutput("getDiagnostics", pendingLeak));
+  const operationLeak = structuredClone(diagnostics);
+  operationLeak.safety.operationInProgress.encrypted_content = "message-body";
+  assert.throws(() => assertCoreMethodOutput("getDiagnostics", operationLeak));
+  const providerPath = structuredClone(diagnostics);
+  providerPath.provider.rolloutCounts.sessions["C:/private"] = 1;
+  assert.throws(() => assertCoreMethodOutput("getDiagnostics", providerPath));
+});
+
 test("ProgressEvent cannot carry messages, paths or diagnostics", () => {
   assert.doesNotThrow(() => assertProgressEvent({
     stage: "sqlite",

@@ -1,5 +1,5 @@
 export function applyPreparedDesktopOperationForTest(
-  method: "applySync" | "applySwitch",
+  method: "applySync" | "applySwitch" | "applyRestore",
   input: { schemaVersion: 1; planId: string },
   control: {
     signal?: AbortSignal;

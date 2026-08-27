@@ -406,7 +406,7 @@ platform?
 - 恢复目标完成后尝试把绑定 journal 标记为 rolledBack；
 - 当前 journal terminal 标记失败会使 `runRestore` 整体 reject，即使部分恢复结果已经持久化；只有 inventory 刷新失败会降级为 warning。
 
-### 7.3 当前 Restore 安全债
+### 7.3 已发布 v0.5 Restore 安全债（Legacy）
 
 `runRestore` 当前会获取正式 operation lock，也会校验被选中备份及其 journal，但**恢复操作自身不会先创建新的恢复前备份，也没有独立的 restore transaction journal**。因此，若 restore 在 config、global state、SQLite 或 rollout 已部分落盘后发生进程崩溃，当前实现没有与 sync/switch 同等级的自动补偿证据。
 
@@ -418,11 +418,15 @@ platform?
 - 当前恢复目标已落盘但 rolledBack terminal 标记失败时，调用方只会收到失败，不能据此证明目标未恢复或 Journal 已收敛；vNext 必须增加 commit/terminal acknowledgement reconciliation；
 - 补齐安全机制时必须继续兼容 v1/v2 旧备份格式和现有 restore 选项。
 
-### 7.4 vNext Restore v2 目标（未实现）
+### 7.4 vNext Restore v2（V1/C8 候选已实现，尚未发布）
 
-[ADR-0013](../../adr/0013-restore-v2-recovery-state-machine.md) 冻结 Restore v2 的目标：在任何 restore mutation 前创建独立的恢复前 snapshot，并用独立 restore operation journal 记录 source backup、目标清单、每目标状态和 durable terminal。`prepared/applying/committing/rollback-pending` crash 必须由显式 recovery 依据该 snapshot 补偿；`committed-pending-ack` 必须按目标 Hash 前进到 `completed` 或 `recovery-required`，不得对已提交目标启动反向补偿。
+[ADR-0013](../../adr/0013-restore-v2-recovery-state-machine.md) 冻结 Restore v2：在任何 restore mutation 前创建独立的恢复前 snapshot，并用独立 restore operation journal 记录 source backup、目标清单、每目标状态和 durable terminal。Node 与仍受支持的 .NET Core 都实现该协议。`prepared/applying/committing/rollback-pending` crash 必须由显式 recovery 依据该 snapshot 补偿，或由同 source、同物理 Home、完整目标覆盖的新 Restore 创建自己的 snapshot/journal 后以 completed resolver 收敛；`committed-pending-ack` 必须按目标 Hash 前进到 `completed` 或 `recovery-required`，不得对已提交目标启动反向补偿。
 
-当前 `runRestore` 仍是 7.3 所述 v0.5 行为。source backup v1/v2、现有 restore options、relocation 双重授权和 foreign pending 处理必须保持兼容；未知 journal/schema 必须 fail closed，不能依赖 message 推断结果。
+snapshot manifest 与 durable `prepared` event 必须全量绑定 schema/protocol、operation、source backup、storage（含持久化 `codexHomePhysical`）、required target kinds、resolver operation IDs、按顺序排列的完整 targets，以及 snapshot 的稳定物理目录；任何不一致都在 compensation 或 commit acknowledgement 前进入 `recovery-required`，不能仅凭重算后的 manifest hash 放行。
+
+completed resolver 只在 source backup id/path/revision、pending 与 resolver 持久化的 `codexHomePhysical`、当前已加锁 Codex Home 的稳定物理 identity、唯一 operationId 与 required target kinds 全部匹配时解除 write blocker；不得重新解析可变 lexical `codexHome` 来替代历史 physical binding。旧 raw journal 不改写，Prune 继续保护其 journal/source/snapshot。foreign pending、重复 operationId、覆盖不足、invalid tail 或未知 journal/schema 必须在新 snapshot/journal/mutation 前 fail closed，不能依赖 message 推断结果。source backup v1/v2、现有 restore options 与 relocation 双重授权保持兼容。
+
+已发布 v0.5 仍是 7.3 行为；本节实现只有在 C8、本 PR 远端门禁和最终合入完成后才成为发布合同。
 
 ### 7.5 当前结果
 
@@ -912,6 +916,7 @@ V1/C3 已实现上述边界；`runSync/runSwitch/runRestore/runWatch` 仍作为 
 ### 16.1 C3 Plan / Apply 合同
 
 - `prepareSync/prepareSwitch/prepareRestore` 返回不可变 `PlanSummary` schema v1。`planId` 为 32-byte 随机不透明标识；TTL 固定 10 分钟；ledger 仅驻留当前进程并单次消费，重启、过期、重放和跨 operation 使用均返回 `PLAN_EXPIRED`。
+- Plan ledger 必须按最早 expiry 使用不阻止进程退出的自治 timer 清理弃置计划；不得依赖后续 consume 或新的 Prepare 才回收。人工 Plan intent 同样按每个 Home 的最早 expiry 自治清理并重新 arm，多个 Watch waiter 不得各自创建 10 分钟 timer。
 - `applySync/applySwitch/applyRestore` 只接受精确的 `{schemaVersion: 1, planId}`。任何附加路径、Provider、model、backupId 或 mutation 参数都返回 `INVALID_INPUT`，且不消费合法 Plan。
 - Apply 在 Home→State DB 双锁内重新读取可信 Profile、config、rollout inventory、State DB main/WAL/SHM 与 Restore source backup revision；任一漂移统一返回 `STALE_STATE`，且在 Backup/Journal/mutation 前停止。
 - Web 只公开 `*/prepare` 与 `*/apply`。旧 `/api/sync`、`/api/switch`、`/api/restore` 固定返回 `410 PLAN_REQUIRED`，不得调用兼容 `run*` 写入口。
@@ -952,6 +957,23 @@ V1/C3 已实现上述边界；`runSync/runSwitch/runRestore/runWatch` 仍作为 
 - Runtime Hello 必须同时匹配 runtime/core protocol、app/core version、buildId、随机 nonce、generation 和精确只读 capability。崩溃立即拒绝全部 pending 为 `CORE_RUNTIME_CRASHED`；不后台重启；下一次用户请求每个 profile/revision 都必须先完成 `getStatus` pending-journal preflight，失败不得被后续请求绕过。
 - request timeout 必须终止当前 Runtime generation，避免迟到响应与复用 requestId 错误关联；下一次用户请求按 crash restart/preflight 规则处理。shutdown 是终结性、幂等操作，调用前后都拒绝新请求，不能产生孤儿 Utility。response 的 requestId/generation/operationId 及 preflight profile 必须与请求关联。
 - History 列表标题只能来自显式 metadata；无标题返回空字符串并由 UI 本地化。消息正文只在用户显式打开详情后返回，离开详情立即清空/abort，不进入 Query cache、日志或 Diagnostics。
+
+### 16.6 C7 Electron Sync / Switch 候选边界
+
+- DesktopCoreClient、Preload、Main IPC、Supervisor 与 Utility 只增加 `prepareSync/applySync/prepareSwitch/applySwitch`，Apply 仍只接收 `{schemaVersion:1, planId}`；Main 持有并一次性消费 renderer sender 绑定的 Plan ownership。
+- Renderer 只能提交 profile、Provider 和 `provider-default/keep-root-model/explicit` 三种 model intent；不得提交 Codex/SQLite/backup 路径或底层 apply 参数。自定义 Provider 必须由 Core 从可信 config 验证。
+- pending recovery 阻断 Sync/Switch。apply lifecycle 必须以 requestId/operationId 关联进度与取消；Runtime crash/timeout 立即拒绝 pending，下一请求重新 Status preflight。
+
+### 16.7 C8 Electron Restore / Watch / Diagnostics / Update 候选边界
+
+- DesktopCoreClient、Preload、Main IPC、Supervisor 与 Utility 只按精确方法组增加 `prepareRestore/applyRestore`、`pruneBackups/startWatch/stopWatch/getWatchStatus`。Main 持有 Restore Plan 与 Watch ID；Renderer 只提交 profile、受管 backupId、Restore options、keepCount 或有限 Watch 输入。
+- Recovery Required 时，Sync/Switch/startWatch 继续阻断；Restore 与 Prune 可作为 recovery-safe 操作进入 Core，stop/get Watch status 仍可用。Restore Apply 属于 cancellable write lifecycle，完成后使 Supervisor 的 Status preflight 失效并重新读取。
+- Restore snapshot/journal 持久化 `codexHomePhysical`；pending、resolver 与当前已加锁 Home 必须匹配该稳定物理 identity，不得用可变 lexical 路径的当前 realpath 擦除历史 binding。snapshot manifest 与 durable `prepared` event 必须全量绑定 schema/protocol、operation、source、storage、required kinds、resolver IDs、ordered targets 和 snapshot 物理目录。config、global state 与 rollout 的固定名称、物理 parent、reparse/symlink 边界必须在 snapshot、每目标 apply、补偿与 commit acknowledgement 前反复验证。任一绑定、边界或物理 identity 无法可靠证明时返回 `LOCK_UNVERIFIABLE(codex-home)` 或 `RECOVERY_REQUIRED`，不得读写被换接到 Home 外的目标。无目标 mutation 的取消只能写入验证型 compensation evidence，不得为“回滚”而重写原目标。
+- Watch 每次 apply 都重新 Prepare/Apply 并获取 Home→State DB 双锁。已 Prepare 的人工 Plan 具有优先级；Watch 合并重复事件并等待人工 intent 释放或过期，只运行一次 follow-up。首次遇到 `RECOVERY_REQUIRED/PENDING_TRANSACTION` 即停止，不继续自动写。
+- Diagnostics Renderer 请求严格只有 `{schemaVersion:1, profile}`。输出目标由 Main 原生文件选择器产生并转换为 5 分钟、单次消费的随机 capability；token 和目标路径不跨 Renderer。ZIP 条目固定且再次执行共享 Diagnostics DTO exact validation，排除 `auth.json`、凭据、token、路径、rollout/DB、消息正文与 `encrypted_content`。
+- Update 只由 Main 的 `electron-updater` controller 管理，固定使用打包 metadata 中的 GitHub provider；不得调用 `setFeedURL`，Renderer 不得提交 URL、channel、路径、版本、silent/force 参数或接收 release notes、下载 URL、缓存路径和原始异常。Preload 仅暴露无参数的 `getStatus/check/download/install`，响应为脱敏 schema v2 状态。
+- `autoDownload` 与 `autoInstallOnAppQuit` 均关闭。检查、下载或更新错误不得改变 Core 结果。安装意图必须在 Supervisor 内同步关闭 restart gate，将已经入场但尚处于 preflight/dispatch 前的写请求计入 admission，并等待这些请求排空；此后新的 Sync/Switch/Restore/Prune/startWatch 立即返回 busy，只有 `getWatchStatus` 仍为只读。排空后必须再次确认 update 已下载、无 active Watch、无写操作，并由 Main 对全部已知 Profile 强制刷新 Status、证明无 pending recovery，最后才可调用 `quitAndInstall`；任一 Profile 无法验证、installer 抛错或安装未启动时均 fail closed 并重新开放 gate。
+- C8 只接入受控状态机和门禁；Desktop 版本仍为 `0.0.0` 或非 packaged/不支持目标时状态为 disabled，不启动网络检查。真实版本注入、签名、Update metadata 和跨版本 packaged smoke 属于 C9/C10 门禁，未获得发布授权前不得把通道描述为已上线。
 
 ## 17. Phase 1 提取要求
 

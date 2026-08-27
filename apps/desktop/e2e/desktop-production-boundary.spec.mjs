@@ -36,15 +36,29 @@ test("production desktop bundle has no test bridge and reads the real SQLite fix
     const boundary = await page.evaluate(() => ({
       bridgeKeys: Object.keys(window.codexProvider).sort(),
       coreKeys: Object.keys(window.codexProvider.core).sort(),
+      updateKeys: Object.keys(window.codexProvider.updates).sort(),
       process: typeof globalThis.process,
       require: typeof globalThis.require
     }));
     expect(boundary).toEqual({
-      bridgeKeys: ["core", "profiles", "version"],
-      coreKeys: ["cancelOperation", "requestReadOnly", "requestSyncSwitch", "subscribeOperation"],
+      bridgeKeys: ["core", "diagnostics", "profiles", "updates", "version"],
+      coreKeys: [
+        "cancelOperation",
+        "requestMaintenance",
+        "requestReadOnly",
+        "requestRestore",
+        "requestSyncSwitch",
+        "subscribeOperation"
+      ],
+      updateKeys: ["check", "download", "getStatus", "install"],
       process: "undefined",
       require: "undefined"
     });
+
+    const updateStatus = await page.evaluate(() => window.codexProvider.updates.getStatus());
+    expect(updateStatus.schemaVersion).toBe(2);
+    expect(updateStatus.installAllowed).toBe(false);
+    expect(JSON.stringify(updateStatus)).not.toMatch(/url|path|releaseNotes|token/i);
 
     const profile = (await page.evaluate(() => window.codexProvider.profiles.list())).profiles[0];
     const status = await page.evaluate(async ({ profile }) => window.codexProvider.core.requestReadOnly({

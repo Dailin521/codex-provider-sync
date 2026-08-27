@@ -123,7 +123,12 @@ export const resources = {
         runtime: "Runtime",
         storage: "Storage",
         provider: "Provider",
-        safety: "Safety"
+        safety: "Safety",
+        export: "Export redacted bundle",
+        exporting: "Exporting…",
+        exportCreated: "Redacted diagnostics bundle created.",
+        exportCancelled: "Diagnostics export cancelled.",
+        exportFailed: "Diagnostics export failed."
       },
       settings: {
         title: "Settings",
@@ -136,6 +141,38 @@ export const resources = {
         watch: "Watch",
         watchStart: "Start watch",
         watchStop: "Stop watch",
+        watchRecoveryBlocked: "Resolve the pending recovery before starting Watch.",
+        update: "Updates",
+        updateStatus: {
+          disabled: "Unavailable",
+          idle: "Ready to check",
+          checking: "Checking",
+          available: "Update available",
+          downloading: "Downloading",
+          downloaded: "Ready to install",
+          "not-available": "Up to date",
+          error: "Update failed",
+          installing: "Restarting to install"
+        },
+        updateReason: {
+          "not-packaged": "Update checks are available only in a packaged build.",
+          "not-configured": "No release update channel is configured.",
+          "unsupported-target": "Updates are not supported for this platform target.",
+          "check-failed": "The update check failed without affecting Core operations.",
+          "download-failed": "The update download failed without affecting Core operations.",
+          "install-failed": "The installer could not be started; the current version remains active."
+        },
+        updateBlocked: {
+          "write-in-progress": "An update cannot be installed while a protected operation is running.",
+          "watch-active": "Stop Watch before installing an update.",
+          "pending-recovery": "An update cannot be installed while a transaction requires recovery.",
+          "recovery-unverified": "Recovery state could not be verified; installation remains blocked."
+        },
+        updateVersion: "Version {{version}}",
+        updateProgress: "{{percent}}% downloaded",
+        updateCheck: "Check for updates",
+        updateDownload: "Download update",
+        updateInstall: "Restart and install",
         forget: "Forget this browser",
         englishFallback: "English fallback",
         forgetHint: "Pairing credentials are removed by the local host."
@@ -285,7 +322,12 @@ export const resources = {
         runtime: "运行时",
         storage: "存储",
         provider: "Provider",
-        safety: "安全状态"
+        safety: "安全状态",
+        export: "导出脱敏诊断包",
+        exporting: "正在导出…",
+        exportCreated: "脱敏诊断包已创建。",
+        exportCancelled: "已取消诊断导出。",
+        exportFailed: "诊断导出失败。"
       },
       settings: {
         title: "设置",
@@ -298,6 +340,38 @@ export const resources = {
         watch: "监视",
         watchStart: "启动监视",
         watchStop: "停止监视",
+        watchRecoveryBlocked: "请先解决待恢复事务，再启动监视。",
+        update: "更新",
+        updateStatus: {
+          disabled: "不可用",
+          idle: "可检查更新",
+          checking: "正在检查",
+          available: "发现新版本",
+          downloading: "正在下载",
+          downloaded: "可安装",
+          "not-available": "已是最新版本",
+          error: "更新失败",
+          installing: "正在重启安装"
+        },
+        updateReason: {
+          "not-packaged": "仅打包后的应用可检查更新。",
+          "not-configured": "尚未配置正式 Release 更新通道。",
+          "unsupported-target": "当前平台目标不支持应用内更新。",
+          "check-failed": "检查更新失败，不会影响 Core 操作。",
+          "download-failed": "下载更新失败，不会影响 Core 操作。",
+          "install-failed": "无法启动安装程序，当前版本仍保持可用。"
+        },
+        updateBlocked: {
+          "write-in-progress": "受保护操作运行期间不能安装更新。",
+          "watch-active": "请先停止监视，再安装更新。",
+          "pending-recovery": "存在待恢复事务时不能安装或重启更新。",
+          "recovery-unverified": "无法确认所有 Profile 的恢复状态，已阻止安装。"
+        },
+        updateVersion: "版本 {{version}}",
+        updateProgress: "已下载 {{percent}}%",
+        updateCheck: "检查更新",
+        updateDownload: "下载更新",
+        updateInstall: "重启并安装",
         forget: "忘记此浏览器",
         englishFallback: "英文为兜底语言",
         forgetHint: "配对凭据将由本地 Host 删除。"

@@ -24,6 +24,47 @@ export interface HostClient {
   saveProfile?(input: SaveProfileInput, signal?: AbortSignal): Promise<HostProfile>;
   deleteProfile?(profileId: string, profileRevision: string, signal?: AbortSignal): Promise<void>;
   forgetBrowser?(): Promise<void>;
+  exportDiagnostics?(
+    profile: { profileId: string; profileRevision?: string },
+    signal?: AbortSignal
+  ): Promise<HostDiagnosticsExportResult>;
+  getUpdateStatus?(signal?: AbortSignal): Promise<HostUpdateStatus>;
+  checkForUpdates?(signal?: AbortSignal): Promise<HostUpdateStatus>;
+  downloadUpdate?(signal?: AbortSignal): Promise<HostUpdateStatus>;
+  installUpdate?(signal?: AbortSignal): Promise<HostUpdateStatus>;
+}
+
+export type HostDiagnosticsExportResult =
+  | { status: "created" }
+  | { status: "cancelled" }
+  | { status: "failed" };
+
+export interface HostUpdateStatus {
+  state:
+    | "disabled"
+    | "idle"
+    | "checking"
+    | "available"
+    | "downloading"
+    | "downloaded"
+    | "not-available"
+    | "error"
+    | "installing";
+  reason?:
+    | "not-packaged"
+    | "not-configured"
+    | "unsupported-target"
+    | "check-failed"
+    | "download-failed"
+    | "install-failed";
+  version?: string;
+  progressPercent?: number;
+  installBlockedReason?:
+    | "write-in-progress"
+    | "watch-active"
+    | "pending-recovery"
+    | "recovery-unverified";
+  installAllowed: boolean;
 }
 
 export interface AppUiCapabilities {
@@ -35,6 +76,8 @@ export interface AppUiCapabilities {
   manageProfiles: boolean;
   revealProfilePaths: boolean;
   forgetBrowser: boolean;
+  exportDiagnostics: boolean;
+  viewUpdateStatus: boolean;
 }
 
 export const FULL_APP_UI_CAPABILITIES: Readonly<AppUiCapabilities> = Object.freeze({
@@ -45,7 +88,9 @@ export const FULL_APP_UI_CAPABILITIES: Readonly<AppUiCapabilities> = Object.free
   watch: true,
   manageProfiles: true,
   revealProfilePaths: true,
-  forgetBrowser: true
+  forgetBrowser: true,
+  exportDiagnostics: true,
+  viewUpdateStatus: true
 });
 
 export const READ_ONLY_APP_UI_CAPABILITIES: Readonly<AppUiCapabilities> = Object.freeze({
@@ -56,7 +101,9 @@ export const READ_ONLY_APP_UI_CAPABILITIES: Readonly<AppUiCapabilities> = Object
   watch: false,
   manageProfiles: false,
   revealProfilePaths: false,
-  forgetBrowser: false
+  forgetBrowser: false,
+  exportDiagnostics: false,
+  viewUpdateStatus: false
 });
 
 export const SYNC_SWITCH_APP_UI_CAPABILITIES: Readonly<AppUiCapabilities> = Object.freeze({
@@ -67,7 +114,22 @@ export const SYNC_SWITCH_APP_UI_CAPABILITIES: Readonly<AppUiCapabilities> = Obje
   watch: false,
   manageProfiles: false,
   revealProfilePaths: false,
-  forgetBrowser: false
+  forgetBrowser: false,
+  exportDiagnostics: false,
+  viewUpdateStatus: false
+});
+
+export const DESKTOP_C8_APP_UI_CAPABILITIES: Readonly<AppUiCapabilities> = Object.freeze({
+  sync: true,
+  switchProvider: true,
+  restore: true,
+  pruneBackups: true,
+  watch: true,
+  manageProfiles: false,
+  revealProfilePaths: false,
+  forgetBrowser: false,
+  exportDiagnostics: true,
+  viewUpdateStatus: true
 });
 
 export interface PreferenceStore {

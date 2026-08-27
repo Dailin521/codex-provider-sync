@@ -74,7 +74,10 @@ public sealed record TransactionRecoveryInfo(
     string? OperationId,
     string State,
     string BackupDirectory,
-    string JournalPath);
+    string JournalPath)
+{
+    public string OperationKind { get; init; } = "sync";
+}
 
 public sealed record StateDbLocation(string Path, string RelativePath, string Source);
 
@@ -274,6 +277,12 @@ public sealed class RestoreResult
     /// may be stale.
     /// </summary>
     public string? BackupInventoryWarning { get; init; }
+    public int? RestoreVersion { get; init; }
+    public string? RestoreOperationId { get; init; }
+    public string? PreRestoreSnapshotId { get; init; }
+    public string? RestoreJournalState { get; init; }
+    public bool CommitAcknowledgementRecovered { get; init; }
+    public IReadOnlyList<string> ResolvedOperationIds { get; init; } = [];
 }
 
 public sealed class BackupStorageInfo

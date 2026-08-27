@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-08-25
-- Scope: vNext target Restore contract; not implemented by v0.5
+- Scope: vNext Restore contract; implemented by the V1/C8 candidate, not released until the final PR gates and merge complete
 
 ## Context
 
@@ -31,15 +31,19 @@ prepared | applying | committing
   or recovery-required
 ```
 
-`completed`、`rolled-back` 与 `recovery-required` 是耐久终态。`committed-pending-ack` 表示目标内容已经提交，但调用方尚未完成终态确认：恢复流程必须重新读取 journal、核对 operationId、目标 manifest 与 hashes，然后只允许前进到 `completed`；不得在该窗口对已提交目标启动补偿。若无法证明目标与 manifest 一致，则进入 `recovery-required` 并保留 snapshot、journal、source backup 和已完成/未完成 targets。
+`completed`、`rolled-back` 与 `recovery-required` 是耐久终态；其中 `recovery-required` 仍是 write blocker。`committed-pending-ack` 表示目标内容已经提交，但调用方尚未完成终态确认：恢复流程必须重新读取 journal、核对 operationId、目标 manifest 与 hashes，然后只允许前进到 `completed`；不得在该窗口对已提交目标启动补偿。若无法证明目标与 manifest 一致，则进入 `recovery-required` 并保留 snapshot、journal、source backup 和已完成/未完成 targets。
 
-兼容读取规则固定为：旧 v1 `committed` 投影为 v2 `completed`，旧 `rolledBack` 投影为 `rolled-back`，旧 `recoveryRequired` 投影为 `recovery-required`；不得把历史 v1 `committed` 解释为 `committed-pending-ack`。v2 reader 必须能读取 v1；旧 reader 遇到未知 v2 schema 时必须 fail closed，不得改写 journal。
+pre-restore snapshot manifest 与 durable `prepared` event 必须绑定同一个 schema/protocol、operation、source backup、storage（含持久化的 `codexHomePhysical`）、required target kinds、resolver operation IDs、按顺序排列的完整 targets，以及 journal 所记录的 snapshot 物理目录。任一字段不一致，即使攻击者或故障同时重算 manifest hash，也必须在 compensation 或 commit acknowledgement 前进入 `recovery-required`，不得读取另一个 snapshot、补偿目标或确认完成。
+
+历史 `transaction-journal.jsonl` 的 `protocolVersion: 1` 是 Sync/Switch transaction journal，并不是独立 Restore journal；Restore v2 继续通过既有兼容路径校验其 source backup 绑定，并在新 Restore 完成 commit acknowledgement 后标记该 source transaction 已恢复。独立 Restore journal 的首个格式就是 `restore-journal.v2.jsonl`（`schemaVersion: 2`、`protocolVersion: 2`），不存在 standalone Restore journal v1，也不得把旧 transaction journal 的 `committed`、`rolledBack` 或 `recoveryRequired` 状态猜测为 Restore v2 状态。未知 Restore journal schema/version 必须 fail closed 且不得改写；旧 reader 遇到未知 v2 文件同样必须 fail closed。
 
 ## Compensation, Crash and Foreign Pending Rules
 
-- mutation 或 crash 发生在 `prepared`、`applying`、`committing` 或 `rollback-pending` 时，后续普通写入必须被阻断；显式 recovery 依据 pre-restore snapshot 执行补偿，成功后将本 Restore journal 收敛到 `rolled-back`。
+- mutation 或 crash 发生在 `prepared`、`applying`、`committing` 或 `rollback-pending` 时，后续普通写入必须被阻断。显式 recovery 可以重新打开原 journal 并依据 pre-restore snapshot 补偿到 `rolled-back`；也可以执行下述 evidence-preserving resolver Restore。
 - 补偿失败、目标 identity 改变、snapshot 覆盖不足或 journal 尾部不可信时，必须保留全部证据并返回 `RECOVERY_REQUIRED`；不得无 journal 地报告部分成功。
-- 只有与所选 source backup 明确绑定、且本次 Restore 覆盖其全部必要目标的 pending journal 才能由该 Restore 收敛；其他 foreign pending 保持 recovery blocker，不得被顺带清除或忽略。可执行恢复时，当前 Restore 仍创建自己的 pre-restore snapshot 和 journal。
+- 只有与所选 source backup identity 完全一致、Codex Home 物理 realpath 一致、operationId 唯一且本次 Restore 覆盖其全部必要目标的 pending journal，才可由新的显式 Restore 收敛。新 Restore 必须创建自己的 pre-restore snapshot 和 journal；仅当新 journal 耐久到 `completed` 后，其 `resolvesOperationIds` 才把严格绑定的旧 journal 投影为“已解决”。旧 journal 原始 bytes 和原非终态保持不变，作为 crash evidence 保留；不得伪造其已执行过 `rolled-back` 补偿。
+- resolver projection 只影响 write-blocker 判断，不授予删除证据的权限。Prune 仍必须保护旧 journal 自身、其 source backup 与 pre-restore snapshot。不同 source、不同物理 Home、目标覆盖不足、重复 operationId、invalid tail 或未知 schema 的 pending 都继续阻断，且必须在新 snapshot/journal/mutation 前失败。
+- 物理 Home binding 以每个 journal `prepared.storage.codexHomePhysical` 的持久值为准；completed resolver 只有在 pending、resolver 和当前已加锁 Codex Home 的稳定物理 identity 全部一致时才可解除 blocker。不得重新解析可变的 lexical `codexHome`，把 junction/reparse 换接后的新位置当作历史证据的 identity。
 - Node 与 .NET 都必须识别对方生成的 Restore v2 journal、source backup v1/v2 和 terminal 语义；未知 schema/version 必须 fail closed，而非解析 message 或猜测状态。
 - 用户取消只允许在 Core 定义的安全点；取消后的 journal 是否需要恢复由 durable journal 状态决定，而不是由取消信号本身决定。
 
@@ -47,8 +51,8 @@ prepared | applying | committing
 
 - Restore v2 继续保留现有 restore options、relocation 双重授权以及 relocation 时不恢复旧 config 的规则。
 - Restore v2 不读取/复制认证数据、Token 或消息正文；所有测试只使用临时 Fixture。
-- Prune 不得删除 source backup、恢复前 snapshot 或任一非 terminal Restore journal 引用的 backup。
-- 本 ADR 不把 v0.5 Restore 描述为已经事务化；实现和 release 仍受执行索引阶段 5 门槛约束。
+- Prune 不得删除 source backup、恢复前 snapshot、任一非 terminal Restore journal 引用的 backup，或被 completed resolver 投影为已解决但原始 journal 尚非 terminal 的证据。
+- 本 ADR 不把已发布 v0.5 Restore 描述为已经事务化；V1/C8 候选实现和 release 仍受执行索引阶段 5、C8 证据与最终合入门槛约束。
 
 ## Migration and Validation
 
