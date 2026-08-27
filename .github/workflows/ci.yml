@@ -123,6 +123,10 @@ jobs:
           node-version: "24"
           cache: "npm"
       - run: npm ci
+      - name: Configure the Linux Electron runtime sandbox
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo -- "$(command -v node)" apps/desktop/scripts/configure-linux-sandbox.mjs node_modules/electron/dist chrome-sandbox
       - name: Install Linux Electron runtime dependencies
         if: runner.os == 'Linux'
         run: npx playwright install-deps
@@ -130,6 +134,10 @@ jobs:
       - run: npm run desktop:build
       - run: npm run desktop:verify-production-bundle
       - run: npm run desktop:pack:dir
+      - name: Configure the unpacked Linux production sandbox
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo -- "$(command -v node)" apps/desktop/scripts/configure-linux-sandbox.mjs dist-desktop/linux-unpacked chrome-sandbox
       - name: Run unpacked production Electron smoke
         if: runner.os != 'Linux'
         run: npm run desktop:test:e2e:packaged
@@ -167,6 +175,10 @@ jobs:
           node-version: "24"
           cache: "npm"
       - run: npm ci
+      - name: Configure the Linux Electron runtime sandbox
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo -- "$(command -v node)" apps/desktop/scripts/configure-linux-sandbox.mjs node_modules/electron/dist chrome-sandbox
       - name: Install Linux Electron runtime dependencies
         if: runner.os == 'Linux'
         run: npx playwright install-deps chromium
@@ -184,6 +196,10 @@ jobs:
           CPS_DESKTOP_VERSION: ${{ steps.candidate.outputs.version }}
           CPS_DESKTOP_BUILD_ID: ${{ steps.candidate.outputs.build_id }}
         run: npm run desktop:pack:candidate
+      - name: Configure the unpacked Linux candidate sandbox
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo -- "$(command -v node)" apps/desktop/scripts/configure-linux-sandbox.mjs dist-desktop/linux-unpacked chrome-sandbox
       - name: Audit and stage candidate
         if: runner.os != 'Linux'
         env:
@@ -211,6 +227,7 @@ jobs:
         env:
           CPS_CANDIDATE_TARGET: ${{ matrix.target }}
           CPS_DESKTOP_VERSION: ${{ steps.candidate.outputs.version }}
+          CPS_LINUX_SANDBOX_SETUP: setuid
         run: xvfb-run -a npm run desktop:smoke:candidate:artifacts
       - name: Upload audited candidate
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -281,6 +298,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: "10.0.x"
@@ -296,6 +316,9 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: "10.0.x"

@@ -106,15 +106,59 @@ function coreErrorHttpStatus(error, fallback) {
 }
 
 async function readJsonBody(request) {
-  const chunks = [];
-  let received = 0;
-  for await (const chunk of request) {
-    received += chunk.length;
-    if (received > MAX_REQUEST_BYTES) {
-      throw new WebRequestError(`Request body exceeds ${MAX_REQUEST_BYTES} bytes.`, 413, "REQUEST_TOO_LARGE");
-    }
-    chunks.push(chunk);
-  }
+  const chunks = await new Promise((resolve, reject) => {
+    const receivedChunks = [];
+    let received = 0;
+    let tooLarge = false;
+    let settled = false;
+    const cleanup = ({ keepErrorListener = false } = {}) => {
+      request.removeListener("data", onData);
+      request.removeListener("end", onEnd);
+      if (!keepErrorListener) request.removeListener("error", onError);
+      request.removeListener("aborted", onAborted);
+    };
+    const finish = (callback, value, cleanupOptions) => {
+      if (settled) return;
+      settled = true;
+      cleanup(cleanupOptions);
+      callback(value);
+    };
+    const onData = (chunk) => {
+      if (tooLarge) return;
+      received += chunk.length;
+      if (received > MAX_REQUEST_BYTES) {
+        tooLarge = true;
+        receivedChunks.length = 0;
+        return;
+      }
+      receivedChunks.push(chunk);
+    };
+    const onEnd = () => {
+      if (tooLarge) {
+        finish(reject, new WebRequestError(
+          `Request body exceeds ${MAX_REQUEST_BYTES} bytes.`,
+          413,
+          "REQUEST_TOO_LARGE"
+        ));
+        return;
+      }
+      finish(resolve, receivedChunks);
+    };
+    const onError = (error) => finish(reject, error);
+    const onAborted = () => finish(
+      reject,
+      new WebRequestError("Request was aborted.", 400, "INVALID_REQUEST"),
+      // Some supported Node releases emit ECONNRESET after `aborted`.
+      // Leave the once-only error listener in place to consume that terminal
+      // stream event; its settle guard preserves the original error.
+      { keepErrorListener: true }
+    );
+    request.on("data", onData);
+    request.once("end", onEnd);
+    request.once("error", onError);
+    request.once("aborted", onAborted);
+    if (request.aborted) onAborted();
+  });
   if (chunks.length === 0) {
     return {};
   }
@@ -968,6 +1012,7 @@ export function createWebUiServer({
       }
       await serveStatic(response, pathname, webRoot);
     } catch (error) {
+      if (request.aborted || response.destroyed || response.writableEnded) return;
       if (error instanceof WebRequestError) {
         sendError(response, error.statusCode, error, error.code);
       } else {

@@ -315,10 +315,13 @@ test("Electron rejects an unconfigured custom Provider before plan or backup cre
   try {
     electronApp = await launchDesktop(fixture);
     const page = await electronApp.firstWindow();
+    await expect(page.getByText("openai", { exact: true }).first()).toBeVisible();
     await page.getByRole("button", { name: "Switch Provider" }).click();
     await page.getByLabel("Provider ID").fill("missing-provider");
     await page.getByLabel("Model handling").selectOption("provider-default");
-    await page.getByRole("button", { name: "Prepare switch" }).click();
+    const prepareSwitch = page.getByRole("button", { name: "Prepare switch" });
+    await expect(prepareSwitch).toBeEnabled();
+    await prepareSwitch.click();
     await expect(notificationWithCode(page, "INVALID_INPUT")).toBeVisible();
     await expect(page.getByRole("dialog", { name: "Review plan" })).toHaveCount(0);
     expect((await fixture.snapshotProtected()).hash).toBe(baseline.hash);

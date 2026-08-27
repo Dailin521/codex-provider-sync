@@ -1606,6 +1606,7 @@ public sealed class CodexSyncService
         CancellationToken cancellationToken)
     {
         ValidateRestoreRequest(backupDir, options);
+        string requestedBackupDir = Path.GetFullPath(backupDir);
         string codexHome = _codexHomeService.NormalizeCodexHome(explicitCodexHome);
         await _codexHomeService.EnsureCodexHomeAsync(codexHome);
 
@@ -1623,7 +1624,7 @@ public sealed class CodexSyncService
                 lockConfigText);
             lockStorage.EnsureSqliteAccessSupported("restore");
             RestoreBackupIdentity lockedSourceBackup = await RestoreV2Service.CaptureSourceIdentityAsync(
-                backupDir,
+                requestedBackupDir,
                 cancellationToken);
             physicalBackupDir = lockedSourceBackup.BackupDir;
             string stateDbTargetPath = await _backupService.ResolveRestoreStateDbTargetPathAsync(
@@ -1637,7 +1638,7 @@ public sealed class CodexSyncService
         }
         await using LockHandle? stateDbLock = stateDbHandle;
         physicalBackupDir ??= (await RestoreV2Service.CaptureSourceIdentityAsync(
-            backupDir,
+            requestedBackupDir,
             cancellationToken)).BackupDir;
         RestorePreparation preparation = await PrepareRestoreAsync(
             codexHome,
@@ -1692,6 +1693,7 @@ public sealed class CodexSyncService
                 preparation.ResolvesOperationIds,
                 cancellationToken);
         }
+        result = CopyRestoreResult(result, requestedBackupDir);
         // The restore and its journal marker are already durable. Refreshing the
         // inventory only corrects metadata.json bookkeeping, so surface a
         // failure as a warning instead of reporting a completed restore as
@@ -1703,21 +1705,10 @@ public sealed class CodexSyncService
         }
         catch (Exception error)
         {
-            return new RestoreResult
-            {
-                CodexHome = result.CodexHome,
-                BackupDir = result.BackupDir,
-                TargetProvider = result.TargetProvider,
-                CreatedAt = result.CreatedAt,
-                ChangedSessionFiles = result.ChangedSessionFiles,
-                BackupInventoryWarning = $"Backup inventory refresh failed: {error.Message}",
-                RestoreVersion = result.RestoreVersion,
-                RestoreOperationId = result.RestoreOperationId,
-                PreRestoreSnapshotId = result.PreRestoreSnapshotId,
-                RestoreJournalState = result.RestoreJournalState,
-                CommitAcknowledgementRecovered = result.CommitAcknowledgementRecovered,
-                ResolvedOperationIds = result.ResolvedOperationIds
-            };
+            return CopyRestoreResult(
+                result,
+                requestedBackupDir,
+                $"Backup inventory refresh failed: {error.Message}");
         }
     }
 
@@ -1751,9 +1742,7 @@ public sealed class CodexSyncService
             cancellationToken);
         IReadOnlyList<PendingTransactionInfo> pending = await FileTransactionJournal.FindPendingAsync(codexHome);
         PendingTransactionInfo[] foreignPending = pending
-            .Where(transaction => !PathComparer.Equals(
-                Path.GetFullPath(transaction.BackupDir),
-                normalizedBackupDir))
+            .Where(transaction => !PendingTransactionMatchesBackup(transaction, normalizedBackupDir))
             .ToArray();
         if (foreignPending.Length > 0)
         {
@@ -2223,6 +2212,61 @@ public sealed class CodexSyncService
         if (expiresAtUtc is not null && DateTimeOffset.UtcNow >= expiresAtUtc.Value)
         {
             throw new CoreWritePlanExpiredException();
+        }
+    }
+
+    private static RestoreResult CopyRestoreResult(
+        RestoreResult result,
+        string backupDir,
+        string? backupInventoryWarning = null)
+    {
+        return new RestoreResult
+        {
+            CodexHome = result.CodexHome,
+            BackupDir = backupDir,
+            TargetProvider = result.TargetProvider,
+            CreatedAt = result.CreatedAt,
+            ChangedSessionFiles = result.ChangedSessionFiles,
+            BackupInventoryWarning = backupInventoryWarning ?? result.BackupInventoryWarning,
+            RestoreVersion = result.RestoreVersion,
+            RestoreOperationId = result.RestoreOperationId,
+            PreRestoreSnapshotId = result.PreRestoreSnapshotId,
+            RestoreJournalState = result.RestoreJournalState,
+            CommitAcknowledgementRecovered = result.CommitAcknowledgementRecovered,
+            ResolvedOperationIds = result.ResolvedOperationIds
+        };
+    }
+
+    private static bool PendingTransactionMatchesBackup(
+        PendingTransactionInfo transaction,
+        string physicalBackupDir)
+    {
+        try
+        {
+            string? journalParent = Path.GetDirectoryName(transaction.JournalPath);
+            if (string.IsNullOrWhiteSpace(journalParent))
+            {
+                return false;
+            }
+            string journalParentPhysical = RestoreV2Service.ResolveStablePhysicalDirectory(
+                journalParent);
+            if (string.IsNullOrWhiteSpace(transaction.DeclaredBackupDir))
+            {
+                // A readable but unparseable journal has no trustworthy
+                // prepared record to bind. Preserve the explicit managed-
+                // backup repair path only when the journal itself is physically
+                // inside the exact backup selected by the caller.
+                return transaction.InvalidTail
+                    && PathComparer.Equals(journalParentPhysical, physicalBackupDir);
+            }
+            string declaredPhysical = RestoreV2Service.ResolveStablePhysicalDirectory(
+                transaction.DeclaredBackupDir);
+            return PathComparer.Equals(declaredPhysical, physicalBackupDir)
+                && PathComparer.Equals(journalParentPhysical, physicalBackupDir);
+        }
+        catch
+        {
+            return false;
         }
     }
 

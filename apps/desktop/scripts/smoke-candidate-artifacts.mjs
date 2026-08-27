@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
   auditExtractedApp,
   RELEASE_REPOSITORY_ROOT,
@@ -11,6 +12,7 @@ import {
 } from "./release-audit.mjs";
 
 const VERSION_PATTERN = /^1\.0\.0-(?:alpha|beta|rc)\.\d+$/;
+const LINUX_SANDBOX_HELPER = fileURLToPath(new URL("./configure-linux-sandbox.mjs", import.meta.url));
 const target = process.env.CPS_CANDIDATE_TARGET;
 const version = process.env.CPS_DESKTOP_VERSION;
 const descriptor = RELEASE_TARGETS[target];
@@ -134,6 +136,40 @@ function runProductSmoke(executable) {
   });
 }
 
+async function configureLinuxSandbox(appRoot) {
+  if (process.platform !== "linux") {
+    if (process.env.CPS_LINUX_SANDBOX_SETUP) {
+      throw new Error("CPS_LINUX_SANDBOX_SETUP is supported only on Linux.");
+    }
+    return;
+  }
+  const realTempRoot = await fs.realpath(tempRoot);
+  const realAppRoot = await fs.realpath(path.resolve(appRoot));
+  const relativeAppRoot = path.relative(realTempRoot, realAppRoot);
+  if (!relativeAppRoot
+      || relativeAppRoot.startsWith(`..${path.sep}`)
+      || relativeAppRoot === ".."
+      || path.isAbsolute(relativeAppRoot)) {
+    throw new Error("Refusing to configure a Linux sandbox outside the candidate smoke directory.");
+  }
+  const sandboxPath = path.join(realAppRoot, "chrome-sandbox");
+  const before = await fs.lstat(sandboxPath);
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) {
+    throw new Error("The packaged Linux chrome-sandbox must be one regular, unlinked file.");
+  }
+  if (before.uid === 0 && (before.mode & 0o7777) === 0o4755) return;
+  if (process.env.CPS_LINUX_SANDBOX_SETUP !== "setuid") {
+    throw new Error(
+      "The Linux candidate sandbox is not configured; set CPS_LINUX_SANDBOX_SETUP=setuid in an authorized CI environment."
+    );
+  }
+  run("sudo", ["--", process.execPath, LINUX_SANDBOX_HELPER, realAppRoot, "chrome-sandbox"]);
+  const after = await fs.lstat(sandboxPath);
+  if (after.uid !== 0 || (after.mode & 0o7777) !== 0o4755 || after.nlink !== 1) {
+    throw new Error("The packaged Linux chrome-sandbox failed its owner/mode verification.");
+  }
+}
+
 async function inspectAndSmokeContainer({ appRoot, executable, assetName, containerKind }) {
   const audit = await auditExtractedApp({
     appRoot,
@@ -142,6 +178,7 @@ async function inspectAndSmokeContainer({ appRoot, executable, assetName, contai
     buildId: staging.buildId
   });
   assert.deepEqual(audit, expectedAudit, `Final ${containerKind} container differs from the audited app.`);
+  await configureLinuxSandbox(appRoot);
   runProductSmoke(executable);
   return Object.freeze({
     assetName,

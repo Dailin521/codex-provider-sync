@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
+import { build as buildPlist } from "plist";
 import {
   assertSafeAsarEntries,
   assertSafeProductTextEntry,
   createRuntimeProjection,
   isAuditedProductTextEntry,
+  parseMacInfoPlist,
   RELEASE_TARGETS
 } from "../scripts/release-audit.mjs";
 import { resolveCandidateBuild } from "../scripts/resolve-candidate-build.mjs";
@@ -40,8 +42,18 @@ test("candidate identity is injected without mutating the source package version
   assert.equal(desktopManifest.version, "0.0.0");
   assert.equal(rootManifest.optionalDependencies["better-sqlite3"], "8.7.0");
   assert.equal(desktopManifest.dependencies["better-sqlite3"], "13.0.3");
+  assert.equal(desktopManifest.homepage, "https://github.com/Dailin521/codex-provider-sync#readme");
   assert.equal(desktopManifest.devDependencies.plist, "5.0.0");
   assert.equal(desktopManifest.devDependencies.resedit, "3.1.0");
+});
+
+test("macOS release audit parses XML Info.plist buffers as XML", () => {
+  const expected = {
+    ElectronAsarIntegrity: {
+      "Resources/app.asar": { algorithm: "SHA256", hash: "a".repeat(64) }
+    }
+  };
+  assert.deepEqual(parseMacInfoPlist(Buffer.from(buildPlist(expected), "utf8")), expected);
 });
 
 test("release targets use the frozen C9 artifact names", () => {
@@ -125,6 +137,8 @@ test("builder and candidate scripts enforce native fallback, fuses, audit metada
   const buildScript = await read("apps/desktop/scripts/build-candidate.mjs");
   const stageScript = await read("apps/desktop/scripts/stage-candidate.mjs");
   const smokeScript = await read("apps/desktop/scripts/smoke-candidate-artifacts.mjs");
+  const sandboxHelper = await read("apps/desktop/scripts/configure-linux-sandbox.mjs");
+  const workflow = await read(".github/workflows/ci.yml");
   for (const expected of [
     "node_modules/better-sqlite3/prebuilds/${platform}-${arch}.node",
     "!node_modules/better-sqlite3/prebuilds/!(${platform}-${arch}).node",
@@ -146,4 +160,17 @@ test("builder and candidate scripts enforce native fallback, fuses, audit metada
   assert.match(smokeScript, /container-verification\.v1\.json/);
   assert.match(smokeScript, /syncRestoreVerified:\s*true/);
   assert.match(smokeScript, /SHA256SUMS\.txt/);
+  assert.match(smokeScript, /configure-linux-sandbox\.mjs/);
+  assert.doesNotMatch(smokeScript, /run\("sudo",\s*\["(?:chown|chmod)"/);
+  for (const expected of [
+    "O_NOFOLLOW",
+    "handle.chown(0, 0)",
+    "handle.chmod(0o4755)",
+    "opened.dev !== before.dev",
+    "opened.ino !== before.ino",
+    "opened.nlink !== 1n"
+  ]) assert.match(sandboxHelper, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(workflow, /configure-linux-sandbox\.mjs node_modules\/electron\/dist chrome-sandbox/);
+  assert.match(workflow, /configure-linux-sandbox\.mjs dist-desktop\/linux-unpacked chrome-sandbox/);
+  assert.doesNotMatch(workflow, /sudo\s+(?:chown|chmod)\b/);
 });

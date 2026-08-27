@@ -7,7 +7,7 @@ import { CoreError } from "./core-error.js";
 import { openDatabase } from "./sqlite.js";
 import { resolveStorageLayout } from "./storage-layout.js";
 
-const DEFAULT_BUSY_TIMEOUT_MS = 5000;
+const DEFAULT_BUSY_TIMEOUT_MS = 0;
 
 export function stateDbPath(codexHome) {
   return path.join(codexHome, SQLITE_DIR_BASENAME, DB_FILE_BASENAME);

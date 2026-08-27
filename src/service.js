@@ -1871,6 +1871,11 @@ export async function prepareRestore(options = {}) {
   const restoreConfig = options.restoreConfig !== false;
   const restoreDatabase = options.restoreDatabase !== false;
   const restoreSessions = options.restoreSessions !== false;
+  const hasBackupId = typeof options.backupId === "string" && Boolean(options.backupId.trim());
+  const hasBackupDir = typeof options.backupDir === "string" && Boolean(options.backupDir.trim());
+  if (!hasBackupId && !hasBackupDir) {
+    throw new CoreError("INVALID_INPUT", "A managed backupId is required for Restore preparation.");
+  }
   if (options.allowSqliteHomeRelocation
       && !(typeof options.sqliteHome === "string" && options.sqliteHome.trim())) {
     throw new CoreError(

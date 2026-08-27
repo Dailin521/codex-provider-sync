@@ -196,7 +196,7 @@ test("history list aggregates a large rollout while detail retains only its boun
   }
 });
 
-test("history detail rejects a same-mtime file replacement selected after listing", async (t) => {
+test("history detail rejects a same-mtime file replacement selected after listing", async () => {
   const { home, file } = await fixture();
   const replacement = `${file}.replacement`;
   const displaced = `${file}.displaced`;
@@ -214,16 +214,16 @@ test("history detail rejects a same-mtime file replacement selected after listin
     })
   ].join("\n") + "\n", "utf8");
   await fs.utimes(replacement, originalStat.atime, originalStat.mtime);
-  const originalOpen = fs.open.bind(fs);
+  const originalOpen = fs.open;
   let openCount = 0;
-  t.mock.method(fs, "open", async (...args) => {
+  fs.open = async (...args) => {
     openCount += 1;
     if (openCount === 2) {
       await fs.rename(file, displaced);
       await fs.rename(replacement, file);
     }
     return originalOpen(...args);
-  });
+  };
   try {
     await assert.rejects(
       () => getHistorySession(home, "thread-one"),
@@ -231,6 +231,7 @@ test("history detail rejects a same-mtime file replacement selected after listin
         && !String(error?.message).includes("replacement marker")
     );
   } finally {
+    fs.open = originalOpen;
     await fs.rm(home, { recursive: true, force: true });
   }
 });

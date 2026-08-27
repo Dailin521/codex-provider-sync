@@ -196,7 +196,7 @@ async function startHolder({ mode, codexHome, stateDbPath, configText = "" }) {
 }
 
 function asLastComplete(status) {
-  const value = structuredClone(status);
+  const value = JSON.parse(JSON.stringify(status));
   value.operationInProgress = null;
   delete value.statusReadBlocked;
   delete value.alignment;

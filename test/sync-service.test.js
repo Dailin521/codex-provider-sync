@@ -24,6 +24,7 @@ import {
   restoreSessionChanges
 } from "../src/session-files.js";
 import { openDatabase } from "../src/sqlite.js";
+import { assertSqliteWritable } from "../src/sqlite-state.js";
 import {
   TransactionJournal,
   findPendingTransactions,
@@ -3301,7 +3302,7 @@ test("runSync leaves rollout files and sqlite untouched when sqlite is locked", 
   try {
     lockDb.exec("BEGIN IMMEDIATE");
     await assert.rejects(
-      () => runSync({ codexHome, sqliteBusyTimeoutMs: 0 }),
+      () => runSync({ codexHome }),
       /state_5\.sqlite is currently in use/
     );
   } finally {
@@ -3324,6 +3325,33 @@ test("runSync leaves rollout files and sqlite untouched when sqlite is locked", 
     assert.equal(row.model_provider, "apigather");
   } finally {
     db.close();
+  }
+});
+
+test("assertSqliteWritable defaults to a fail-fast SQLite busy policy", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeStateDb(codexHome, [
+    { id: "thread-default-busy", model_provider: "openai", archived: false }
+  ]);
+  const lockDb = await openDatabase(stateDbPath(codexHome));
+  try {
+    lockDb.exec("BEGIN IMMEDIATE");
+    const startedAt = Date.now();
+    await assert.rejects(
+      () => assertSqliteWritable(codexHome),
+      (error) => error?.code === "SQLITE_BUSY"
+    );
+    assert.ok(
+      Date.now() - startedAt < 1500,
+      "The default SQLite busy timeout must not wait before reporting contention."
+    );
+  } finally {
+    try {
+      lockDb.exec("ROLLBACK");
+    } catch {
+      // Ignore cleanup failures in tests.
+    }
+    lockDb.close();
   }
 });
 

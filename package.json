@@ -24,7 +24,7 @@
     "codex-provider": "src/cli.js"
   },
   "scripts": {
-    "test": "node --test",
+    "test": "node scripts/run-root-tests.js",
     "web:build": "npm run workspaces:build && npm run build --workspace @codex-provider-sync/web",
     "web:test:e2e": "npm run test:e2e --workspace @codex-provider-sync/web",
     "desktop:build": "npm run workspaces:build && npm run build:electron --workspace @codex-provider-sync/desktop",
@@ -78,8 +78,7 @@
   },
   "devDependencies": {
     "@types/node": "24.13.3",
-    "ajv": "8.20.0",
-    "typescript": "7.0.2"
+    "ajv": "8.20.0"
   },
   "overrides": {
     "node-releases": "2.0.18"

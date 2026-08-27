@@ -162,9 +162,7 @@ async function verifyEmbeddedAsarIntegrity(layout, descriptor, headerSha256) {
 
   const infoPath = path.join(layout.appRoot, "Contents", "Info.plist");
   const infoBuffer = await fs.readFile(infoPath);
-  const info = infoBuffer.subarray(0, 8).toString("ascii") === "bplist00"
-    ? parseBinaryPlist(infoBuffer)
-    : parsePlist(infoBuffer);
+  const info = parseMacInfoPlist(infoBuffer);
   const integrity = info?.ElectronAsarIntegrity;
   assert.ok(integrity && typeof integrity === "object" && !Array.isArray(integrity));
   const records = Object.entries(integrity);
@@ -342,6 +340,12 @@ function packagedComponents(asarPath, entries) {
 
 function fuseIs(fuses, option, expected) {
   assert.equal(fuses[option], expected, `Electron fuse ${FuseV1Options[option]} has an unsafe state.`);
+}
+
+export function parseMacInfoPlist(infoBuffer) {
+  return infoBuffer.subarray(0, 8).toString("ascii") === "bplist00"
+    ? parseBinaryPlist(infoBuffer)
+    : parsePlist(infoBuffer.toString("utf8"));
 }
 
 async function verifyNativeDriver(nativeBinding, asarPath) {
