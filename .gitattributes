@@ -1,3 +1,4 @@
+package-lock.json text eol=lf
 web/index.html text eol=lf
 web/dist/index.html text eol=lf
 web/dist/assets/*.js text eol=lf -whitespace

@@ -178,6 +178,8 @@ jobs:
           node-version: "24"
           cache: "npm"
       - run: npm ci
+      - name: Verify candidate lockfile byte identity
+        run: node -e "const {execFileSync}=require('node:child_process');const value=execFileSync('git',['ls-files','--eol','package-lock.json'],{encoding:'utf8'});if(!value.includes('w/lf'))throw new Error('package-lock.json must be checked out with LF bytes.');process.stdout.write(value)"
       - name: Install the pinned Electron runtime
         if: runner.os == 'Linux'
         run: node -e "require('electron')"

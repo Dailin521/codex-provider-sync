@@ -133,12 +133,17 @@ test("ASAR policy rejects source maps, fixtures, credentials and key material by
 });
 
 test("builder and candidate scripts enforce native fallback, fuses, audit metadata and no publishing", async () => {
+  const attributes = await read(".gitattributes");
   const builder = await read("apps/desktop/electron-builder.yml");
   const buildScript = await read("apps/desktop/scripts/build-candidate.mjs");
   const stageScript = await read("apps/desktop/scripts/stage-candidate.mjs");
   const smokeScript = await read("apps/desktop/scripts/smoke-candidate-artifacts.mjs");
   const sandboxHelper = await read("apps/desktop/scripts/configure-linux-sandbox.mjs");
   const workflow = await read(".github/workflows/ci.yml");
+  const candidateJob = workflow.match(
+    /^  electron-release-candidate:\r?\n[\s\S]*?(?=^  electron-candidate-set:)/m
+  )?.[0];
+  assert.ok(candidateJob, "The native release-candidate job must remain present.");
   for (const expected of [
     "node_modules/better-sqlite3/prebuilds/${platform}-${arch}.node",
     "!node_modules/better-sqlite3/prebuilds/!(${platform}-${arch}).node",
@@ -163,6 +168,7 @@ test("builder and candidate scripts enforce native fallback, fuses, audit metada
   );
   assert.match(buildScript, /"--publish",\s*"never"/);
   assert.match(buildScript, /--config\.extraMetadata\.version=/);
+  assert.match(attributes, /^package-lock\.json text eol=lf$/m);
   assert.match(
     buildScript,
     /"linux-x64":\s*\{[\s\S]*?configOverrides:\s*\["--config\.productName=CodexProviderSync"\]/,
@@ -193,6 +199,9 @@ test("builder and candidate scripts enforce native fallback, fuses, audit metada
   ]) assert.match(sandboxHelper, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.match(workflow, /configure-linux-sandbox\.mjs node_modules\/electron\/dist chrome-sandbox/);
   assert.match(workflow, /configure-linux-sandbox\.mjs dist-desktop\/linux-unpacked chrome-sandbox/);
+  assert.match(candidateJob, /Verify candidate lockfile byte identity/);
+  assert.match(candidateJob, /git',\['ls-files','--eol','package-lock\.json'/);
+  assert.match(candidateJob, /value\.includes\('w\/lf'\)/);
   assert.equal(
     [...workflow.matchAll(/run: node -e "require\('electron'\)"/g)].length,
     2,
