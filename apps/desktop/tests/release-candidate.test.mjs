@@ -149,8 +149,17 @@ test("builder and candidate scripts enforce native fallback, fuses, audit metada
     "target: nsis",
     "target: dmg",
     "target: AppImage",
-    "target: deb"
+    "target: deb",
+    "appImage:",
+    "artifactName: CodexProviderSync-${version}-linux-x64.AppImage",
+    "deb:",
+    "artifactName: CodexProviderSync-${version}-linux-x64.deb"
   ]) assert.match(builder, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(
+    builder,
+    /artifactName:\s*CodexProviderSync-\$\{version\}-linux-\$\{arch\}/,
+    "Linux package targets must not expose electron-builder's x86_64/amd64 arch aliases."
+  );
   assert.match(buildScript, /"--publish",\s*"never"/);
   assert.match(buildScript, /--config\.extraMetadata\.version=/);
   assert.match(stageScript, /releaseAuthorized:\s*false/);

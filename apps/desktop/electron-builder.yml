@@ -64,10 +64,13 @@ linux:
     - target: deb
       arch:
         - x64
-  artifactName: CodexProviderSync-${version}-linux-${arch}.${ext}
   executableName: codex-provider-sync
   category: Utility
   maintainer: Dailin521
+appImage:
+  artifactName: CodexProviderSync-${version}-linux-x64.AppImage
+deb:
+  artifactName: CodexProviderSync-${version}-linux-x64.deb
 publish:
   - provider: github
     owner: Dailin521

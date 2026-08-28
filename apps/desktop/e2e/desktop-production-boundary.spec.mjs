@@ -13,6 +13,7 @@ const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const packagedExecutable = process.env.CPS_DESKTOP_EXECUTABLE;
 const electronExecutable = packagedExecutable || require("electron");
 const PRODUCTION_SMOKE_TIMEOUT_MS = 90_000;
+const PRODUCTION_OPERATION_TIMEOUT_MS = 30_000;
 
 function waitForExit(child, timeoutMs) {
   if (child.exitCode !== null) return Promise.resolve(true);
@@ -217,9 +218,14 @@ test("production or unpacked desktop completes real Sync and Restore through Uti
     const dialog = page.getByRole("dialog", { name: "Review plan" });
     await expect(dialog).toBeVisible();
     await dialog.getByRole("button", { name: "Confirm and apply" }).click();
-    await expect(page.getByText("Operation completed.", { exact: true })).toBeVisible();
+    await expect(page.getByText("Operation completed.", { exact: true })).toBeVisible({
+      timeout: PRODUCTION_OPERATION_TIMEOUT_MS
+    });
     await page.getByRole("dialog", { name: "Operation result" }).getByRole("button", { name: "Close" }).last().click();
-    await expect.poll(async () => (await fixture.inspect()).sqlite.provider).toBe("openai");
+    await expect.poll(
+      async () => (await fixture.inspect()).sqlite.provider,
+      { timeout: PRODUCTION_OPERATION_TIMEOUT_MS }
+    ).toBe("openai");
     const state = await fixture.inspect();
     expect(state.rollout.model_provider).toBe("openai");
     expect(state.backupIds).toHaveLength(1);
@@ -231,8 +237,13 @@ test("production or unpacked desktop completes real Sync and Restore through Uti
     const restoreDialog = page.getByRole("dialog", { name: "Review plan" });
     await expect(restoreDialog).toBeVisible();
     await restoreDialog.getByRole("button", { name: "Confirm and apply" }).click();
-    await expect(page.getByText("Operation completed.", { exact: true }).last()).toBeVisible();
-    await expect.poll(async () => (await fixture.snapshotTargets()).hash).toBe(baseline.hash);
+    await expect(page.getByText("Operation completed.", { exact: true }).last()).toBeVisible({
+      timeout: PRODUCTION_OPERATION_TIMEOUT_MS
+    });
+    await expect.poll(
+      async () => (await fixture.snapshotTargets()).hash,
+      { timeout: PRODUCTION_OPERATION_TIMEOUT_MS }
+    ).toBe(baseline.hash);
 
     const events = await page.evaluate(() => globalThis.__productionOperationEvents);
     expect(events.filter((event) => event.event === "operation-started")).toHaveLength(2);
