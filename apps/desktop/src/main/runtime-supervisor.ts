@@ -283,8 +283,9 @@ export class CoreRuntimeSupervisor {
   }
 
   crashForTest(): boolean {
-    if (!this.#child || this.#state === "shutting-down") return false;
-    this.#child.kill();
+    const child = this.#child;
+    if (!child || this.#state !== "ready") return false;
+    this.#failRuntime(child);
     return true;
   }
 

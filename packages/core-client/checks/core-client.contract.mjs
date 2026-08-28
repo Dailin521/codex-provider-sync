@@ -724,3 +724,180 @@ test("DesktopCoreClient routes the exact C8 surface and forwards lifecycle cance
   ]);
   assert.equal(calls, 5);
 });
+
+test("DesktopCoreClient retries an unaccepted Apply cancellation until it is acknowledged", async () => {
+  let listener = null;
+  let finishApply;
+  const cancellations = [];
+  const operationId = "11111111-1111-4111-8111-111111111111";
+  const client = new DesktopCoreClient({
+    async requestReadOnly() { throw new Error("unexpected read"); },
+    async requestSyncSwitch(request) {
+      return new Promise((resolve) => {
+        finishApply = () => resolve({
+          protocolVersion: 1,
+          requestId: request.requestId,
+          operationId,
+          ok: false,
+          error: {
+            code: "OPERATION_CANCELLED",
+            message: "The operation was cancelled.",
+            severity: "info",
+            retryable: true,
+            recoveryRequired: false,
+            operationId
+          }
+        });
+      });
+    },
+    async requestRestore() { throw new Error("unexpected restore"); },
+    async requestMaintenance() { throw new Error("unexpected maintenance"); },
+    subscribeOperation(next) { listener = next; return () => { listener = null; }; },
+    async cancelOperation(input) {
+      cancellations.push(input);
+      const accepted = cancellations.length > 1;
+      if (accepted) queueMicrotask(finishApply);
+      return { accepted };
+    }
+  }, { requestIdFactory: () => "desktop-cancel-retry" });
+  const controller = new AbortController();
+  const applying = client.applySync(
+    { schemaVersion: 1, planId: "p".repeat(48) },
+    { signal: controller.signal }
+  );
+  listener({
+    protocolVersion: 1,
+    requestId: "desktop-cancel-retry",
+    operationId,
+    event: "operation-started",
+    operation: "sync"
+  });
+  controller.abort();
+  await assert.rejects(applying, (error) => (
+    error instanceof CoreClientError && error.code === "OPERATION_CANCELLED"
+  ));
+  assert.deepEqual(cancellations, [
+    { requestId: "desktop-cancel-retry", operationId },
+    { requestId: "desktop-cancel-retry", operationId }
+  ]);
+});
+
+test("DesktopCoreClient re-confirms an early accepted cancellation after operation-started", async () => {
+  let listener = null;
+  let finishApply;
+  const cancellations = [];
+  const operationId = "11111111-1111-4111-8111-111111111111";
+  const client = new DesktopCoreClient({
+    async requestReadOnly() { throw new Error("unexpected read"); },
+    async requestSyncSwitch(request) {
+      return new Promise((resolve) => {
+        finishApply = () => resolve({
+          protocolVersion: 1,
+          requestId: request.requestId,
+          operationId,
+          ok: false,
+          error: {
+            code: "OPERATION_CANCELLED",
+            message: "The operation was cancelled.",
+            severity: "info",
+            retryable: true,
+            recoveryRequired: false,
+            operationId
+          }
+        });
+      });
+    },
+    async requestRestore() { throw new Error("unexpected restore"); },
+    async requestMaintenance() { throw new Error("unexpected maintenance"); },
+    subscribeOperation(next) { listener = next; return () => { listener = null; }; },
+    async cancelOperation(input) {
+      cancellations.push(input);
+      if (input.operationId === operationId) queueMicrotask(finishApply);
+      return { accepted: true };
+    }
+  }, { requestIdFactory: () => "desktop-early-cancel" });
+  const controller = new AbortController();
+  const applying = client.applySync(
+    { schemaVersion: 1, planId: "p".repeat(48) },
+    { signal: controller.signal }
+  );
+  controller.abort();
+  await new Promise((resolve) => setImmediate(resolve));
+  listener({
+    protocolVersion: 1,
+    requestId: "desktop-early-cancel",
+    operationId,
+    event: "operation-started",
+    operation: "sync"
+  });
+  await assert.rejects(applying, (error) => (
+    error instanceof CoreClientError && error.code === "OPERATION_CANCELLED"
+  ));
+  assert.deepEqual(cancellations, [
+    { requestId: "desktop-early-cancel" },
+    { requestId: "desktop-early-cancel", operationId }
+  ]);
+});
+
+test("DesktopCoreClient backs off rejected cancellations and stops after the request settles", async () => {
+  let listener = null;
+  let finishApply;
+  let activeCancellations = 0;
+  let maximumActiveCancellations = 0;
+  let cancellationCalls = 0;
+  const operationId = "11111111-1111-4111-8111-111111111111";
+  const client = new DesktopCoreClient({
+    async requestReadOnly() { throw new Error("unexpected read"); },
+    async requestSyncSwitch(request) {
+      return new Promise((resolve) => {
+        finishApply = () => resolve({
+          protocolVersion: 1,
+          requestId: request.requestId,
+          operationId,
+          ok: false,
+          error: {
+            code: "OPERATION_CANCELLED",
+            message: "The operation was cancelled.",
+            severity: "info",
+            retryable: true,
+            recoveryRequired: false,
+            operationId
+          }
+        });
+      });
+    },
+    async requestRestore() { throw new Error("unexpected restore"); },
+    async requestMaintenance() { throw new Error("unexpected maintenance"); },
+    subscribeOperation(next) { listener = next; return () => { listener = null; }; },
+    async cancelOperation() {
+      cancellationCalls += 1;
+      activeCancellations += 1;
+      maximumActiveCancellations = Math.max(maximumActiveCancellations, activeCancellations);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      activeCancellations -= 1;
+      throw new Error("transient cancellation invoke failure");
+    }
+  }, { requestIdFactory: () => "desktop-cancel-backoff" });
+  const controller = new AbortController();
+  const applying = client.applySync(
+    { schemaVersion: 1, planId: "p".repeat(48) },
+    { signal: controller.signal }
+  );
+  listener({
+    protocolVersion: 1,
+    requestId: "desktop-cancel-backoff",
+    operationId,
+    event: "operation-started",
+    operation: "sync"
+  });
+  controller.abort();
+  setTimeout(finishApply, 110);
+  await assert.rejects(applying, (error) => (
+    error instanceof CoreClientError && error.code === "OPERATION_CANCELLED"
+  ));
+  const callsAtSettlement = cancellationCalls;
+  assert.equal(maximumActiveCancellations, 1);
+  assert.ok(callsAtSettlement >= 1 && callsAtSettlement <= 2);
+  await new Promise((resolve) => setTimeout(resolve, 175));
+  assert.equal(cancellationCalls, callsAtSettlement);
+});

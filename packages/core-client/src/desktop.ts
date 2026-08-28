@@ -129,6 +129,9 @@ function safeNotify<T>(observer: ((event: T) => void) | undefined, event: T): vo
   try { observer(event); } catch {}
 }
 
+const DESKTOP_CANCEL_RETRY_MIN_DELAY_MS = 25;
+const DESKTOP_CANCEL_RETRY_MAX_DELAY_MS = 1_000;
+
 class DesktopCoreTransport implements CoreTransport {
   readonly #bridge: DesktopCoreBridge;
 
@@ -195,26 +198,73 @@ class DesktopCoreTransport implements CoreTransport {
 
     let operationId: string | undefined;
     let cancelRequested = false;
+    let requestSettled = false;
+    let cancellationInFlight = false;
+    let cancellationRetryTimer: ReturnType<typeof setTimeout> | undefined;
+    let cancellationRetryDelayMs = DESKTOP_CANCEL_RETRY_MIN_DELAY_MS;
+    const scheduleCancellationRetry = (): void => {
+      if (requestSettled || !cancelRequested || cancellationRetryTimer !== undefined) return;
+      const delayMs = cancellationRetryDelayMs;
+      cancellationRetryDelayMs = Math.min(
+        cancellationRetryDelayMs * 2,
+        DESKTOP_CANCEL_RETRY_MAX_DELAY_MS
+      );
+      cancellationRetryTimer = setTimeout(() => {
+        cancellationRetryTimer = undefined;
+        void sendCancellation();
+      }, delayMs);
+    };
+    const sendCancellation = async (): Promise<void> => {
+      if (requestSettled || !cancelRequested || cancellationInFlight) return;
+      cancellationInFlight = true;
+      const attemptedOperationId = operationId;
+      let accepted = false;
+      try {
+        accepted = (await this.#bridge.cancelOperation({
+          requestId: envelope.requestId,
+          ...(attemptedOperationId ? { operationId: attemptedOperationId } : {})
+        })).accepted;
+      } catch {
+        // A transient invoke failure is equivalent to an unaccepted cancel.
+      } finally {
+        cancellationInFlight = false;
+      }
+      if (requestSettled || !cancelRequested) return;
+      if (!accepted || operationId !== attemptedOperationId) {
+        scheduleCancellationRetry();
+      }
+    };
+    const requestCancellation = (): void => {
+      if (cancellationRetryTimer !== undefined) {
+        clearTimeout(cancellationRetryTimer);
+        cancellationRetryTimer = undefined;
+      }
+      void sendCancellation();
+    };
     const unsubscribe = this.#bridge.subscribeOperation((event) => {
       if (event.requestId !== envelope.requestId) return;
       if (event.event === "operation-started") {
         operationId = event.operationId;
         safeNotify(options.onOperationStarted, event);
+        if (cancelRequested) {
+          cancellationRetryDelayMs = DESKTOP_CANCEL_RETRY_MIN_DELAY_MS;
+          requestCancellation();
+        }
       } else {
         safeNotify(options.onProgress, event);
-      }
-      if (cancelRequested) {
-        void this.#bridge.cancelOperation({ requestId: envelope.requestId, operationId });
       }
     });
     const onAbort = () => {
       cancelRequested = true;
-      void this.#bridge.cancelOperation({ requestId: envelope.requestId, operationId });
+      cancellationRetryDelayMs = DESKTOP_CANCEL_RETRY_MIN_DELAY_MS;
+      requestCancellation();
     };
     options.signal?.addEventListener("abort", onAbort, { once: true });
     const request = requestManaged();
     return new Promise((resolve, reject) => {
       void request.then(resolve, reject).finally(() => {
+        requestSettled = true;
+        if (cancellationRetryTimer !== undefined) clearTimeout(cancellationRetryTimer);
         options.signal?.removeEventListener("abort", onAbort);
         unsubscribe();
       });

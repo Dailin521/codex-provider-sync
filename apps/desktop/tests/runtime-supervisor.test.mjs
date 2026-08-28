@@ -82,20 +82,23 @@ class FakeUtility {
     this.messageListeners = new Set();
     this.exitListeners = new Set();
     this.exited = false;
+    this.killCalls = 0;
     this.applyFrames = new Map();
-    queueMicrotask(() => this.emitMessage({
-      kind: "hello",
-      runtimeProtocolVersion: DESKTOP_RUNTIME_PROTOCOL_VERSION,
-      coreProtocolVersion: DESKTOP_CORE_PROTOCOL_VERSION,
-      appVersion: behavior.badAppVersion ? "wrong-app" : identity.appVersion,
-      coreVersion: identity.coreVersion,
-      buildId: identity.buildId,
-      sessionNonce: identity.sessionNonce,
-      generation: identity.generation,
-      capabilities: behavior.readOnlyHello
-        ? DESKTOP_RUNTIME_METHODS.slice(0, 5)
-        : DESKTOP_RUNTIME_METHODS
-    }));
+    if (!behavior.holdHello) {
+      queueMicrotask(() => this.emitMessage({
+        kind: "hello",
+        runtimeProtocolVersion: DESKTOP_RUNTIME_PROTOCOL_VERSION,
+        coreProtocolVersion: DESKTOP_CORE_PROTOCOL_VERSION,
+        appVersion: behavior.badAppVersion ? "wrong-app" : identity.appVersion,
+        coreVersion: identity.coreVersion,
+        buildId: identity.buildId,
+        sessionNonce: identity.sessionNonce,
+        generation: identity.generation,
+        capabilities: behavior.readOnlyHello
+          ? DESKTOP_RUNTIME_METHODS.slice(0, 5)
+          : DESKTOP_RUNTIME_METHODS
+      }));
+    }
   }
 
   postMessage(frame) {
@@ -235,7 +238,10 @@ class FakeUtility {
     else queueMicrotask(respond);
   }
 
-  kill() { this.exit(); }
+  kill() {
+    this.killCalls += 1;
+    if (!this.behavior.deferExitOnKill) this.exit();
+  }
   onMessage(listener) { this.messageListeners.add(listener); return () => this.messageListeners.delete(listener); }
   onExit(listener) { this.exitListeners.add(listener); return () => this.exitListeners.delete(listener); }
   emitMessage(frame) { for (const listener of [...this.messageListeners]) listener(frame); }
@@ -528,6 +534,56 @@ test("runtime crash rejects every pending request and next read restarts with pr
     children[1].messages.filter((frame) => frame.kind === "request").map((frame) => frame.envelope.method),
     ["getStatus", "listBackups"]
   );
+});
+
+test("test crash hook settles pending requests without waiting for a Utility exit event", async () => {
+  const children = [];
+  const supervisor = new CoreRuntimeSupervisor({
+    appVersion: "0.5.0",
+    spawnUtility(identity) {
+      const child = new FakeUtility(identity, {
+        holdRequests: true,
+        deferExitOnKill: true
+      });
+      children.push(child);
+      return child;
+    }
+  });
+  const pending = supervisor.request(readRequest("getStatus", "test-crash-pending"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(supervisor.crashForTest(), true);
+  const response = await pending;
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, "CORE_RUNTIME_CRASHED");
+  assert.equal(supervisor.snapshot.state, "crashed");
+  assert.equal(children[0].killCalls, 1);
+  assert.equal(children[0].exited, false);
+  children[0].exit();
+  assert.equal(supervisor.snapshot.state, "crashed");
+  await supervisor.shutdown();
+});
+
+test("test crash hook refuses to detach a Runtime while its handshake is pending", async () => {
+  const children = [];
+  const supervisor = new CoreRuntimeSupervisor({
+    appVersion: "0.5.0",
+    handshakeTimeoutMs: 100,
+    spawnUtility(identity) {
+      const child = new FakeUtility(identity, { holdHello: true });
+      children.push(child);
+      return child;
+    }
+  });
+  const pending = supervisor.request(readRequest("getStatus", "starting-test-crash"));
+  assert.equal(supervisor.snapshot.state, "starting");
+  assert.equal(supervisor.crashForTest(), false);
+  assert.equal(children[0].killCalls, 0);
+  children[0].exit();
+  const response = await pending;
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, "CORE_RUNTIME_CRASHED");
+  assert.equal(supervisor.snapshot.state, "crashed");
+  await supervisor.shutdown();
 });
 
 test("unknown dispatch operation event fails the generation closed", async () => {
