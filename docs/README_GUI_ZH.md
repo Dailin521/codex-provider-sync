@@ -1,6 +1,6 @@
 # Codex Provider Sync GUI
 
-> **发行状态：当前已发布的 Windows .NET WinForms GUI。**该实现仍在迁移期维护，也是当前桌面兼容行为依据。vNext Electron 桌面端尚未公开发布，不能作为 Stable、默认入口或更新来源；Phase 6 退出门槛通过后才会执行 Electron 主入口与 .NET Legacy 的正式交接。
+> **V1 候选交接目标：保留的 .NET Legacy fallback；公开发行状态：当前仍是已发布的 Windows GUI。**该实现不是已退役产品，仍保持可构建、可测试并作为兼容行为依据。Electron 在 `V1` 中标记为新版主桌面端候选，但尚未合入 `main`、公开发布、签名或进入更新通道；候选角色不等于公开入口已经切换。
 
 ## 适用场景
 

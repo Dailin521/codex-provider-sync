@@ -36,16 +36,16 @@
 >
 > CLI/Web と Windows GUI は別々にリリースされるため、バージョン番号が異なる場合があります。
 >
-> **移行状況：**現在公開されているデスクトップ版は Windows .NET GUI です。リポジトリ内の vNext Electron は未公開の候補実装であり、既定版、Stable、またはダウンロード可能な製品ではありません。4 プラットフォームのゲート、最終証拠、別途承認されたリリース検証が完了するまで、Electron を主入口、.NET を Legacy として扱いません。
+> **V1 候補での位置付け：**本 PR は C10 の移行目標として Electron を新しい主デスクトップ候補、既存の .NET Windows/macOS 実装を移行後の Legacy fallback として示します。**公開リリースの状態は別です：**Releases で現在提供されているのは Windows .NET GUI だけで、Electron は `main` 未マージ、未公開、未署名で、ダウンロードや自動更新の対象ではありません。この候補上の表示は、Electron がすでに .NET を公開製品として置き換えたという意味ではありません。
 
 | 利用場面 | 推奨する入口 |
 | --- | --- |
-| Windows デスクトップ | [現在の Windows GUI（.NET）をダウンロード](https://github.com/Dailin521/codex-provider-sync/releases/latest)・[使い方](#windows-gui) |
+| Windows デスクトップ | [現在公開中の Windows GUI（.NET）をダウンロード](https://github.com/Dailin521/codex-provider-sync/releases/latest)・[`V1` Electron 主デスクトップ候補ガイド（公開ダウンロードなし）](README_DESKTOP_EN.md) |
 | macOS デスクトップ | [ローカル Web UI（CLI が必要）](#ローカル-web-ui)・[ネイティブ GUI のビルド手順（英語）](README_MAC_GUI_EN.md) |
 | ブラウザ UI またはクロスプラットフォーム利用 | [ローカル Web UI（CLI が必要）](#ローカル-web-ui) |
 | スクリプト、CI、または WSL | [CLI](#cli) |
 
-### Windows GUI
+### 現在公開中の Windows GUI（.NET、V1 の Legacy fallback 目標）
 
 [Releases](https://github.com/Dailin521/codex-provider-sync/releases/latest) から `CodexProviderSync.exe` をダウンロードします。
 
@@ -56,6 +56,8 @@
 コード署名は付与していないため、Windows でセキュリティ警告が表示される場合があります。本プロジェクトの Releases からのみダウンロードしてください。
 
 [Windows GUI の詳細（中国語）](README_GUI_ZH.md)
+
+新しい Electron 主デスクトップ候補の機能、安全境界、内部検証は [Electron primary desktop candidate guide（英語）](README_DESKTOP_EN.md) を参照してください。候補上の役割は公開リリースを意味せず、このガイドはダウンロードやリリース権限を提供しません。
 
 ### ローカル Web UI
 
@@ -122,12 +124,12 @@ flowchart LR
     WebServer --> NodeCore["Node Core public facade"]
     CLI["Node CLI"] --> NodeCore
 
-    ElectronRenderer["vNext Electron Renderer<br/>unreleased candidate"] --> DesktopClient["DesktopCoreClient"]
+    ElectronRenderer["Electron Renderer<br/>V1 primary desktop candidate"] --> DesktopClient["DesktopCoreClient"]
     DesktopClient --> ElectronHost["Preload / Main<br/>narrow IPC"]
     ElectronHost --> Utility["Utility Process"]
     Utility --> NodeCore
 
-    WindowsGUI["Windows GUI"] --> Application[".NET Application"]
+    WindowsGUI[".NET GUI<br/>published now; V1 Legacy fallback target"] --> Application[".NET Application"]
     Application --> DotNetCore[".NET Core"]
     MacGUI["macOS GUI"] --> DotNetCore
 
@@ -141,11 +143,11 @@ flowchart LR
 ```
 
 - Web UI は `HttpCoreClient → /api/core → Node Core public facade`、CLI は同じ公開 Core 境界を直接使用します。
-- vNext Electron 候補は `DesktopCoreClient → 制限された Preload/Main IPC → Utility Process → Node Core` を使用し、Renderer から Node、任意パス、汎用 IPC にはアクセスできません。
+- `V1` の Electron 主デスクトップ候補は `DesktopCoreClient → 制限された Preload/Main IPC → Utility Process → Node Core` を使用し、Renderer から Node、任意パス、汎用 IPC にはアクセスできません。
 - Windows GUI は Application 層を通じて .NET Core を呼び出し、macOS GUI は現在 .NET Core を直接呼び出します。
 - Node サービスと .NET Core は同じ設定、rollout、SQLite、バックアップの安全境界を扱います。
 
-現在の .NET デスクトップ実装は引き続き公開製品と互換動作の基準であり、まだ Legacy ではありません。Electron への置き換えは vNext 移行実行索引の Phase 6 完了条件を満たすまで行いません。
+`V1` 候補は C10 の移行目標として Electron を新しい主デスクトップ候補、保持する .NET Windows/macOS 実装を移行後の Legacy fallback と表示します。.NET は引き続きビルド・テストされ、少なくとも 2 メンテナンス周期は保持されます。公開 Releases はまだ .NET であり、Electron は未マージ・未公開・未署名です。この候補上の表示を、公開入口の切り替え完了と表現しないでください。
 
 ## 安全上の境界
 
@@ -160,7 +162,7 @@ flowchart LR
 
 - [AI / Agent ガイド](../AGENTS.md)
 - [Windows GUI（中国語）](README_GUI_ZH.md)
-- [vNext Electron デスクトップ候補（英語）](README_DESKTOP_EN.md)
+- [V1 Electron 主デスクトップ候補（英語）](README_DESKTOP_EN.md)
 - [Web UI（中国語）](README_WEB_UI_ZH.md)
 - [中文](../README.md) · [English](README_EN.md) · 日本語 · [한국어](README_KO.md)
 - [macOS GUI: 中文](README_MAC_GUI_ZH.md) · [English](README_MAC_GUI_EN.md)

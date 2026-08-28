@@ -30,7 +30,7 @@ describe("App localization and keyboard navigation", () => {
     );
 
     await screen.findByRole("button", { name: "Overview", exact: true });
-    expect(screen.getByText("New primary desktop · .NET Legacy fallback retained")).toBeVisible();
+    expect(screen.getByText("V1 primary desktop candidate · .NET post-handoff Legacy target")).toBeVisible();
     await user.tab();
     const skipLink = screen.getByRole("link", { name: "Skip to content" });
     expect(skipLink).toHaveFocus();

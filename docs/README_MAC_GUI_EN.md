@@ -2,7 +2,7 @@
 
 [中文](README_MAC_GUI_ZH.md) · English
 
-> This guide covers the retained .NET/Avalonia local build during migration; it is not an Electron release guide. Electron remains an unreleased candidate, GitHub Releases has no downloadable macOS Electron artifact, and the formal .NET Legacy handoff has not happened.
+> This guide covers the .NET/Avalonia local build that `V1` retains for the post-handoff Legacy fallback role; it is not an Electron release guide. The implementation remains buildable and tested, and is neither removed nor retired. Electron is labeled as the new primary desktop candidate in `V1`, but is not merged into `main`, published, signed, or notarized; GitHub Releases still has no downloadable macOS Electron artifact.
 
 `CodexProviderSync.app` is the macOS desktop GUI. It is built with Avalonia and
 reuses the status, synchronization, switching, restore, and backup-cleanup

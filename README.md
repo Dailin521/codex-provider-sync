@@ -34,16 +34,16 @@
 
 > CLI/Web 与当前 Windows GUI 独立发布，版本号可能不同。
 >
-> **迁移状态：**当前公开发布的桌面入口仍是 Windows .NET GUI。仓库内的 vNext Electron 桌面端是未发布候选实现，不是当前默认、Stable 或可下载产品；只有四平台候选门禁、最终证据和另行授权的发布验证全部通过后，README 才会切换为 Electron 主入口并把 .NET 标记为 Legacy。
+> **V1 候选定位：**本 PR 按 C10 将 Electron 标记为新版主桌面端候选，将保留的 .NET Windows/macOS 实现标记为交接后的 Legacy fallback。**公开发行状态另计：**当前 Releases 仍只提供 Windows .NET GUI；Electron 尚未合入 `main`、未发布、未签名，也不是当前可下载或自动更新的产品。候选角色不表示 Electron 已经公开替代 .NET。
 
 | 场景 | 推荐入口 |
 | --- | --- |
-| Windows 桌面 | [下载当前 Windows GUI（.NET）](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [使用说明](#当前-windows-gui-net) |
+| Windows 桌面 | [下载当前公开 Windows GUI（.NET）](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [`V1` Electron 主桌面端候选说明（尚无公开下载）](docs/README_DESKTOP_ZH.md) |
 | macOS 桌面 | [本地 Web UI（需 CLI）](#本地-web-ui)；[原生 GUI 构建说明](docs/README_MAC_GUI_ZH.md) |
 | 需要浏览器界面或跨平台使用 | [本地 Web UI（需 CLI）](#本地-web-ui) |
 | 脚本、CI 或 WSL | [CLI](#cli) |
 
-### 当前 Windows GUI（.NET）
+### 当前公开 Windows GUI（.NET；V1 候选中的 Legacy fallback）
 
 从 [Releases](https://github.com/Dailin521/codex-provider-sync/releases/latest) 下载 `CodexProviderSync.exe`：
 
@@ -55,7 +55,7 @@
 
 [Windows GUI 完整说明](docs/README_GUI_ZH.md)
 
-vNext Electron 候选的能力、安全边界和内部验收方式见 [Electron 桌面端候选说明](docs/README_DESKTOP_ZH.md)。该说明不提供公开下载，也不构成发布授权。
+新版 Electron 主桌面端候选的能力、安全边界和内部验收方式见 [Electron 主桌面端候选说明](docs/README_DESKTOP_ZH.md)。候选角色不等于公开发行；该说明不提供下载，也不构成发布授权。
 
 ### 本地 Web UI
 
@@ -132,12 +132,12 @@ flowchart LR
     WebServer --> NodeCore["Node Core public facade"]
     CLI["Node CLI"] --> NodeCore
 
-    ElectronRenderer["vNext Electron Renderer<br/>unreleased candidate"] --> DesktopClient["DesktopCoreClient"]
+    ElectronRenderer["Electron Renderer<br/>V1 primary desktop candidate"] --> DesktopClient["DesktopCoreClient"]
     DesktopClient --> ElectronHost["Preload / Main<br/>narrow IPC"]
     ElectronHost --> Utility["Utility Process"]
     Utility --> NodeCore
 
-    WindowsGUI["Windows GUI"] --> Application[".NET Application"]
+    WindowsGUI[".NET GUI<br/>published now; V1 Legacy fallback target"] --> Application[".NET Application"]
     Application --> DotNetCore[".NET Core"]
     MacGUI["macOS GUI"] --> DotNetCore
 
@@ -151,11 +151,11 @@ flowchart LR
 ```
 
 - Web UI 的业务请求经 `HttpCoreClient → /api/core → Node Core public facade`；CLI 直接调用同一公开 Core 边界，不解析彼此的人类输出。
-- vNext Electron 候选经 `DesktopCoreClient → 窄 Preload/Main IPC → Utility Process → Node Core`，Renderer 不接触 Node、任意路径或通用 IPC。
+- `V1` 新版 Electron 主桌面端候选经 `DesktopCoreClient → 窄 Preload/Main IPC → Utility Process → Node Core`，Renderer 不接触 Node、任意路径或通用 IPC。
 - Windows GUI 通过 Application 层调用 .NET Core；macOS GUI 当前直接调用 .NET Core。
 - Node 服务和 .NET Core 处理相同的配置、rollout、SQLite 和备份安全边界。
 
-当前 .NET 桌面实现仍是已发布产品和兼容行为依据，尚未标记 Legacy。Electron 替代必须满足 [vNext 分阶段迁移执行索引](docs/migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md) 的 Phase 6 退出门槛；内部 checkpoint 或单平台本地测试不能提前改变发行状态。
+`V1` 候选按 C10 携带“Electron 新版主桌面端 / .NET Legacy fallback”的交接目标；.NET 仍可构建、测试并至少保留两个维护周期。当前公开 Releases 仍是 .NET，Electron 尚未合入、发布或签名。不得把候选中的角色标识表述成已经发生的公开入口切换；后续发布门槛见 [vNext 分阶段迁移执行索引](docs/migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md)。
 
 ## 安全边界
 
@@ -172,7 +172,7 @@ flowchart LR
 - [vNext 分阶段迁移执行索引](docs/migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md)
 - [AI / Agent 操作指南](AGENTS.md)
 - [Windows GUI](docs/README_GUI_ZH.md)
-- [vNext Electron 桌面端候选说明](docs/README_DESKTOP_ZH.md)
+- [V1 Electron 主桌面端候选说明](docs/README_DESKTOP_ZH.md)
 - [Web UI](docs/README_WEB_UI_ZH.md)
 - [English](docs/README_EN.md) · [日本語](docs/README_JA.md) · [한국어](docs/README_KO.md)
 - [macOS GUI：中文](docs/README_MAC_GUI_ZH.md) · [English](docs/README_MAC_GUI_EN.md)

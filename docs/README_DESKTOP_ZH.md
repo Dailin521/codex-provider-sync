@@ -1,8 +1,8 @@
-# vNext Electron 桌面端候选说明
+# V1 Electron 主桌面端候选说明
 
-> **发行状态：未发布候选。**当前公开发布的桌面入口仍是 Windows .NET GUI。本页用于代码审查和内部验收，不提供 Stable 下载，不授权 tag、npm/GitHub Release、签名、公证或更新通道发布。
+> **V1 候选定位：新版主桌面端候选；发行状态：未发布。**本 PR 按 C10 将 Electron 标记为新版主桌面端候选，并把保留的 .NET Windows/macOS 实现标记为交接后的 Legacy fallback。当前公开 Releases 仍只提供 Windows .NET GUI；Electron 尚未合入 `main`、未签名、未公证，不提供下载或生产更新通道。本页不表示 Electron 已公开替代 .NET，也不授权 tag、npm/GitHub Release、签名、公证、更新通道发布或合并。
 
-vNext 桌面端位于 `apps/desktop`，在 Windows x64、macOS x64/arm64 和 Linux x64 上共享 React 界面与 Node Core。达到 Phase 6 退出门槛后，Electron 才会成为主桌面端，保留的 .NET GUI 才会标记为 Legacy fallback；当前不能提前这样宣称。
+新版桌面端位于 `apps/desktop`，在 Windows x64、macOS x64/arm64 和 Linux x64 上共享现代 React 界面与 Node Core。`V1` 在候选源码和界面中显示上述交接目标；它在最终 PR 合入和发布门槛通过前不生效为公开入口，也不表示 Phase 6 已 Completed、Beta 已验证、签名/公证已完成或已经公开 Release。
 
 ## 能力
 
@@ -48,9 +48,9 @@ C9 候选矩阵固定为 Windows x64 NSIS/portable ZIP、macOS x64/arm64 DMG/ZIP
 ## 发布与交接边界
 
 - `1.0.0-alpha|beta|rc.<run>` 只用于 CI 候选，构建始终 `--publish never`。
-- required CI、四目标 aggregate 和最终 C10 证据未全绿前，不写 source `1.0.0`，不把 Electron 称为 Beta、Stable、默认入口或已发布产品。
+- source manifest 已定为 `1.0.0`，它只表示经 CI 验证的候选源码版本，不等于 Beta、Stable、公开下载、默认更新入口或已发布产品。
 - 当前候选 unsigned、not notarized，未配置正式 Release 更新通道。
 - 公开发布、签名、公证、更新 metadata 和跨版本升级验证都需要另行授权。
-- .NET 删除不属于本 PR；即使 Electron 正式接管，也至少保留到稳定版发布后的两个维护周期，再单独立项。
+- .NET 实现继续保持可构建、可测试，并在 V1 候选中标记为交接后的 Legacy fallback 目标；删除不属于本 PR，且至少要等稳定版发布后的两个维护周期，再单独立项。
 
 实现与阶段状态以 [Accepted 架构基线](VNEXT_ELECTRON_NODE_ARCHITECTURE_ZH.md) 和 [vNext 迁移执行索引](migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md) 为准。

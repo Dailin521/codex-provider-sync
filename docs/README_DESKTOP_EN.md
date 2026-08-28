@@ -1,8 +1,8 @@
-# vNext Electron Desktop Candidate
+# V1 Electron Primary Desktop Candidate
 
-> **Release status: unreleased candidate.** The currently published desktop entry point remains the Windows .NET GUI. This page is for code review and internal acceptance; it provides no Stable download and does not authorize a tag, npm/GitHub Release, signing, notarization, or update-channel publication.
+> **V1 candidate designation: new primary desktop candidate; release status: unreleased.** This PR labels Electron as the new primary desktop candidate and the retained .NET Windows/macOS implementations as post-handoff Legacy fallbacks. Public Releases still provide only the Windows .NET GUI; Electron is not merged into `main`, signed, notarized, downloadable, or on a production update channel. This does not claim that Electron has publicly replaced .NET and authorizes no tag, npm/GitHub Release, signing, notarization, update-channel publication, or merge.
 
-The vNext desktop host lives in `apps/desktop` and shares the React UI and Node Core across Windows x64, macOS x64/arm64, and Linux x64. Electron becomes the primary desktop product, and the retained .NET GUI becomes a Legacy fallback, only after the Phase 6 exit gates pass. Neither claim is valid yet.
+The new desktop host lives in `apps/desktop` and shares the modern React UI and Node Core across Windows x64, macOS x64/arm64, and Linux x64. `V1` displays those handoff targets in the candidate source and UI; they do not become a public entry-point switch before the final PR and release gates pass, and they do not mark Phase 6 Completed or claim real Beta use, signing/notarization, a public Release, or update validation.
 
 ## Capabilities
 
@@ -48,9 +48,9 @@ The C9 matrix fixes Windows x64 NSIS/portable ZIP, macOS x64/arm64 DMG/ZIP, and 
 ## Release and handoff boundary
 
 - `1.0.0-alpha|beta|rc.<run>` is CI-candidate metadata only, and builds always use `--publish never`.
-- Until required CI, the four-target aggregate, and final C10 evidence all pass, do not write source `1.0.0` or call Electron Beta, Stable, default, or released.
+- Source manifests are `1.0.0`; this denotes a CI-verified source candidate only, not Beta, Stable, a public download, a default update entry point, or a released product.
 - The current candidate is unsigned, not notarized, and has no production Release update channel.
 - Public release, signing, notarization, update metadata, and cross-version upgrade validation require separate authorization.
-- Removing .NET is outside this PR. Even after Electron takes over, removal waits at least two maintenance cycles after the stable release and requires a separate project.
+- The .NET implementation remains buildable and tested, and the V1 candidate labels it as the post-handoff Legacy fallback target. Removal is outside this PR, waits at least two maintenance cycles after the stable release, and requires a separate project.
 
 The [Accepted architecture baseline](VNEXT_ELECTRON_NODE_ARCHITECTURE_ZH.md) and [vNext migration execution index](migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md) remain authoritative.

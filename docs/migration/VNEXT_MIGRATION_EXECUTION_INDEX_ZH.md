@@ -2,7 +2,7 @@
 
 > **状态：受保护分支上的阶段 0 已完成；V1 的 C0 checkpoint 在单最终 PR 合入前不推进任何后续 Phase 状态。**
 >
-> **日期：2026-08-27**
+> **日期：2026-08-28**
 >
 > **目标：Electron + React + TypeScript + Node 单核心的渐进迁移**
 >
@@ -42,7 +42,7 @@
 
 - 本分支受 [ADR-0011](../adr/0011-v1-single-branch-single-final-pr.md) 约束：`C0`～`C10` 采用批准计划中的合并后编号；旧 PR 2～PR 10 只保留为依赖与安全意图来源。
 - 每个 checkpoint 必须记录 commit SHA、范围、适用测试/Fixture、真实平台证据、未满足 gate 和上一个可回退 commit；最终 PR 审查按 checkpoint 进行。
-- checkpoint 通过不自动开放下一阶段能力：Electron 写、Restore v2、Watch、默认桌面入口和 Legacy 清理由本索引的对应退出门槛继续阻断。
+- checkpoint 通过不自动开放下一阶段能力：Electron 写、Restore v2、Watch、公开默认桌面入口、Phase Completed 和 Legacy 清理由本索引的对应退出门槛继续阻断。V1 候选可按 C10 显示交接目标，但不得把它表述成已经发生的公开替代。
 - checkpoint 无法在同步 `main` 后重放或复验时，停止在最近已验证 checkpoint；不得以合并拓扑例外跳过差异登记、Fixture 或发布验证。
 - 在 V1 分支内，本索引中“进入条件：上一 Phase Completed”表示相应前序 checkpoint 的全部证据已验证；它不改变受保护分支上该 Phase 仍未 Completed 的状态。
 
@@ -165,12 +165,12 @@
 | C2 | CLI `--json` | C1 | stdout 单一 JSON、stderr 日志、JSON Exit Code 与 Schema 合同 | In Progress（V1，本地门禁通过） |
 | C3 | Prepare/Apply、协调器与双层锁 | C1、C2 | Revision/Plan/Apply、Node/.NET 双层资源锁、真实争锁证据 | In Progress（V1，本地门禁通过） |
 | C4 | Workspace、Core、Contracts、CoreClient | C1～C3（Phase 1 全部门槛已验证） | 不搬高风险算法；根 npm CLI tarball/Node 16 兼容 | In Progress（V1，本地门禁通过） |
-| C5 | 共享 React UI 与 Web | C4 | AppShell/Features/HttpCoreClient；Web 安全与功能等价；阶段 2 门槛 | In Progress（V1，本地门禁通过，等待远端 CI/最终合入） |
-| C6 | Electron 安全骨架、Utility Runtime、只读能力 | C5（需 Phase 2 远端门槛闭合；当前未满足） | 安全窗口/IPC、握手、crash recovery、三平台只读 smoke | Pending（V1 候选实现与本地 Windows 门禁通过；不得在 C5/远端 CI 前正式验证） |
-| C7 | Electron Sync/Switch | C6（Phase 3 全部门槛已验证） | Prepare/Apply、Busy/Partial/Cancel、Backup/Restore 回环 | Pending（V1 候选实现与本地 Windows 门禁通过；WSL 实机、C5/C6 前置门槛、远端三平台 CI 与最终合入未闭合） |
-| C8 | Restore/Watch/Diagnostics/Update | C7（Phase 4 全部门槛已验证） | Restore v2 crash matrix、foreign pending、诊断隐私、Watch/Update | Pending（V1 候选实现与本地 Windows 门禁通过；真实 WSL、C5～C7 前置门槛、远端三平台 CI、C9 真实更新/发行链与最终合入未闭合） |
-| C9 | 打包、CI 与发布工程 | C8（Phase 5 全部门槛已验证） | 四目标产物、native SQLite、packaged smoke、SBOM/checksums | Pending（V1 候选实现与本地 Windows x64 ZIP/NSIS 最终容器门禁通过；C8 前置 Phase、远端 macOS x64/arm64、Linux x64、四目标 aggregate、签名/公证与最终合入未闭合） |
-| C10 | 最终证据与 Legacy 交接 | C9 | evidence bundle、README/Legacy、全量门禁；不自动发布 | Pending（V1 脱敏 bundle 合同/生成器、文档交接候选与本地 Windows 门禁通过；远端四平台/aggregate、`1.0.0`、最终合入与发布验证未闭合） |
+| C5 | 共享 React UI 与 Web | C4 | AppShell/Features/HttpCoreClient；Web 安全与功能等价；阶段 2 门槛 | In Progress（V1 候选实现、本地门禁与 `c63a403` required CI 已验证；等待最终合入） |
+| C6 | Electron 安全骨架、Utility Runtime、只读能力 | C5（需 Phase 2 全部门槛闭合；受保护分支状态未满足） | 安全窗口/IPC、握手、crash recovery、三平台只读 smoke | Pending（`c63a403` 的 Windows/macOS/Linux Electron 候选门禁已验证；Phase 状态、真实 WSL 与最终合入未闭合） |
+| C7 | Electron Sync/Switch | C6（Phase 3 全部门槛已验证） | Prepare/Apply、Busy/Partial/Cancel、Backup/Restore 回环 | Pending（`c63a403` 的写能力、隐藏 E2E 与三平台候选 CI 已验证；Phase 前置、真实 WSL 与最终合入未闭合） |
+| C8 | Restore/Watch/Diagnostics/Update | C7（Phase 4 全部门槛已验证） | Restore v2 crash matrix、foreign pending、诊断隐私、Watch/Update | Pending（`c63a403` 的 Restore/Watch/Diagnostics/Update 候选门禁已验证；真实 WSL、真实更新链、Phase 前置与最终合入未闭合） |
+| C9 | 打包、CI 与发布工程 | C8（Phase 5 全部门槛已验证） | 四目标产物、native SQLite、packaged smoke、SBOM/checksums | Pending（`c63a403` 的四目标原生候选、最终容器 smoke、aggregate、SBOM/checksum 已验证；签名、公证、真实更新与最终合入未闭合） |
+| C10 | 最终证据与 Legacy 交接 | C9 | evidence bundle、README/Legacy、全量门禁；不自动发布 | Pending（`c63a403` 的 source `1.0.0`、交接目标标识、26/26 CI 与脱敏 bundle 已验证；真实 Beta/WSL、受保护 `main` 合入后复验、签名/公证和发布授权未闭合） |
 
 `C0`～`C10` 按表中依赖和阶段门槛推进，不能用“只搭骨架”绕过上一阶段的退出条件。Checkpoint 内可以有若干小提交，但最终 evidence 必须绑定一个明确 commit。
 
@@ -217,4 +217,6 @@ Node 与 .NET 在同一 Fixture 上不一致时，PR 必须记录：
 
 ## 8. 本 PR 完成后的下一步
 
-V1 已准备 `C9` 候选实现和 `C10` 证据生成候选。本地 Windows 已通过 Restore v2、Watch、Diagnostics、Update admission gate、Node↔.NET fixture、隐藏 Electron E2E，以及绑定实现 commit `73256f3187dd337bb681a1cc9810edad8f6309bb` 的 Windows x64 ZIP/NSIS 最终容器审计、native fallback、Status、Sync→Restore、正常退出与卸载验证；根 npm tarball 也已移除 production source map。C10 另建立 commit-bound、release-false-only 的脱敏 bundle schema/生成器/required job，并在最新 `origin/main` 基线上重跑本地 Node/Web/Electron/.NET/package/audit 门禁。由于本机已注册的 Ubuntu 缺失 WSL `ext4.vhdx`，真实 WSL UNC 用例按合同 Skip；C5～C8 required CI、远端 macOS x64/arm64、Linux x64、四目标 aggregate、最终 `1.0.0` commit、受保护 main 合入后复验、签名/公证和发布授权仍未闭合，因此 C6/Phase 3、C7/Phase 4、C8/Phase 5、C9/Phase 6 与 C10 均保持 Pending，不能宣称完整功能、Beta、Stable、Electron 默认入口、.NET Legacy 或已发布。C1 的本地证据见 [C1 Public API 与结构化错误证据](evidence/C1_PUBLIC_API_ERRORS_2026-08-25.md)，C2 证据见 [C2 CLI JSON 合同证据](evidence/C2_CLI_JSON_2026-08-25.md)，C3 证据见 [C3 Plan/Apply 与双层锁证据](evidence/C3_PLAN_APPLY_DUAL_LOCK_2026-08-25.md)，C4 证据见 [C4 Workspace、Core 与 CoreClient 证据](evidence/C4_WORKSPACE_CORE_CLIENT_2026-08-25.md)，C5 证据见 [C5 共享 UI、Web 与跨运行时 Fixture 证据](evidence/C5_SHARED_UI_WEB_2026-08-26.md)，C6 证据见 [C6 Electron Read-only Alpha 证据](evidence/C6_ELECTRON_READONLY_2026-08-26.md)，C7 证据见 [C7 Electron Sync/Switch 证据](evidence/C7_ELECTRON_SYNC_SWITCH_2026-08-26.md)，C8 证据见 [C8 Restore / Watch / Diagnostics / Update 证据](evidence/C8_RESTORE_WATCH_DIAGNOSTICS_UPDATE_2026-08-27.md)，C9 证据见 [C9 打包、CI 与发布工程证据](evidence/C9_PACKAGING_CI_RELEASE_ENGINEERING_2026-08-27.md)，C10 候选证据见 [C10 最终证据与 Legacy 交接候选](evidence/C10_FINAL_EVIDENCE_BUNDLE_2026-08-27.md)。
+V1 的实现 checkpoint `c63a403688b6d148afa65fba9e1461c7ebcd3331` 已包含 `origin/main@c7ff85218a07a8e5f14132c582cad1239c52865e`，补齐两个不同 Codex Home 共用一个 State DB 时的真实 Node writer↔.NET writer 双向争锁，并在本地跨运行时矩阵中达到 12/12。Draft PR #90 的 [CI run 33142610556](https://github.com/Dailin521/codex-provider-sync/actions/runs/33142610556) 在测试合并 commit `10047581a46f67993c809bb8fb3b58a89fb42d09` 上 26/26 jobs 成功：Windows x64、macOS x64、macOS arm64、Linux x64 原生候选、最终容器 smoke、四目标 aggregate、C10 `ci-verified-not-release` bundle 和 `ci-gate` 均通过；source manifest 已为 `1.0.0`，候选版本为 `1.0.0-rc.204`。
+
+V1 候选按 C10 在界面和文档中显示“Electron 新版主桌面端候选 / .NET Legacy fallback”的交接目标；这不表示公开入口已经切换。当前 GitHub Release 仍是 .NET `v0.4.1`，PR 仍为 Draft、未合并，Electron 没有公开下载、签名、公证或生产更新通道。由于本机 Ubuntu 缺失 WSL `ext4.vhdx`，真实 WSL UNC 用例仍按合同 Skip；真实 Beta、受保护 `main` 合入后同 SHA 复验、签名/公证、真实更新升级和独立发布授权也未闭合。因此 Phase 1～7 仍保持 Pending/In Progress，不能宣称 Beta、Stable、公开替代或已发布。当前证据见 [C10 最终候选证据快照（2026-08-28）](evidence/C10_FINAL_EVIDENCE_BUNDLE_2026-08-28.md)；C1 证据见 [C1 Public API 与结构化错误证据](evidence/C1_PUBLIC_API_ERRORS_2026-08-25.md)，C2 证据见 [C2 CLI JSON 合同证据](evidence/C2_CLI_JSON_2026-08-25.md)，C3 证据见 [C3 Plan/Apply 与双层锁证据](evidence/C3_PLAN_APPLY_DUAL_LOCK_2026-08-25.md)，C4 证据见 [C4 Workspace、Core 与 CoreClient 证据](evidence/C4_WORKSPACE_CORE_CLIENT_2026-08-25.md)，C5 证据见 [C5 共享 UI、Web 与跨运行时 Fixture 证据](evidence/C5_SHARED_UI_WEB_2026-08-26.md)，C6 证据见 [C6 Electron Read-only Alpha 证据](evidence/C6_ELECTRON_READONLY_2026-08-26.md)，C7 证据见 [C7 Electron Sync/Switch 证据](evidence/C7_ELECTRON_SYNC_SWITCH_2026-08-26.md)，C8 证据见 [C8 Restore / Watch / Diagnostics / Update 证据](evidence/C8_RESTORE_WATCH_DIAGNOSTICS_UPDATE_2026-08-27.md)，C9 证据见 [C9 打包、CI 与发布工程证据](evidence/C9_PACKAGING_CI_RELEASE_ENGINEERING_2026-08-27.md)。

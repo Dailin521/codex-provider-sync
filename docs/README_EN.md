@@ -36,16 +36,16 @@ This tool synchronizes session files and the SQLite index, restoring session vis
 >
 > CLI/Web and the current Windows GUI are released independently, so their version numbers may differ.
 >
-> **Migration status:** The currently published desktop entry point is the Windows .NET GUI. The vNext Electron desktop code in this repository is an unreleased candidate implementation, not the current default, Stable, or downloadable product. This README will switch to Electron as the primary desktop entry point and mark .NET as Legacy only after the four-platform candidate gates, final evidence, and separately authorized release validation all pass.
+> **V1 candidate designation:** This PR labels Electron as the new primary desktop candidate and the retained .NET Windows/macOS implementations as post-handoff Legacy fallbacks. **Public release status is separate:** Releases still provide only the Windows .NET GUI; Electron is not merged into `main`, published, signed, downloadable, or on an update channel. The candidate designation does not claim that Electron has publicly replaced .NET.
 
 | Scenario | Recommended interface |
 | --- | --- |
-| Windows desktop | [Download the current Windows GUI (.NET)](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [Usage guide](#current-windows-gui-net) |
+| Windows desktop | [Download the currently published Windows GUI (.NET)](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [`V1` Electron primary desktop candidate guide (no public download)](README_DESKTOP_EN.md) |
 | macOS desktop | [Local Web UI (CLI required)](#local-web-ui); [native GUI build guide](README_MAC_GUI_EN.md) |
 | Browser interface or cross-platform use | [Local Web UI (CLI required)](#local-web-ui) |
 | Scripts, CI, or WSL | [CLI](#cli) |
 
-### Current Windows GUI (.NET)
+### Currently published Windows GUI (.NET; V1 Legacy fallback target)
 
 Download `CodexProviderSync.exe` from [Releases](https://github.com/Dailin521/codex-provider-sync/releases/latest):
 
@@ -57,7 +57,7 @@ The application is not code-signed, so Windows may show a security warning. Down
 
 [Full Windows GUI guide (Chinese)](README_GUI_ZH.md)
 
-See the [vNext Electron desktop candidate guide](README_DESKTOP_EN.md) for its capabilities, security boundaries, and internal acceptance workflow. That guide does not provide a public download or authorize a release.
+See the [Electron primary desktop candidate guide](README_DESKTOP_EN.md) for its capabilities, security boundaries, and internal acceptance workflow. A source role is not a public release; that guide provides no download and authorizes no release.
 
 ### Local Web UI
 
@@ -124,12 +124,12 @@ flowchart LR
     WebServer --> NodeCore["Node Core public facade"]
     CLI["Node CLI"] --> NodeCore
 
-    ElectronRenderer["vNext Electron Renderer<br/>unreleased candidate"] --> DesktopClient["DesktopCoreClient"]
+    ElectronRenderer["Electron Renderer<br/>V1 primary desktop candidate"] --> DesktopClient["DesktopCoreClient"]
     DesktopClient --> ElectronHost["Preload / Main<br/>narrow IPC"]
     ElectronHost --> Utility["Utility Process"]
     Utility --> NodeCore
 
-    WindowsGUI["Windows GUI"] --> Application[".NET Application"]
+    WindowsGUI[".NET GUI<br/>published now; V1 Legacy fallback target"] --> Application[".NET Application"]
     Application --> DotNetCore[".NET Core"]
     MacGUI["macOS GUI"] --> DotNetCore
 
@@ -143,11 +143,11 @@ flowchart LR
 ```
 
 - Web requests flow through `HttpCoreClient → /api/core → Node Core public facade`; the CLI calls the same public Core boundary directly.
-- The vNext Electron candidate uses `DesktopCoreClient → narrow Preload/Main IPC → Utility Process → Node Core`; its Renderer has no Node, arbitrary-path, or generic-IPC access.
+- The `V1` Electron primary desktop candidate uses `DesktopCoreClient → narrow Preload/Main IPC → Utility Process → Node Core`; its Renderer has no Node, arbitrary-path, or generic-IPC access.
 - The Windows GUI calls .NET Core through the Application layer; the macOS GUI currently calls .NET Core directly.
 - The Node service and .NET Core enforce the same configuration, rollout, SQLite, and backup safety boundaries.
 
-The .NET desktop implementation remains the published product and compatibility authority; it is not Legacy yet. Electron replacement is gated by Phase 6 in the [vNext migration execution index](migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md). Internal checkpoints and single-platform local evidence do not change release status.
+The `V1` candidate carries the C10 handoff target of Electron as the new primary desktop and .NET as a retained Legacy fallback. .NET remains buildable, tested, and retained for at least two maintenance cycles. Public Releases still provide .NET; Electron has not been merged, published, or signed. Do not describe this candidate label as a completed public entry-point switch; remaining release gates are tracked in the [vNext migration execution index](migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md).
 
 ## Safety boundaries
 
@@ -162,7 +162,7 @@ The .NET desktop implementation remains the published product and compatibility 
 
 - [AI / Agent Guide](../AGENTS.md)
 - [Windows GUI guide (Chinese)](README_GUI_ZH.md)
-- [vNext Electron desktop candidate guide](README_DESKTOP_EN.md)
+- [V1 Electron primary desktop candidate guide](README_DESKTOP_EN.md)
 - [Web UI guide (Chinese)](README_WEB_UI_ZH.md)
 - [中文](../README.md) · [日本語](README_JA.md) · [한국어](README_KO.md)
 - [macOS GUI: 中文](README_MAC_GUI_ZH.md) · [English](README_MAC_GUI_EN.md)

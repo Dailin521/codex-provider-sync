@@ -7,7 +7,7 @@ export const resources = {
       brand: {
         desktop: {
           label: "Desktop",
-          subtitle: "New primary desktop · .NET Legacy fallback retained"
+          subtitle: "V1 primary desktop candidate · .NET post-handoff Legacy target"
         },
         web: {
           label: "Web",
@@ -353,7 +353,7 @@ export const resources = {
       brand: {
         desktop: {
           label: "桌面端",
-          subtitle: "新版主桌面端 · 保留 .NET Legacy 兼容回退"
+          subtitle: "V1 新版主桌面端候选 · .NET 交接后 Legacy fallback 目标"
         },
         web: {
           label: "Web",
