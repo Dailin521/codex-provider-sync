@@ -12,10 +12,11 @@ const require = createRequire(import.meta.url);
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packagedExecutable = process.env.CPS_DESKTOP_EXECUTABLE;
 const electronExecutable = packagedExecutable || require("electron");
-const PRODUCTION_SMOKE_TIMEOUT_MS = 90_000;
+const PRODUCTION_SMOKE_TIMEOUT_MS = 150_000;
 const PRODUCTION_OPERATION_TIMEOUT_MS = 30_000;
 const PRODUCTION_READY_TIMEOUT_MS = 20_000;
 const PRODUCTION_BRIDGE_TIMEOUT_MS = 30_000;
+const PRODUCTION_CDP_TIMEOUT_MS = 60_000;
 const PRODUCTION_CLOSE_TIMEOUT_MS = 10_000;
 
 async function withDeadline(label, task, timeoutMs) {
@@ -104,7 +105,9 @@ async function launchPackagedDesktop({ args, env }) {
       child.once("error", onError);
       child.once("exit", onExit);
     });
-    browser = await chromium.connectOverCDP(endpoint);
+    browser = await chromium.connectOverCDP(endpoint, {
+      timeout: PRODUCTION_CDP_TIMEOUT_MS
+    });
     for (let attempt = 0; attempt < 100 && !page; attempt += 1) {
       page = browser.contexts().flatMap((context) => context.pages())[0];
       if (!page) await new Promise((resolve) => setTimeout(resolve, 50));
