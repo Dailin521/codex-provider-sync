@@ -142,6 +142,11 @@ function exactSorted(values) {
   return [...values].sort((left, right) => left.localeCompare(right));
 }
 
+function assertExactKeys(value, expected, label) {
+  assert.ok(value && typeof value === "object" && !Array.isArray(value), `${label} must be an object.`);
+  assert.deepEqual(exactSorted(Object.keys(value)), exactSorted(expected), `${label} fields changed.`);
+}
+
 export function normalizeRequiredJobs(raw) {
   const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
   assert.ok(parsed && typeof parsed === "object" && !Array.isArray(parsed), "Required job results must be an object.");
@@ -223,6 +228,116 @@ export function normalizeCandidateIndex(index, evidenceForCommit) {
     commit: index.commit,
     lockfileSha256: [...lockfiles][0],
     targets
+  });
+}
+
+export function normalizeFormalReleaseEvidence(
+  evidence,
+  { manifest, evidenceForCommit, repository, runId, runAttempt }
+) {
+  assertExactKeys(evidence, [
+    "schemaVersion",
+    "scope",
+    "containsRealUserData",
+    "syntheticOnly",
+    "generatedAt",
+    "workflow",
+    "release",
+    "asset",
+    "binary",
+    "backup",
+    "verification",
+    "limitation"
+  ], "Formal Release evidence");
+  assert.equal(evidence.schemaVersion, 1);
+  assert.equal(evidence.scope, "historical-formal-release-backup-evidence");
+  assert.equal(evidence.containsRealUserData, false);
+  assert.equal(evidence.syntheticOnly, true);
+  assert.equal(Number.isNaN(Date.parse(evidence.generatedAt)), false);
+
+  assertExactKeys(evidence.workflow, ["repository", "runId", "runAttempt", "testedCommit"], "Formal Release workflow binding");
+  assert.equal(evidence.workflow.repository, repository);
+  assert.equal(evidence.workflow.runId, runId);
+  assert.equal(evidence.workflow.runAttempt, runAttempt);
+  assert.equal(evidence.workflow.testedCommit, evidenceForCommit);
+
+  assertExactKeys(evidence.release, [
+    "repository",
+    "releaseId",
+    "tag",
+    "tagObjectSha",
+    "commit",
+    "publishedAt",
+    "tagSigned"
+  ], "Formal Release provenance");
+  assert.equal(evidence.release.repository, manifest.repository);
+  assert.equal(evidence.release.releaseId, manifest.release.id);
+  assert.equal(evidence.release.tag, manifest.release.tag);
+  assert.equal(evidence.release.tagObjectSha, manifest.release.tagObjectSha);
+  assert.equal(evidence.release.commit, manifest.release.commit);
+  assert.equal(evidence.release.publishedAt, manifest.release.publishedAt);
+  assert.equal(evidence.release.tagSigned, manifest.release.tagSigned);
+
+  const expectedAsset = manifest.assets.automationZip;
+  assertExactKeys(evidence.asset, [
+    "id",
+    "name",
+    "size",
+    "sha256",
+    "checksumAssetSha256",
+    "releaseChecksumsSha256"
+  ], "Formal Release asset evidence");
+  assert.equal(evidence.asset.id, expectedAsset.id);
+  assert.equal(evidence.asset.name, expectedAsset.name);
+  assert.equal(evidence.asset.size, expectedAsset.size);
+  assert.equal(evidence.asset.sha256, expectedAsset.sha256);
+  assert.equal(evidence.asset.checksumAssetSha256, manifest.assets.automationChecksum.sha256);
+  assert.equal(evidence.asset.releaseChecksumsSha256, manifest.assets.releaseChecksums.sha256);
+
+  const expectedBinary = manifest.archiveEntries.find((entry) => entry.name === "CodexProviderSync.Automation.exe");
+  assert.ok(expectedBinary, "The formal Release manifest has no Automation binary.");
+  assertExactKeys(evidence.binary, ["name", "size", "sha256", "authenticodeStatus"], "Formal Release binary evidence");
+  assert.equal(evidence.binary.name, expectedBinary.name);
+  assert.equal(evidence.binary.size, expectedBinary.size);
+  assert.equal(evidence.binary.sha256, expectedBinary.sha256);
+  assert.equal(evidence.binary.authenticodeStatus, "NotSigned");
+
+  assertExactKeys(evidence.backup, ["metadataVersion", "metadataSha256", "producedTreeSha256"], "Formal Release backup evidence");
+  assert.equal(evidence.backup.metadataVersion, 2);
+  assert.match(evidence.backup.metadataSha256 || "", HASH_PATTERN);
+  assert.match(evidence.backup.producedTreeSha256 || "", HASH_PATTERN);
+  assertExactKeys(evidence.verification, [
+    "releaseApiPinned",
+    "releaseChecksumPinned",
+    "isolatedEnvironment",
+    "authCanaryExcluded",
+    "currentNodeRestoreVerified",
+    "pendingRecoveryCount"
+  ], "Formal Release verification");
+  assert.equal(evidence.verification.releaseApiPinned, true);
+  assert.equal(evidence.verification.releaseChecksumPinned, true);
+  assert.equal(evidence.verification.isolatedEnvironment, true);
+  assert.equal(evidence.verification.authCanaryExcluded, true);
+  assert.equal(evidence.verification.currentNodeRestoreVerified, true);
+  assert.equal(evidence.verification.pendingRecoveryCount, 0);
+  assert.match(evidence.limitation || "", /^The formal v0\.4\.1 Automation binary is unsigned;/);
+
+  return Object.freeze({
+    artifactName: "historical-formal-release-backup-evidence",
+    release: Object.freeze({
+      repository: evidence.release.repository,
+      releaseId: evidence.release.releaseId,
+      tag: evidence.release.tag,
+      tagObjectSha: evidence.release.tagObjectSha,
+      commit: evidence.release.commit,
+      publishedAt: evidence.release.publishedAt,
+      tagSigned: evidence.release.tagSigned
+    }),
+    asset: Object.freeze({ ...evidence.asset }),
+    binary: Object.freeze({ ...evidence.binary }),
+    backup: Object.freeze({ ...evidence.backup }),
+    syntheticOnly: true,
+    currentNodeRestoreVerified: true
   });
 }
 
@@ -440,12 +555,6 @@ function pendingItems({ event, ref, sourceVersions }) {
       requiredEvidence: "Define and verify one cross-runtime maintenance lease before authorizing production update installation."
     },
     {
-      id: "historical-formal-release-backup",
-      blocking: true,
-      reason: "Repository-tag synthetic backups do not prove hosted formal Release binary output.",
-      requiredEvidence: "Restore a checksum-verified synthetic backup produced by an authorized historical formal Release binary."
-    },
-    {
       id: "real-beta-validation",
       blocking: true,
       reason: "No authorized real-user Beta validation has been completed.",
@@ -458,6 +567,7 @@ function pendingItems({ event, ref, sourceVersions }) {
 export async function createEvidenceBundle({
   repositoryRoot = REPOSITORY_ROOT,
   candidateIndexPath,
+  formalReleaseEvidencePath,
   environment = process.env,
   now = new Date()
 }) {
@@ -480,6 +590,18 @@ export async function createEvidenceBundle({
   const checkpointRecords = await collectCheckpoints(repositoryRoot, evidenceForCommit);
   const candidateIndex = JSON.parse(await fs.readFile(candidateIndexPath, "utf8"));
   const candidateSet = normalizeCandidateIndex(candidateIndex, evidenceForCommit);
+  const formalReleaseManifest = JSON.parse(await fs.readFile(
+    path.join(repositoryRoot, "test-support", "formal-release-assets.v1.json"),
+    "utf8"
+  ));
+  const formalReleaseEvidence = JSON.parse(await fs.readFile(formalReleaseEvidencePath, "utf8"));
+  const historicalFormalRelease = normalizeFormalReleaseEvidence(formalReleaseEvidence, {
+    manifest: formalReleaseManifest,
+    evidenceForCommit,
+    repository,
+    runId,
+    runAttempt: Number(runAttemptText)
+  });
   const rootPackage = JSON.parse(await fs.readFile(path.join(repositoryRoot, "package.json"), "utf8"));
   const desktopPackage = JSON.parse(await fs.readFile(path.join(repositoryRoot, "apps", "desktop", "package.json"), "utf8"));
   assert.match(rootPackage.version || "", VERSION_PATTERN);
@@ -519,6 +641,10 @@ export async function createEvidenceBundle({
       indexSha256: await sha256File(candidateIndexPath),
       ...candidateSet
     },
+    historicalFormalRelease: {
+      evidenceSha256: await sha256File(formalReleaseEvidencePath),
+      ...historicalFormalRelease
+    },
     assertions: {
       checkpointChainLinear: true,
       allEvidenceFilesHashed: true,
@@ -528,6 +654,7 @@ export async function createEvidenceBundle({
       candidateSetComplete: true,
       candidateCommitMatchesEvidenceCommit: true,
       candidateReleaseUnauthorized: true,
+      historicalFormalReleaseBackupVerified: true,
       redactionScanPassed: true
     },
     pending: pendingItems({ event, ref, sourceVersions }),
@@ -579,7 +706,11 @@ async function main() {
   const outputRoot = path.resolve(
     process.env.CPS_C10_OUTPUT_ROOT || path.join(REPOSITORY_ROOT, "artifacts", "c10")
   );
-  const bundle = await createEvidenceBundle({ candidateIndexPath });
+  const formalReleaseEvidencePath = path.resolve(
+    process.env.CPS_FORMAL_RELEASE_EVIDENCE
+      || path.join(REPOSITORY_ROOT, "artifacts", "test-fixtures", "historical-formal-release-backup-evidence.json")
+  );
+  const bundle = await createEvidenceBundle({ candidateIndexPath, formalReleaseEvidencePath });
   const result = await writeEvidenceBundle({ bundle, outputRoot });
   process.stdout.write(`C10 evidence bundle written: ${result.checksum}\n`);
 }

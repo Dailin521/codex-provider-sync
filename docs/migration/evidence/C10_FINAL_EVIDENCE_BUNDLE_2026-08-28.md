@@ -51,7 +51,7 @@ CI 测试的是 GitHub 为 PR #90 生成的 merge ref；C10 bundle 同时记录 
 ## 尚未闭合与停止边界
 
 1. **真实 WSL UNC：**本快照环境只注册 Ubuntu WSL2，但其 `ext4.vhdx` 缺失，启动报 `CreateInstance/MountDisk/HCS/ERROR_FILE_NOT_FOUND`。没有与 source commit 绑定的健康 Windows+WSL strict artifact 时，该项保持 Pending；不得用模拟 UNC 或代码开关替代，也不得在未授权时 unregister/reinstall 发行版。
-2. **真实 Beta 与历史发布物：**本快照时尚无真实用户 Beta 反馈或受控历史正式 Release binary backup 实物回归，不能外推为用户环境稳定性。后续 tag-source synthetic evidence 也只能证明冻结仓库 tag 的格式兼容，不能替代 hosted formal Release binary 或真实用户数据。
+2. **真实 Beta 与历史发布物：**本静态 `c63a403` 快照生成时尚无真实用户 Beta 反馈或受控历史正式 Release binary backup 实物回归，不能外推为用户环境稳定性。后续 source head 新增了固定 v0.4.1 hosted Automation Release asset 的 checksum-bound synthetic backup→当前 Node Restore fixture；只有该 source head 最新成功 C10 artifact 才能关闭“本快照缺少 hosted formal binary”这一项。它仍不能替代真实用户 Beta、真实用户数据、代码签名或生产跨版本升级。
 3. **受保护 `main`：**PR #90 未合并且明确禁止合并。获授权合并后，必须在实际 `main` SHA 重跑全部 applicable jobs 并生成新的 C10 bundle。
 4. **签名与更新：**Windows signing、Apple Developer ID/Notarization、生产 update metadata/download/restart 和跨版本升级验证均未执行。
 5. **发布授权：**未创建 tag，未发布 npm/GitHub Release，未签名、公证或写生产更新通道；本证据不授予这些权限。

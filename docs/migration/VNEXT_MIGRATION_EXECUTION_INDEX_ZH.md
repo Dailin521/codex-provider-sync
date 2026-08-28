@@ -169,8 +169,8 @@
 | C6 | Electron 安全骨架、Utility Runtime、只读能力 | C5（需 Phase 2 全部门槛闭合；受保护分支状态未满足） | 安全窗口/IPC、握手、crash recovery、三平台只读 smoke | Pending（`c63a403` checkpoint 的 Windows/macOS/Linux Electron 候选门禁已验证；后续 head、Phase 状态、真实 WSL 与最终合入未闭合） |
 | C7 | Electron Sync/Switch | C6（Phase 3 全部门槛已验证） | Prepare/Apply、Busy/Partial/Cancel、Backup/Restore 回环 | Pending（`c63a403` checkpoint 的写能力、隐藏 E2E 与三平台候选 CI 已验证；后续 head、Phase 前置、真实 WSL 与最终合入未闭合） |
 | C8 | Restore/Watch/Diagnostics/Update | C7（Phase 4 全部门槛已验证） | Restore v2 crash matrix、foreign pending、诊断隐私、Watch/Update | Pending（`c63a403` checkpoint 的候选门禁已验证；后续 hardening head、commit-bound 真实 WSL、获授权真实更新链、Phase 前置与最终合入未闭合） |
-| C9 | 打包、CI 与发布工程 | C8（Phase 5 全部门槛已验证） | 四目标产物、native SQLite、packaged smoke、SBOM/checksums | Pending（`c63a403` checkpoint 的四目标候选证据已验证；后续 head、签名、公证、真实更新与最终合入未闭合） |
-| C10 | 最终证据与 Legacy 交接 | C9 | evidence bundle、README/Legacy、全量门禁；不自动发布 | Pending（`c63a403` checkpoint 的 source `1.0.0`、交接目标和 26/26 CI 已验证；后续 head、真实 Beta/WSL、受保护 `main` 合入后复验、签名/公证和发布授权未闭合） |
+| C9 | 打包、CI 与发布工程 | C8（Phase 5 全部门槛已验证） | 四目标产物、native SQLite、packaged smoke、SBOM/checksums | Pending（`c63a403` checkpoint 的四目标候选证据已验证；后续 head 增加 checksum-bound hosted v0.4.1 Automation backup fixture，只有最新成功 C10 artifact 才是当前证明；签名、公证、真实更新与最终合入未闭合） |
+| C10 | 最终证据与 Legacy 交接 | C9 | evidence bundle、README/Legacy、全量门禁；不自动发布 | Pending（`c63a403` checkpoint 的 source `1.0.0`、交接目标和 26/26 CI 已验证；后续 source head 的 hosted formal Release backup 兼容只以最新成功 C10 artifact 为准；真实 Beta/WSL、受保护 `main` 合入后复验、签名/公证和发布授权仍未闭合） |
 
 `C0`～`C10` 按表中依赖和阶段门槛推进，不能用“只搭骨架”绕过上一阶段的退出条件。Checkpoint 内可以有若干小提交，但最终 evidence 必须绑定一个明确 commit。
 

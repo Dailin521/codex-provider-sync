@@ -60,6 +60,7 @@ ZIP 与 NSIS 都完成：最终容器内容复审、候选 ASAR loader + unpacke
 
 - 根 tarball 安装态 smoke 从 help/status 扩展为真实 npm bin `sync --json → managed backup → synthetic drift → restore --json`，断言 config/rollout 字节、SQLite Provider 与 pending recovery 全部恢复；Windows/Ubuntu Node 16.20.2 required matrix 继续执行同一脚本。
 - Windows cross-runtime job 以 `fetch-depth:0` 获取冻结 tag，校验 `v0.2.9@1a2b290...` 与 `v0.4.1@75f45756...` 后构建历史 .NET Core，真实产生 synthetic metadata v1/v2 backup，再由当前 Node Restore；CI 只上传不含真实数据的 commit/hash evidence。该等级是 repository-tag-source，不是 hosted formal Release binary。
+- 后续 source head 新增独立的 checksum-bound hosted Release fixture：固定 `v0.4.1` Release/tag/commit、Automation ZIP asset ID/size/SHA-256、发布页 checksum 资产及 archive entry Hash，校验通过后才在严格环境白名单中执行正式托管的旧 Automation Plan/Apply，并由当前 Node Restore synthetic backup。fork PR 不执行 hosted binary；同仓库 PR artifact 仍是审查预览，受保护 `main` 必须重新运行。它只上传同一 CI run/tested commit 绑定的脱敏 hash evidence；是否通过只以对应 source head 最新成功的 C10 artifact 为准，不能回填到上方历史 checkpoint。
 - Web 与 npm 手工发布工作流在任何发布动作前都安装 Chromium 并运行 production Web E2E；普通 Web/Desktop Playwright 配置启用 `forbidOnly`。
 - 候选构建显式注入 `CPS_DESKTOP_RELEASE_AUTHORIZED=false`，所以 unsigned/not-authorized 候选不会建立真实 update port。仓库当前没有把该值置 true 的正式发布路径；这是未获发布授权时的预期 fail-closed 状态。
 
@@ -70,6 +71,6 @@ ZIP 与 NSIS 都完成：最终容器内容复审、候选 ASAR loader + unpacke
 - 本地 Windows 不能替代 macOS x64、macOS arm64、Linux x64 的 native build、DMG/ZIP/AppImage/deb 解包/安装、embedded integrity、native SQLite 与 graceful-exit 证据；四目标 aggregate 也尚未产生。required CI 未全绿前 C9 保持 Pending。
 - 本机 Ubuntu 注册项缺少 `ext4.vhdx`，真实 WSL UNC 测试按合同 Skip。C10 必须保留该限制，不得把 synthetic path 测试冒充 WSL 实机。
 - 候选明确是 unsigned、not notarized、release not authorized。没有 tag、npm publish、GitHub Release、签名、公证或更新通道写入；真实 update metadata/download/restart upgrade 仍阻断 Stable。
-- tag-source historical fixture 不等于执行 v0.2.9/v0.4.1 hosted Release binary；正式 Release backup 兼容、真实 Beta 与跨版本升级仍是外部证据阻断项。
+- tag-source historical fixture 仍只证明冻结源码；后续 source head 已具备执行固定 v0.4.1 hosted Automation Release binary 的 synthetic backup→当前 Node Restore fixture，但在其 source-head CI/C10 artifact 成功前不得声称闭合。即使该 artifact 成功，它也只闭合“历史正式托管 backup 格式兼容”，不闭合真实 Beta、Windows/macOS 签名、公证、真实用户数据或生产跨版本升级。
 - 当前 builder 使用 Electron 默认应用图标；仓库尚无经确认的跨平台 product icon 资产。它不改变本 checkpoint 的数据安全结论，但在公开 Stable 前应由产品资产验收决定是否补齐。
 - macOS/Linux 任一容器审计、native probe、Status/Sync→Restore、正常退出或 aggregate 失败时，必须停在 `73256f3` 的 Windows-only evidence，不得降级门禁、跳过 job 或写入 `1.0.0` source version。

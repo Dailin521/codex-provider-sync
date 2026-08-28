@@ -12,6 +12,7 @@ import {
   assertEvidenceSchema,
   assertRedacted,
   normalizeCandidateIndex,
+  normalizeFormalReleaseEvidence,
   normalizeRequiredJobs,
   REQUIRED_JOBS,
   REQUIRED_TARGETS
@@ -23,6 +24,10 @@ const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(testDirectory, "..");
 const sha = "a".repeat(40);
 const hash = "b".repeat(64);
+const formalReleaseManifest = JSON.parse(fs.readFileSync(
+  path.join(rootDir, "test-support", "formal-release-assets.v1.json"),
+  "utf8"
+));
 const expectedAssets = {
   "windows-x64": ["CodexProviderSync-1.0.0-rc.42-windows-x64-portable.zip", "CodexProviderSync-1.0.0-rc.42-windows-x64-setup.exe"],
   "macos-x64": ["CodexProviderSync-1.0.0-rc.42-macos-x64.dmg", "CodexProviderSync-1.0.0-rc.42-macos-x64.zip"],
@@ -49,6 +54,62 @@ function candidateIndex() {
       manifestSha256: hash,
       assets: expectedAssets[target].map((name, index) => ({ name, sizeBytes: 10 + index, sha256: hash }))
     }))
+  };
+}
+
+function formalReleaseEvidence() {
+  const executable = formalReleaseManifest.archiveEntries.find(
+    (entry) => entry.name === "CodexProviderSync.Automation.exe"
+  );
+  return {
+    schemaVersion: 1,
+    scope: "historical-formal-release-backup-evidence",
+    containsRealUserData: false,
+    syntheticOnly: true,
+    generatedAt: "2026-08-28T00:00:00.000Z",
+    workflow: {
+      repository: formalReleaseManifest.repository,
+      runId: "42",
+      runAttempt: 3,
+      testedCommit: sha
+    },
+    release: {
+      repository: formalReleaseManifest.repository,
+      releaseId: formalReleaseManifest.release.id,
+      tag: formalReleaseManifest.release.tag,
+      tagObjectSha: formalReleaseManifest.release.tagObjectSha,
+      commit: formalReleaseManifest.release.commit,
+      publishedAt: formalReleaseManifest.release.publishedAt,
+      tagSigned: formalReleaseManifest.release.tagSigned
+    },
+    asset: {
+      id: formalReleaseManifest.assets.automationZip.id,
+      name: formalReleaseManifest.assets.automationZip.name,
+      size: formalReleaseManifest.assets.automationZip.size,
+      sha256: formalReleaseManifest.assets.automationZip.sha256,
+      checksumAssetSha256: formalReleaseManifest.assets.automationChecksum.sha256,
+      releaseChecksumsSha256: formalReleaseManifest.assets.releaseChecksums.sha256
+    },
+    binary: {
+      name: executable.name,
+      size: executable.size,
+      sha256: executable.sha256,
+      authenticodeStatus: "NotSigned"
+    },
+    backup: {
+      metadataVersion: 2,
+      metadataSha256: hash,
+      producedTreeSha256: hash
+    },
+    verification: {
+      releaseApiPinned: true,
+      releaseChecksumPinned: true,
+      isolatedEnvironment: true,
+      authCanaryExcluded: true,
+      currentNodeRestoreVerified: true,
+      pendingRecoveryCount: 0
+    },
+    limitation: "The formal v0.4.1 Automation binary is unsigned; synthetic fixture only."
   };
 }
 
@@ -89,6 +150,57 @@ test("C10 candidate set binds four native targets to the tested commit", () => {
   assert.throws(() => normalizeCandidateIndex(toolDrift, sha), /tool-version set/);
 });
 
+test("C10 formal Release evidence binds the hosted binary and current workflow", () => {
+  const normalized = normalizeFormalReleaseEvidence(formalReleaseEvidence(), {
+    manifest: formalReleaseManifest,
+    evidenceForCommit: sha,
+    repository: formalReleaseManifest.repository,
+    runId: "42",
+    runAttempt: 3
+  });
+  assert.equal(normalized.release.tag, "v0.4.1");
+  assert.equal(normalized.asset.sha256, formalReleaseManifest.assets.automationZip.sha256);
+  assert.equal(normalized.currentNodeRestoreVerified, true);
+
+  const wrongRun = formalReleaseEvidence();
+  wrongRun.workflow.runId = "41";
+  assert.throws(() => normalizeFormalReleaseEvidence(wrongRun, {
+    manifest: formalReleaseManifest,
+    evidenceForCommit: sha,
+    repository: formalReleaseManifest.repository,
+    runId: "42",
+    runAttempt: 3
+  }));
+
+  const changedAsset = formalReleaseEvidence();
+  changedAsset.asset.sha256 = hash;
+  assert.throws(() => normalizeFormalReleaseEvidence(changedAsset, {
+    manifest: formalReleaseManifest,
+    evidenceForCommit: sha,
+    repository: formalReleaseManifest.repository,
+    runId: "42",
+    runAttempt: 3
+  }));
+
+  for (const mutate of [
+    (evidence) => { evidence.workflow.testedCommit = "c".repeat(40); },
+    (evidence) => { evidence.binary.sha256 = hash; },
+    (evidence) => { evidence.backup.metadataVersion = 1; },
+    (evidence) => { evidence.verification.currentNodeRestoreVerified = false; },
+    (evidence) => { evidence.verification.pendingRecoveryCount = 1; }
+  ]) {
+    const changed = formalReleaseEvidence();
+    mutate(changed);
+    assert.throws(() => normalizeFormalReleaseEvidence(changed, {
+      manifest: formalReleaseManifest,
+      evidenceForCommit: sha,
+      repository: formalReleaseManifest.repository,
+      runId: "42",
+      runAttempt: 3
+    }));
+  }
+});
+
 test("C10 redaction rejects protected keys, absolute paths, and credential markers", () => {
   assert.doesNotThrow(() => assertRedacted({ evidencePath: "docs/migration/evidence/C9.md", result: "success" }));
   assert.throws(() => assertRedacted({ token: "redacted" }), /forbidden key class/);
@@ -125,6 +237,25 @@ test("C10 JSON schema remains strict and release-false-only", () => {
   assert.deepEqual(
     schema.properties.candidateSet.properties.targets.prefixItems.map((entry) => entry.allOf[1].properties.target.const),
     REQUIRED_TARGETS
+  );
+  assert.equal(
+    schema.properties.historicalFormalRelease.properties.artifactName.const,
+    "historical-formal-release-backup-evidence"
+  );
+  assert.deepEqual(
+    Object.fromEntries(["tagObjectSha", "commit", "publishedAt"].map((name) => [
+      name,
+      schema.properties.historicalFormalRelease.properties.release.properties[name].const
+    ])),
+    {
+      tagObjectSha: formalReleaseManifest.release.tagObjectSha,
+      commit: formalReleaseManifest.release.commit,
+      publishedAt: formalReleaseManifest.release.publishedAt
+    }
+  );
+  assert.equal(
+    schema.properties.assertions.properties.historicalFormalReleaseBackupVerified.const,
+    true
   );
   for (const property of Object.values(schema.properties.release.properties)) assert.equal(property.const, false);
 });

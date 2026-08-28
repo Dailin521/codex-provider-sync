@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "repository": "Dailin521/codex-provider-sync",
+  "release": {
+    "id": 366935386,
+    "tag": "v0.4.1",
+    "tagObjectSha": "1971fd52c8b9f9e24835dd2b4719137e73b36d77",
+    "commit": "75f45756cf732333e7c52f45c8cd1b183291a029",
+    "name": "v0.4.1 - 修复 v0.4.0 同步性能回退",
+    "publishedAt": "2026-08-07T18:21:23Z",
+    "uploader": "github-actions[bot]",
+    "draft": false,
+    "prerelease": false,
+    "tagSigned": false
+  },
+  "assets": {
+    "automationZip": {
+      "id": 505502580,
+      "name": "codex-provider-sync-v0.4.1-automation-win-x64.zip",
+      "size": 33692001,
+      "sha256": "6a8266a38567c56f9c8bb2662a84ac5a7b739c837a92cc4be0f4fdef76058616",
+      "url": "https://github.com/Dailin521/codex-provider-sync/releases/download/v0.4.1/codex-provider-sync-v0.4.1-automation-win-x64.zip"
+    },
+    "automationChecksum": {
+      "id": 505502582,
+      "name": "codex-provider-sync-v0.4.1-automation-win-x64.zip.sha256",
+      "size": 117,
+      "sha256": "8203a06a475e2d859717cd2072b82a5671fe557eca504aaf38b0080b4d98c2f3",
+      "url": "https://github.com/Dailin521/codex-provider-sync/releases/download/v0.4.1/codex-provider-sync-v0.4.1-automation-win-x64.zip.sha256"
+    },
+    "releaseChecksums": {
+      "id": 505502577,
+      "name": "checksums.txt",
+      "size": 312,
+      "sha256": "2a1b0426667024f235a49a4dd3a2bd27b3ffa0e3995b6f03468e05f57608cc98",
+      "url": "https://github.com/Dailin521/codex-provider-sync/releases/download/v0.4.1/checksums.txt"
+    }
+  },
+  "archiveEntries": [
+    {
+      "name": "automation-protocol-v0.4.schema.json",
+      "size": 9688,
+      "sha256": "005f1552f089a42a9950d1cf302bb75069e2c6657ac0e0bfdba32dc0451aba5c"
+    },
+    {
+      "name": "CodexProviderSync.Automation.exe",
+      "size": 39029116,
+      "sha256": "e1ed5a75018833ecc80cd2da90b185c9573efcf4d07e13baef2c206fb6b70c64"
+    },
+    {
+      "name": "README-AUTOMATION.zh-CN.md",
+      "size": 2581,
+      "sha256": "b8c8c799894b74032f3f8c371b26dafe94ddfa6e013efb7e3091392c448ecc56"
+    }
+  ]
+}
