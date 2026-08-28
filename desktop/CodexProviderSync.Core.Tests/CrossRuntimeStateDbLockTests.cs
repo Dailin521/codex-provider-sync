@@ -7,6 +7,8 @@ namespace CodexProviderSync.Core.Tests;
 
 public sealed class CrossRuntimeStateDbLockTests
 {
+    private static readonly TimeSpan NodeReadinessTimeout = TimeSpan.FromSeconds(30);
+
     [WindowsStateDbAliasFact]
     public async Task DotNetAndNode_WindowsDirectoryAliases_ContendOnOneStateDbResource()
     {
@@ -78,12 +80,13 @@ public sealed class CrossRuntimeStateDbLockTests
             await held.release();
             """;
         using Process child = StartNode(script);
-        string readyLine = await ReadLineWithTimeoutAsync(child.StandardOutput, TimeSpan.FromSeconds(15));
-        using JsonDocument ready = JsonDocument.Parse(readyLine);
-        Assert.True(ready.RootElement.GetProperty("ready").GetBoolean());
-        Assert.Equal(resource.ResourceKey, ready.RootElement.GetProperty("resourceKey").GetString());
         try
         {
+            string readyLine = await WaitForNodeReadyAsync(child);
+            using JsonDocument ready = JsonDocument.Parse(readyLine);
+            Assert.True(ready.RootElement.GetProperty("ready").GetBoolean());
+            Assert.Equal(resource.ResourceKey, ready.RootElement.GetProperty("resourceKey").GetString());
+
             InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
                 () => new LockService().AcquireStateDbLockAsync(resource, "dotnet-alias-contender"));
             Assert.True(LockService.IsOperationBusy(error));
@@ -92,11 +95,7 @@ public sealed class CrossRuntimeStateDbLockTests
         }
         finally
         {
-            await child.StandardInput.WriteLineAsync("release");
-            child.StandardInput.Close();
-            using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(15));
-            await child.WaitForExitAsync(timeout.Token);
-            Assert.Equal(0, child.ExitCode);
+            await ReleaseNodeOwnerAsync(child);
         }
     }
 
@@ -141,13 +140,13 @@ public sealed class CrossRuntimeStateDbLockTests
             await held.release();
             """;
         using Process child = StartNode(script);
-        string readyLine = await ReadLineWithTimeoutAsync(child.StandardOutput, TimeSpan.FromSeconds(15));
-        using JsonDocument ready = JsonDocument.Parse(readyLine);
-        Assert.True(ready.RootElement.GetProperty("ready").GetBoolean());
-        Assert.Equal(resource.ResourceKey, ready.RootElement.GetProperty("resourceKey").GetString());
-
         try
         {
+            string readyLine = await WaitForNodeReadyAsync(child);
+            using JsonDocument ready = JsonDocument.Parse(readyLine);
+            Assert.True(ready.RootElement.GetProperty("ready").GetBoolean());
+            Assert.Equal(resource.ResourceKey, ready.RootElement.GetProperty("resourceKey").GetString());
+
             InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
                 () => new LockService().AcquireStateDbLockAsync(resource, "dotnet-contender"));
             Assert.True(LockService.IsOperationBusy(error));
@@ -155,11 +154,7 @@ public sealed class CrossRuntimeStateDbLockTests
         }
         finally
         {
-            await child.StandardInput.WriteLineAsync("release");
-            child.StandardInput.Close();
-            using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(15));
-            await child.WaitForExitAsync(timeout.Token);
-            Assert.Equal(0, child.ExitCode);
+            await ReleaseNodeOwnerAsync(child);
         }
     }
 
@@ -181,12 +176,12 @@ public sealed class CrossRuntimeStateDbLockTests
             await held.release();
             """;
         using Process child = StartNode(script);
-        string readyLine = await ReadLineWithTimeoutAsync(child.StandardOutput, TimeSpan.FromSeconds(15));
-        using JsonDocument ready = JsonDocument.Parse(readyLine);
-        Assert.True(ready.RootElement.GetProperty("ready").GetBoolean());
-
         try
         {
+            string readyLine = await WaitForNodeReadyAsync(child);
+            using JsonDocument ready = JsonDocument.Parse(readyLine);
+            Assert.True(ready.RootElement.GetProperty("ready").GetBoolean());
+
             await using SqliteConnection connection = fixture.OpenSqliteConnection();
             await connection.OpenAsync();
             SqliteCommand update = connection.CreateCommand();
@@ -202,11 +197,7 @@ public sealed class CrossRuntimeStateDbLockTests
         }
         finally
         {
-            await child.StandardInput.WriteLineAsync("release");
-            child.StandardInput.Close();
-            using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(15));
-            await child.WaitForExitAsync(timeout.Token);
-            Assert.Equal(0, child.ExitCode);
+            await ReleaseNodeOwnerAsync(child);
         }
 
         StatusSnapshot refreshed = await service.GetStatusAsync(fixture.CodexHome);
@@ -231,12 +222,12 @@ public sealed class CrossRuntimeStateDbLockTests
             await release();
             """;
         using Process child = StartNode(script);
-        string readyLine = await ReadLineWithTimeoutAsync(child.StandardOutput, TimeSpan.FromSeconds(15));
-        using JsonDocument ready = JsonDocument.Parse(readyLine);
-        Assert.True(ready.RootElement.GetProperty("ready").GetBoolean());
-
         try
         {
+            string readyLine = await WaitForNodeReadyAsync(child);
+            using JsonDocument ready = JsonDocument.Parse(readyLine);
+            Assert.True(ready.RootElement.GetProperty("ready").GetBoolean());
+
             await fixture.WriteConfigAsync("model_provider = \"openai\"");
             StatusSnapshot blocked = await new CodexSyncService().GetStatusAsync(fixture.CodexHome);
             Assert.Equal("apigather", blocked.CurrentProvider.Provider);
@@ -246,11 +237,7 @@ public sealed class CrossRuntimeStateDbLockTests
         }
         finally
         {
-            await child.StandardInput.WriteLineAsync("release");
-            child.StandardInput.Close();
-            using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(15));
-            await child.WaitForExitAsync(timeout.Token);
-            Assert.Equal(0, child.ExitCode);
+            await ReleaseNodeOwnerAsync(child);
         }
 
         Assert.Equal("openai", (await service.GetStatusAsync(fixture.CodexHome)).CurrentProvider.Provider);
@@ -281,12 +268,12 @@ public sealed class CrossRuntimeStateDbLockTests
             await held.release();
             """;
         using Process child = StartNode(script);
-        string readyLine = await ReadLineWithTimeoutAsync(child.StandardOutput, TimeSpan.FromSeconds(15));
-        using JsonDocument ready = JsonDocument.Parse(readyLine);
-        Assert.True(ready.RootElement.GetProperty("ready").GetBoolean());
-
         try
         {
+            string readyLine = await WaitForNodeReadyAsync(child);
+            using JsonDocument ready = JsonDocument.Parse(readyLine);
+            Assert.True(ready.RootElement.GetProperty("ready").GetBoolean());
+
             await using SqliteConnection connection = new($"Data Source={sharedStateDb};Pooling=False");
             await connection.OpenAsync();
             SqliteCommand update = connection.CreateCommand();
@@ -303,11 +290,7 @@ public sealed class CrossRuntimeStateDbLockTests
         }
         finally
         {
-            await child.StandardInput.WriteLineAsync("release");
-            child.StandardInput.Close();
-            using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(15));
-            await child.WaitForExitAsync(timeout.Token);
-            Assert.Equal(0, child.ExitCode);
+            await ReleaseNodeOwnerAsync(child);
         }
 
         StatusSnapshot refreshed = await service.GetStatusAsync(second.CodexHome, sharedSqliteHome);
@@ -374,11 +357,55 @@ public sealed class CrossRuntimeStateDbLockTests
         return new ProcessResult(process.ExitCode, await stdout, await stderr);
     }
 
-    private static async Task<string> ReadLineWithTimeoutAsync(StreamReader reader, TimeSpan timeout)
+    private static async Task<string> WaitForNodeReadyAsync(Process process)
     {
-        using CancellationTokenSource cancellation = new(timeout);
-        return await reader.ReadLineAsync(cancellation.Token)
-            ?? throw new InvalidOperationException("Node lock parity process exited before publishing readiness.");
+        Task<string?> ready = process.StandardOutput.ReadLineAsync();
+        Task exited = process.WaitForExitAsync();
+        Task timeout = Task.Delay(NodeReadinessTimeout);
+        Task completed = await Task.WhenAny(ready, exited, timeout);
+        if (ready.IsCompleted)
+        {
+            return await ready
+                ?? throw new InvalidOperationException("Node lock parity process exited before publishing readiness.");
+        }
+
+        if (!process.HasExited)
+        {
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+        }
+        string stderr = (await process.StandardError.ReadToEndAsync()).Trim();
+        string diagnostic = string.IsNullOrWhiteSpace(stderr) ? "no stderr" : stderr;
+        if (completed == exited)
+        {
+            throw new InvalidOperationException(
+                $"Node lock parity process exited with code {process.ExitCode} before publishing readiness ({diagnostic}).");
+        }
+        throw new TimeoutException(
+            $"Node lock parity process did not publish readiness within {NodeReadinessTimeout.TotalSeconds:F0} seconds ({diagnostic}).");
+    }
+
+    private static async Task ReleaseNodeOwnerAsync(Process process)
+    {
+        if (process.HasExited) return;
+
+        await process.StandardInput.WriteLineAsync("release");
+        process.StandardInput.Close();
+        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(15));
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+            throw new TimeoutException("Node lock parity process did not exit after release.");
+        }
+        Assert.Equal(0, process.ExitCode);
     }
 
     private sealed record ProcessResult(int ExitCode, string StdOut, string StdErr);

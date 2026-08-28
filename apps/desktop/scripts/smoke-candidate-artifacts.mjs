@@ -251,7 +251,7 @@ async function smokeMac() {
     await fs.cp(
       path.join(mountRoot, "Codex Provider Sync.app"),
       path.join(copyRoot, "Codex Provider Sync.app"),
-      { recursive: true, errorOnExist: true }
+      { recursive: true, errorOnExist: true, verbatimSymlinks: true }
     );
   } finally {
     run("hdiutil", ["detach", mountRoot]);

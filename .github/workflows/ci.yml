@@ -123,6 +123,9 @@ jobs:
           node-version: "24"
           cache: "npm"
       - run: npm ci
+      - name: Install the pinned Electron runtime
+        if: runner.os == 'Linux'
+        run: node -e "require('electron')"
       - name: Configure the Linux Electron runtime sandbox
         if: runner.os == 'Linux'
         shell: bash
@@ -175,6 +178,9 @@ jobs:
           node-version: "24"
           cache: "npm"
       - run: npm ci
+      - name: Install the pinned Electron runtime
+        if: runner.os == 'Linux'
+        run: node -e "require('electron')"
       - name: Configure the Linux Electron runtime sandbox
         if: runner.os == 'Linux'
         shell: bash

@@ -127,7 +127,12 @@ export async function createDesktopReadOnlyFixture() {
     async close() {
       if (closed) return;
       closed = true;
-      await fs.rm(fixtureRoot, { recursive: true, force: true });
+      await fs.rm(fixtureRoot, {
+        recursive: true,
+        force: true,
+        maxRetries: 20,
+        retryDelay: 100
+      });
     }
   };
 }

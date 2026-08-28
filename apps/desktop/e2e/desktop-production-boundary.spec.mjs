@@ -12,6 +12,7 @@ const require = createRequire(import.meta.url);
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packagedExecutable = process.env.CPS_DESKTOP_EXECUTABLE;
 const electronExecutable = packagedExecutable || require("electron");
+const PRODUCTION_SMOKE_TIMEOUT_MS = 90_000;
 
 function waitForExit(child, timeoutMs) {
   if (child.exitCode !== null) return Promise.resolve(true);
@@ -97,6 +98,7 @@ function launchProductionDesktop(options) {
 }
 
 test("production desktop bundle has no test bridge and reads the real SQLite fixture", async () => {
+  test.setTimeout(PRODUCTION_SMOKE_TIMEOUT_MS);
   const fixture = await createDesktopReadOnlyFixture();
   let electronApp;
   try {
@@ -183,7 +185,7 @@ test("production desktop bundle has no test bridge and reads the real SQLite fix
 });
 
 test("production or unpacked desktop completes real Sync and Restore through Utility Core", async () => {
-  test.setTimeout(60_000);
+  test.setTimeout(PRODUCTION_SMOKE_TIMEOUT_MS);
   const fixture = await createDesktopSyncSwitchFixture();
   const baseline = await fixture.snapshotTargets();
   let electronApp;

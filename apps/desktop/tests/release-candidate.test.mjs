@@ -161,6 +161,7 @@ test("builder and candidate scripts enforce native fallback, fuses, audit metada
   assert.match(smokeScript, /syncRestoreVerified:\s*true/);
   assert.match(smokeScript, /SHA256SUMS\.txt/);
   assert.match(smokeScript, /configure-linux-sandbox\.mjs/);
+  assert.match(smokeScript, /verbatimSymlinks:\s*true/);
   assert.doesNotMatch(smokeScript, /run\("sudo",\s*\["(?:chown|chmod)"/);
   for (const expected of [
     "O_NOFOLLOW",
@@ -172,5 +173,10 @@ test("builder and candidate scripts enforce native fallback, fuses, audit metada
   ]) assert.match(sandboxHelper, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.match(workflow, /configure-linux-sandbox\.mjs node_modules\/electron\/dist chrome-sandbox/);
   assert.match(workflow, /configure-linux-sandbox\.mjs dist-desktop\/linux-unpacked chrome-sandbox/);
+  assert.equal(
+    [...workflow.matchAll(/run: node -e "require\('electron'\)"/g)].length,
+    2,
+    "Both Linux Electron jobs must install the pinned runtime before configuring its sandbox."
+  );
   assert.doesNotMatch(workflow, /sudo\s+(?:chown|chmod)\b/);
 });
