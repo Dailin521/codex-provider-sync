@@ -1,12 +1,12 @@
 import type { WatchSnapshot, WatchStatusList } from "@codex-provider-sync/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Globe2, Languages, Moon, Play, Sun } from "lucide-react";
+import { Globe2, Languages, Moon, Play, RefreshCw, Sun } from "lucide-react";
 import { Fragment, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { PageHeading, profileSelector } from "../../shared/presentation.js";
 import type { AppUiCapabilities, AppUiProps, HostProfile, HostUpdateStatus } from "../../types.js";
-import { Badge, Button, Card, Field } from "../../ui.js";
+import { Badge, Button, Card, cn, Field } from "../../ui.js";
 
 function activeWatch(value: WatchSnapshot | WatchStatusList | undefined): WatchSnapshot | null {
   if (!value) return null;
@@ -27,24 +27,33 @@ export function SettingsPage({ props, profile, capabilities, recoveryBlocked, wr
   const watch = useQuery({
     queryKey: ["watch-status"],
     queryFn: () => props.core.getWatchStatus({}),
-    enabled: capabilities.watch,
-    refetchInterval: capabilities.watch ? 3000 : false
+    enabled: capabilities.watch
   });
   const currentWatch = activeWatch(watch.data);
   const start = useMutation({
     mutationFn: () => props.core.startWatch({ profile: profileSelector(profile), includeStateDb: true }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["watch-status"] })
+    onSuccess: (value) => queryClient.setQueryData(["watch-status"], value)
   });
   const stop = useMutation({
     mutationFn: (watchId: string) => props.core.stopWatch({ watchId }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["watch-status"] })
+    onSuccess: (value) => queryClient.setQueryData(["watch-status"], value)
   });
   const update = useQuery({
     queryKey: ["desktop-update-status"],
     queryFn: ({ signal }) => props.host.getUpdateStatus?.(signal),
-    enabled: capabilities.viewUpdateStatus && Boolean(props.host.getUpdateStatus),
-    refetchInterval: capabilities.viewUpdateStatus ? 3000 : false
+    enabled: capabilities.viewUpdateStatus && Boolean(props.host.getUpdateStatus)
   });
+  const canRefresh = capabilities.watch
+    || (capabilities.viewUpdateStatus && Boolean(props.host.getUpdateStatus));
+  const refreshing = watch.isFetching || update.isFetching;
+  const refreshStatuses = async () => {
+    await Promise.all([
+      capabilities.watch ? watch.refetch() : Promise.resolve(),
+      capabilities.viewUpdateStatus && props.host.getUpdateStatus
+        ? update.refetch()
+        : Promise.resolve()
+    ]);
+  };
   const storeUpdate = (value: HostUpdateStatus) => queryClient.setQueryData(["desktop-update-status"], value);
   const checkUpdate = useMutation({
     mutationFn: () => props.host.checkForUpdates?.() ?? Promise.reject(new Error("Update check unavailable.")),
@@ -69,7 +78,16 @@ export function SettingsPage({ props, profile, capabilities, recoveryBlocked, wr
   };
   return (
     <Fragment>
-      <PageHeading title={t("settings.title")} subtitle={t(`settings.subtitle.${props.surface}`)} />
+      <PageHeading
+        action={canRefresh ? (
+          <Button disabled={refreshing} onClick={() => void refreshStatuses()} type="button" variant="secondary">
+            <RefreshCw className={cn(refreshing && "animate-spin")} size={16} />
+            {t("common.refresh")}
+          </Button>
+        ) : undefined}
+        title={t("settings.title")}
+        subtitle={t(`settings.subtitle.${props.surface}`)}
+      />
       <div className="grid gap-4 lg:grid-cols-2">
         <Card>
           <Field label={t("settings.language")}>

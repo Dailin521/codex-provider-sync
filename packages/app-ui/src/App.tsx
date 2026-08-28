@@ -15,7 +15,12 @@ export function AppUi(props: AppUiProps) {
   const [i18n, setI18n] = useState<Awaited<ReturnType<typeof createAppI18n>> | null>(null);
   const [queryClient] = useState(() => new QueryClient({
     defaultOptions: {
-      queries: { retry: 1, refetchOnWindowFocus: false },
+      queries: {
+        retry: false,
+        staleTime: Infinity,
+        refetchOnWindowFocus: false,
+        refetchOnReconnect: false
+      },
       mutations: { retry: false }
     }
   }));

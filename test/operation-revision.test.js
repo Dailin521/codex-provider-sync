@@ -86,3 +86,35 @@ test("rollout and managed backup revisions are deterministic and content-bound",
   }
 });
 
+test("metadata rollout revisions avoid body reads while detecting file metadata drift", async () => {
+  const value = await fixture();
+  let rolloutBodyReads = 0;
+  const fsImpl = {
+    ...fs,
+    async readFile(filePath, ...args) {
+      if (path.resolve(String(filePath)) === path.resolve(value.rolloutPath)) {
+        rolloutBodyReads += 1;
+        throw new Error("rollout body read sentinel");
+      }
+      return fs.readFile(filePath, ...args);
+    }
+  };
+  try {
+    const first = await captureRolloutRevision(value.codexHome, { fsImpl, mode: "metadata" });
+    assert.equal(first.rolloutScanComplete, true);
+    assert.equal(rolloutBodyReads, 0);
+
+    await fs.appendFile(value.rolloutPath, '{"type":"event_msg"}\n', "utf8");
+    const second = await captureRolloutRevision(value.codexHome, { fsImpl, mode: "metadata" });
+    assert.notEqual(second.revision, first.revision);
+    assert.equal(rolloutBodyReads, 0);
+
+    await assert.rejects(
+      captureRolloutRevision(value.codexHome, { fsImpl }),
+      /rollout body read sentinel/
+    );
+    assert.equal(rolloutBodyReads, 1);
+  } finally {
+    await fs.rm(value.root, { recursive: true, force: true });
+  }
+});

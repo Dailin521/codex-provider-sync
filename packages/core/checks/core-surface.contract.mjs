@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import nodeFs from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -184,6 +185,100 @@ test("trusted profile selection never falls back to the process default Codex Ho
   } finally {
     if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = originalCodexHome;
+    await fs.rm(testRoot, { recursive: true, force: true });
+  }
+});
+
+test("public Status reads rollout metadata only while write preparation keeps the deep scan", async () => {
+  const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "provider-sync-core-status-metadata-"));
+  const codexHome = path.join(testRoot, "codex-home");
+  const rollout = path.join(codexHome, "sessions", "rollout-large.jsonl");
+  const originalCreateReadStream = nodeFs.createReadStream;
+  const originalReadFile = nodeFs.promises.readFile;
+  let streamBodyReadAttempts = 0;
+  let revisionBodyReadAttempts = 0;
+  try {
+    await fs.mkdir(path.dirname(rollout), { recursive: true });
+    await fs.mkdir(path.join(codexHome, "archived_sessions"), { recursive: true });
+    await fs.writeFile(path.join(codexHome, "config.toml"), 'model_provider = "openai"\n');
+    await fs.writeFile(rollout, [
+      JSON.stringify({
+        type: "session_meta",
+        timestamp: "2026-08-28T00:00:00.000Z",
+        payload: { id: "large", cwd: "C:\\private", model_provider: "relay" }
+      }),
+      JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "private body" } }),
+      JSON.stringify({ type: "turn_context", payload: { model: "private-model" } })
+    ].join("\n") + "\n");
+
+    nodeFs.createReadStream = ((filePath, ...args) => {
+      if (path.resolve(String(filePath)) === path.resolve(rollout)) {
+        streamBodyReadAttempts += 1;
+        throw new Error("rollout body scan sentinel");
+      }
+      return originalCreateReadStream.call(nodeFs, filePath, ...args);
+    });
+    nodeFs.promises.readFile = (async (filePath, ...args) => {
+      if (path.resolve(String(filePath)) === path.resolve(rollout)) {
+        revisionBodyReadAttempts += 1;
+        throw new Error("rollout body revision sentinel");
+      }
+      return originalReadFile.call(nodeFs.promises, filePath, ...args);
+    });
+
+    const facade = core.createCoreFacade({
+      resolveProfile: async () => ({
+        id: "default",
+        revision: "r1",
+        codexHome
+      })
+    });
+    const input = { profile: { profileId: "default", profileRevision: "r1" } };
+    const status = await facade.getStatus(input);
+
+    assert.equal(status.rolloutCounts.sessions.relay, 1);
+    assert.equal(status.rolloutScanComplete, true);
+    assert.equal(streamBodyReadAttempts, 0);
+    assert.equal(revisionBodyReadAttempts, 0);
+    assert.doesNotMatch(JSON.stringify(status), /private body|private-model|C:\\private/);
+
+    nodeFs.promises.readFile = originalReadFile;
+    await assert.rejects(
+      facade.prepareSync({ ...input, keepCount: 1 }),
+      /rollout body scan sentinel/
+    );
+    assert.equal(streamBodyReadAttempts, 1);
+  } finally {
+    nodeFs.createReadStream = originalCreateReadStream;
+    nodeFs.promises.readFile = originalReadFile;
+    await fs.rm(testRoot, { recursive: true, force: true });
+  }
+});
+
+test("public Status bounds malformed oversized session metadata and fails alignment closed", async () => {
+  const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "provider-sync-core-status-limit-"));
+  const codexHome = path.join(testRoot, "codex-home");
+  try {
+    await fs.mkdir(path.join(codexHome, "sessions"), { recursive: true });
+    await fs.mkdir(path.join(codexHome, "archived_sessions"), { recursive: true });
+    await fs.writeFile(path.join(codexHome, "config.toml"), 'model_provider = "openai"\n');
+    await fs.writeFile(
+      path.join(codexHome, "sessions", "rollout-oversized.jsonl"),
+      Buffer.alloc((1024 * 1024) + 1, 0x78)
+    );
+    const facade = core.createCoreFacade({
+      resolveProfile: async () => ({ id: "default", revision: "r1", codexHome })
+    });
+
+    const status = await facade.getStatus({
+      profile: { profileId: "default", profileRevision: "r1" }
+    });
+
+    assert.equal(status.rolloutScanComplete, false);
+    assert.equal(status.alignment.aligned, false);
+    assert.deepEqual(status.rolloutCounts.sessions, {});
+    assert.deepEqual(status.lockedRolloutFiles, []);
+  } finally {
     await fs.rm(testRoot, { recursive: true, force: true });
   }
 });

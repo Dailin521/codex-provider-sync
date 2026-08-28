@@ -73,8 +73,7 @@ export function AppContent({ props }: { props: AppUiProps }) {
   const mutationCount = useIsMutating();
   const profilesQuery = useQuery({
     queryKey: ["profiles"],
-    queryFn: ({ signal }) => props.host.listProfiles(signal),
-    staleTime: 5000
+    queryFn: ({ signal }) => props.host.listProfiles(signal)
   });
   const profiles = profilesQuery.data ?? [];
   const profile = profiles.find((entry) => entry.id === selectedProfileId) ?? profiles[0];
@@ -113,8 +112,7 @@ export function AppContent({ props }: { props: AppUiProps }) {
   const statusQuery = useQuery({
     queryKey: ["status", profile?.id, profile?.revision],
     queryFn: ({ signal }) => props.core.getStatus({ profile: profileSelector(profile) }, { signal }),
-    enabled: Boolean(profile),
-    refetchInterval: 5000
+    enabled: Boolean(profile)
   });
   const status = statusQuery.data;
   const statusReady = statusQuery.isSuccess && status !== undefined;
@@ -144,13 +142,14 @@ export function AppContent({ props }: { props: AppUiProps }) {
     queryFn: ({ signal }) => props.core.getDiagnostics({ profile: profileSelector(profile) }, { signal }),
     enabled: Boolean(profile && route === "diagnostics")
   });
-  const refreshAfterWrite = useCallback(async () => {
-    await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["status"] }),
+  const refreshAfterWrite = useCallback(async ({ refreshStatus = true } = {}) => {
+    const refreshes = [
       queryClient.invalidateQueries({ queryKey: ["backups"] }),
       queryClient.invalidateQueries({ queryKey: ["history"] }),
       queryClient.invalidateQueries({ queryKey: ["diagnostics"] })
-    ]);
+    ];
+    if (refreshStatus) refreshes.push(queryClient.invalidateQueries({ queryKey: ["status"] }));
+    await Promise.all(refreshes);
   }, [queryClient]);
   const prepare = useCallback(async (action: () => Promise<PlanSummary>, trigger: HTMLElement | null) => {
     planReturnFocus.current = trigger;
@@ -228,10 +227,12 @@ export function AppContent({ props }: { props: AppUiProps }) {
       setOperationResult(result);
       closePlanForResult();
       try {
-        await refreshAfterWrite();
         if (requiresRecovery) {
+          await refreshAfterWrite({ refreshStatus: false });
           const refreshedStatus = await statusQuery.refetch();
           setRecoveryResultStatusChecked(refreshedStatus.isSuccess);
+        } else {
+          await refreshAfterWrite();
         }
       } catch {
         // Keep recovery-required results non-dismissible until a later fresh

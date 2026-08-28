@@ -90,6 +90,45 @@ async function captureStableFile(filePath, fsImpl, { allowLocked = false } = {})
   });
 }
 
+async function captureStableMetadata(filePath, fsImpl, { allowLocked = false } = {}) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let beforeStats;
+    try {
+      beforeStats = await statOrNull(filePath, fsImpl);
+    } catch (error) {
+      if (allowLocked && LOCKED_FILE_CODES.has(error?.code)) {
+        return { present: true, locked: true, causeCode: error.code };
+      }
+      throw error;
+    }
+    if (!beforeStats) return { present: false };
+    if (!beforeStats.isFile()) {
+      throw new CoreError("STALE_STATE", "A revision target is not a regular file.", {
+        details: { reason: "storage" }
+      });
+    }
+    const before = statIdentity(beforeStats);
+    try {
+      const afterStats = await statOrNull(filePath, fsImpl);
+      const after = afterStats ? statIdentity(afterStats) : null;
+      if (sameStat(before, after)) return { present: true, ...after };
+    } catch (error) {
+      if (allowLocked && LOCKED_FILE_CODES.has(error?.code)) {
+        return {
+          present: true,
+          ...before,
+          locked: true,
+          causeCode: error.code
+        };
+      }
+      throw error;
+    }
+  }
+  throw new CoreError("STALE_STATE", "A revision target changed while it was being captured.", {
+    details: { reason: "storage" }
+  });
+}
+
 async function listRolloutFiles(rootDir, fsImpl) {
   let entries;
   try {
@@ -115,14 +154,19 @@ async function listRolloutFiles(rootDir, fsImpl) {
   return files;
 }
 
-export async function captureRolloutRevision(codexHome, { fsImpl = fs } = {}) {
+export async function captureRolloutRevision(codexHome, { fsImpl = fs, mode = "content" } = {}) {
+  if (mode !== "content" && mode !== "metadata") {
+    throw new CoreError("INVALID_INPUT", "Unsupported rollout revision mode.");
+  }
   const manifest = [];
   const lockedRolloutFiles = [];
   for (const scope of SESSION_SCOPES) {
     const scopeRoot = path.join(codexHome, scope);
     for (const filePath of await listRolloutFiles(scopeRoot, fsImpl)) {
       const relativePath = path.relative(codexHome, filePath).split(path.sep).join("/");
-      const revision = await captureStableFile(filePath, fsImpl, { allowLocked: true });
+      const revision = mode === "metadata"
+        ? await captureStableMetadata(filePath, fsImpl, { allowLocked: true })
+        : await captureStableFile(filePath, fsImpl, { allowLocked: true });
       manifest.push({ path: relativePath, ...revision });
       if (revision.locked) lockedRolloutFiles.push(relativePath);
     }
@@ -218,12 +262,13 @@ export async function captureOperationRevisions({
   configText,
   storage,
   backupDir = null,
+  rolloutRevisionMode = "content",
   platform = process.platform,
   fsImpl = fs
 }) {
   const configRevision = captureConfigRevision(configText);
   const [rollout, stateDbRevision, backupRevision] = await Promise.all([
-    captureRolloutRevision(codexHome, { fsImpl }),
+    captureRolloutRevision(codexHome, { fsImpl, mode: rolloutRevisionMode }),
     captureStateDbRevision(storage, { fsImpl, platform }),
     backupDir ? captureBackupRevision(backupDir, { fsImpl }) : Promise.resolve(null)
   ]);
@@ -253,4 +298,3 @@ export function revisionMismatch(expected, actual) {
   }
   return null;
 }
-

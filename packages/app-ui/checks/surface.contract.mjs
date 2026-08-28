@@ -72,6 +72,7 @@ test("shared UI exposes explicit read-only, C7, and C8 capability profiles", asy
   });
   assert.equal(Object.isFrozen(DESKTOP_C8_APP_UI_CAPABILITIES), true);
   const appContentSource = await fs.readFile(new URL("../src/app/AppContent.tsx", import.meta.url), "utf8");
+  const appSource = await fs.readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
   const settingsSource = await fs.readFile(new URL("../src/features/settings/SettingsPage.tsx", import.meta.url), "utf8");
   const typesSource = await fs.readFile(new URL("../src/types.ts", import.meta.url), "utf8");
   assert.match(appContentSource, /route === "sync" && capabilities\.sync/);
@@ -89,6 +90,11 @@ test("shared UI exposes explicit read-only, C7, and C8 capability profiles", asy
   assert.match(typesSource, /AppUiSurface = "desktop" \| "web"/);
   assert.match(appContentSource, /brand\.\$\{props\.surface\}/);
   assert.match(settingsSource, /settings\.subtitle\.\$\{props\.surface\}/);
+  assert.doesNotMatch(appContentSource, /refetchInterval/);
+  assert.doesNotMatch(settingsSource, /refetchInterval/);
+  assert.match(appSource, /staleTime:\s*Infinity/);
+  assert.match(appSource, /retry:\s*false/);
+  assert.match(appSource, /refetchOnReconnect:\s*false/);
 });
 
 test("shared UI translations and write forms keep one strict schema", () => {

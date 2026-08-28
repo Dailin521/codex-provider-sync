@@ -539,7 +539,12 @@ export function createCoreFacade({ resolveProfile }) {
     async getStatus(input) {
       const trusted = await trustedInput(input);
       return publicStatus(withPublicProfile(
-        await getStatusInternal(rootProfileInput(trusted.profile)),
+        await getStatusInternal({
+          ...rootProfileInput(trusted.profile),
+          // Trusted host-only optimization. This option is intentionally not
+          // represented in the public CoreClient/HTTP/IPC input schemas.
+          rolloutScanMode: "metadata"
+        }),
         trusted.profile
       ));
     },

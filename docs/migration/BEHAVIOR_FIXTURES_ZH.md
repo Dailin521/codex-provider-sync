@@ -51,6 +51,7 @@ Fixture 不是用户数据样本，严禁从真实 `~/.codex`、认证文件或�
 | `root-model` | 根级 model、Provider section model 与 turn_context model 不同 | Follow/Keep/Explicit 三种 Switch 语义清晰；非目标字段和换行符不变 |
 | `encrypted-content` | rollout 含来自原 Provider 的 `encrypted_content` | 只同步可见性元数据；保留加密内容字节并返回明确 warning |
 | `large-rollout` | 超大 rollout、超过 64 KiB 的行、Unicode 与特殊 model 字符 | 流式处理且目标字段正确；未修改字节、CRLF 与原 mtime 按合同保持 |
+| `status-metadata-boundary` | 大 rollout 首行含 `session_meta`，正文设置禁止读取 sentinel | Web/Electron Facade Status 仅以首行和 stat 完整统计 Provider 并成功；CLI/Prepare 仍触发正文扫描，元数据 revision 在文件 size/mtime/ctime 漂移时变化 |
 | `malformed-rollout` | 截断、无效 JSONL、文件扫描期间消失等 | 不读取越界、不覆盖无法证明安全的内容；按操作返回 skip/error 并保留原字节 |
 
 ## 4. SQLite 与存储布局

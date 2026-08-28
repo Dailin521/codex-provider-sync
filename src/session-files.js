@@ -12,6 +12,14 @@ import { CoreError } from "./core-error.js";
 
 const execFileAsync = promisify(execFile);
 const ROLLOUT_SCAN_CHUNK_BYTES = 1024 * 1024;
+const STATUS_SESSION_META_MAX_BYTES = 1024 * 1024;
+
+class RolloutMetadataLimitError extends Error {
+  constructor() {
+    super("Rollout session metadata exceeds the read-only Status limit.");
+    this.name = "RolloutMetadataLimitError";
+  }
+}
 
 async function syncStagedFile(filePath) {
   const handle = await fsp.open(filePath, "r+");
@@ -225,14 +233,18 @@ async function listJsonlFiles(rootDir) {
   return files;
 }
 
-async function readFirstLineRecord(filePath) {
+async function readFirstLineRecord(filePath, { maxBytes = Number.POSITIVE_INFINITY } = {}) {
   let handle;
   try {
     handle = await fsp.open(filePath, "r");
     let position = 0;
     let collected = Buffer.alloc(0);
     while (true) {
-      const chunk = Buffer.alloc(64 * 1024);
+      const bounded = Number.isSafeInteger(maxBytes) && maxBytes >= 0;
+      const remaining = bounded ? (maxBytes + 1) - position : 64 * 1024;
+      const chunkLength = bounded ? Math.min(64 * 1024, remaining) : 64 * 1024;
+      if (chunkLength <= 0) throw new RolloutMetadataLimitError();
+      const chunk = Buffer.alloc(chunkLength);
       const { bytesRead } = await handle.read(chunk, 0, chunk.length, position);
       if (bytesRead === 0) {
         break;
@@ -241,6 +253,7 @@ async function readFirstLineRecord(filePath) {
       collected = Buffer.concat([collected, chunk.subarray(0, bytesRead)]);
       const newlineIndex = collected.indexOf(0x0a);
       if (newlineIndex !== -1) {
+        if (bounded && newlineIndex > maxBytes) throw new RolloutMetadataLimitError();
         const crlf = newlineIndex > 0 && collected[newlineIndex - 1] === 0x0d;
         const lineBuffer = crlf ? collected.subarray(0, newlineIndex - 1) : collected.subarray(0, newlineIndex);
         return {
@@ -249,6 +262,7 @@ async function readFirstLineRecord(filePath) {
           offset: newlineIndex + 1
         };
       }
+      if (bounded && collected.length > maxBytes) throw new RolloutMetadataLimitError();
     }
     return {
       firstLine: collected.toString("utf8"),
@@ -1180,6 +1194,58 @@ async function findLockedFilesOnWindows(filePaths) {
   } finally {
     await fsp.rm(tempDir, { recursive: true, force: true });
   }
+}
+
+// Public Web/Electron Status needs the complete provider distribution, but it
+// must not scan message/event bodies. Reading only the first session_meta line
+// keeps Status bounded by rollout count instead of total rollout byte size.
+// Write preparation deliberately continues to use collectSessionChanges below.
+export async function collectStatusRolloutMetadata(codexHome, options = {}) {
+  const { skipLockedReads = false } = options;
+  const lockedPaths = [];
+  const incompletePaths = [];
+  const providerCounts = {
+    sessions: new Map(),
+    archived_sessions: new Map()
+  };
+
+  for (const dirName of SESSION_DIRS) {
+    const rootDir = path.join(codexHome, dirName);
+    try {
+      await fsp.access(rootDir);
+    } catch {
+      continue;
+    }
+    const rolloutPaths = await listJsonlFiles(rootDir);
+    for (const rolloutPath of rolloutPaths) {
+      let record;
+      try {
+        record = await readFirstLineRecord(rolloutPath, { maxBytes: STATUS_SESSION_META_MAX_BYTES });
+      } catch (error) {
+        if (error instanceof RolloutMetadataLimitError) {
+          incompletePaths.push(rolloutPath);
+          continue;
+        }
+        if (skipLockedReads && isRolloutFileBusyError(error)) {
+          lockedPaths.push(rolloutPath);
+          continue;
+        }
+        throw error;
+      }
+      const parsed = parseSessionMetaRecord(record.firstLine);
+      if (!parsed) {
+        incompletePaths.push(rolloutPath);
+        continue;
+      }
+      const currentProvider = parsed.payload.model_provider ?? "(missing)";
+      providerCounts[dirName].set(
+        currentProvider,
+        (providerCounts[dirName].get(currentProvider) ?? 0) + 1
+      );
+    }
+  }
+
+  return { incompletePaths, lockedPaths, providerCounts };
 }
 
 export async function collectSessionChanges(codexHome, targetProvider, options = {}) {

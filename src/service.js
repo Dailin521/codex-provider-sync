@@ -45,6 +45,7 @@ import {
 import {
   applySessionChanges,
   collectSessionChanges,
+  collectStatusRolloutMetadata,
   splitLockedSessionChanges,
   summarizeProviderCounts
 } from "./session-files.js";
@@ -396,6 +397,7 @@ async function scanStatus({
   profile,
   profileId,
   profileRevision,
+  rolloutScanMode = "full",
   platform
 } = {}) {
   const codexHome = providedStorage?.codexHome ?? normalizeCodexHome(explicitCodexHome);
@@ -404,23 +406,29 @@ async function scanStatus({
   const storage = await prepareStorage({ codexHome, sqliteHome, configText, storage: providedStorage, platform });
   const current = readCurrentProviderFromConfigText(configText);
   const configuredProviders = listConfiguredProviderIds(configText);
-  const {
-    providerCounts,
-    encryptedContentCounts,
-    lockedPaths,
-    userEventThreadIds,
-    threadCwdById
-  } = await collectSessionChanges(codexHome, "__status_only__", { skipLockedReads: true });
+  const metadataOnly = rolloutScanMode === "metadata";
+  const rolloutScan = metadataOnly
+    ? await collectStatusRolloutMetadata(codexHome, { skipLockedReads: true })
+    : await collectSessionChanges(codexHome, "__status_only__", { skipLockedReads: true });
+  const { providerCounts, lockedPaths } = rolloutScan;
+  const incompletePaths = metadataOnly ? rolloutScan.incompletePaths : [];
+  const encryptedContentCounts = metadataOnly
+    ? { sessions: {}, archived_sessions: {} }
+    : rolloutScan.encryptedContentCounts;
+  const userEventThreadIds = metadataOnly ? new Set() : rolloutScan.userEventThreadIds;
+  const threadCwdById = metadataOnly ? new Map() : rolloutScan.threadCwdById;
   const stateDbLocation = storage.stateDbLocation;
   const sqliteCounts = storage.sqliteAccess.supported
     ? await readSqliteProviderCounts(storage)
     : null;
-  const sqliteRepairStats = sqliteCounts && !sqliteCounts.unreadable
+  const sqliteRepairStats = !metadataOnly && sqliteCounts && !sqliteCounts.unreadable
     ? await readSqliteRepairStats(storage, { userEventThreadIds, threadCwdById })
     : null;
   let projectThreadVisibility = [];
-  let projectThreadVisibilityAvailable = storage.sqliteAccess.supported && !sqliteCounts?.unreadable;
-  if (storage.sqliteAccess.supported && !sqliteCounts?.unreadable) {
+  let projectThreadVisibilityAvailable = !metadataOnly
+    && storage.sqliteAccess.supported
+    && !sqliteCounts?.unreadable;
+  if (!metadataOnly && storage.sqliteAccess.supported && !sqliteCounts?.unreadable) {
     try {
       projectThreadVisibility = await readProjectThreadVisibility(storage);
     } catch {
@@ -479,7 +487,7 @@ async function scanStatus({
     backupSummary,
     pendingRecovery: pendingTransactions.length > 0,
     operationInProgress: null,
-    rolloutScanComplete: lockedPaths.length === 0,
+    rolloutScanComplete: lockedPaths.length === 0 && incompletePaths.length === 0,
     pendingTransactions: pendingTransactions.map((transaction) => ({
       operationId: transaction.operationId ?? null,
       operationKind: transaction.operationKind ?? "sync",
@@ -566,6 +574,7 @@ export async function getStatus(options = {}) {
   const codexHome = options.storage?.codexHome ?? normalizeCodexHome(options.codexHome);
   const platform = options.platform ?? process.platform;
   const sqliteHome = explicitSqliteHomeFromOptions(options);
+  const rolloutRevisionMode = options.rolloutScanMode === "metadata" ? "metadata" : "content";
   const profile = profileFromOptions(options, codexHome, sqliteHome, platform);
   const activeSnapshot = operationCoordinator.statusDuringWrite(
     codexHome,
@@ -625,6 +634,7 @@ export async function getStatus(options = {}) {
       profileRevision: profile.revision,
       configText,
       storage,
+      rolloutRevisionMode,
       platform
     });
   } catch (error) {
@@ -677,6 +687,7 @@ export async function getStatus(options = {}) {
       profileRevision: profile.revision,
       configText: latestConfigText,
       storage,
+      rolloutRevisionMode,
       platform
     });
   } catch (error) {
@@ -709,6 +720,7 @@ export async function getStatus(options = {}) {
       profileRevision: profile.revision,
       configText: retryConfigText,
       storage,
+      rolloutRevisionMode,
       platform
     });
     driftReason = revisionMismatch(afterRevision, retryRevision);

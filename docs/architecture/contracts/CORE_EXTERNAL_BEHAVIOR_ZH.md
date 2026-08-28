@@ -930,6 +930,7 @@ V1/C3 已实现上述边界；`runSync/runSwitch/runRestore/runWatch` 仍作为 
 
 - 本进程协调器为同一 Codex Home 生成 operationId，并缓存最近一次完整 Status。写操作期间 Status 返回该完整 snapshot 加 `operationInProgress`；无缓存时返回 `rolloutScanComplete:false` 的保守快照。
 - Status 不获取写锁，而是只读检查 Home 与解析后的 State DB protocol lock，并在扫描前后核对 config/rollout/State DB revision。外部 Node/.NET 写者活跃或锁不可验证时不得扫描业务中间态；`LOCK_UNVERIFIABLE` 状态不得显示 aligned/healthy。Pending Journal 仍可作为恢复证据读取。
+- Web/Electron 的 Trusted Facade Status 只读取每个 rollout 的首条 `session_meta` 与文件元数据，仍完整返回 Provider 分布、SQLite 分布、锁、pending、backup 和 revision 安全状态；它不扫描 `encrypted_content`、user event 或 `turn_context` 正文。CLI/内部详细 Status 与所有 Prepare/Apply 仍执行完整内容扫描。元数据 rollout revision 只用于只读观察一致性，不得用于 Plan/Apply、Backup、Restore 或写前状态绑定。
 - `ProgressEvent` observer 的异常不能改变 transaction result。成功 OperationResult 的 `outcome` 为 `completed` 或 locked-rollout `partial`；失败通过结构化 Core Error/transport envelope 返回。
 - Watch 保持单飞、合并重复事件，每次重新 Prepare/Apply 并获取双锁。遇到本进程人工操作时保留当前事件批次、等待 operation completion 后只运行一次合并 follow-up；外部 Busy/不可验证锁不轮询、不计入连续业务失败，并等待新的受保护文件事件。
 - Diagnostics 只返回有界安全元数据；不得读取、复制或序列化 `auth.json`、token、凭据或消息正文。
@@ -949,6 +950,7 @@ V1/C3 已实现上述边界；`runSync/runSwitch/runRestore/runWatch` 仍作为 
 - 响应必须保留同一 `requestId`。非 2xx 不得伪装成功 envelope；不可信异常只返回固定、安全的 `INTERNAL_ERROR` DTO，不输出 stack、cause、路径、token、消息正文或原始异常文本。
 - Web Host 在进入 envelope handler 前验证一次性 pairing、设备凭据 hash 与 loopback Origin；Facade 只解析 server-managed profile ID/revision，Prepare 绑定 storage revisions，Apply 在双锁内重新核对。受管 backupId 在可信 Host/Core 边界解析；Renderer 不能通过 Core 输入提交任意路径。
 - React UI 的业务调用固定为 `HttpCoreClient → /api/core → createCoreFacade`；profile 管理、配对和忘记浏览器属于 Host API，不得把业务实现复制进 UI。
+- 共享 UI 的 Status、Watch 与 Update 状态只在首次进入时加载，并仅由用户明确点击刷新；不得使用定时器、窗口聚焦或网络重连触发后台刷新。用户明确执行写操作后的受控安全刷新仍属于该操作的完成确认，不视为后台轮询。
 - History 列表仅在用户进入 History 页面后读取；详情仅在用户明确选择会话后延迟读取，正文不进入 TanStack Query cache，离开页面时清空并取消 pending detail request。
 - Production HTML 使用每响应随机 nonce 的严格 CSP；无 `unsafe-inline`，外部导航、远程脚本和跨源 Core 请求不在允许面内。
 
