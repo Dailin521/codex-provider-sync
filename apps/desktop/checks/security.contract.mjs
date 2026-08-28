@@ -152,6 +152,7 @@ test("electron-vite emits a CJS sandbox preload and keeps source maps disabled",
   assert.match(config, /external: \["electron"\]/);
   assert.match(config, /__CPS_DESKTOP_TEST_BUILD__:\s*JSON\.stringify\(mode === "test"\)/);
   assert.match(config, /__CPS_DESKTOP_FORCE_BETTER_SQLITE3__:\s*JSON\.stringify\(mode === "test"\)/);
+  assert.match(config, /__CPS_DESKTOP_RELEASE_AUTHORIZED__:\s*JSON\.stringify\(desktopReleaseAuthorized\)/);
   const sqlite = await read("../../src/sqlite.js");
   assert.match(sqlite, /typeof __CPS_DESKTOP_FORCE_BETTER_SQLITE3__ !== "undefined"/);
   assert.doesNotMatch(sqlite, /process\.env\.[A-Za-z0-9_]*SQLITE|CPS_FORCE_BETTER_SQLITE3/);

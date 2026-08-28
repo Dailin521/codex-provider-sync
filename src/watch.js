@@ -29,6 +29,48 @@ import {
 } from "./storage-layout.js";
 
 const watchRegistry = new Map();
+const activeWatchByScope = new Map();
+const pendingWatchStartByScope = new Map();
+const MAX_WATCH_HISTORY = 64;
+
+async function physicalWatchScope(options) {
+  const codexHome = normalizeCodexHome(options.codexHome);
+  let physical;
+  try {
+    physical = await fsp.realpath(codexHome);
+    const info = await fsp.stat(physical);
+    if (!info.isDirectory()) throw Object.assign(new Error("Codex Home is not a directory."), { code: "ENOTDIR" });
+    physical = await fsp.realpath(physical);
+  } catch (error) {
+    if (error?.code === "EACCES" || error?.code === "EPERM") {
+      throw new CoreError("PERMISSION_DENIED", "Permission denied while resolving the Watch scope.", {
+        cause: error,
+        details: { causeCode: error.code }
+      });
+    }
+    throw new CoreError("CODEX_HOME_NOT_FOUND", "Codex Home could not be resolved for Watch.", {
+      cause: error
+    });
+  }
+  const resolved = path.resolve(physical);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function pruneWatchHistory() {
+  let stoppedCount = 0;
+  for (const entry of watchRegistry.values()) {
+    if (entry.status === "stopped") stoppedCount += 1;
+  }
+  let removeCount = stoppedCount - MAX_WATCH_HISTORY;
+  if (removeCount <= 0) return;
+  for (const [watchId, entry] of watchRegistry) {
+    if (removeCount <= 0) break;
+    if (entry.status === "stopped") {
+      watchRegistry.delete(watchId);
+      removeCount -= 1;
+    }
+  }
+}
 
 function defaultDebounceMs() {
   return 750;
@@ -541,24 +583,51 @@ function watchSnapshot(entry) {
 }
 
 export async function startWatch(options = {}) {
-  const handle = await runWatch(options);
-  const entry = {
-    watchId: randomUUID(),
-    status: "running",
-    startedAt: new Date().toISOString(),
-    stoppedAt: null,
-    stopReason: null,
-    includeStateDb: options.includeStateDb !== false,
-    once: Boolean(options.once),
-    handle
-  };
-  watchRegistry.set(entry.watchId, entry);
-  void handle.done.then((reason) => {
+  const scopeKey = await physicalWatchScope(options);
+  const active = activeWatchByScope.get(scopeKey);
+  if (active && active.status !== "stopped") return watchSnapshot(active);
+  const pending = pendingWatchStartByScope.get(scopeKey);
+  if (pending) return pending;
+  const start = (async () => {
+    const current = activeWatchByScope.get(scopeKey);
+    if (current && current.status !== "stopped") return watchSnapshot(current);
+    const handle = await runWatch(options);
+    const entry = {
+      watchId: randomUUID(),
+      status: "running",
+      startedAt: new Date().toISOString(),
+      stoppedAt: null,
+      stopReason: null,
+      includeStateDb: options.includeStateDb !== false,
+      once: Boolean(options.once),
+      scopeKey,
+      handle
+    };
+    watchRegistry.set(entry.watchId, entry);
+    activeWatchByScope.set(scopeKey, entry);
+    void handle.done.then((reason) => finalizeWatch(entry, reason));
+    return watchSnapshot(entry);
+  })();
+  pendingWatchStartByScope.set(scopeKey, start);
+  try {
+    return await start;
+  } finally {
+    if (pendingWatchStartByScope.get(scopeKey) === start) {
+      pendingWatchStartByScope.delete(scopeKey);
+    }
+  }
+}
+
+function finalizeWatch(entry, reason) {
+  if (entry.status !== "stopped") {
     entry.status = "stopped";
     entry.stoppedAt = new Date().toISOString();
     entry.stopReason = typeof reason === "string" ? reason : "unknown";
-  });
-  return watchSnapshot(entry);
+  }
+  if (activeWatchByScope.get(entry.scopeKey) === entry) {
+    activeWatchByScope.delete(entry.scopeKey);
+  }
+  pruneWatchHistory();
 }
 
 function requireWatchEntry(input) {
@@ -578,8 +647,9 @@ export async function stopWatch(input) {
   if (entry.status === "running") {
     entry.status = "stopping";
     await entry.handle.stop();
+    finalizeWatch(entry, await entry.handle.done);
   } else if (entry.status === "stopping") {
-    await entry.handle.done;
+    finalizeWatch(entry, await entry.handle.done);
   }
   return watchSnapshot(entry);
 }

@@ -2,6 +2,7 @@ import type { CoreRuntimeSupervisor } from "./runtime-supervisor.js";
 
 export type DesktopUpdateUnavailableReason =
   | "not-packaged"
+  | "not-authorized"
   | "not-configured"
   | "unsupported-target";
 
@@ -15,6 +16,7 @@ export interface DesktopUpdateAvailabilityInput {
   isPackaged: boolean;
   platform: NodeJS.Platform;
   arch: string;
+  releaseAuthorized: boolean;
   configured: boolean;
 }
 
@@ -35,6 +37,7 @@ export function getDesktopUpdateUnavailableReason(
 ): DesktopUpdateUnavailableReason | null {
   if (!input.isPackaged) return "not-packaged";
   if (!supportedUpdateTarget(input.platform, input.arch)) return "unsupported-target";
+  if (!input.releaseAuthorized) return "not-authorized";
   if (!input.configured) return "not-configured";
   return null;
 }

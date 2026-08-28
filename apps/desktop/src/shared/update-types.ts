@@ -11,6 +11,7 @@ export type DesktopUpdateState =
 
 export type DesktopUpdateReason =
   | "not-packaged"
+  | "not-authorized"
   | "not-configured"
   | "unsupported-target"
   | "check-failed"

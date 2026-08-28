@@ -463,6 +463,58 @@ test("Watch status reconciliation removes an autonomously stopped Watch from Mai
   } finally { value.cleanup(); }
 });
 
+test("Main restart verification clears an autonomously stopped Watch without Renderer polling", async () => {
+  const value = harness();
+  try {
+    const started = await value.handlers.get(DESKTOP_IPC_CHANNELS.coreMaintenance)(
+      value.event,
+      createCoreRequestEnvelope("startWatch", { profile, includeStateDb: true }, "watch-restart-start")
+    );
+    assert.equal(started.ok, true);
+    assert.equal(value.activeWatchCounts.at(-1), 1);
+    const originalRequestManaged = value.supervisor.requestManaged;
+    value.supervisor.requestManaged = async (request, selectedProfile, options) => {
+      if (request.method !== "getWatchStatus") {
+        return originalRequestManaged(request, selectedProfile, options);
+      }
+      value.calls.push({ kind: "managed", request, profile: selectedProfile, options });
+      return createCoreSuccessEnvelope(request, {
+        schemaVersion: 1,
+        watches: [{
+          schemaVersion: 1,
+          watchId: started.result.watchId,
+          status: "stopped",
+          startedAt: "2026-08-26T00:00:00.000Z",
+          stoppedAt: "2026-08-26T00:01:00.000Z",
+          stopReason: "once",
+          includeStateDb: true,
+          once: true
+        }]
+      });
+    };
+    assert.equal(await value.cleanup.verifyNoActiveWatchesForRestart(), "clear");
+    assert.equal(value.activeWatchCounts.at(-1), 0);
+  } finally { value.cleanup(); }
+});
+
+test("Main restart verification preserves ownership when Watch is active or unverifiable", async () => {
+  const value = harness();
+  try {
+    const started = await value.handlers.get(DESKTOP_IPC_CHANNELS.coreMaintenance)(
+      value.event,
+      createCoreRequestEnvelope("startWatch", { profile, includeStateDb: true }, "watch-restart-active")
+    );
+    assert.equal(started.ok, true);
+    assert.equal(await value.cleanup.verifyNoActiveWatchesForRestart(), "active");
+    assert.equal(value.activeWatchCounts.at(-1), 1);
+    value.supervisor.requestManaged = async () => {
+      throw new Error("runtime unavailable");
+    };
+    assert.equal(await value.cleanup.verifyNoActiveWatchesForRestart(), "unverifiable");
+    assert.equal(value.activeWatchCounts.at(-1), 1);
+  } finally { value.cleanup(); }
+});
+
 test("Diagnostics and Update IPC accept only pathless trusted product input", async () => {
   const value = harness();
   try {

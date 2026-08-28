@@ -35,6 +35,7 @@ C9 固定生成 Windows x64 NSIS/ZIP、macOS x64/arm64 DMG/ZIP、Linux x64 AppIm
 - ZIP/Installer/DMG/AppImage/deb 必须逐个解包或安装，再重复 ASAR、Fuse、native binding、敏感路径与 source-map 审计；builder 的 unpacked 目录不能替代最终容器证据；
 - checksum 清单必须精确覆盖资产、审计、SBOM、容器报告与 release manifest，候选目录不得夹带未清单文件；
 - C9 CI 只上传 unsigned、not-authorized 的短期候选，不自动创建 tag、npm 包或 GitHub Release。
+- Main 的更新能力使用编译期 `releaseAuthorized` fail-closed gate。缺省与所有 C9 candidate 固定为 false，不能创建 updater port、排定网络检查或安装；只有另行获授权且具备签名/metadata/升级证据的正式发布构建才可显式置 true，运行时环境变量不能事后开启。
 
 ## Consequences
 

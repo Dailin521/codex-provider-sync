@@ -45,7 +45,11 @@ if (process.platform !== config.platform || process.arch !== config.arch) {
   throw new Error(`Candidate ${target} must be built on native ${config.platform}/${config.arch}, got ${process.platform}/${process.arch}.`);
 }
 
-const buildEnvironment = { ...process.env, CPS_DESKTOP_BUILD_ID: buildId };
+const buildEnvironment = {
+  ...process.env,
+  CPS_DESKTOP_BUILD_ID: buildId,
+  CPS_DESKTOP_RELEASE_AUTHORIZED: "false"
+};
 runNpm(["run", "workspaces:build"], { env: buildEnvironment });
 runNpm(["run", "build:electron"], { cwd: desktopRoot, env: buildEnvironment });
 runNpm(["run", "verify:production-bundle"], { cwd: desktopRoot, env: buildEnvironment });

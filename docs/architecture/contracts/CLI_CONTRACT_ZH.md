@@ -291,6 +291,7 @@ codex-provider watch [--codex-home PATH] [--sqlite-home PATH] [--debounce-ms N] 
 ### 8.3 当前行为
 
 - 启动时要求 Codex Home 与 `config.toml` 已存在；
+- 启动前按物理 Codex Home 建立唯一 Watch scope；重复或并发启动同一 `realpath` Home 不创建第二个 watcher，Windows 比较不区分大小写；物理路径无法可靠解析时 fail closed；
 - 默认监听 `config.toml`、当前活动 `state_5.sqlite` 以及 `-wal`、`-shm` sidecar；
 - 配置变化后重新解析 SQLite Home，并重新绑定 DB watcher；
 - 每次触发同步时重新读取根级 model；
@@ -518,7 +519,7 @@ Phase 0 之后的 CLI 改造至少必须覆盖：
 - SQLite Home 优先级与 default-only legacy fallback；
 - Web 默认端口、回环绑定与复用；
 - Watch 默认 750 ms、once 成功退出与连续失败停止；
-- npm `bin`、`engines` 与发布包包含 CLI/Web 运行所需文件；
+- npm `bin`、`engines` 与发布包包含 CLI/Web 运行所需文件；安装态 tarball 必须经真实 bin shim 完成 `sync --json → managed backup → drift → restore --json`，逐字节恢复 config/rollout、恢复 SQLite Provider 且不留下 pending recovery；
 - JSON help、输入错误、成功、noop、partial、rolled-back、stale、recovery、busy、lock unverifiable 与 cancelled 均为单一 stdout 文档；
 - JSON progress 只进入 stderr，未知异常、底层 warning 与序列化失败不泄漏 stack、cause、凭据、Token、secret 或消息正文；
 - `watch --json` 与 `web --json` 在任何长运行副作用前被拒绝；

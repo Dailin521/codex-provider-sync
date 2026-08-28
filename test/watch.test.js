@@ -441,6 +441,74 @@ test("startWatch exposes registry status and stopWatch is idempotent", async () 
   }
 });
 
+test("startWatch deduplicates one physical Codex Home and releases the scope after stop", async () => {
+  const { root, codexHome } = await makeTempCodexHome();
+  const aliasHome = path.join(root, "codex-home-alias");
+  try {
+    await fs.symlink(codexHome, aliasHome, process.platform === "win32" ? "junction" : "dir");
+    const options = {
+      codexHome,
+      includeStateDb: false,
+      onLog: () => {},
+      onSync: async () => ({ targetProvider: "openai", changedSessionFiles: 0, sqliteRowsUpdated: 0 })
+    };
+    const left = await startWatch(options);
+    const right = await startWatch({
+      ...options,
+      codexHome: aliasHome,
+      includeStateDb: true,
+      once: true
+    });
+    assert.equal(left.watchId, right.watchId);
+    assert.equal(right.includeStateDb, false);
+    assert.equal(right.once, false);
+    assert.equal(getWatchStatus().watches.filter((watch) => watch.status !== "stopped"
+      && watch.watchId === left.watchId).length, 1);
+
+    await stopWatch({ watchId: left.watchId });
+    const [restarted, concurrent] = await Promise.all([
+      startWatch(options),
+      startWatch({ ...options, codexHome: aliasHome })
+    ]);
+    assert.equal(restarted.watchId, concurrent.watchId);
+    assert.notEqual(restarted.watchId, left.watchId);
+    assert.equal(getWatchStatus({ watchId: left.watchId }).status, "stopped");
+    assert.equal((await stopWatch({ watchId: left.watchId })).status, "stopped");
+    await stopWatch({ watchId: restarted.watchId });
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("stopped Watch remains immediately idempotent when active watches exceed retained history", async () => {
+  const fixtures = [];
+  const started = [];
+  try {
+    for (let index = 0; index < 65; index += 1) {
+      const fixture = await makeTempCodexHome();
+      fixtures.push(fixture);
+      started.push(await startWatch({
+        codexHome: fixture.codexHome,
+        includeStateDb: false,
+        onLog: () => {},
+        onSync: async () => ({
+          targetProvider: "openai",
+          changedSessionFiles: 0,
+          sqliteRowsUpdated: 0
+        })
+      }));
+    }
+
+    const first = started[0];
+    assert.equal((await stopWatch({ watchId: first.watchId })).status, "stopped");
+    assert.equal((await stopWatch({ watchId: first.watchId })).status, "stopped");
+    assert.equal(getWatchStatus({ watchId: first.watchId }).status, "stopped");
+  } finally {
+    await Promise.allSettled(started.map(({ watchId }) => stopWatch({ watchId })));
+    await Promise.all(fixtures.map(({ root }) => fs.rm(root, { recursive: true, force: true })));
+  }
+});
+
 test("runWatch stops itself after consecutive non-busy sync failures and resolves done", async () => {
   // Regression guard for B11: when the sync handler keeps
   // throwing something other than `state_5.sqlite is currently

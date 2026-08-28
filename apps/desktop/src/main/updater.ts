@@ -33,9 +33,11 @@ export interface DesktopUpdateControllerOptions {
   platform: NodeJS.Platform;
   arch: string;
   appVersion: string;
+  releaseAuthorized: boolean;
   configured: boolean;
   supervisor: Pick<CoreRuntimeSupervisor, "snapshot" | "tryBeginRestartInstall">;
   hasActiveWatches(): boolean;
+  verifyNoActiveWatches(): Promise<boolean>;
   verifyRecoveryState(): Promise<DesktopRecoveryVerification>;
   beforeInstall?(): Promise<void>;
   createPort?: () => Promise<DesktopUpdaterPort>;
@@ -89,6 +91,7 @@ export async function createProductionUpdaterPort(options: {
 export class DesktopUpdateController {
   readonly #supervisor: Pick<CoreRuntimeSupervisor, "snapshot" | "tryBeginRestartInstall">;
   readonly #hasActiveWatches: () => boolean;
+  readonly #verifyNoActiveWatches: () => Promise<boolean>;
   readonly #verifyRecoveryState: () => Promise<DesktopRecoveryVerification>;
   readonly #beforeInstall: () => Promise<void>;
   readonly #createPort: () => Promise<DesktopUpdaterPort>;
@@ -113,6 +116,7 @@ export class DesktopUpdateController {
   constructor(options: DesktopUpdateControllerOptions) {
     this.#supervisor = options.supervisor;
     this.#hasActiveWatches = options.hasActiveWatches;
+    this.#verifyNoActiveWatches = options.verifyNoActiveWatches;
     this.#verifyRecoveryState = options.verifyRecoveryState;
     this.#beforeInstall = options.beforeInstall ?? (async () => {});
     this.#createPort = options.createPort ?? (() => createProductionUpdaterPort({
@@ -242,6 +246,13 @@ export class DesktopUpdateController {
       let retainRestartGate = false;
       try {
         await restartLease.waitForWrites();
+        if (this.#hasActiveWatches()) {
+          let noActiveWatches = false;
+          try {
+            noActiveWatches = await this.#verifyNoActiveWatches();
+          } catch {}
+          if (!noActiveWatches) return this.status;
+        }
         this.#recoveryVerification = "unknown";
         const recoveryVerification = await this.#refreshRecoveryVerification();
         if (this.#immediateInstallBlock() || recoveryVerification !== "clear") {

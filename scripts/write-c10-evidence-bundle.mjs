@@ -412,8 +412,8 @@ function pendingItems({ event, ref, sourceVersions }) {
     {
       id: "real-wsl-unc-validation",
       blocking: true,
-      reason: "The registered local WSL environment was unavailable for the real UNC scenario.",
-      requiredEvidence: "Run the Windows WSL boundary case on a healthy real distribution."
+      reason: "No commit-bound evidence from a healthy Windows plus real WSL distribution was supplied.",
+      requiredEvidence: "Run the strict Windows WSL boundary case with CPS_REQUIRE_REAL_WSL=1 and retain redacted commit-bound evidence."
     },
     {
       id: "release-authorization",
@@ -432,6 +432,24 @@ function pendingItems({ event, ref, sourceVersions }) {
       blocking: true,
       reason: "No production update metadata or restart-upgrade path has been published.",
       requiredEvidence: "Verify an authorized cross-version update without an active write or unresolved journal."
+    },
+    {
+      id: "cross-runtime-update-admission",
+      blocking: true,
+      reason: "The Main restart gate does not reserve external CLI, Web, or Watch writers.",
+      requiredEvidence: "Define and verify one cross-runtime maintenance lease before authorizing production update installation."
+    },
+    {
+      id: "historical-formal-release-backup",
+      blocking: true,
+      reason: "Repository-tag synthetic backups do not prove hosted formal Release binary output.",
+      requiredEvidence: "Restore a checksum-verified synthetic backup produced by an authorized historical formal Release binary."
+    },
+    {
+      id: "real-beta-validation",
+      blocking: true,
+      reason: "No authorized real-user Beta validation has been completed.",
+      requiredEvidence: "Complete a privacy-safe Beta and record platform, upgrade, backup, Restore, and known-limit evidence."
     }
   );
   return pending;

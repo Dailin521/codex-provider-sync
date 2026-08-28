@@ -37,6 +37,8 @@ jobs:
       - run: npm ci
       - run: npm run workspaces:check
       - run: npm run web:build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run web:test:e2e
       - run: npm test
       - run: npm run package:smoke
       - run: npm audit --omit=dev --audit-level=moderate

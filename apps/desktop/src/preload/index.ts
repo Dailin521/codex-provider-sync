@@ -243,7 +243,12 @@ function validateUpdateStatus(value: unknown): DesktopUpdateStatus {
     throw new TypeError("Invalid update status response.");
   }
   const state = String(status.state);
-  const disabledReasons = new Set(["not-packaged", "not-configured", "unsupported-target"]);
+  const disabledReasons = new Set([
+    "not-packaged",
+    "not-authorized",
+    "not-configured",
+    "unsupported-target"
+  ]);
   const errorReasons = new Set(["check-failed", "download-failed", "install-failed"]);
   if ((state === "disabled" && !disabledReasons.has(String(status.reason)))
       || (state === "error" && !errorReasons.has(String(status.reason)))

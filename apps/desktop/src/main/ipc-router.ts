@@ -60,6 +60,13 @@ export interface DesktopIpcRouterOptions {
   onActiveWatchCountChanged?(count: number): void;
 }
 
+export type DesktopWatchRestartVerification = "clear" | "active" | "unverifiable";
+
+export interface DesktopIpcRegistration {
+  (): void;
+  verifyNoActiveWatchesForRestart(): Promise<DesktopWatchRestartVerification>;
+}
+
 interface PlanOwnership {
   senderId: number;
   applyMethod: "applySync" | "applySwitch" | "applyRestore";
@@ -212,7 +219,7 @@ function validCancelInput(value: unknown): value is { requestId: string; operati
         && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(source.operationId)));
 }
 
-export function registerDesktopIpc(options: DesktopIpcRouterOptions): () => void {
+export function registerDesktopIpc(options: DesktopIpcRouterOptions): DesktopIpcRegistration {
   const registered: string[] = [];
   const plans = new Map<string, PlanOwnership>();
   const watches = new Map<string, WatchOwnership>();
@@ -247,6 +254,47 @@ export function registerDesktopIpc(options: DesktopIpcRouterOptions): () => void
       changed = true;
     }
     if (changed) notifyWatchCount();
+  };
+  const removeStaleWatchOwnership = (): boolean => {
+    const generation = options.supervisor.snapshot.generation;
+    let changed = false;
+    for (const [watchId, owner] of watches) {
+      if (owner.generation !== generation) {
+        watches.delete(watchId);
+        changed = true;
+      }
+    }
+    if (changed) notifyWatchCount();
+    return changed;
+  };
+  const verifyNoActiveWatchesForRestart = async (): Promise<DesktopWatchRestartVerification> => {
+    removeStaleWatchOwnership();
+    const first = watches.values().next().value as WatchOwnership | undefined;
+    if (!first) return "clear";
+    const generation = options.supervisor.snapshot.generation;
+    const request = createCoreRequestEnvelope(
+      "getWatchStatus",
+      {},
+      `desktop-update-watch-${randomUUID()}`
+    );
+    try {
+      const response = await options.supervisor.requestManaged(request, first.profile, {
+        allowRecoveryBlocked: true
+      });
+      if (!response.ok || options.supervisor.snapshot.generation !== generation) {
+        return "unverifiable";
+      }
+      const result = response.result as WatchSnapshot | WatchStatusList;
+      if (!("watches" in result)) return "unverifiable";
+      if (result.watches.some((watch) => watch.status !== "stopped")) return "active";
+      if (watches.size > 0) {
+        watches.clear();
+        notifyWatchCount();
+      }
+      return "clear";
+    } catch {
+      return "unverifiable";
+    }
   };
   const updateBusy = (value: unknown): CoreResponseEnvelope => failureEnvelope(
     value,
@@ -495,15 +543,7 @@ export function registerDesktopIpc(options: DesktopIpcRouterOptions): () => void
     if (inFlightRequestIds.has(request.requestId)) return failureEnvelope(request, "INVALID_INPUT");
     inFlightRequestIds.add(request.requestId);
     try {
-      const generation = options.supervisor.snapshot.generation;
-      let removedStaleWatch = false;
-      for (const [watchId, owner] of watches) {
-        if (owner.generation !== generation) {
-          watches.delete(watchId);
-          removedStaleWatch = true;
-        }
-      }
-      if (removedStaleWatch) notifyWatchCount();
+      removeStaleWatchOwnership();
       if (typed.method === "pruneBackups" || typed.method === "startWatch") {
         if (options.updates.restartPending) return updateBusy(request);
         const profile = (typed.payload as { profile?: ProfileSelector }).profile;
@@ -607,6 +647,7 @@ export function registerDesktopIpc(options: DesktopIpcRouterOptions): () => void
     );
     const response = await options.supervisor.request(request);
     if (!response.ok) {
+      options.diagnosticsExporter.revoke(token);
       return { schemaVersion: 1, status: "failed", reason: "runtime-unavailable" };
     }
     return options.diagnosticsExporter.export(token, response.result);
@@ -641,14 +682,16 @@ export function registerDesktopIpc(options: DesktopIpcRouterOptions): () => void
   register(DESKTOP_IPC_CHANNELS.updateDownload, updateAction("download"));
   register(DESKTOP_IPC_CHANNELS.updateInstall, updateAction("install"));
 
-  return () => {
+  const cleanup = (() => {
     unsubscribeOperations();
     plans.clear();
     watches.clear();
     notifyWatchCount();
     activeRequests.clear();
     for (const channel of registered) options.ipcMain.removeHandler(channel);
-  };
+  }) as DesktopIpcRegistration;
+  cleanup.verifyNoActiveWatchesForRestart = verifyNoActiveWatchesForRestart;
+  return cleanup;
 }
 
 export { isTrustedSender };

@@ -118,7 +118,10 @@ export function BackupsRestorePage({
                     <Field error={form.formState.errors.relocationTargetProfileId ? t("validation.restore") : undefined} label={t("backups.targetProfile")}>
                       <select className="min-h-10 rounded-lg border border-[var(--border)] bg-[var(--input)] px-3" {...form.register("relocationTargetProfileId")}>
                         <option value="">—</option>
-                        {profiles.filter((entry) => entry.id !== profile.id && entry.sqliteHome).map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
+                        {profiles.filter((entry) => (
+                          entry.id !== profile.id
+                            && (Boolean(entry.sqliteHome) || entry.sqliteHomeConfigured === true)
+                        )).map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
                       </select>
                     </Field>
                   ) : null}

@@ -14,6 +14,7 @@ coverage/
 artifacts/
 desktop/**/bin/
 desktop/**/obj/
+test-support/**/obj/
 *.csproj.user
 test/*.exe
 WORKLOG*.md

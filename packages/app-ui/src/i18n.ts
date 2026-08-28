@@ -206,6 +206,7 @@ export const resources = {
         },
         updateReason: {
           "not-packaged": "Update checks are available only in a packaged build.",
+          "not-authorized": "This candidate build is not authorized to use a production update channel.",
           "not-configured": "No release update channel is configured.",
           "unsupported-target": "Updates are not supported for this platform target.",
           "check-failed": "The update check failed without affecting Core operations.",
@@ -552,6 +553,7 @@ export const resources = {
         },
         updateReason: {
           "not-packaged": "仅打包后的应用可检查更新。",
+          "not-authorized": "此候选构建未获生产更新通道授权。",
           "not-configured": "尚未配置正式 Release 更新通道。",
           "unsupported-target": "当前平台目标不支持应用内更新。",
           "check-failed": "检查更新失败，不会影响 Core 操作。",

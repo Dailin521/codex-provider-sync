@@ -575,6 +575,8 @@ vNext 公共 Core/HTTP/IPC 列表投影不返回 `rolloutPath`、`cwd` 或 `firs
 - 连续 5 次非 busy 失败后停止；
 - once 在首次成功 sync 后停止；
 - 返回 handle：Codex Home、config path、动态 state DB path、动态 SQLite Home、`stop()`、`done` 和可选 `signalPromise`。
+- `startWatch` 在创建 watcher 前以 `realpath(Codex Home)` 建立物理 scope（Windows 不区分大小写）；同一物理 Home 的并发或重复启动返回同一个活动 snapshot，首个启动的 options 保持权威，不建立第二组 OS watcher；
+- 物理 Home 无法可靠解析时 fail closed：权限错误为 `PERMISSION_DENIED`，其它缺失或不可解析状态为 `CODEX_HOME_NOT_FOUND`。手工或自动停止完成后释放活动 scope；终态 registry 只保留最近 64 条 stopped 记录。
 
 ## 10. 跨进程锁与恢复状态
 
@@ -971,11 +973,11 @@ V1/C3 已实现上述边界；`runSync/runSwitch/runRestore/runWatch` 仍作为 
 - DesktopCoreClient、Preload、Main IPC、Supervisor 与 Utility 只按精确方法组增加 `prepareRestore/applyRestore`、`pruneBackups/startWatch/stopWatch/getWatchStatus`。Main 持有 Restore Plan 与 Watch ID；Renderer 只提交 profile、受管 backupId、Restore options、keepCount 或有限 Watch 输入。
 - Recovery Required 时，Sync/Switch/startWatch 继续阻断；Restore 与 Prune 可作为 recovery-safe 操作进入 Core，stop/get Watch status 仍可用。Restore Apply 属于 cancellable write lifecycle，完成后使 Supervisor 的 Status preflight 失效并重新读取。
 - Restore snapshot/journal 持久化 `codexHomePhysical`；pending、resolver 与当前已加锁 Home 必须匹配该稳定物理 identity，不得用可变 lexical 路径的当前 realpath 擦除历史 binding。snapshot manifest 与 durable `prepared` event 必须全量绑定 schema/protocol、operation、source、storage、required kinds、resolver IDs、ordered targets 和 snapshot 物理目录。config、global state 与 rollout 的固定名称、物理 parent、reparse/symlink 边界必须在 snapshot、每目标 apply、补偿与 commit acknowledgement 前反复验证。任一绑定、边界或物理 identity 无法可靠证明时返回 `LOCK_UNVERIFIABLE(codex-home)` 或 `RECOVERY_REQUIRED`，不得读写被换接到 Home 外的目标。无目标 mutation 的取消只能写入验证型 compensation evidence，不得为“回滚”而重写原目标。
-- Watch 每次 apply 都重新 Prepare/Apply 并获取 Home→State DB 双锁。已 Prepare 的人工 Plan 具有优先级；Watch 合并重复事件并等待人工 intent 释放或过期，只运行一次 follow-up。首次遇到 `RECOVERY_REQUIRED/PENDING_TRANSACTION` 即停止，不继续自动写。
-- Diagnostics Renderer 请求严格只有 `{schemaVersion:1, profile}`。输出目标由 Main 原生文件选择器产生并转换为 5 分钟、单次消费的随机 capability；token 和目标路径不跨 Renderer。ZIP 条目固定且再次执行共享 Diagnostics DTO exact validation，排除 `auth.json`、凭据、token、路径、rollout/DB、消息正文与 `encrypted_content`。
+- Watch 每次 apply 都重新 Prepare/Apply 并获取 Home→State DB 双锁。已 Prepare 的人工 Plan 具有优先级；Watch 合并重复事件并等待人工 intent 释放或过期，只运行一次 follow-up。首次遇到 `RECOVERY_REQUIRED/PENDING_TRANSACTION` 即停止，不继续自动写。同一物理 Codex Home 只能有一个 active/pending Watch；停止后释放 scope，终态历史有界。
+- Diagnostics Renderer 请求严格只有 `{schemaVersion:1, profile}`。输出目标由 Main 原生文件选择器产生并转换为 5 分钟、单次消费的随机 capability；最多保留 32 个未消费 capability，同一规范化目标只能被一个 capability 保留，写入前还必须按父目录 realpath 拒绝指向同一物理 ZIP 的并发路径别名。过期、显式 revoke、消费成功或失败都会释放目标 reservation；同 token 并发导出最多一方成功。token 和目标路径不跨 Renderer。ZIP 条目固定且再次执行共享 Diagnostics DTO exact validation，排除 `auth.json`、凭据、token、路径、rollout/DB、消息正文与 `encrypted_content`。
 - Update 只由 Main 的 `electron-updater` controller 管理，固定使用打包 metadata 中的 GitHub provider；不得调用 `setFeedURL`，Renderer 不得提交 URL、channel、路径、版本、silent/force 参数或接收 release notes、下载 URL、缓存路径和原始异常。Preload 仅暴露无参数的 `getStatus/check/download/install`，响应为脱敏 schema v2 状态。
-- `autoDownload` 与 `autoInstallOnAppQuit` 均关闭。检查、下载或更新错误不得改变 Core 结果。安装意图必须在 Supervisor 内同步关闭 restart gate，将已经入场但尚处于 preflight/dispatch 前的写请求计入 admission，并等待这些请求排空；此后新的 Sync/Switch/Restore/Prune/startWatch 立即返回 busy，只有 `getWatchStatus` 仍为只读。排空后必须再次确认 update 已下载、无 active Watch、无写操作，并由 Main 对全部已知 Profile 强制刷新 Status、证明无 pending recovery，最后才可调用 `quitAndInstall`；任一 Profile 无法验证、installer 抛错或安装未启动时均 fail closed 并重新开放 gate。
-- C8 只接入受控状态机和门禁；Desktop source manifest 版本仍为 `0.0.0` 或非 packaged/不支持目标时状态为 disabled，不启动网络检查。C9 只在候选构建时注入 prerelease 版本；签名、Update metadata 和跨版本 packaged smoke 仍属于 C10/发布门禁，未获得发布授权前不得把通道描述为已上线。
+- `autoDownload` 与 `autoInstallOnAppQuit` 均关闭。检查、下载或更新错误不得改变 Core 结果。安装意图必须在 Supervisor 内同步关闭 restart gate，将已经入场但尚处于 preflight/dispatch 前的写请求计入 admission，并等待这些请求排空；此后新的 Sync/Switch/Restore/Prune/startWatch 立即返回 busy，只有 `getWatchStatus` 仍为只读。排空后，Main 必须通过既有 Utility `getWatchStatus` 重新核对其持有的 Watch ownership，清除已自动停止的缓存；查询失败或仍有 active Watch 时 fail closed。随后还必须确认 update 已下载、无写操作，并对全部已知 Profile 强制刷新 Status、证明无 pending recovery，最后才可调用 `quitAndInstall`；任一 Profile 无法验证、installer 抛错或安装未启动时均 fail closed 并重新开放 gate。
+- C8 只接入受控状态机和门禁。只有 Main 编译期 `releaseAuthorized=true`、packaged、受支持目标且版本/通道已配置时才允许创建 updater port、排定检查或执行任何网络/安装动作；缺省及所有未授权候选固定为 `disabled/not-authorized`。C9 候选显式注入 `releaseAuthorized=false`；签名、Update metadata、跨版本 packaged smoke，以及覆盖外部 CLI/Web/Watch 的跨运行时 maintenance lease 仍属于发布前门禁，未获得发布授权前不得把通道描述为已上线。
 
 ### 16.8 C9 Electron 候选产物与 CI 边界
 

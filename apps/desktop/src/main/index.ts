@@ -18,7 +18,7 @@ import {
 } from "../shared/constants.js";
 import { createElectronUtilitySpawner } from "./electron-utility.js";
 import { DesktopDiagnosticsExporter } from "./diagnostics-export.js";
-import { registerDesktopIpc } from "./ipc-router.js";
+import { registerDesktopIpc, type DesktopIpcRegistration } from "./ipc-router.js";
 import { DesktopProfileRepository } from "../profiles/repository.js";
 import { CoreRuntimeSupervisor } from "./runtime-supervisor.js";
 import { createSecureWebPreferences } from "./security-policy.js";
@@ -47,6 +47,7 @@ if (!app.requestSingleInstanceLock()) {
   let mainWindow: BrowserWindow | null = null;
   let supervisor: CoreRuntimeSupervisor | null = null;
   let removeIpc: (() => void) | null = null;
+  let ipcRegistration: DesktopIpcRegistration | null = null;
   let removeTestIpc: (() => void) | null = null;
   let removeSecurity: (() => void) | null = null;
   let updates: DesktopUpdateController | null = null;
@@ -126,8 +127,12 @@ if (!app.requestSingleInstanceLock()) {
       arch: process.arch,
       appVersion: app.getVersion(),
       configured: app.getVersion() !== "0.0.0",
+      releaseAuthorized: __CPS_DESKTOP_RELEASE_AUTHORIZED__,
       supervisor,
       hasActiveWatches: () => activeWatchCount > 0,
+      verifyNoActiveWatches: async () => (
+        (await ipcRegistration?.verifyNoActiveWatchesForRestart()) === "clear"
+      ),
       verifyRecoveryState: () => supervisor!.verifyProfilesSafeForRestart(
         profiles.list().map((profile) => ({
           profileId: profile.id,
@@ -135,7 +140,7 @@ if (!app.requestSingleInstanceLock()) {
         }))
       )
     });
-    removeIpc = registerDesktopIpc({
+    ipcRegistration = registerDesktopIpc({
       ipcMain,
       getWindow: () => mainWindow,
       rendererOrigin: DESKTOP_APP_ORIGIN,
@@ -165,6 +170,7 @@ if (!app.requestSingleInstanceLock()) {
         return result.canceled || !result.filePath ? null : result.filePath;
       }
     });
+    removeIpc = ipcRegistration;
     if (e2eEnabled) {
       const { registerDesktopTestHooks } = await import("./e2e-hooks.js");
       removeTestIpc = registerDesktopTestHooks({

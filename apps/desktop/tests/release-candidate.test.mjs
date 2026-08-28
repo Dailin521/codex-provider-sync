@@ -172,6 +172,7 @@ test("builder and candidate scripts enforce native fallback, fuses, audit metada
   );
   assert.match(buildScript, /"--publish",\s*"never"/);
   assert.match(buildScript, /--config\.extraMetadata\.version=/);
+  assert.match(buildScript, /CPS_DESKTOP_RELEASE_AUTHORIZED:\s*"false"/);
   assert.match(attributes, /^package-lock\.json text eol=lf$/m);
   assert.match(attributes, /^apps\/desktop\/release\/artifact-audit-policy\.v1\.json text eol=lf$/m);
   assert.match(

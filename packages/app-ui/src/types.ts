@@ -52,6 +52,7 @@ export interface HostUpdateStatus {
     | "installing";
   reason?:
     | "not-packaged"
+    | "not-authorized"
     | "not-configured"
     | "unsupported-target"
     | "check-failed"

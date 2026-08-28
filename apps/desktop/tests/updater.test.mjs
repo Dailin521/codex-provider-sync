@@ -48,6 +48,8 @@ function fixture(overrides = {}) {
     beforeInstall: 0,
     gateClosed: false,
     gateReleases: 0,
+    watchVerification: "active",
+    watchVerificationCalls: 0,
     waitForWrites: async () => {}
   };
   const controller = new DesktopUpdateController({
@@ -55,6 +57,7 @@ function fixture(overrides = {}) {
     platform: "win32",
     arch: "x64",
     appVersion: "1.0.0",
+    releaseAuthorized: true,
     configured: true,
     supervisor: {
       snapshot,
@@ -74,6 +77,12 @@ function fixture(overrides = {}) {
       }
     },
     hasActiveWatches: () => state.watches,
+    verifyNoActiveWatches: async () => {
+      state.watchVerificationCalls += 1;
+      if (state.watchVerification !== "clear") return false;
+      state.watches = false;
+      return true;
+    },
     verifyRecoveryState: async () => state.verification,
     beforeInstall: async () => { state.beforeInstall += 1; },
     createPort: async () => port,
@@ -164,6 +173,19 @@ test("updater closes admission, drains an already admitted Watch, and reopens wi
   assert.equal(state.gateReleases, 1);
 });
 
+test("updater rechecks an autonomously stopped Watch after closing restart admission", async () => {
+  const { controller, port, state } = fixture();
+  await controller.check();
+  await controller.download();
+  state.watches = true;
+  state.watchVerification = "clear";
+  const result = await controller.install();
+  assert.equal(result.state, "installing");
+  assert.equal(state.watchVerificationCalls, 1);
+  assert.equal(state.watches, false);
+  assert.equal(port.installs, 1);
+});
+
 test("updater reopens write admission when the installer fails synchronously", async () => {
   const { controller, port, state } = fixture();
   await controller.check();
@@ -203,19 +225,21 @@ test("updater fails closed without leaking raw errors or allowing invalid event 
   assert.equal(invalid.port.downloads, 0);
 });
 
-test("updater stays disabled before a packaged, supported and configured release", async () => {
+test("updater stays disabled before a packaged, authorized and configured release", async () => {
   const created = [];
   const controller = new DesktopUpdateController({
     isPackaged: false,
     platform: "win32",
     arch: "x64",
     appVersion: "0.0.0",
+    releaseAuthorized: false,
     configured: false,
     supervisor: {
       snapshot: { recoveryBlocked: false, writeInProgress: false },
       tryBeginRestartInstall: () => null
     },
     hasActiveWatches: () => false,
+    verifyNoActiveWatches: async () => true,
     verifyRecoveryState: async () => "clear",
     createPort: async () => { created.push(true); return new FakeUpdaterPort(); }
   });
@@ -226,4 +250,37 @@ test("updater stays disabled before a packaged, supported and configured release
     reason: "not-packaged"
   });
   assert.equal(created.length, 0);
+});
+
+test("unsigned candidate never creates an updater port or schedules network work", async () => {
+  const created = [];
+  const controller = new DesktopUpdateController({
+    isPackaged: true,
+    platform: "win32",
+    arch: "x64",
+    appVersion: "1.0.0-rc.205",
+    releaseAuthorized: false,
+    configured: true,
+    supervisor: {
+      snapshot: { recoveryBlocked: false, writeInProgress: false },
+      tryBeginRestartInstall: () => null
+    },
+    hasActiveWatches: () => false,
+    verifyNoActiveWatches: async () => true,
+    verifyRecoveryState: async () => "clear",
+    createPort: async () => { created.push(true); return new FakeUpdaterPort(); }
+  });
+  assert.deepEqual(controller.status, {
+    schemaVersion: 2,
+    state: "disabled",
+    installAllowed: false,
+    reason: "not-authorized"
+  });
+  controller.scheduleInitialCheck(0);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await controller.check();
+  await controller.download();
+  await controller.install();
+  assert.equal(created.length, 0);
+  controller.dispose();
 });

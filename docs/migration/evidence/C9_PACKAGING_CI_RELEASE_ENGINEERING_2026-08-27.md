@@ -54,10 +54,22 @@ ZIP 与 NSIS 都完成：最终容器内容复审、候选 ASAR loader + unpacke
 
 本机工具：Node `24.11.1`、npm `11.10.0`、PowerShell `7.6.4`、Git `2.52.0.windows.1`、.NET SDK `10.0.400`、Windows build `26200`。本机不是 Node 16.20.2 环境；Node 16 根 tarball 兼容性继续由 required CI 与 C4 已有安装态合同证明，不能把本地 Node 24 smoke 记作 Node 16 实机结果。
 
+## 2026-08-28 后续 source-head 发布门 hardening
+
+这些变更不改变上面的历史资产 Hash，也不能沿用该 checkpoint 的计数；PR #90 后续 source head 必须重新生成候选和 C10 artifact：
+
+- 根 tarball 安装态 smoke 从 help/status 扩展为真实 npm bin `sync --json → managed backup → synthetic drift → restore --json`，断言 config/rollout 字节、SQLite Provider 与 pending recovery 全部恢复；Windows/Ubuntu Node 16.20.2 required matrix 继续执行同一脚本。
+- Windows cross-runtime job 以 `fetch-depth:0` 获取冻结 tag，校验 `v0.2.9@1a2b290...` 与 `v0.4.1@75f45756...` 后构建历史 .NET Core，真实产生 synthetic metadata v1/v2 backup，再由当前 Node Restore；CI 只上传不含真实数据的 commit/hash evidence。该等级是 repository-tag-source，不是 hosted formal Release binary。
+- Web 与 npm 手工发布工作流在任何发布动作前都安装 Chromium 并运行 production Web E2E；普通 Web/Desktop Playwright 配置启用 `forbidOnly`。
+- 候选构建显式注入 `CPS_DESKTOP_RELEASE_AUTHORIZED=false`，所以 unsigned/not-authorized 候选不会建立真实 update port。仓库当前没有把该值置 true 的正式发布路径；这是未获发布授权时的预期 fail-closed 状态。
+
+聚焦验证已通过安装态 tarball lifecycle、历史 tag-source Restore 和 Desktop 71/71；完整四目标 candidate set、全量门禁与远端 artifact 仍以新 checkpoint 的 CI 为准。
+
 ## 未闭合项与停止边界
 
 - 本地 Windows 不能替代 macOS x64、macOS arm64、Linux x64 的 native build、DMG/ZIP/AppImage/deb 解包/安装、embedded integrity、native SQLite 与 graceful-exit 证据；四目标 aggregate 也尚未产生。required CI 未全绿前 C9 保持 Pending。
 - 本机 Ubuntu 注册项缺少 `ext4.vhdx`，真实 WSL UNC 测试按合同 Skip。C10 必须保留该限制，不得把 synthetic path 测试冒充 WSL 实机。
 - 候选明确是 unsigned、not notarized、release not authorized。没有 tag、npm publish、GitHub Release、签名、公证或更新通道写入；真实 update metadata/download/restart upgrade 仍阻断 Stable。
+- tag-source historical fixture 不等于执行 v0.2.9/v0.4.1 hosted Release binary；正式 Release backup 兼容、真实 Beta 与跨版本升级仍是外部证据阻断项。
 - 当前 builder 使用 Electron 默认应用图标；仓库尚无经确认的跨平台 product icon 资产。它不改变本 checkpoint 的数据安全结论，但在公开 Stable 前应由产品资产验收决定是否补齐。
 - macOS/Linux 任一容器审计、native probe、Status/Sync→Restore、正常退出或 aggregate 失败时，必须停在 `73256f3` 的 Windows-only evidence，不得降级门禁、跳过 job 或写入 `1.0.0` source version。

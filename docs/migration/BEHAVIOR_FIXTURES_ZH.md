@@ -63,6 +63,7 @@ Fixture 不是用户数据样本，严禁从真实 `~/.codex`、认证文件或�
 | `sqlite-malformed` | `state_5.sqlite` 不是有效数据库或缺少关键结构 | Status 降级报告 `SQLITE_UNREADABLE`；写操作在 Backup/rollout mutation 前停止 |
 | `sqlite-live-wal` | 数据仍在 WAL，数据库由另一连接保持打开 | 官方 online backup 生成单一可独立打开的 main DB；不把 WAL/SHM 当备份清单文件 |
 | `wsl-unc-unchanged-hash` | Windows 下 SQLite Home 为 `\\wsl.localhost\...` 或 `\\wsl$\...` | Status 只诊断；写操作返回 `SQLITE_UNSUPPORTED_PATH`，配置、rollout、DB、global state 与 backup root 的 Hash/存在性全部不变 |
+| `real-wsl-unc-strict` | 健康 Windows+WSL2 runner 从真实 ext4 Home 调用 Windows Core/Electron | `CPS_REQUIRE_REAL_WSL=1` 时缺少可运行发行版或 `CODEX_PROVIDER_SYNC_WSL_SQLITE_HOME` 必须失败而非 Skip；main DB、WAL、SHM、journal 的存在性与 Hash 全部不变 |
 
 ## 5. 锁、并发与恢复
 
@@ -81,6 +82,7 @@ Fixture 不是用户数据样本，严禁从真实 `~/.codex`、认证文件或�
 | `plan-ledger-replay-expiry` | Plan 过期、重放、跨 operation、重启失效、篡改 apply payload | 只允许当前进程内 10 分钟单次消费；失效返回 `PLAN_EXPIRED`，附加字段返回 `INVALID_INPUT`，均无 Backup/Journal/mutation |
 | `plan-ledger-abandoned-expiry` | Prepare 后调用方离开且没有 consume/waiter；同一 Home 有多个不同 expiry 的人工 intent | 单一最早到期 timer 自治清理并 rearm，不阻止进程退出；Watch 在最后 intent 到期后只恢复一次，不产生每 waiter timer |
 | `watch-manual-priority` | 单一文件事件触发 Watch，但人工 Apply 已持有本进程协调器；等待期间继续产生重复事件 | Watch 不并发、不计失败；保留并合并 reasons，人工 operation completion 后恰运行一次 follow-up；stop 后 callback 不再 Apply |
+| `watch-physical-scope-dedupe-and-bounded-history` | 同一物理 Codex Home 通过重复、并发或路径别名启动 Watch，并在自动/手工停止后重启 | 只创建一个活动 watcher、返回同一 watchId 且首个 options 生效；停止释放 scope，旧 watch 仍可查询/幂等 stop；最多保留 64 个 stopped 记录 |
 | `pending-journal` | Managed Backup 中存在未终结 Journal | Status 可读并暴露恢复证据；Sync/Switch 被 `PENDING_TRANSACTION`/`RECOVERY_REQUIRED` 阻断。Prune 仍可作为 recovery-safe maintenance 执行，但必须保护所有 Pending Journal 引用的备份 |
 | `foreign-pending-restore` | Node 创建 Pending Journal/Backup 后由 .NET Restore，及反方向 | 两个方向都只按受管清单恢复，清除 Pending 前必须落入合法 terminal；差异需显式裁决 |
 | `restore-mid-failure` | Restore 在某一目标已替换后注入失败 | 不能报告成功；必须完整补偿，或保留可操作证据并返回 `RECOVERY_REQUIRED`，不得留下无 Journal 的半恢复状态 |
@@ -93,8 +95,10 @@ Fixture 不是用户数据样本，严禁从真实 `~/.codex`、认证文件或�
 | `restore-v2-windows-path-alias` | 同一 Windows 物理 source 分别以 8.3 短路径、长路径与 junction 创建/恢复 journal | Node↔.NET 两个方向均把 Prepare/Apply/journal 绑定到稳定物理 source，另一运行时可用另一别名恢复；无法证明时 fail closed，不以 lexical 字符串、旧式 backupId 或换接后的当前目标放行 |
 | `restore-v2-reparse-swap` | snapshot/apply 后把 rollout 或其父目录换成指向 Home 外的 junction/symlink，再进入 compensation/ack | 每个 mutation/ack 边界重新验证物理 Home 与 reparse segment；外部目标字节不变，journal 进入 `recovery-required`，不得按相同内容 hash 误确认 |
 | `restore-v2-ack-reconciliation` | `committed-pending-ack` 已持久化但 API acknowledgement/observer 失败 | 不把已提交 Restore 报为可回滚失败；重新读取 journal 与目标 Hash 后收敛到 `completed` 或 `recovery-required` |
-| `desktop-update-install-gate` | Update 已下载，同时注入已入场但未 dispatch 的 write、后续 write、active Watch、pending recovery、无法验证 Profile、installer 异常或安装竞争 | Supervisor 同步关闭 gate，计入并排空已 admission 的写，拒绝后续写，再强制刷新全部 Profile Status；任一条件不安全或 installer 失败都不退出并重新开放 gate。IPC 为 null-only，DTO 不含 URL/path/release notes/raw error |
+| `desktop-update-install-gate` | Update 已下载，同时注入已入场但未 dispatch 的 write、后续 write、自动停止/active Watch、pending recovery、无法验证 Profile、installer 异常或安装竞争 | 未授权候选的 check/download/install/timer 均不创建 updater port；获授权路径先关闭 gate、排空写、由 Main 重新查询 Utility Watch 状态并刷新全部 Profile。任一条件不安全或查询/installer 失败都不退出并重新开放 gate。IPC 为 null-only，DTO 不含 URL/path/release notes/raw error |
+| `desktop-diagnostics-capability-bound` | Renderer 重复请求诊断导出、复用 token、并发消费、选择相同目标或以路径别名指向同一物理 ZIP | 目标仅由 Main 选择；5 分钟 TTL、最多 32 个 pending、规范化目标独占 reservation，写入时按父目录 realpath 拒绝物理目标并发、单次消费；过期/revoke/完成后释放且 ZIP 无路径/凭据/正文 |
 | `bidirectional-backup-roundtrip` | Node Backup→.NET Restore；.NET Backup→Node Restore | 两个方向恢复到等价语义状态；正文和不应变化字段逐字节一致；Metadata v1/v2 兼容边界明确 |
+| `historical-tag-produced-backup-restore` | 从冻结 commit 的 `v0.2.9`/`v0.4.1` tag 源构建历史 .NET Core，真实产生 synthetic metadata v1/v2 backup，再由当前 Node Restore | config/rollout/SQLite 恢复；tag commit、metadata/tree Hash 与 synthetic-only 声明进入 CI artifact。证据等级仅为 repository-tag-source，不等于 hosted formal Release binary 或真实用户数据 |
 | `journal-crash-matrix` | 在 prepared/applying/applied/commit/rollback 及 ack 窗口真实终止进程 | durable terminal 优先；非 terminal 阻断后续写；不得对 committed 状态补回滚事件；显式 Restore 可收敛 |
 | `rollback-recovery-required` | mutation 后使自动 rollback 的一个或多个目标失败 | 原始错误与所有 rollback error 均保留；Backup、completed/uncompleted targets 和 `RECOVERY_REQUIRED` 可用于人工恢复 |
 
@@ -102,15 +106,15 @@ Fixture 不是用户数据样本，严禁从真实 `~/.codex`、认证文件或�
 
 V1/C3 的 executable mapping：Plan/revision 见 `test/plan-ledger.test.js`、`test/operation-revision.test.js`、`test/plan-apply.test.js`；Node 锁与外部 Status 见 `test/state-db-lock.test.js`、`test/status-coordination.test.js`；Watch 见 `test/watch.test.js`；Web transport 见 `test/web-server.test.js`；.NET 与跨运行时锁见 `StateDbLockResourceTests`、`DualResourceLockIntegrationTests`、`CrossRuntimeStateDbLockTests`、`LockServiceTests`。`shared-sqlite-home-contention` 与 `dual-resource-lock-order` 另由 `test-support/cross-runtime-fixtures.mjs`、`test-support/cross-runtime-writer-host.mjs` 和 `.NET FixtureHost` 启动两个方向的真实 Sync writer，winner 在 `before_backup` 持有 Home→State DB 双锁，loser 必须以 `OPERATION_BUSY(state-db)` 且零 Backup/Journal/mutation 退出。C5 的双向 backup/foreign pending executable mapping 为 `test-support/cross-runtime-fixtures.mjs`、`test-support/cross-runtime-node-crash-host.mjs`、`.NET FixtureHost` 与既有 `.NET CrashHost`；完整命令与结果记录在 `evidence/C5_SHARED_UI_WEB_2026-08-26.md`。
 
-C7 的 executable mapping 为 `test-support/desktop-sync-switch-fixture.mjs`、`apps/desktop/e2e/desktop-sync-switch.spec.mjs`、`apps/desktop/tests/ipc-router.test.mjs`、`runtime-supervisor.test.mjs` 与 `test/plan-apply.test.js`。它使用临时 Home、真实 SQLite、Windows `FileShare.None`、受控 test-build Utility 终止和完整目标 Hash/语义快照；生产 Core host control 不包含故障注入能力。当前 Windows 主机的 Ubuntu 因 WSL `ext4.vhdx` 缺失无法启动，因此 `wsl-unc-unchanged-hash` 仅按明确原因 Skip，仍是远端/修复后本机必须闭合的 C7 门槛；详见 `evidence/C7_ELECTRON_SYNC_SWITCH_2026-08-26.md`。
+C7 的 executable mapping 为 `test-support/desktop-sync-switch-fixture.mjs`、`apps/desktop/e2e/desktop-sync-switch.spec.mjs`、`apps/desktop/tests/ipc-router.test.mjs`、`runtime-supervisor.test.mjs` 与 `test/plan-apply.test.js`。它使用临时 Home、真实 SQLite、Windows `FileShare.None`、受控 test-build Utility 终止和完整目标 Hash/语义快照；生产 Core host control 不包含故障注入能力。`scripts/test-wsl-unc-safety.sh` 以 `CPS_REQUIRE_REAL_WSL=1` 提供严格真实 WSL 门；没有与 source commit 绑定的健康 Windows+WSL 结果时仍是 Pending，不能用 synthetic UNC 或代码开关冒充实证。详见 `evidence/C7_ELECTRON_SYNC_SWITCH_2026-08-26.md`。
 
-C8 的 executable mapping 为 `test/restore-v2-state-machine.test.js`、`RestoreJournalServiceTests`、`RestoreV2IntegrationTests`、`test-support/cross-runtime-fixtures.mjs`、Node/.NET CrashHost、`test/watch.test.js`、`test/operation-coordinator.test.js`、`apps/desktop/tests/updater.test.mjs`、Desktop contracts/unit tests 与隐藏模式 Electron E2E。跨运行时 harness 覆盖 applying/prepared/committing/rollback-pending、commit ack、foreign pending、unknown schema、Windows 物理路径 alias、manifest/prepared 全量绑定和 persisted physical Home mismatch；Windows alias 用例通过系统返回的实际 8.3 短路径和真实 junction，让 Node 与 .NET 分别以别名创建 pending、由另一运行时以物理长路径恢复，也保留长路径创建/别名恢复矩阵，并校验原 journal bytes 不改写。原 journal 保留与 resolver projection 是显式裁决，不再把 raw 非终态伪报为 `rolled-back`。Updater fixture 只使用注入 port，不访问真实 Release；C9 必须另做签名产物的检查/下载/重启升级 smoke。
+C8 的 executable mapping 为 `test/restore-v2-state-machine.test.js`、`RestoreJournalServiceTests`、`RestoreV2IntegrationTests`、`test-support/cross-runtime-fixtures.mjs`、Node/.NET CrashHost、`test/watch.test.js`、`test/operation-coordinator.test.js`、`apps/desktop/tests/updater.test.mjs`、Desktop contracts/unit tests、`apps/desktop/e2e/desktop-restore-relocation.spec.mjs` 与隐藏模式 Electron E2E。跨运行时 harness 覆盖 applying/prepared/committing/rollback-pending、commit ack、foreign pending、unknown schema、Windows 物理路径 alias、manifest/prepared 全量绑定和 persisted physical Home mismatch；Windows alias 用例通过系统返回的实际 8.3 短路径和真实 junction，让 Node 与 .NET 分别以别名创建 pending、由另一运行时以物理长路径恢复，也保留长路径创建/别名恢复矩阵，并校验原 journal bytes 不改写。原 journal 保留与 resolver projection 是显式裁决，不再把 raw 非终态伪报为 `rolled-back`。Updater fixture 只使用注入 port，不访问真实 Release；C9/C10 必须另做获授权签名产物的检查/下载/重启升级 smoke。
 
 ## 6. Restore、Backup 与 Prune
 
 | Fixture ID | 输入语义 | 关键预期 |
 | --- | --- | --- |
-| `restore-relocation` | Backup 的 SQLite Home 与当前目标不同 | 默认拒绝；只有显式目标和 relocation 确认才允许，且跨 SQLite Home Restore 不恢复 config |
+| `restore-relocation` | Backup 的 SQLite Home 与当前目标不同；Electron Renderer 只看到 `sqliteHomeConfigured` 摘要 | 默认拒绝；只有可信命名 profile 的显式目标和 relocation 确认才允许，且跨 SQLite Home Restore 不恢复 config。隐藏 Electron UI 回归必须证明 source 业务状态不变、目标 DB 恢复 |
 | `prune-managed-only` | backup root 同时包含受管备份、普通目录和 Pending Journal 引用 | 只删除超过保留数的受管备份；普通目录和 Pending Journal 所在目录永不删除 |
 | `backup-first-no-mutation` | Backup 期间空间、权限或 snapshot 失败 | 返回 `BACKUP_FAILED`；不存在 Journal/目标 mutation；原始 Hash 不变 |
 
@@ -141,7 +145,7 @@ C2 使用真实 Node 子进程和完全位于临时目录的最小 Core fixture 
 | `cli-json-daemon-rejection` | `watch --json`、`web --json` | 在创建长运行状态、runtime descriptor 或浏览器进程前返回 `INVALID_INPUT`/exit 2 |
 | `cli-json-redaction` | 非法参数值、unknown/typed error、恶意 details、越权 result 字段、循环结果、stdout EPIPE | 固定错误文案与命令级字段 allowlist 不泄漏 stack/cause/secret/token/prompt/message body；terminal writer 最多尝试一次 stdout |
 | `cli-human-compat` | 不传 `--json` 运行既有 help/input/sync 路径 | Human 输出和既有 `0/1`、partial 行为不变 |
-| `installed-root-entrypoint` | 从真实根 npm tarball 安装后，经 npm bin shim/Windows 规范化路径运行 `help` 与临时 Home `status --json` | CLI 必须实际执行并返回合同输出；不得因 `process.argv[1]` 与模块 URL 的短/长路径、大小写或链接形式不同而静默退出 |
+| `installed-root-entrypoint` | 从真实根 npm tarball 安装后，经 npm bin shim/Windows 规范化路径运行 `help`、临时 Home `status --json`，再执行 `sync --json → drift → restore --json` | CLI 必须实际执行并创建 managed backup；config/rollout 字节与 SQLite Provider 恢复且无 pending recovery；不得因短/长路径、大小写或链接形式不同而静默退出，也不得引入 Electron/workspace runtime 依赖 |
 
 这些用例当前由 `test/cli-json-contract.test.js`、`test/cli-json.test.js`、`test-support/cli-json-driver.js` 和真实 Core Sync 回归承载；未来迁入 `packages/test-fixtures` 时必须保持同一外部合同。
 

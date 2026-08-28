@@ -40,6 +40,7 @@
     "desktop:verify:candidate:set": "npm run verify:candidate:set --workspace @codex-provider-sync/desktop",
     "desktop:test:e2e:packaged": "npm run test:e2e:packaged --workspace @codex-provider-sync/desktop",
     "fixtures:cross-runtime": "node --test test-support/cross-runtime-fixtures.mjs",
+    "fixtures:historical-tags": "node --test test-support/historical-tag-backup-fixtures.mjs",
     "web:start": "node src/cli.js web",
     "workspaces:build": "tsc -b tsconfig.workspaces.json && tsc -p packages/core/tsconfig.json",
     "workspaces:test": "npm run test --workspaces --if-present",

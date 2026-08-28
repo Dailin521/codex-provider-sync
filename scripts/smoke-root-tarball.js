@@ -299,10 +299,23 @@ try {
   }
 
   const codexHome = path.join(tempRoot, "synthetic-codex-home");
-  await fs.mkdir(path.join(codexHome, "sessions"), { recursive: true });
+  const rolloutPath = path.join(codexHome, "sessions", "2026", "08", "28", "rollout-synthetic.jsonl");
+  await fs.mkdir(path.dirname(rolloutPath), { recursive: true });
   await fs.mkdir(path.join(codexHome, "archived_sessions"), { recursive: true });
   await fs.mkdir(path.join(codexHome, "sqlite"), { recursive: true });
-  await fs.writeFile(path.join(codexHome, "config.toml"), 'model_provider = "openai"\n');
+  const configPath = path.join(codexHome, "config.toml");
+  const initialConfig = 'model_provider = "openai"\n';
+  const initialRollout = `${JSON.stringify({
+    type: "session_meta",
+    timestamp: "2026-08-28T00:00:00.000Z",
+    payload: {
+      id: "synthetic-thread",
+      cwd: "synthetic",
+      model_provider: "apigather"
+    }
+  })}\n`;
+  await fs.writeFile(configPath, initialConfig);
+  await fs.writeFile(rolloutPath, initialRollout);
   if (installLifecycle) {
     const stateDbPath = path.join(codexHome, "sqlite", "state_5.sqlite");
     const createDatabase = [
@@ -323,7 +336,7 @@ try {
       '  model TEXT',
       ');`);',
       'database.prepare("INSERT INTO threads (id, model_provider, cwd, archived, first_user_message) VALUES (?, ?, ?, ?, ?)")',
-      '  .run("synthetic-thread", "openai", "synthetic", 0, "synthetic");',
+      '  .run("synthetic-thread", "apigather", "synthetic", 0, "");',
       'database.close();'
     ].join("\n");
     run(process.execPath, ["-e", createDatabase], {
@@ -353,7 +366,106 @@ try {
         || statusEnvelope.result?.sqliteCounts?.unreadable === true)) {
     throw new Error("Installed CLI did not open the synthetic SQLite database.");
   }
-  if (installLifecycle) await smokeInstalledWeb(tempRoot, codexHome);
+  if (installLifecycle) {
+    const stateDbPath = path.join(codexHome, "sqlite", "state_5.sqlite");
+    const databaseProvider = (nextProvider) => {
+      const script = [
+        'let Database;',
+        'try { Database = require("node:sqlite").DatabaseSync; }',
+        'catch (error) {',
+        '  if (!["ERR_UNKNOWN_BUILTIN_MODULE", "MODULE_NOT_FOUND"].includes(error?.code)) throw error;',
+        '  Database = require("better-sqlite3");',
+        '}',
+        'const database = new Database(process.env.PROVIDER_SYNC_SMOKE_DB);',
+        'if (process.env.PROVIDER_SYNC_SMOKE_NEXT) {',
+        '  database.prepare("UPDATE threads SET model_provider = ? WHERE id = ?")',
+        '    .run(process.env.PROVIDER_SYNC_SMOKE_NEXT, "synthetic-thread");',
+        '}',
+        'const row = database.prepare("SELECT model_provider AS provider FROM threads WHERE id = ?")',
+        '  .get("synthetic-thread");',
+        'database.close();',
+        'process.stdout.write(String(row.provider));'
+      ].join("\n");
+      return run(process.execPath, ["-e", script], {
+        cwd: tempRoot,
+        env: {
+          PROVIDER_SYNC_SMOKE_DB: stateDbPath,
+          ...(nextProvider ? { PROVIDER_SYNC_SMOKE_NEXT: nextProvider } : {})
+        }
+      }).stdout.trim();
+    };
+    const rolloutProvider = async () => JSON.parse(
+      (await fs.readFile(rolloutPath, "utf8")).trim().split(/\r?\n/)[0]
+    ).payload.model_provider;
+    const sync = run(process.execPath, [
+      npmCliPath,
+      "run",
+      "--silent",
+      "provider",
+      "--",
+      "sync",
+      "--json",
+      "--codex-home",
+      codexHome
+    ], { cwd: tempRoot });
+    const syncEnvelope = JSON.parse(sync.stdout);
+    const backupDir = syncEnvelope.result?.backupDir;
+    if (syncEnvelope.ok !== true
+        || syncEnvelope.command !== "sync"
+        || typeof backupDir !== "string"
+        || !path.isAbsolute(backupDir)) {
+      throw new Error("Installed CLI JSON sync did not create an auditable managed backup.");
+    }
+    await fs.access(path.join(backupDir, "metadata.json"));
+    if (databaseProvider() !== "openai" || await rolloutProvider() !== "openai") {
+      throw new Error("Installed CLI sync did not align the synthetic rollout and SQLite row.");
+    }
+
+    await fs.writeFile(configPath, 'model_provider = "relay"\n');
+    await fs.writeFile(rolloutPath, initialRollout.replace("apigather", "relay"));
+    if (databaseProvider("relay") !== "relay") {
+      throw new Error("Could not create the synthetic pre-Restore drift state.");
+    }
+    const restore = run(process.execPath, [
+      npmCliPath,
+      "run",
+      "--silent",
+      "provider",
+      "--",
+      "restore",
+      backupDir,
+      "--json",
+      "--codex-home",
+      codexHome
+    ], { cwd: tempRoot });
+    const restoreEnvelope = JSON.parse(restore.stdout);
+    if (restoreEnvelope.ok !== true || restoreEnvelope.command !== "restore") {
+      throw new Error("Installed CLI JSON restore failed for its own managed backup.");
+    }
+    if (await fs.readFile(configPath, "utf8") !== initialConfig
+        || await fs.readFile(rolloutPath, "utf8") !== initialRollout
+        || databaseProvider() !== "apigather") {
+      throw new Error("Installed CLI restore did not recover the original synthetic bytes and SQLite provider.");
+    }
+    const restoredStatus = run(process.execPath, [
+      npmCliPath,
+      "run",
+      "--silent",
+      "provider",
+      "--",
+      "status",
+      "--json",
+      "--codex-home",
+      codexHome
+    ], { cwd: tempRoot });
+    const restoredStatusEnvelope = JSON.parse(restoredStatus.stdout);
+    if (restoredStatusEnvelope.ok !== true
+        || restoredStatusEnvelope.result?.pendingRecovery === true
+        || restoredStatusEnvelope.result?.pendingTransactions?.length > 0) {
+      throw new Error("Installed CLI restore left a pending recovery transaction.");
+    }
+    await smokeInstalledWeb(tempRoot, codexHome);
+  }
 
   const productionTree = JSON.parse(run(process.execPath, [npmCliPath, "ls", "--omit=dev", "--json"], {
     cwd: tempRoot

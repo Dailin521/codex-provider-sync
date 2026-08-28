@@ -6,6 +6,7 @@ import { defineConfig } from "electron-vite";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const desktopBuildId = process.env.CPS_DESKTOP_BUILD_ID?.trim() || "dev-c9";
+const desktopReleaseAuthorized = process.env.CPS_DESKTOP_RELEASE_AUTHORIZED === "true";
 
 if (!/^[A-Za-z0-9._-]{1,128}$/.test(desktopBuildId)) {
   throw new Error("CPS_DESKTOP_BUILD_ID must be a 1-128 character safe identifier.");
@@ -16,7 +17,8 @@ export default defineConfig(({ mode }) => ({
     define: {
       __CPS_DESKTOP_TEST_BUILD__: JSON.stringify(mode === "test"),
       __CPS_DESKTOP_FORCE_BETTER_SQLITE3__: JSON.stringify(mode === "test"),
-      __CPS_DESKTOP_BUILD_ID__: JSON.stringify(desktopBuildId)
+      __CPS_DESKTOP_BUILD_ID__: JSON.stringify(desktopBuildId),
+      __CPS_DESKTOP_RELEASE_AUTHORIZED__: JSON.stringify(desktopReleaseAuthorized)
     },
     ssr: {
       noExternal: [/^@codex-provider-sync\//]

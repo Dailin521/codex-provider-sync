@@ -37,14 +37,27 @@ NODE
 
 sqlite_home_windows="$(wslpath -w "$sqlite_home")"
 project_windows="$(wslpath -w "$repo_dir/desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj")"
-database_hash_before="$(sha256sum "$sqlite_home/state_5.sqlite")"
+sqlite_artifact_state() {
+  local suffix
+  for suffix in "" "-wal" "-shm" "-journal"; do
+    local target="$sqlite_home/state_5.sqlite$suffix"
+    if [[ -f "$target" ]]; then
+      printf '%s present %s\n' "$suffix" "$(sha256sum "$target" | cut -d' ' -f1)"
+    else
+      printf '%s missing\n' "$suffix"
+    fi
+  done
+}
+
+database_state_before="$(sqlite_artifact_state)"
 
 "$dotnet_exe" test "$project_windows" --no-restore \
+  --environment "CPS_REQUIRE_REAL_WSL=1" \
   --environment "CODEX_PROVIDER_SYNC_WSL_SQLITE_HOME=$sqlite_home_windows" \
   --filter "Category=WindowsWslIntegration"
 
-database_hash_after="$(sha256sum "$sqlite_home/state_5.sqlite")"
-if [[ "$database_hash_after" != "$database_hash_before" ]]; then
-  echo "WSL SQLite database changed during the Windows safety test." >&2
+database_state_after="$(sqlite_artifact_state)"
+if [[ "$database_state_after" != "$database_state_before" ]]; then
+  echo "WSL SQLite database or sidecar state changed during the Windows safety test." >&2
   exit 1
 fi

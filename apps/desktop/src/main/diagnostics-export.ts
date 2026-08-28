@@ -16,6 +16,7 @@ import type { DesktopDiagnosticsExportResult } from "../shared/diagnostics-types
 interface TargetCapability {
   path: string;
   expiresAt: number;
+  reservationKey: string;
 }
 
 interface ZipEntry {
@@ -28,6 +29,9 @@ export interface DesktopDiagnosticsExporterOptions {
   isPackaged: boolean;
   now?: () => Date;
 }
+
+const CAPABILITY_TTL_MS = 5 * 60_000;
+const MAX_TARGET_CAPABILITIES = 32;
 
 function crc32(data: Buffer): number {
   let crc = 0xffffffff;
@@ -108,11 +112,17 @@ function normalizeTarget(value: string): string {
   return target;
 }
 
+function targetReservationKey(target: string): string {
+  return process.platform === "win32" ? target.toLowerCase() : target;
+}
+
 export class DesktopDiagnosticsExporter {
   readonly #appVersion: string;
   readonly #isPackaged: boolean;
   readonly #now: () => Date;
   readonly #targets = new Map<string, TargetCapability>();
+  readonly #reservedTargets = new Map<string, string>();
+  readonly #activeDestinations = new Set<string>();
 
   constructor(options: DesktopDiagnosticsExporterOptions) {
     this.#appVersion = options.appVersion;
@@ -121,96 +131,145 @@ export class DesktopDiagnosticsExporter {
   }
 
   authorizeTarget(targetPath: string): string {
+    const now = this.#now().getTime();
+    this.#sweepExpired(now);
+    if (this.#targets.size >= MAX_TARGET_CAPABILITIES) {
+      throw new Error("Too many pending diagnostics target capabilities.");
+    }
+    const target = normalizeTarget(targetPath);
+    const reservationKey = targetReservationKey(target);
+    if (this.#reservedTargets.has(reservationKey)) {
+      throw new Error("The diagnostics target is already reserved.");
+    }
     const token = randomBytes(32).toString("base64url");
     this.#targets.set(token, {
-      path: normalizeTarget(targetPath),
-      expiresAt: this.#now().getTime() + 5 * 60_000
+      path: target,
+      expiresAt: now + CAPABILITY_TTL_MS,
+      reservationKey
     });
+    this.#reservedTargets.set(reservationKey, token);
     return token;
   }
 
-  async export(token: string, snapshot: DiagnosticsSnapshot): Promise<DesktopDiagnosticsExportResult> {
+  revoke(token: string): void {
     const capability = this.#targets.get(token);
     this.#targets.delete(token);
-    if (!capability || capability.expiresAt <= this.#now().getTime()) {
+    if (capability) this.#releaseReservation(token, capability);
+  }
+
+  async export(token: string, snapshot: DiagnosticsSnapshot): Promise<DesktopDiagnosticsExportResult> {
+    this.#sweepExpired(this.#now().getTime());
+    const capability = this.#targets.get(token);
+    this.#targets.delete(token);
+    if (!capability) {
       return { schemaVersion: 1, status: "failed", reason: "write-failed" };
     }
     try {
-      assertCoreMethodOutput("getDiagnostics", snapshot);
-    } catch {
-      return { schemaVersion: 1, status: "failed", reason: "invalid-snapshot" };
-    }
-    const createdAt = this.#now().toISOString();
-    const entries: ZipEntry[] = [
-      jsonEntry("app-info.json", {
-        schemaVersion: 1,
-        appVersion: this.#appVersion,
-        coreVersion: DESKTOP_CORE_VERSION,
-        buildId: DESKTOP_BUILD_ID,
-        packaged: this.#isPackaged,
-        platform: process.platform,
-        arch: process.arch,
-        generatedAt: createdAt
-      }),
-      jsonEntry("status-summary.json", {
-        schemaVersion: 1,
-        generatedAt: snapshot.generatedAt,
-        provider: snapshot.provider,
-        safety: {
-          pendingRecovery: snapshot.safety.pendingRecovery,
-          operationInProgress: snapshot.safety.operationInProgress,
-          rolloutScanComplete: snapshot.safety.rolloutScanComplete,
-          lockedRolloutCount: snapshot.safety.lockedRolloutCount,
-          projectThreadVisibilityAvailable: snapshot.safety.projectThreadVisibilityAvailable
-        }
-      }),
-      jsonEntry("storage-layout.json", {
-        schemaVersion: 1,
-        generatedAt: snapshot.generatedAt,
-        storage: snapshot.storage
-      }),
-      jsonEntry("pending-transaction-summary.json", {
-        schemaVersion: 1,
-        generatedAt: snapshot.generatedAt,
-        pendingTransactions: snapshot.safety.pendingTransactions
-      }),
-      {
-        name: "recent-redacted-logs/README.txt",
-        data: Buffer.from(
-          "No persistent application logs were included. Credentials, message bodies, rollout files, and databases are excluded.\n",
-          "utf8"
-        )
-      }
-    ];
-    const archive = createStoredZip(entries);
-    let temporary: string | null = null;
-    try {
-      await fs.mkdir(path.dirname(capability.path), { recursive: true });
-      const parent = await fs.realpath(path.dirname(capability.path));
-      const destination = path.join(parent, path.basename(capability.path));
-      temporary = `${destination}.tmp-${process.pid}-${randomUUID()}`;
-      const handle = await fs.open(temporary, "wx", 0o600);
       try {
-        await handle.writeFile(archive);
-        await handle.sync();
+        assertCoreMethodOutput("getDiagnostics", snapshot);
+      } catch {
+        return { schemaVersion: 1, status: "failed", reason: "invalid-snapshot" };
+      }
+      const createdAt = this.#now().toISOString();
+      const entries: ZipEntry[] = [
+        jsonEntry("app-info.json", {
+          schemaVersion: 1,
+          appVersion: this.#appVersion,
+          coreVersion: DESKTOP_CORE_VERSION,
+          buildId: DESKTOP_BUILD_ID,
+          packaged: this.#isPackaged,
+          platform: process.platform,
+          arch: process.arch,
+          generatedAt: createdAt
+        }),
+        jsonEntry("status-summary.json", {
+          schemaVersion: 1,
+          generatedAt: snapshot.generatedAt,
+          provider: snapshot.provider,
+          safety: {
+            pendingRecovery: snapshot.safety.pendingRecovery,
+            operationInProgress: snapshot.safety.operationInProgress,
+            rolloutScanComplete: snapshot.safety.rolloutScanComplete,
+            lockedRolloutCount: snapshot.safety.lockedRolloutCount,
+            projectThreadVisibilityAvailable: snapshot.safety.projectThreadVisibilityAvailable
+          }
+        }),
+        jsonEntry("storage-layout.json", {
+          schemaVersion: 1,
+          generatedAt: snapshot.generatedAt,
+          storage: snapshot.storage
+        }),
+        jsonEntry("pending-transaction-summary.json", {
+          schemaVersion: 1,
+          generatedAt: snapshot.generatedAt,
+          pendingTransactions: snapshot.safety.pendingTransactions
+        }),
+        {
+          name: "recent-redacted-logs/README.txt",
+          data: Buffer.from(
+            "No persistent application logs were included. Credentials, message bodies, rollout files, and databases are excluded.\n",
+            "utf8"
+          )
+        }
+      ];
+      const archive = createStoredZip(entries);
+      let temporary: string | null = null;
+      let activeDestinationKey: string | null = null;
+      let ownsActiveDestination = false;
+      try {
+        await fs.mkdir(path.dirname(capability.path), { recursive: true });
+        const parent = await fs.realpath(path.dirname(capability.path));
+        const destination = path.join(parent, path.basename(capability.path));
+        activeDestinationKey = targetReservationKey(destination);
+        if (this.#activeDestinations.has(activeDestinationKey)) {
+          return { schemaVersion: 1, status: "failed", reason: "write-failed" };
+        }
+        this.#activeDestinations.add(activeDestinationKey);
+        ownsActiveDestination = true;
+        temporary = `${destination}.tmp-${process.pid}-${randomUUID()}`;
+        const handle = await fs.open(temporary, "wx", 0o600);
+        try {
+          await handle.writeFile(archive);
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        await fs.rename(temporary, destination);
+        await fs.chmod(destination, 0o600).catch(() => {});
+        const directory = await fs.open(path.dirname(destination), "r").catch(() => null);
+        if (directory) {
+          try { await directory.sync(); } catch {} finally { await directory.close(); }
+        }
+        return {
+          schemaVersion: 1,
+          status: "created",
+          artifactId: randomUUID(),
+          createdAt
+        };
+      } catch {
+        if (temporary) await fs.rm(temporary, { force: true }).catch(() => {});
+        return { schemaVersion: 1, status: "failed", reason: "write-failed" };
       } finally {
-        await handle.close();
+        if (activeDestinationKey && ownsActiveDestination) {
+          this.#activeDestinations.delete(activeDestinationKey);
+        }
       }
-      await fs.rename(temporary, destination);
-      await fs.chmod(destination, 0o600).catch(() => {});
-      const directory = await fs.open(path.dirname(destination), "r").catch(() => null);
-      if (directory) {
-        try { await directory.sync(); } catch {} finally { await directory.close(); }
-      }
-      return {
-        schemaVersion: 1,
-        status: "created",
-        artifactId: randomUUID(),
-        createdAt
-      };
-    } catch {
-      if (temporary) await fs.rm(temporary, { force: true }).catch(() => {});
-      return { schemaVersion: 1, status: "failed", reason: "write-failed" };
+    } finally {
+      this.#releaseReservation(token, capability);
+    }
+  }
+
+  #sweepExpired(now: number): void {
+    for (const [token, capability] of this.#targets) {
+      if (capability.expiresAt > now) continue;
+      this.#targets.delete(token);
+      this.#releaseReservation(token, capability);
+    }
+  }
+
+  #releaseReservation(token: string, capability: TargetCapability): void {
+    if (this.#reservedTargets.get(capability.reservationKey) === token) {
+      this.#reservedTargets.delete(capability.reservationKey);
     }
   }
 }

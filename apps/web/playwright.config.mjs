@@ -1,6 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
+  forbidOnly: true,
   testDir: "./e2e",
   fullyParallel: false,
   workers: 1,

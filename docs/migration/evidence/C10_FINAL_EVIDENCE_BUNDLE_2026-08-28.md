@@ -1,8 +1,8 @@
 # C10 最终候选证据快照（2026-08-28）
 
-状态：实现 checkpoint `c63a403688b6d148afa65fba9e1461c7ebcd3331` 的本地门禁、四目标原生候选、required CI、aggregate、C10 脱敏 bundle 和 source `1.0.0` 已闭合，CI 结论为 `ci-verified-not-release`。Draft PR #90 仍为 Open/Draft、未合入 `main`；真实 WSL UNC、真实 Beta、合入后 `main` 复验、签名、公证、生产更新升级和独立发布授权未闭合。因此 Phase 6/C10 仍为 Pending，不构成 Beta、Stable、公开替代或发布声明。
+状态：`c63a403688b6d148afa65fba9e1461c7ebcd3331` checkpoint 的本地门禁、四目标原生候选、required CI、aggregate、C10 脱敏 bundle 和 source `1.0.0` 已闭合，CI 结论为 `ci-verified-not-release`。Draft PR #90 仍为 Open/Draft、未合入 `main`；真实 WSL UNC、真实 Beta、合入后 `main` 复验、签名、公证、生产更新升级和独立发布授权未闭合。因此 Phase 6/C10 仍为 Pending，不构成 Beta、Stable、公开替代或发布声明。
 
-本文是 2026-08-28 的当前候选快照；[2026-08-27 证据](C10_FINAL_EVIDENCE_BUNDLE_2026-08-27.md) 保留当时本地 Windows checkpoint 的历史事实，不回写成后续结果。
+本文是 `c63a403` 的静态候选证据快照，不追踪后续 source head；PR #90 的最新 source-head C10 证据只以最新成功 `c10-evidence-bundle` artifact 为准。这样可避免为记录新 SHA 再产生新 commit、进而再次改变被证明的 SHA。[2026-08-27 证据](C10_FINAL_EVIDENCE_BUNDLE_2026-08-27.md) 同样只保留当时本地 Windows checkpoint 的历史事实。
 
 ## 绑定对象
 
@@ -45,13 +45,13 @@ CI 测试的是 GitHub 为 PR #90 生成的 merge ref；C10 bundle 同时记录 
 ## V1 候选角色与公开发行边界
 
 - V1 候选按批准的 C10 目标，在 Electron 界面和迁移文档中显示“新版主桌面端候选”，并把保留且继续构建/测试的 .NET Windows/macOS 实现标记为交接后的 Legacy fallback。
-- 该候选标识不等于 Electron 已经公开替代 .NET，也不把 Phase 6 标为 Completed。当前 [GitHub Release v0.4.1](https://github.com/Dailin521/codex-provider-sync/releases/tag/v0.4.1) 仍只提供 .NET Windows 资产；Electron 没有公开下载或生产更新通道。
-- .NET 实现未删除、未停止关键 CI，仍是当前公开桌面兼容依据。即使未来稳定版交接完成，也至少保留两个维护周期；删除属于后续独立 Phase 7/PR。
+- 该候选标识不等于 Electron 已经公开替代 .NET，也不把 Phase 6 标为 Completed。本快照生成时，[GitHub Release v0.4.1](https://github.com/Dailin521/codex-provider-sync/releases/tag/v0.4.1) 仍只提供 .NET Windows 资产；Electron 没有公开下载或生产更新通道。
+- .NET 实现未删除、未停止关键 CI，是本快照生成时的公开桌面兼容依据。即使未来稳定版交接完成，也至少保留两个维护周期；删除属于后续独立 Phase 7/PR。
 
 ## 尚未闭合与停止边界
 
-1. **真实 WSL UNC：**本机只注册 Ubuntu WSL2，但其 `ext4.vhdx` 缺失，启动报 `CreateInstance/MountDisk/HCS/ERROR_FILE_NOT_FOUND`。真实 WSL 用例保持明确 Skip；不得用模拟 UNC 替代，也不得在未授权时 unregister/reinstall 发行版。
-2. **真实 Beta：**尚无真实用户 Beta 反馈和受控历史正式 Release backup 实物回归，不能外推为用户环境稳定性。
+1. **真实 WSL UNC：**本快照环境只注册 Ubuntu WSL2，但其 `ext4.vhdx` 缺失，启动报 `CreateInstance/MountDisk/HCS/ERROR_FILE_NOT_FOUND`。没有与 source commit 绑定的健康 Windows+WSL strict artifact 时，该项保持 Pending；不得用模拟 UNC 或代码开关替代，也不得在未授权时 unregister/reinstall 发行版。
+2. **真实 Beta 与历史发布物：**本快照时尚无真实用户 Beta 反馈或受控历史正式 Release binary backup 实物回归，不能外推为用户环境稳定性。后续 tag-source synthetic evidence 也只能证明冻结仓库 tag 的格式兼容，不能替代 hosted formal Release binary 或真实用户数据。
 3. **受保护 `main`：**PR #90 未合并且明确禁止合并。获授权合并后，必须在实际 `main` SHA 重跑全部 applicable jobs 并生成新的 C10 bundle。
 4. **签名与更新：**Windows signing、Apple Developer ID/Notarization、生产 update metadata/download/restart 和跨版本升级验证均未执行。
 5. **发布授权：**未创建 tag，未发布 npm/GitHub Release，未签名、公证或写生产更新通道；本证据不授予这些权限。

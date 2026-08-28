@@ -85,6 +85,43 @@ async function sqliteFileDigests(stateDbPath) {
   ]));
 }
 
+function createSyntheticStateDatabase(stateDbPath, provider, model) {
+  const database = new DatabaseSync(stateDbPath);
+  try {
+    database.exec(`
+      CREATE TABLE threads (
+        id TEXT PRIMARY KEY,
+        model_provider TEXT,
+        cwd TEXT NOT NULL DEFAULT '',
+        archived INTEGER NOT NULL DEFAULT 0,
+        first_user_message TEXT NOT NULL DEFAULT '',
+        model TEXT,
+        has_user_event INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT 0,
+        updated_at_ms INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+    database.prepare(`
+      INSERT INTO threads (
+        id, model_provider, cwd, archived, first_user_message, model,
+        has_user_event, updated_at, updated_at_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      "c7-desktop-session",
+      provider,
+      "C:\\synthetic\\desktop-project",
+      0,
+      "",
+      model,
+      1,
+      1787702400,
+      1787702400000
+    );
+  } finally {
+    database.close();
+  }
+}
+
 function readSessionMeta(text) {
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -116,6 +153,8 @@ export async function createDesktopSyncSwitchFixture() {
     "rollout-c7-desktop.jsonl"
   );
   const stateDbPath = path.join(codexHome, "sqlite", "state_5.sqlite");
+  const targetSqliteHome = path.join(fixtureRoot, "relocation-target-sqlite");
+  const targetStateDbPath = path.join(targetSqliteHome, "state_5.sqlite");
   const configPath = path.join(codexHome, "config.toml");
   const globalStatePath = path.join(codexHome, ".codex-global-state.json");
   const globalStateBackupPath = `${globalStatePath}.bak`;
@@ -138,7 +177,24 @@ export async function createDesktopSyncSwitchFixture() {
   await fs.mkdir(path.dirname(rolloutPath), { recursive: true });
   await fs.mkdir(path.join(codexHome, "archived_sessions"), { recursive: true });
   await fs.mkdir(path.dirname(stateDbPath), { recursive: true });
+  await fs.mkdir(targetSqliteHome, { recursive: true });
   await fs.mkdir(userData, { recursive: true });
+  await fs.writeFile(path.join(userData, "profiles.v1.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    profiles: [
+      {
+        id: "relocation-target",
+        name: "Relocation target",
+        codexHome,
+        sqliteHome: targetSqliteHome
+      },
+      {
+        id: "no-sqlite-target",
+        name: "No SQLite target",
+        codexHome
+      }
+    ]
+  }, null, 2)}\n`, "utf8");
   await fs.writeFile(
     configPath,
     [
@@ -183,40 +239,8 @@ export async function createDesktopSyncSwitchFixture() {
       payload: { type: "user_message", message: "C7_DESKTOP_BODY_ONLY_MARKER" }
     }
   ].map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf8");
-  const database = new DatabaseSync(stateDbPath);
-  try {
-    database.exec(`
-      CREATE TABLE threads (
-        id TEXT PRIMARY KEY,
-        model_provider TEXT,
-        cwd TEXT NOT NULL DEFAULT '',
-        archived INTEGER NOT NULL DEFAULT 0,
-        first_user_message TEXT NOT NULL DEFAULT '',
-        model TEXT,
-        has_user_event INTEGER NOT NULL DEFAULT 0,
-        updated_at INTEGER NOT NULL DEFAULT 0,
-        updated_at_ms INTEGER NOT NULL DEFAULT 0
-      );
-    `);
-    database.prepare(`
-      INSERT INTO threads (
-        id, model_provider, cwd, archived, first_user_message, model,
-        has_user_event, updated_at, updated_at_ms
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      "c7-desktop-session",
-      "legacy-provider",
-      "C:\\synthetic\\desktop-project",
-      0,
-      "",
-      "legacy-model",
-      1,
-      1787702400,
-      1787702400000
-    );
-  } finally {
-    database.close();
-  }
+  createSyntheticStateDatabase(stateDbPath, "legacy-provider", "legacy-model");
+  createSyntheticStateDatabase(targetStateDbPath, "target-before", "target-model");
   let closed = false;
   return {
     fixtureRoot,
@@ -224,8 +248,14 @@ export async function createDesktopSyncSwitchFixture() {
     userData,
     rolloutPath,
     stateDbPath,
+    targetSqliteHome,
+    targetStateDbPath,
     configPath,
     gateMarkerPath,
+    async snapshotSqlite(databasePath = stateDbPath) {
+      const value = sqliteCanonicalState(databasePath);
+      return { ...value, hash: digest(JSON.stringify(value)) };
+    },
     async snapshotTargets() {
       const value = {
         config: await fileDigest(configPath),

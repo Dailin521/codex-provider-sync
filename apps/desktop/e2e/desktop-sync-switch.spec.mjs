@@ -573,8 +573,15 @@ for (const scenario of [
 }
 
 test("Windows WSL UNC storage is rejected with every protected hash unchanged", async () => {
+  const requireRealWsl = process.env.CPS_REQUIRE_REAL_WSL === "1";
+  if (process.platform !== "win32" && requireRealWsl) {
+    throw new Error("CPS_REQUIRE_REAL_WSL=1 requires a Windows test process with a real WSL distribution.");
+  }
   test.skip(process.platform !== "win32", "WSL UNC is a Windows-only safety boundary.");
   const distro = await findWslDistro();
+  if (!distro && requireRealWsl) {
+    throw new Error("CPS_REQUIRE_REAL_WSL=1 but no runnable WSL distribution is available.");
+  }
   test.skip(!distro, "No runnable WSL distribution is available on this machine.");
   const fixture = await createDesktopSyncSwitchFixture();
   let electronApp;

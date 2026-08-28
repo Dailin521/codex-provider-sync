@@ -46,10 +46,23 @@
 
 独立安全复核在新增三项补丁后重读 Node/.NET Restore binding 与 Electron restart admission gate，未发现新增或遗留的 P0/P1/P2。
 
+## 2026-08-28 后续 source-head hardening（不回写旧 checkpoint 结论）
+
+以下变更发生在本文原始 `1ec27a5` 证据之后；它们必须由 PR #90 最新 source head 的成功 C10 artifact 重新绑定，不能把上表旧计数当作新 head 证据：
+
+- 未授权 Electron 候选由 Main 编译期 `releaseAuthorized=false` 固定为 `disabled/not-authorized`；定时检查、check/download/install 均不会创建 updater port 或触发网络。未来只有另行获授权的正式构建入口才可显式置 true。
+- 安装 restart gate 排空写请求后，Main 通过既有 Utility `getWatchStatus` 再次验证 Watch；自动停止造成的 stale ownership 会被清除，查询失败或仍 active 时继续 fail closed。外部 CLI/Web/Watch 尚未共享该 Main 内准入门，生产更新授权前仍需独立的跨运行时 maintenance lease 协议与竞争测试。
+- Core Watch 以物理 Codex Home 去重并处理并发 start，停止后释放 scope，stopped registry 有界；Diagnostics capability 为 5 分钟/最多 32 个、规范化目标独占、写入时按父目录 realpath 排除物理路径别名并发、可 revoke、单次并发消费。
+- Electron Restore 页面以不泄露路径的 `sqliteHomeConfigured` 选择可信目标；新增隐藏窗口真实 UI→Preload→Main→Utility→Core 的 database-only relocation 回归，断言 source config/rollout/source DB 不变、目标 DB 恢复，并拒绝无显式 SQLite Home 的 target。
+- `CPS_REQUIRE_REAL_WSL=1` 只把环境缺失从 Skip 提升为失败，并把 main/WAL/SHM/journal 的存在性和 Hash 全部纳入脚本复核；它不是实机通过证据。
+
+本次聚焦验证为 Desktop contracts/unit `71/71`、隐藏 Electron relocation `1/1`、历史 tag-source backup Restore `1/1`。完整 root/workspace/Web/Electron/.NET/候选矩阵与远端 CI 在新 checkpoint 提交后重跑。
+
 ## 未闭合项与后续 TODO
 
 - `wsl.exe --list --quiet` 可见 Ubuntu，但启动返回 `Wsl/Service/CreateInstance/MountDisk/HCS/ERROR_FILE_NOT_FOUND`，发行版 `ext4.vhdx` 缺失。真实 WSL UNC 场景是明确原因的 expected skip，不是通过；修复后或远端 Windows runner 必须重跑全部受保护 Hash 不变验证。
 - 本地 Windows 不能替代远端 Windows/macOS/Linux required CI；macOS/Linux Runtime、锁语义和 unpacked app 证据仍为 Pending。C5/C6/C7 前置 checkpoint 也尚未因 required CI/最终合入而闭合，因此 C8/Phase 5 不标记 In Progress 或 Completed。
 - C9 仍负责 Windows x64 NSIS/portable ZIP、macOS x64/arm64 DMG/ZIP、Linux x64 AppImage/deb、Electron ABI native SQLite fallback、`asarUnpack`、SBOM/checksum、最终包扫描和各平台安装/解包 smoke。当前 `--dir` 不能替代这些证据。
 - 当前 Update controller 单测和门禁通过不等于更新通道已上线。真实 metadata、签名、公证、下载、重启升级和发布授权仍未发生。
+- Main restart gate 不覆盖同时启动的外部 CLI/Web/Watch 进程。正式启用生产更新前必须把 maintenance admission 变成所有 Node/.NET 写入口共同遵守的跨运行时协议；不得用 Main 私有锁或一次 Status 检查宣称该竞态已关闭。
 - 本 checkpoint 未创建 tag，未发布 npm/GitHub Release，未签名、公证或写更新通道；.NET 保持可构建且未删除，不能据跨运行时 9/9 宣称 Legacy 已可移除。
