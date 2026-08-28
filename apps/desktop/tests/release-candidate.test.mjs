@@ -38,8 +38,8 @@ test("candidate identity is injected without mutating the source package version
   assert.throws(() => resolveCandidateBuild({ channel: "rc", runNumber: -1, sha: "0123456", target: "windows-x64" }));
   const rootManifest = JSON.parse(await read("package.json"));
   const desktopManifest = JSON.parse(await read("apps/desktop/package.json"));
-  assert.equal(rootManifest.version, "0.5.0");
-  assert.equal(desktopManifest.version, "0.0.0");
+  assert.equal(rootManifest.version, "1.0.0");
+  assert.equal(desktopManifest.version, "1.0.0");
   assert.equal(rootManifest.optionalDependencies["better-sqlite3"], "8.7.0");
   assert.equal(desktopManifest.dependencies["better-sqlite3"], "13.0.3");
   assert.equal(desktopManifest.homepage, "https://github.com/Dailin521/codex-provider-sync#readme");

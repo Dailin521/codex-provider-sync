@@ -1,6 +1,6 @@
 {
   "name": "@codex-provider-sync/desktop",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "description": "vNext Electron desktop host for codex-provider-sync.",
   "homepage": "https://github.com/Dailin521/codex-provider-sync#readme",
   "author": "Dailin521",
