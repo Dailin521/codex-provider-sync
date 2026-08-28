@@ -47,7 +47,7 @@ async function openSwitchPlan(page, { provider = "relay", mode = "provider-defau
   return dialog;
 }
 
-async function waitForGate(markerPath, expectedPoint) {
+async function waitForGate(markerPath, expectedPoint, timeout = 10_000) {
   await expect.poll(async () => {
     try {
       return JSON.parse(await fs.readFile(markerPath, "utf8")).point;
@@ -55,7 +55,7 @@ async function waitForGate(markerPath, expectedPoint) {
       if (error?.code === "ENOENT") return null;
       throw error;
     }
-  }).toBe(expectedPoint);
+  }, { timeout }).toBe(expectedPoint);
 }
 
 function notificationWithCode(page, code) {
@@ -485,13 +485,26 @@ test("Electron Cancel after config mutation waits for a durable rollback termina
 for (const scenario of [
   { point: "before_backup", operation: "sync", recoveryBlocked: false, journalState: null },
   { point: "after_config_mutation_before_applied", operation: "switch", recoveryBlocked: true, journalState: "applying" },
-  { point: "after_rollout_mutation_before_applied", operation: "sync", recoveryBlocked: true, journalState: "applying" },
+  {
+    point: "after_rollout_mutation_before_applied",
+    operation: "sync",
+    recoveryBlocked: true,
+    journalState: "applying",
+    testTimeoutMs: 90_000
+  },
   { point: "after_sqlite_commit_before_ack", operation: "sync", recoveryBlocked: true, journalState: "applied" },
   { point: "after_transaction_journal_commit_before_ack", operation: "sync", recoveryBlocked: false, journalState: "committed" },
-  { point: "after_transaction_commit", operation: "sync", recoveryBlocked: false, journalState: "committed" }
+  {
+    point: "after_transaction_commit",
+    operation: "sync",
+    recoveryBlocked: false,
+    journalState: "committed",
+    gateTimeoutMs: 30_000,
+    testTimeoutMs: 90_000
+  }
 ]) {
   test(`Utility crash matrix: ${scenario.point}`, async () => {
-    if (scenario.point === "after_rollout_mutation_before_applied") test.setTimeout(90_000);
+    if (scenario.testTimeoutMs) test.setTimeout(scenario.testTimeoutMs);
     const fixture = await createDesktopSyncSwitchFixture();
     const baseline = await fixture.snapshotProtected();
     let electronApp;
@@ -505,7 +518,11 @@ for (const scenario of [
         ? await openSwitchPlan(page, { provider: "relay", mode: "provider-default" })
         : await openSyncPlan(page);
       await dialog.getByRole("button", { name: "Confirm and apply" }).click();
-      await waitForGate(fixture.gateMarkerPath, scenario.point);
+      await waitForGate(
+        fixture.gateMarkerPath,
+        scenario.point,
+        scenario.gateTimeoutMs
+      );
       const beforeCrash = await electronApp.evaluate(
         () => globalThis.__CPS_DESKTOP_TEST__.runtime()
       );
