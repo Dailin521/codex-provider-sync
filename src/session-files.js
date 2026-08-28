@@ -41,14 +41,14 @@ function wrapRolloutFileBusyError(error, filePath, action) {
 }
 
 async function getFileSnapshot(filePath) {
-  const stat = await fsp.stat(filePath);
-  const identity = await fsp.stat(filePath, { bigint: true });
+  const stat = await fsp.stat(filePath, { bigint: true });
   return {
-    size: stat.size,
-    mtimeMs: stat.mtimeMs,
-    mode: stat.mode,
-    dev: String(identity.dev),
-    ino: String(identity.ino)
+    size: Number(stat.size),
+    mtimeMs: Number(stat.mtimeNs) / 1e6,
+    mode: Number(stat.mode),
+    nlink: Number(stat.nlink),
+    dev: String(stat.dev),
+    ino: String(stat.ino)
   };
 }
 
@@ -75,60 +75,6 @@ function emptyEncryptedContentCounts() {
 
 function incrementPlainCount(counts, directory, provider) {
   counts[directory][provider] = (counts[directory][provider] ?? 0) + 1;
-}
-
-function streamContainsText(filePath, text, startOffset) {
-  const needle = Buffer.from(text);
-  const safeStartOffset = Math.max(0, startOffset ?? 0);
-
-  return new Promise((resolve, reject) => {
-    let previous = Buffer.alloc(0);
-    let settled = false;
-    const stream = fs.createReadStream(filePath, {
-      start: safeStartOffset,
-      highWaterMark: ROLLOUT_SCAN_CHUNK_BYTES
-    });
-
-    function settle(value, error) {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      if (error) {
-        reject(wrapRolloutFileBusyError(error, filePath, "scan"));
-        return;
-      }
-      resolve(value);
-    }
-
-    stream.on("data", (chunk) => {
-      const buffer = previous.length ? Buffer.concat([previous, chunk]) : chunk;
-      if (buffer.indexOf(needle) !== -1) {
-        settle(true);
-        stream.destroy();
-        return;
-      }
-
-      const keepBytes = Math.max(0, needle.length - 1);
-      previous = keepBytes > 0
-        ? buffer.subarray(Math.max(0, buffer.length - keepBytes))
-        : Buffer.alloc(0);
-    });
-    stream.on("end", () => settle(false));
-    stream.on("error", (error) => {
-      if (settled) {
-        return;
-      }
-      settle(false, error);
-    });
-  });
-}
-
-async function fileHasEncryptedContent(filePath, firstLine, startOffset) {
-  if (firstLine.includes("encrypted_content")) {
-    return true;
-  }
-  return streamContainsText(filePath, "encrypted_content", startOffset);
 }
 
 function recordHasUserEvent(record) {
@@ -179,47 +125,6 @@ function toDesktopWorkspacePath(value) {
   return value;
 }
 
-async function fileHasUserEvent(filePath, firstLine, startOffset) {
-  try {
-    if (recordHasUserEvent(JSON.parse(firstLine))) {
-      return true;
-    }
-  } catch {
-    // Keep scanning the rest of the rollout below.
-  }
-
-  const stream = fs.createReadStream(filePath, {
-    encoding: "utf8",
-    start: Math.max(0, startOffset ?? 0),
-    highWaterMark: ROLLOUT_SCAN_CHUNK_BYTES
-  });
-  const lines = readline.createInterface({
-    input: stream,
-    crlfDelay: Infinity
-  });
-
-  try {
-    for await (const line of lines) {
-      if (!line) {
-        continue;
-      }
-      try {
-        if (recordHasUserEvent(JSON.parse(line))) {
-          return true;
-        }
-      } catch {
-        // Ignore malformed non-metadata lines; provider sync only needs positive evidence.
-      }
-    }
-    return false;
-  } catch (error) {
-    throw wrapRolloutFileBusyError(error, filePath, "scan");
-  } finally {
-    lines.close();
-    stream.destroy();
-  }
-}
-
 async function listJsonlFiles(rootDir) {
   const entries = await fsp.readdir(rootDir, { withFileTypes: true });
   entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
@@ -237,11 +142,16 @@ async function listJsonlFiles(rootDir) {
   return files;
 }
 
-async function readFirstLineRecordFromHandle(handle) {
+async function readFirstLineRecordFromHandle(handle, maxBytes = Infinity) {
   let position = 0;
   let collected = Buffer.alloc(0);
   while (true) {
-    const chunk = Buffer.alloc(64 * 1024);
+    if (position >= maxBytes) {
+      const error = new Error("Fast mode requires a session metadata header smaller than 1 MiB; use full sync.");
+      error.code = "FAST_MODE_UNSUPPORTED";
+      throw error;
+    }
+    const chunk = Buffer.alloc(Math.min(64 * 1024, maxBytes - position));
     const { bytesRead } = await handle.read(chunk, 0, chunk.length, position);
     if (bytesRead === 0) {
       break;
@@ -266,11 +176,11 @@ async function readFirstLineRecordFromHandle(handle) {
   };
 }
 
-async function readFirstLineRecord(filePath) {
+async function readFirstLineRecord(filePath, maxBytes) {
   let handle;
   try {
     handle = await fsp.open(filePath, "r");
-    return await readFirstLineRecordFromHandle(handle);
+    return await readFirstLineRecordFromHandle(handle, maxBytes);
   } catch (error) {
     throw wrapRolloutFileBusyError(error, filePath, "read");
   } finally {
@@ -293,44 +203,24 @@ function parseSessionMetaRecord(firstLine) {
   }
 }
 
-// Scan the start of a rollout file looking for the first `turn_context`
-// event and return its `payload.model` field. This is the field that the
-// Codex GUI bottom-right uses to label old conversations, so we have to
-// rewrite it (along with `payload.collaboration_mode.settings.model`) on
-// every sync in addition to the per-thread SQLite `model` column.
-//
-// We stream line-by-line because individual `turn_context` lines can
-// easily exceed 64 KB once Codex includes the `developer_instructions`
-// blob — the previous code that capped the read at 64 KB silently
-// missed those, which made the rollout model rewrite a no-op for
-// sessions whose first turn was a long planning step. We stop as
-// soon as we find a `turn_context` line, so the scan is O(1) for the
-// common case and we never load multi-MB rollouts into memory just
-// to read a header.
-//
-// For each line we find, we do a regex on the raw text instead of
-// `JSON.parse`-ing the entire payload: Codex writes opaque multi-KB
-// strings (`developer_instructions`, raw tool output, …) into the
-// payload, and round-tripping those through `JSON.parse` -> `JSON.stringify`
-// would silently mangle embedded escape sequences. Anchoring on
-// `"type":"turn_context"` and grabbing the first `"model":"<value>"`
-// that follows is enough for the first `turn_context` of the file,
-// because rollout lines are single JSON objects.
+// One streaming pass supplies all body-dependent diagnostics and model undo
+// evidence. Keep the existing detection rules; never reserialize message data.
 const ROLLOUT_TURNCONTEXT_TYPE_RE = /"type"\s*:\s*"turn_context"/;
 
-async function readTurnContextModelSnapshot(
+async function scanRolloutBody(
   rolloutPath,
-  { firstLineOffset, firstLineLength, targetModel = null } = {}
+  { firstLine, firstLineLength, targetModel = null } = {}
 ) {
-  const headerSkip = Math.max(0, firstLineOffset ?? 0);
   const headerLength = Math.max(0, firstLineLength ?? 0);
   const models = [];
   const originalTurnContextModels = [];
+  let hasEncryptedContent = firstLine.includes("encrypted_content");
+  let hasUserEvent = recordHasUserEvent(JSON.parse(firstLine));
   let lineIndex = 0;
 
   const stream = fs.createReadStream(rolloutPath, {
     encoding: "utf8",
-    start: headerSkip + headerLength,
+    start: headerLength,
     highWaterMark: ROLLOUT_SCAN_CHUNK_BYTES
   });
   const lines = readline.createInterface({
@@ -341,6 +231,11 @@ async function readTurnContextModelSnapshot(
   try {
     for await (const line of lines) {
       lineIndex += 1;
+      hasEncryptedContent ||= line.includes("encrypted_content");
+      if (!hasUserEvent) {
+        try { hasUserEvent = recordHasUserEvent(JSON.parse(line)); }
+        catch { /* Malformed body lines provide no positive user-event evidence. */ }
+      }
       if (!line.includes('"turn_context"')) {
         continue;
       }
@@ -368,7 +263,7 @@ async function readTurnContextModelSnapshot(
         }
       }
     }
-    return { models, originalTurnContextModels };
+    return { models, originalTurnContextModels, hasEncryptedContent, hasUserEvent };
   } catch (error) {
     throw wrapRolloutFileBusyError(error, rolloutPath, "read");
   } finally {
@@ -501,9 +396,8 @@ const SAFE_IN_PLACE_PROVIDER_ID_RE = /^[A-Za-z0-9._-]+$/;
 const PROVIDER_MUTATION_STRATEGY = "provider_bytes_in_place";
 
 function getInPlaceProviderMutation(change) {
-  // POSIX pilot: Windows keeps its existing exclusive replacement worker
-  // until its file-ID and crash-recovery implementation is platform-tested.
-  if (process.platform === "win32" || !change
+  if (!change
+      || (change.originalNlink !== undefined && change.originalNlink !== 1)
       || change.modelRewriteRequired
       || change.modelOnlyChange
       || typeof change.originalFirstLine !== "string"
@@ -657,25 +551,20 @@ async function writeBytesFully(handle, bytes, position, writeImpl) {
 async function finishInPlaceWrite(handle, entry, expectedBytes, options = {}) {
   const mutation = entry.mutation ?? entry.inPlaceMutation;
   await (options.inPlaceSync ?? ((h) => h.sync()))(handle);
-  const actual = await readBytesFully(handle, expectedBytes.length, mutation.byteOffset);
-  if (!actual?.equals(expectedBytes)) {
+  const expected = Buffer.from(entry.originalFirstLine + entry.originalSeparator, "utf8");
+  expectedBytes.copy(expected, mutation.byteOffset);
+  const actual = await readBytesFully(handle, expected.length, 0);
+  if (!actual?.equals(expected) || (await handle.stat()).size < mutation.originalSize) {
     throw new Error(`Provider in-place write verification failed: ${entry.path}`);
   }
-  const stat = await handle.stat();
   await assertInPlaceIdentity(handle, entry.path, mutation);
-  // Never reset an append-only writer's new timestamp or truncate its tail.
-  if (stat.size === mutation.originalSize) {
-    await handle.utimes(stat.atime, mutation.originalMtimeMs / 1000);
-    await handle.sync();
-  } else if (options.previousStat?.size === stat.size) {
-    await handle.utimes(stat.atime, options.previousStat.mtimeMs / 1000);
-    await handle.sync();
-  }
+  // POSIX has no exclusive handle here. Even stat followed by utimes races an
+  // append, so retain the actual write time instead of overwriting newer mtime.
 }
 
 async function assertInPlaceIdentity(handle, filePath, mutation) {
   const [opened, current] = await Promise.all([handle.stat({ bigint: true }), fsp.lstat(filePath, { bigint: true })]);
-  if (!current.isFile() || current.isSymbolicLink()
+  if (!current.isFile() || current.isSymbolicLink() || opened.nlink !== 1n
       || String(opened.dev) !== mutation.originalDev || String(opened.ino) !== mutation.originalIno
       || opened.dev !== current.dev || opened.ino !== current.ino) {
     throw new Error(`Rollout identity changed before provider byte access: ${filePath}`);
@@ -699,7 +588,7 @@ function isRecoverableProviderBytes(current, original, replacement) {
   return true;
 }
 
-async function restoreProviderOnHandle(handle, entry, options = {}) {
+async function inspectProviderRecovery(handle, entry) {
   const mutation = entry.mutation ?? entry.inPlaceMutation;
   const { originalBytes, replacementBytes } = validateProviderMutationDescriptor(
     mutation, entry.path, entry.originalFirstLine, entry.originalSeparator);
@@ -717,10 +606,22 @@ async function restoreProviderOnHandle(handle, entry, options = {}) {
       || !isRecoverableProviderBytes(current, originalBytes, replacementBytes)) {
     throw new Error(`Unknown rollout bytes during provider recovery: ${entry.path}`);
   }
+  return { current, originalBytes };
+}
+
+export async function validateProviderByteRestore(entry) {
+  const handle = await fsp.open(entry.path, "r");
+  try { await inspectProviderRecovery(handle, entry); }
+  finally { await handle.close(); }
+}
+
+async function restoreProviderOnHandle(handle, entry, options = {}) {
+  const mutation = entry.mutation ?? entry.inPlaceMutation;
+  const { current, originalBytes } = await inspectProviderRecovery(handle, entry);
   if (!current.equals(originalBytes)) {
     await writeBytesFully(handle, originalBytes, mutation.byteOffset, options.inPlaceRestoreWrite ?? defaultInPlaceWrite);
   }
-  await finishInPlaceWrite(handle, entry, originalBytes, { previousStat: stat });
+  await finishInPlaceWrite(handle, entry, originalBytes);
 }
 
 async function tryRewriteProviderInPlace(change, options = {}) {
@@ -736,11 +637,10 @@ async function tryRewriteProviderInPlace(change, options = {}) {
       return "SKIP_CHANGED";
     }
     handle = await fsp.open(change.path, "r+");
-    const stat = await handle.stat();
     const identity = await handle.stat({ bigint: true });
     const snapshot = {
-      size: stat.size,
-      mtimeMs: stat.mtimeMs,
+      size: Number(identity.size),
+      mtimeMs: Number(identity.mtimeNs) / 1e6,
       dev: String(identity.dev),
       ino: String(identity.ino)
     };
@@ -817,6 +717,10 @@ const WINDOWS_EXCLUSIVE_REWRITE_WORKER_SCRIPT = `
   [Console]::InputEncoding = $utf8
   [Console]::OutputEncoding = $utf8
 
+  Add-Type -TypeDefinition @'
+${fs.readFileSync(new URL("./windows-provider-bytes.cs", import.meta.url), "utf8")}
+'@
+
   function Write-ProtocolMessage($value) {
     $json = $value | ConvertTo-Json -Compress -Depth 8
     [Console]::Out.WriteLine($json)
@@ -872,6 +776,16 @@ const WINDOWS_EXCLUSIVE_REWRITE_WORKER_SCRIPT = `
           return "SKIP_BUSY"
         }
         return "SKIP_CHANGED"
+      }
+
+      if ($null -ne $change.inPlaceMutation) {
+        $m = $change.inPlaceMutation
+        $header = $encoding.GetBytes([string]$change.originalFirstLine + [string]$change.originalSeparator)
+        return [ProviderByteFile]::Apply($source, $header,
+          [Convert]::FromBase64String([string]$m.originalBase64),
+          [Convert]::FromBase64String([string]$m.replacementBase64),
+          [int]$m.byteOffset, [long]$m.originalSize, [double]$m.originalMtimeMs,
+          [string]$m.originalDev, [string]$m.originalIno, [bool]$change.restoreProviderBytes)
       }
 
       if ([bool]$change.requireOriginalMatch) {
@@ -1119,6 +1033,10 @@ export async function createWindowsExclusiveRewriteWorker(options = {}) {
       if (!change || typeof change.path !== "string" || !path.isAbsolute(change.path)) {
         throw new Error(`Windows rewrite worker requires an absolute rollout path: ${change?.path ?? "(missing)"}`);
       }
+      if (change.inPlaceMutation) {
+        validateProviderMutationDescriptor(change.inPlaceMutation, change.path,
+          change.originalFirstLine, change.originalSeparator);
+      }
 
       const id = nextRequestId;
       nextRequestId += 1;
@@ -1136,7 +1054,8 @@ export async function createWindowsExclusiveRewriteWorker(options = {}) {
             || response?.type !== "result"
             || response?.id !== id
             || response?.path !== change.path
-            || !isValidWindowsRewriteResult(response?.result)) {
+            || !isValidWindowsRewriteResult(response?.result)
+            || (change.inPlaceMutation && response.result === "APPLIED")) {
           throw new Error(`Unexpected Windows rewrite worker response for ${change.path}: ${JSON.stringify(response)}`);
         }
         return response.result;
@@ -1521,16 +1440,20 @@ async function findLockedFilesOnWindows(filePaths) {
 export async function collectSessionChanges(codexHome, targetProvider, options = {}) {
   const {
     skipLockedReads = false,
-    targetModel = null
+    targetModel = null,
+    fast = false
   } = options;
+  if (typeof fast !== "boolean" || (fast && targetModel !== null)) {
+    throw new Error("Fast mode requires a boolean fast option and no historical model rewrite.");
+  }
   const summaries = [];
   const lockedPaths = [];
   const providerCounts = {
     sessions: new Map(),
     archived_sessions: new Map()
   };
-  const encryptedContentCounts = emptyEncryptedContentCounts();
-  const userEventThreadIds = new Set();
+  const encryptedContentCounts = fast ? null : emptyEncryptedContentCounts();
+  const userEventThreadIds = fast ? null : new Set();
   const threadCwdById = new Map();
 
   for (const dirName of SESSION_DIRS) {
@@ -1546,7 +1469,7 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
       let scanStart;
       try {
         scanStart = await getFileSnapshot(rolloutPath);
-        record = await readFirstLineRecord(rolloutPath);
+        record = await readFirstLineRecord(rolloutPath, fast ? 1024 * 1024 : undefined);
       } catch (error) {
         if (skipLockedReads && isRolloutFileBusyError(error)) {
           lockedPaths.push(rolloutPath);
@@ -1556,6 +1479,11 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
       }
       const parsed = parseSessionMetaRecord(record.firstLine);
       if (!parsed) {
+        if (fast) {
+          const error = new Error(`Fast mode cannot validate session metadata: ${rolloutPath}`);
+          error.code = "FAST_MODE_UNSUPPORTED";
+          throw error;
+        }
         continue;
       }
       const currentProvider = parsed.payload.model_provider ?? "(missing)";
@@ -1566,11 +1494,15 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
           && parsed.payload.cwd.trim()) {
         threadCwdById.set(parsed.payload.id, toDesktopWorkspacePath(parsed.payload.cwd));
       }
+      let modelSnapshot = { models: [], originalTurnContextModels: [] };
       try {
-        if (await fileHasEncryptedContent(rolloutPath, record.firstLine, record.offset)) {
+        if (!fast) modelSnapshot = await scanRolloutBody(rolloutPath, {
+          firstLine: record.firstLine, firstLineLength: record.offset, targetModel
+        });
+        if (modelSnapshot.hasEncryptedContent) {
           incrementPlainCount(encryptedContentCounts, dirName, currentProvider);
         }
-        if (parsed.payload.id && await fileHasUserEvent(rolloutPath, record.firstLine, record.offset)) {
+        if (parsed.payload.id && modelSnapshot.hasUserEvent) {
           userEventThreadIds.add(parsed.payload.id);
         }
       } catch (error) {
@@ -1581,16 +1513,6 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
         throw error;
       }
 
-      // Peek at the first `turn_context` event to capture the
-      // per-turn model that the Codex GUI bottom-right reads. We
-      // keep this on the summary so the rewrite step knows what
-      // value to swap out, without making collectSessionChanges
-      // require a target model.
-      const modelSnapshot = await readTurnContextModelSnapshot(rolloutPath, {
-        firstLineOffset: 0,
-        firstLineLength: record.offset,
-        targetModel
-      });
       const currentModels = modelSnapshot.models;
       const originalModel = currentModels[0] ?? null;
 
@@ -1627,6 +1549,7 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
           originalMtimeMs: snapshot.mtimeMs,
           originalDev: snapshot.dev,
           originalIno: snapshot.ino,
+          originalNlink: snapshot.nlink,
           originalProvider: currentProvider,
           updatedProvider: targetProvider,
           originalModel,
@@ -1636,6 +1559,11 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
           updatedFirstLine: providerChanged ? JSON.stringify(parsed) : record.firstLine
         };
         change.inPlaceMutation = getInPlaceProviderMutation(change);
+        if (fast && !change.inPlaceMutation) {
+          const error = new Error(`Fast mode requires an unambiguous equal-length provider byte replacement: ${rolloutPath}. Run full sync explicitly for this file.`);
+          error.code = "FAST_MODE_UNSUPPORTED";
+          throw error;
+        }
         summaries.push(change);
       }
     }
@@ -1863,21 +1791,38 @@ export async function restoreSessionChanges(manifestEntries, options = {}) {
 
   const restoredPaths = [];
   const failures = [];
+  let windowsWorker = null;
+  async function restoreWindows(change) {
+    windowsWorker ??= await (options.windowsRewriteWorkerFactory ?? createWindowsExclusiveRewriteWorker)();
+    try {
+      return await windowsWorker.rewrite(change, { requireOriginalMatch: false });
+    } catch (error) {
+      await windowsWorker.close().catch(() => {});
+      windowsWorker = null;
+      throw error;
+    }
+  }
   for (const entry of manifestEntries) {
     try {
       await options.onBeforeRestore?.(entry);
       if (entry.mutation) {
         validateProviderMutationDescriptor(entry.mutation, entry.path, entry.originalFirstLine, entry.originalSeparator);
-        if (process.platform === "win32") throw new Error("POSIX provider-byte backups require recovery on their original POSIX host.");
-        await restoreProviderBytesInPlace(entry, options);
+        if (process.platform === "win32") {
+          const result = await restoreWindows({
+            ...entry, inPlaceMutation: entry.mutation, restoreProviderBytes: true
+          });
+          if (result !== "APPLIED_IN_PLACE") throw new Error(`Provider byte recovery failed: ${result}`);
+        } else {
+          await restoreProviderBytesInPlace(entry, options);
+        }
       } else if (!entry.modelOnlyChange) {
         if (process.platform === "win32") {
-          const [result] = await invokeWindowsExclusiveRewriteBatch([{
+          const result = await restoreWindows({
             path: entry.path,
             separator: entry.originalSeparator ?? "\n",
             updatedFirstLine: entry.originalFirstLine,
             originalMtimeMs: entry.originalMtimeMs
-          }], { requireOriginalMatch: false });
+          });
           if (result !== "APPLIED") {
             throw new Error(
               `Unable to rewrite rollout file because it is currently in use. Close Codex and the Codex app, then retry. Locked file: ${entry.path}`
@@ -1906,6 +1851,11 @@ export async function restoreSessionChanges(manifestEntries, options = {}) {
         ));
       }
     }
+  }
+
+  if (windowsWorker) {
+    try { await windowsWorker.close(); }
+    catch (error) { failures.push(error); }
   }
 
   if (failures.length > 0) {

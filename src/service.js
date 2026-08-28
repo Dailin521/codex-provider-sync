@@ -420,10 +420,14 @@ async function runSyncCore({
   sqliteBusyTimeoutMs,
   onProgress,
   model = null,
+  fast = false,
   platform,
   faultInjector,
   signal
 } = {}, { afterBackup } = {}) {
+  if (typeof fast !== "boolean" || (fast && model !== null)) {
+    throw new Error("Fast sync preserves historical models; do not supply a model.");
+  }
   if (!Number.isInteger(keepCount) || keepCount < 1) {
     throw new Error(`Invalid automatic keep count: ${keepCount}. Expected an integer greater than or equal to 1.`);
   }
@@ -459,9 +463,11 @@ async function runSyncCore({
       encryptedContentCounts,
       userEventThreadIds,
       threadCwdById
-    } = await collectSessionChanges(codexHome, targetProvider, { skipLockedReads: true, targetModel: model });
+    } = await collectSessionChanges(codexHome, targetProvider, { skipLockedReads: true, targetModel: model, fast });
     const cwdStats = await readThreadCwdStats(storage);
-    const encryptedContentWarning = buildEncryptedContentWarning(encryptedContentCounts, targetProvider);
+    const encryptedContentWarning = fast
+      ? "Fast mode: history models, user-event flags and encrypted content were not checked. Metadata alignment does not guarantee continuation with another provider."
+      : buildEncryptedContentWarning(encryptedContentCounts, targetProvider);
     emitProgress(onProgress, {
       stage: "scan_rollout_files",
       status: "complete",
@@ -501,7 +507,8 @@ async function runSyncCore({
       targetProvider,
       sessionChanges: writableChanges,
       configPath,
-      configBackupText
+      configBackupText,
+      fast
     });
     backupDurationMs = Date.now() - backupStartedAt;
     emitProgress(onProgress, {
@@ -710,6 +717,8 @@ async function runSyncCore({
         backupDir,
         backupDurationMs,
         changedSessionFiles: applyResult.appliedChanges,
+        inPlaceSessionFiles: applyResult.inPlaceChanges ?? 0,
+        ...(fast ? { scanScope: "metadata", unchecked: ["historyModels", "userEventFlags", "encryptedContent"] } : {}),
         skippedLockedRolloutFiles,
         sqliteRowsUpdated: sqliteResult.updatedRows,
         sqliteProviderRowsUpdated: sqliteResult.providerRowsUpdated,
@@ -881,12 +890,17 @@ export async function runSwitch({
   provider,
   model,
   keepRootModel = false,
+  fast = false,
   keepCount = DEFAULT_BACKUP_RETENTION_COUNT,
   onProgress,
   platform,
   faultInjector,
   signal
 }) {
+  if (typeof fast !== "boolean" || (fast && model !== undefined && model !== null)) {
+    throw new Error("Fast switch preserves root and historical models; --fast and --model cannot be combined.");
+  }
+  if (fast) keepRootModel = true;
   if (!provider) {
     throw new Error("Missing provider id. Usage: codex-provider switch <provider-id>");
   }
@@ -950,7 +964,8 @@ export async function runSwitch({
       configBackupText: originalConfigText,
       keepCount,
       onProgress,
-      model: modelForThreads,
+      model: fast ? null : modelForThreads,
+      fast,
       faultInjector,
       signal
     },

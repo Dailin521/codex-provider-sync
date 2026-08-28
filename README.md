@@ -107,6 +107,10 @@ codex-provider sync
 
 `switch` 默认会在目标 Provider section 定义了 `model` 时同步根级 `model`。使用 `--keep-root-model` 保留当前值，或使用 `--model <name>` 显式指定。
 
+本分支新增 `sync --fast` / `switch <provider-id> --fast`：只读 rollout 首行，保留模型，不检查历史用户消息和加密内容；不支持原地更新时在写入前报错，不自动全量重写。备份、事务和恢复检查仍然执行；新备份需兼容 v3 的工具恢复，旧 .NET GUI 不支持。详见[实现与兼容边界](docs/TRANSACTIONAL_IN_PLACE_PILOT.md)。
+
+建议使用统一长度的 ASCII Provider ID，优先 6 个字符（如将 `provider_a` 写作 `prov_a`），因为内置 `openai` 是 6 个字符，相对最通用；历史文件很多或很大时，不等长替换会重写整个 rollout、产生大量硬盘写入，等长且符合条件时可 in-place 替换。POSIX 原地路径保留实际写入 mtime，不回拨并发追加的时间；`updated_at` 不变。
+
 SQLite Home 解析顺序：`--sqlite-home` → `config.toml` 根级 `sqlite_home` → `CODEX_SQLITE_HOME` → `<Codex Home>/sqlite`。只有默认布局会回退到 `<Codex Home>/state_5.sqlite`。
 
 ## 当前架构

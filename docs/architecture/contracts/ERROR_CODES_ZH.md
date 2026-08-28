@@ -10,6 +10,8 @@
 
 ## 1. 目的
 
+本分支候选增量（未发布）：`FAST_MODE_UNSUPPORTED` 表示首行无效/超过快速读取上限，或待修改文件无法采用等长原地策略。发生在备份和业务 mutation 之前，修正输入或显式选择完整同步后可重试，不要求 recovery。`IN_PLACE_RESTORE_FAILED` 仅作为内部原因；服务层仍以既有 `SYNC_FAILED_ROLLED_BACK` / `RECOVERY_REQUIRED` 表达最终恢复结果。不得将未知字节、截断或文件替换伪装成安全回退。
+
 本文冻结 vNext 的错误分类、兼容映射和演进规则，使调用方依据稳定的 `code` 决策，而不是解析自然语言 `message`、异常类型名或堆栈。
 
 本文不表示当前代码已经完成统一。当前 Node、Web 与 .NET 仍存在不同大小写、命名和结构；这些现状被列为 Legacy Surface，由后续结构化错误 PR 通过 Adapter 渐进收口。

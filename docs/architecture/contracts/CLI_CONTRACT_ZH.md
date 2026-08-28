@@ -1,5 +1,7 @@
 # CLI 命令兼容合同
 
+> 本分支候选增量（未发布）：`sync --fast` 和 `switch <provider-id> --fast` 只扫描首行，要求原地 provider 更新，保留模型并提示未执行的历史检查。`--fast` 不接收值、不支持其他命令，与 `--model` 互斥，允许冗余的 `--keep-root-model`。默认同步范围不变；摘要增加 `In-place rollout updates`。不支持的快速操作在业务写入前失败，不自动全量重写。详见[候选 ADR](../../adr/proposed-transactional-provider-bytes.md)。
+
 > 状态：Phase 0 兼容基线
 >
 > 基线版本：`@dailin521/codex-provider-sync` v0.5.0

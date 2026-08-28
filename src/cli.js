@@ -16,13 +16,16 @@ function printHelp() {
 
 Usage:
   codex-provider status [--codex-home PATH] [--sqlite-home PATH]
-  codex-provider sync [--provider ID] [--keep N] [--codex-home PATH] [--sqlite-home PATH]
-  codex-provider switch <provider-id> [--model NAME] [--keep-root-model] [--keep N] [--codex-home PATH] [--sqlite-home PATH]
+  codex-provider sync [--fast] [--provider ID] [--keep N] [--codex-home PATH] [--sqlite-home PATH]
+  codex-provider switch <provider-id> [--fast | --model NAME] [--keep-root-model] [--keep N] [--codex-home PATH] [--sqlite-home PATH]
   codex-provider watch [--codex-home PATH] [--sqlite-home PATH] [--debounce-ms N] [--once] [--no-state-db]
   codex-provider web [--port N] [--no-open] [--reset-access] [--codex-home PATH] [--sqlite-home PATH]
   codex-provider prune-backups [--keep N] [--codex-home PATH]
   codex-provider restore <backup-dir> [--no-config] [--no-db] [--no-sessions] [--allow-sqlite-home-relocation] [--codex-home PATH] [--sqlite-home PATH]
   codex-provider install-windows-launcher [--dir PATH] [--codex-home PATH] [--sqlite-home PATH]
+
+sync / switch flags:
+  --fast               read metadata only; require in-place provider updates; preserve models
 
 switch flags:
   --model NAME         override root-level model field with NAME (e.g. "MiniMax-M3")
@@ -56,6 +59,11 @@ function parseArgs(argv) {
     }
     const [flagName, inlineValue] = value.split("=", 2);
     const normalizedName = flagName.slice(2);
+    if (normalizedName === "fast") {
+      if (inlineValue !== undefined) throw new Error("--fast does not take a value.");
+      flags.fast = true;
+      continue;
+    }
     if (inlineValue !== undefined) {
       flags[normalizedName] = inlineValue;
       continue;
@@ -85,6 +93,7 @@ function summarizeSync(result, label) {
   if (result.sqliteUserEventRowsUpdated) {
     lines.push(`Updated SQLite user-event flags: ${result.sqliteUserEventRowsUpdated}`);
   }
+  lines.push(`In-place rollout updates: ${result.inPlaceSessionFiles ?? 0}`);
   if (result.sqliteCwdRowsUpdated) {
     lines.push(`Updated SQLite cwd paths: ${result.sqliteCwdRowsUpdated}`);
   }
@@ -205,6 +214,12 @@ async function main() {
   }
 
   assertSupportedNodeVersion();
+  if (flags.fast && !["sync", "switch"].includes(command)) {
+    throw new Error("--fast is supported only by sync and switch.");
+  }
+  if (flags.fast && flags.model !== undefined) {
+    throw new Error("--fast and --model cannot be combined.");
+  }
 
   if (command === "status") {
     const { getStatus, renderStatus } = await loadService();
@@ -238,7 +253,8 @@ async function main() {
       provider: flags.provider,
       keepCount: parseKeepCount(flags.keep),
       onProgress: createSyncProgressReporter(),
-      model: rootModel
+      model: flags.fast ? null : rootModel,
+      fast: Boolean(flags.fast)
     });
     console.log(summarizeSync(result, "Synchronized"));
     return;
@@ -252,6 +268,7 @@ async function main() {
       sqliteHome: flags["sqlite-home"],
       provider,
       model: flags.model,
+      fast: Boolean(flags.fast),
       keepRootModel: Boolean(flags["keep-root-model"]),
       keepCount: parseKeepCount(flags.keep),
       onProgress: createSyncProgressReporter()

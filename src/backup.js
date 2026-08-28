@@ -10,7 +10,7 @@ import {
   GLOBAL_STATE_BACKUP_FILE_BASENAME,
   GLOBAL_STATE_FILE_BASENAME
 } from "./constants.js";
-import { restoreSessionChanges, validateProviderMutationDescriptor } from "./session-files.js";
+import { restoreSessionChanges, validateProviderMutationDescriptor, validateProviderByteRestore } from "./session-files.js";
 import {
   assertSqliteWritable,
   createSqliteOnlineBackup,
@@ -248,6 +248,7 @@ export async function createBackup({
   codexHome,
   targetProvider,
   sessionChanges,
+  fast = false,
   configPath,
   configBackupText
 }) {
@@ -297,12 +298,13 @@ export async function createBackup({
 
   // Both versions must advance so old readers reject before restoring any
   // config/SQLite data, even when rollout restore was disabled by the caller.
-  const backupVersion = sessionChanges.some((change) => change.inPlaceMutation) ? 3 : 2;
+  const backupVersion = fast || sessionChanges.some((change) => change.inPlaceMutation) ? 3 : 2;
   const sessionManifest = {
     version: backupVersion,
     namespace: BACKUP_NAMESPACE,
     codexHome,
     targetProvider,
+    ...(fast ? { scanScope: "metadata" } : {}),
     createdAt: new Date().toISOString(),
     // Keep the full pre-mutation source of truth for the lifetime of the
     // backup. appliedPaths is only a compatibility hint for backups without a
@@ -338,6 +340,7 @@ export async function createBackup({
     codexHome,
     sqliteHome: actualSqliteHome,
     targetProvider,
+    ...(fast ? { scanScope: "metadata" } : {}),
     createdAt: sessionManifest.createdAt,
     dbFiles: copiedDbFiles,
     sqliteDbFiles: copiedSqliteDbFiles,
@@ -354,9 +357,7 @@ export async function updateSessionBackupManifest(backupDir, sessionChanges, opt
   const sessionManifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
   const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
 
-  // Promote older manifests to the v3 schema. Existing entries remain valid;
-  // only newly collected equal-length provider changes carry a mutation
-  // descriptor for in-place recovery.
+  // Legacy bookkeeping must not retroactively invent in-place undo evidence.
   sessionManifest.version = Math.max(2, sessionManifest.version);
 
   const filesByPath = new Map(
@@ -614,6 +615,11 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
         .filter((entry) => selected.has(pathComparisonKey(entry.path)));
     } else {
       sessionRestoreEntries = await selectSessionRestoreEntries(backupDir, sessionManifest);
+    }
+    // Detect known byte conflicts before rewinding config or SQLite. Apply
+    // still rechecks through the mutation handle; preflight is not a lock.
+    for (const entry of sessionRestoreEntries) {
+      if (entry.mutation) await validateProviderByteRestore(entry);
     }
   }
 

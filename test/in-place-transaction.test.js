@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { applySessionChanges, collectSessionChanges, restoreSessionChanges } from "../src/session-files.js";
@@ -13,13 +13,15 @@ import { runRestore, runSync } from "../src/service.js";
 import { TransactionJournal, readTransactionJournal, findPendingTransactions } from "../src/transaction-journal.js";
 
 const repo = fileURLToPath(new URL("..", import.meta.url));
+const cleanups = [];
+afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 const posix = { skip: process.platform === "win32" };
 const header = '{"type":"session_meta","payload":{"id":"fixture","cwd":"\u4e2d\u6587","model_provider" : "openai"}}';
 const tail = '\n{"type":"event_msg","payload":{"type":"user_message","message":"fixture"}}\n';
 
 async function fixture(t, line = header, suffix = tail) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "provider-in-place-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  cleanups.push(() => fs.rm(root, { recursive: true, force: true }));
   const codexHome = path.join(root, "codex");
   await fs.mkdir(path.join(codexHome, "sessions"), { recursive: true });
   const file = path.join(codexHome, "sessions", "rollout-fixture.jsonl");
@@ -75,7 +77,7 @@ test("provider-looking text inside a string is not a duplicate field", posix, as
   assert.ok(changes[0].inPlaceMutation);
 });
 
-test("short writes loop to completion, preserve inode, bytes, size and mtime", posix, async (t) => {
+test("short writes loop to completion, preserve inode/size and retain actual write time", posix, async (t) => {
   const f = await fixture(t);
   const { changes } = await collectSessionChanges(f.codexHome, "prov_a");
   const before = await fs.stat(f.file);
@@ -86,7 +88,7 @@ test("short writes loop to completion, preserve inode, bytes, size and mtime", p
   const after = await fs.stat(f.file);
   assert.equal(after.ino, before.ino);
   assert.equal(after.size, before.size);
-  assert.equal(Math.round(after.mtimeMs), f.mtime.getTime());
+  assert.ok(after.mtimeMs > f.mtime.getTime());
   assert.equal(await fs.readFile(f.file, "utf8"), f.original.toString().replace('"openai"', '"prov_a"'));
 });
 
@@ -168,11 +170,11 @@ test("pre-write replaced path or append is skipped without fallback", posix, asy
   }
 });
 
-test("active fd appends remain visible and rollback preserves appended tail and mtime", posix, async (t) => {
+test("active fd appends remain visible and rollback never backdates the appended tail", posix, async (t) => {
   const f = await fixture(t);
   const { changes, entry } = await prepare(f);
   const writer = await fs.open(f.file, "a");
-  t.after(() => writer.close());
+  cleanups.push(() => writer.close());
   const before = await writer.stat();
   await applySessionChanges(changes);
   await writer.write(tail);
@@ -180,8 +182,49 @@ test("active fd appends remain visible and rollback preserves appended tail and 
   await restoreSessionChanges([entry]);
   const after = await fs.stat(f.file);
   assert.equal(after.ino, before.ino);
-  assert.ok(Math.abs(after.mtimeMs - appended.mtimeMs) < 0.01);
+  assert.ok(after.mtimeMs >= appended.mtimeMs);
   assert.equal(await fs.readFile(f.file, "utf8"), f.original + tail);
+});
+
+test("write-time truncation or surrounding-header edits cannot report success", posix, async (t) => {
+  for (const kind of ["truncate", "header"]) {
+    const f = await fixture(t);
+    const { changes } = await collectSessionChanges(f.codexHome, "prov_a");
+    await assert.rejects(applySessionChanges(changes, {
+      async inPlaceWrite(h, b, o, n, p) {
+        if (kind === "truncate") await h.truncate(p);
+        else await h.write(Buffer.from("!"), 0, 1, 0);
+        return h.write(b, o, n, p);
+      }
+    }), { code: "IN_PLACE_RESTORE_FAILED" });
+  }
+});
+
+test("append between patch and fsync remains visible and never calls utimes", posix, async (t) => {
+  const f = await fixture(t);
+  const { changes } = await collectSessionChanges(f.codexHome, "prov_a");
+  const writer = await fs.open(f.file, "a");
+  cleanups.push(() => writer.close());
+  let appended;
+  await applySessionChanges(changes, {
+    async inPlaceSync(h) {
+      h.utimes = () => { throw new Error("in-place must not backdate an unlocked file"); };
+      await writer.write(tail);
+      appended = await writer.stat();
+      await h.sync();
+    }
+  });
+  assert.equal((await fs.stat(f.file)).mtimeMs, appended.mtimeMs);
+  assert.equal(await fs.readFile(f.file, "utf8"), f.original.toString().replace("openai", "prov_a") + tail);
+});
+
+test("hardlinked files are not eligible and late links prevent byte mutation", posix, async (t) => {
+  const f = await fixture(t);
+  const { changes } = await collectSessionChanges(f.codexHome, "prov_a");
+  await fs.link(f.file, f.file + ".link");
+  assert.equal((await collectSessionChanges(f.codexHome, "prov_a")).changes[0].inPlaceMutation, null);
+  assert.equal((await applySessionChanges(changes)).appliedChanges, 0);
+  assert.deepEqual(await fs.readFile(f.file), f.original);
 });
 
 test("durable manifest and applying precede mutation; observer failure rolls back without rename", posix, async (t) => {

@@ -1,13 +1,20 @@
 import { EventEmitter } from "node:events";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
+
+const cleanups = [];
+afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
 import {
   applySessionChanges,
+  collectSessionChanges,
+  restoreSessionChanges,
   createWindowsExclusiveRewriteWorker
 } from "../src/session-files.js";
 
@@ -66,6 +73,15 @@ function createFakeSpawn({ ready = { protocolVersion: 1, type: "ready" }, respon
   return { spawnImpl, getSpawnCount: () => spawnCount };
 }
 
+test("native Windows helper recovers short writes and flush failures", {
+  skip: process.platform !== "win32"
+}, () => {
+  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+    "-File", fileURLToPath(new URL("./windows-provider-bytes.ps1", import.meta.url))], { encoding: "utf8", timeout: 60000 });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /PASS: native partial-write exception/);
+});
+
 test("Windows rewrite worker reuses one process and preserves the closed result set", async () => {
   const expectedResults = ["APPLIED", "APPLIED_IN_PLACE", "SKIP_BUSY", "SKIP_CHANGED"];
   const fake = createFakeSpawn({
@@ -94,6 +110,36 @@ test("Windows rewrite worker reuses one process and preserves the closed result 
 
   assert.equal(fake.getSpawnCount(), 1);
   assert.deepEqual(results, expectedResults);
+});
+
+test("real Windows in-place apply/recovery retains file ID and appended data", {
+  skip: process.platform !== "win32"
+}, async (t) => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "provider-bytes-windows-"));
+  cleanups.push(() => fs.rm(home, { recursive: true, force: true }));
+  await fs.mkdir(path.join(home, "sessions"));
+  const file = path.join(home, "sessions", "rollout-[fixture].jsonl");
+  const firstLine = JSON.stringify({ type: "session_meta", payload: { id: "fixture", model_provider: "openai" } });
+  const original = firstLine + '\r\n{"type":"event_msg","payload":{}}\r\n';
+  await fs.writeFile(file, original);
+  const { changes } = await collectSessionChanges(home, "prov_a", { fast: true });
+  const before = await fs.stat(file, { bigint: true });
+  assert.equal((await applySessionChanges(changes)).inPlaceChanges, 1);
+  assert.equal((await fs.stat(file, { bigint: true })).ino, before.ino);
+  const entry = { ...changes[0], mutation: changes[0].inPlaceMutation };
+  const h = await fs.open(file, "r+");
+  const partial = Buffer.from(entry.mutation.originalBase64, "base64").subarray(0, 3);
+  await h.write(partial, 0, partial.length, entry.mutation.byteOffset);
+  await h.close();
+  await fs.appendFile(file, "appended\r\n");
+  await restoreSessionChanges([entry]);
+  await restoreSessionChanges([entry]);
+  assert.equal((await fs.stat(file, { bigint: true })).ino, before.ino);
+  assert.equal(await fs.readFile(file, "utf8"), original + "appended\r\n");
+  const unknown = await fs.open(file, "r+");
+  await unknown.write(Buffer.from("!"), 0, 1, entry.mutation.byteOffset + 1);
+  await unknown.close();
+  await assert.rejects(restoreSessionChanges([entry]), AggregateError);
 });
 
 test("Windows rewrite worker rejects mismatched and malformed protocol responses", async (t) => {

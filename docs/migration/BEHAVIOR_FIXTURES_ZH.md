@@ -1,5 +1,7 @@
 # vNext 行为兼容 Fixture 清单
 
+本分支候选夹具：`test/in-place-transaction.test.js` 验证短写、崩溃、损坏 journal、冲突及活跃追加；`test/fast-sync.test.js` 验证快速范围、无正文流、模型/SQLite/cwd、前置失败和回滚；`test/windows-rewrite-worker.test.js` 与 `test/windows-provider-bytes.ps1` 验证协议和 Windows 原生独占句柄。POSIX 原地路径保留实际写入 mtime，原全量路径仍保留旧 mtime；该区别是待评审合同，不是隐式测试豁免。
+
 > **状态：Accepted（阶段 0 语义清单；共享 Corpus 尚未创建）**
 >
 > **日期：2026-08-24**
