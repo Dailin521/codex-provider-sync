@@ -67,6 +67,9 @@ linux:
   executableName: codex-provider-sync
   category: Utility
   maintainer: Dailin521
+  desktop:
+    entry:
+      Name: Codex Provider Sync
 appImage:
   artifactName: CodexProviderSync-${version}-linux-x64.AppImage
 deb:

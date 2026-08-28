@@ -150,6 +150,7 @@ test("builder and candidate scripts enforce native fallback, fuses, audit metada
     "target: dmg",
     "target: AppImage",
     "target: deb",
+    "Name: Codex Provider Sync",
     "appImage:",
     "artifactName: CodexProviderSync-${version}-linux-x64.AppImage",
     "deb:",
@@ -162,6 +163,11 @@ test("builder and candidate scripts enforce native fallback, fuses, audit metada
   );
   assert.match(buildScript, /"--publish",\s*"never"/);
   assert.match(buildScript, /--config\.extraMetadata\.version=/);
+  assert.match(
+    buildScript,
+    /"linux-x64":\s*\{[\s\S]*?configOverrides:\s*\["--config\.productName=CodexProviderSync"\]/,
+    "The Linux candidate must keep its setuid sandbox install path free of spaces."
+  );
   assert.match(stageScript, /releaseAuthorized:\s*false/);
   assert.match(stageScript, /signingStatus:\s*"unsigned-candidate"/);
   assert.match(stageScript, /sbom\.cyclonedx\.json/);
@@ -171,6 +177,11 @@ test("builder and candidate scripts enforce native fallback, fuses, audit metada
   assert.match(smokeScript, /SHA256SUMS\.txt/);
   assert.match(smokeScript, /configure-linux-sandbox\.mjs/);
   assert.match(smokeScript, /verbatimSymlinks:\s*true/);
+  assert.match(
+    smokeScript,
+    /path\.join\(\s*debRoot,\s*"opt",\s*"CodexProviderSync",\s*"codex-provider-sync"\s*\)/,
+    "The final-container smoke must execute the deb candidate from its real space-free install path."
+  );
   assert.doesNotMatch(smokeScript, /run\("sudo",\s*\["(?:chown|chmod)"/);
   for (const expected of [
     "O_NOFOLLOW",

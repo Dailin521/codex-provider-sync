@@ -284,6 +284,17 @@ async function smokeLinux() {
   await fs.mkdir(debRoot);
   run("dpkg-deb", ["-x", path.join(assetsRoot, debName), debRoot]);
   const debExecutable = await findNamedFile(debRoot, ["codex-provider-sync"]);
+  const expectedDebExecutable = path.join(
+    debRoot,
+    "opt",
+    "CodexProviderSync",
+    "codex-provider-sync"
+  );
+  assert.equal(
+    debExecutable,
+    expectedDebExecutable,
+    "The deb candidate must use the space-free Electron SUID sandbox install path."
+  );
   containerRecords.push(await inspectAndSmokeContainer({
     appRoot: path.dirname(debExecutable),
     executable: debExecutable,

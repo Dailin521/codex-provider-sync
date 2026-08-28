@@ -12,7 +12,12 @@ const TARGET_CONFIG = Object.freeze({
   "windows-x64": { platform: "win32", arch: "x64", args: ["--win", "nsis", "zip", "--x64"] },
   "macos-x64": { platform: "darwin", arch: "x64", args: ["--mac", "dmg", "zip", "--x64"] },
   "macos-arm64": { platform: "darwin", arch: "arm64", args: ["--mac", "dmg", "zip", "--arm64"] },
-  "linux-x64": { platform: "linux", arch: "x64", args: ["--linux", "AppImage", "deb", "--x64"] }
+  "linux-x64": {
+    platform: "linux",
+    arch: "x64",
+    args: ["--linux", "AppImage", "deb", "--x64"],
+    configOverrides: ["--config.productName=CodexProviderSync"]
+  }
 });
 
 function runNpm(args, { cwd = repositoryRoot, env = process.env } = {}) {
@@ -53,6 +58,7 @@ runNpm([
   "never",
   "--config",
   "electron-builder.yml",
+  ...(config.configOverrides || []),
   `--config.extraMetadata.version=${version}`
 ], { cwd: desktopRoot, env: buildEnvironment });
 
