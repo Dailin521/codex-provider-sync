@@ -759,7 +759,9 @@ async function runSyncCore({
         restoreFailures.push(`transaction journal read: ${journalError.message}`);
       }
       const startedRolloutTargets = journalSnapshot
-        ? getStartedJournalTargets(journalSnapshot, "rollout")
+        ? (journalSnapshot.invalidTail || journalSnapshot.events.length === 0
+          ? writableChanges.map((change) => change.path)
+          : getStartedJournalTargets(journalSnapshot, "rollout"))
         : (sessionRestoreNeeded
           ? appliedSessionChanges.map((change) => change.path)
           : writableChanges.map((change) => change.path));

@@ -10,7 +10,7 @@ import {
   GLOBAL_STATE_BACKUP_FILE_BASENAME,
   GLOBAL_STATE_FILE_BASENAME
 } from "./constants.js";
-import { restoreSessionChanges } from "./session-files.js";
+import { restoreSessionChanges, validateProviderMutationDescriptor } from "./session-files.js";
 import {
   assertSqliteWritable,
   createSqliteOnlineBackup,
@@ -156,6 +156,12 @@ async function validateSessionManifestEntries(entries, codexHome) {
       throw new Error(`Backup session manifest contains a duplicate rollout target: ${entry.path}`);
     }
     seen.add(key);
+    if (entry.mutation) {
+      if (entry.modelOnlyChange || entry.originalTurnContextModels?.length) {
+        throw new Error(`Provider byte mutation cannot also restore model fields: ${entry.path}`);
+      }
+      validateProviderMutationDescriptor(entry.mutation, entry.path, entry.originalFirstLine, entry.originalSeparator);
+    }
     await assertNoLinkedPathSegments(lexicalRoot, target);
     const [canonicalRoot, canonicalTarget] = await Promise.all([
       fs.realpath(lexicalRoot),
@@ -289,8 +295,11 @@ export async function createBackup({
   }
   const globalStateFiles = await backupGlobalStateFiles(codexHome, backupDir);
 
+  // Both versions must advance so old readers reject before restoring any
+  // config/SQLite data, even when rollout restore was disabled by the caller.
+  const backupVersion = sessionChanges.some((change) => change.inPlaceMutation) ? 3 : 2;
   const sessionManifest = {
-    version: 2,
+    version: backupVersion,
     namespace: BACKUP_NAMESPACE,
     codexHome,
     targetProvider,
@@ -305,6 +314,7 @@ export async function createBackup({
       originalFirstLine: change.originalFirstLine,
       originalSeparator: change.originalSeparator,
       originalMtimeMs: change.originalMtimeMs,
+      mutation: change.inPlaceMutation ?? null,
       // Per-line record of the original turn_context.model values
       // so a failed rollback can put the per-turn model back to
       // what it was before the sync. Without this, a restore
@@ -323,7 +333,7 @@ export async function createBackup({
   );
 
   await writeMetadataWithInventory(backupDir, {
-    version: 2,
+    version: backupVersion,
     namespace: BACKUP_NAMESPACE,
     codexHome,
     sqliteHome: actualSqliteHome,
@@ -344,11 +354,10 @@ export async function updateSessionBackupManifest(backupDir, sessionChanges, opt
   const sessionManifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
   const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
 
-  // Promote older manifests to the v2 schema so restoreSessionChanges
-  // can rely on the per-line `originalTurnContextModels` field.
-  if (sessionManifest.version !== 2) {
-    sessionManifest.version = 2;
-  }
+  // Promote older manifests to the v3 schema. Existing entries remain valid;
+  // only newly collected equal-length provider changes carry a mutation
+  // descriptor for in-place recovery.
+  sessionManifest.version = Math.max(2, sessionManifest.version);
 
   const filesByPath = new Map(
     (sessionManifest.files ?? []).map((entry) => [pathComparisonKey(entry.path), entry])
@@ -383,7 +392,7 @@ export async function refreshBackupInventory(backupDir, options = {}) {
   const normalizedBackupDir = path.resolve(backupDir);
   const metadataPath = path.join(normalizedBackupDir, "metadata.json");
   const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
-  if (metadata?.namespace !== BACKUP_NAMESPACE || !new Set([1, 2]).has(metadata.version)) {
+  if (metadata?.namespace !== BACKUP_NAMESPACE || !new Set([1, 2, 3]).has(metadata.version)) {
     throw new Error(`Unsupported backup metadata in ${metadataPath}.`);
   }
   await writeMetadataWithInventory(normalizedBackupDir, metadata, options);
@@ -484,7 +493,7 @@ async function selectSessionRestoreEntries(backupDir, sessionManifest) {
 async function readValidatedBackupMetadata(backupDir, codexHome) {
   const metadataPath = path.join(backupDir, "metadata.json");
   const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
-  if (metadata.namespace !== BACKUP_NAMESPACE || ![1, 2].includes(metadata.version)) {
+  if (metadata.namespace !== BACKUP_NAMESPACE || ![1, 2, 3].includes(metadata.version)) {
     throw new Error(`Unsupported backup metadata in ${metadataPath}.`);
   }
   if (typeof metadata.codexHome !== "string" || !storagePathsEqual(metadata.codexHome, codexHome)) {
@@ -526,7 +535,7 @@ export async function getBackupRecoveryCoverage(backupDir, storageOrCodexHome) {
 
   const sessionManifestPath = path.join(backupDir, "session-meta-backup.json");
   const sessionManifest = JSON.parse(await fs.readFile(sessionManifestPath, "utf8"));
-  if (sessionManifest.namespace !== BACKUP_NAMESPACE || ![1, 2].includes(sessionManifest.version)) {
+  if (sessionManifest.namespace !== BACKUP_NAMESPACE || ![1, 2, 3].includes(sessionManifest.version)) {
     throw new Error(`Unsupported session backup manifest in ${sessionManifestPath}.`);
   }
   if (typeof sessionManifest.codexHome !== "string"
@@ -591,7 +600,7 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
   if (restoreSessions) {
     const sessionManifestPath = path.join(backupDir, "session-meta-backup.json");
     sessionManifest = JSON.parse(await fs.readFile(sessionManifestPath, "utf8"));
-    if (sessionManifest.namespace !== BACKUP_NAMESPACE || ![1, 2].includes(sessionManifest.version)) {
+    if (sessionManifest.namespace !== BACKUP_NAMESPACE || ![1, 2, 3].includes(sessionManifest.version)) {
       throw new Error(`Unsupported session backup manifest in ${sessionManifestPath}.`);
     }
     if (typeof sessionManifest.codexHome !== "string"

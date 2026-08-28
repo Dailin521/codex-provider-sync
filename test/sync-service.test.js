@@ -1703,7 +1703,7 @@ test("runSync rewrites rollout files and sqlite, then restore reverts both", asy
   assert.deepEqual(syncResult.skippedLockedRolloutFiles, []);
   assert.equal(syncResult.sqliteRowsUpdated, 2);
   const backupMetadata = JSON.parse(await fs.readFile(path.join(syncResult.backupDir, "metadata.json"), "utf8"));
-  assert.equal(backupMetadata.version, 2);
+  assert.equal(backupMetadata.version, process.platform === "win32" ? 2 : 3);
   assert.equal(backupMetadata.sqliteHome, path.join(codexHome, SQLITE_DIR_BASENAME));
   assert.deepEqual(backupMetadata.sqliteDbFiles, [DB_FILE_BASENAME]);
   assert.ok(Number.isSafeInteger(backupMetadata.sizeBytes));
@@ -1835,7 +1835,7 @@ test("runSync uses an explicit SQLite home and never touches a stale Codex Home 
   }
 
   const metadata = JSON.parse(await fs.readFile(path.join(result.backupDir, "metadata.json"), "utf8"));
-  assert.equal(metadata.version, 2);
+  assert.equal(metadata.version, process.platform === "win32" ? 2 : 3);
   assert.equal(metadata.sqliteHome, sqliteHome);
   assert.deepEqual(metadata.dbFiles, []);
   assert.deepEqual(metadata.sqliteDbFiles, [DB_FILE_BASENAME]);
@@ -3263,7 +3263,7 @@ test("applySessionChanges preserves large UTF-8 session metadata", async () => {
   assert.match(rollout, /"large_blob":"数据块数据块/);
 });
 
-test("applySessionChanges atomically replaces equal-length provider IDs", async () => {
+test("applySessionChanges updates equal-length provider IDs without replacing the inode", async () => {
   const { codexHome } = await makeTempCodexHome();
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-in-place.jsonl");
   await writeRollout(sessionPath, "thread-in-place", "openai");
@@ -3278,6 +3278,7 @@ test("applySessionChanges atomically replaces equal-length provider IDs", async 
   await fs.writeFile(sessionPath, original, "utf8");
   const originalTime = new Date("2026-01-02T03:04:05.000Z");
   await fs.utimes(sessionPath, originalTime, originalTime);
+  const before = await fs.stat(sessionPath);
 
   const { changes } = await collectSessionChanges(codexHome, "prov_a");
   const result = await applySessionChanges(changes);
@@ -3285,7 +3286,11 @@ test("applySessionChanges atomically replaces equal-length provider IDs", async 
   const rollout = await fs.readFile(sessionPath, "utf8");
 
   assert.equal(result.appliedChanges, 1);
-  assert.equal(result.inPlaceChanges, 0);
+  assert.equal(result.inPlaceChanges, process.platform === "win32" ? 0 : 1);
+  if (process.platform !== "win32") {
+    assert.equal(after.ino, before.ino);
+    assert.equal(after.size, before.size);
+  }
   assert.equal(Math.round(after.mtimeMs), originalTime.getTime());
   const firstNewline = rollout.indexOf("\n");
   assert.equal(JSON.parse(rollout.slice(0, firstNewline)).payload.model_provider, "prov_a");

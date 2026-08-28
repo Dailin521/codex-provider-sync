@@ -10,6 +10,11 @@
 
 ## 1. 文档目的
 
+当前修复分支的 POSIX 原地写试运行扩展见
+[事务化原地更新试运行说明](../../TRANSACTIONAL_IN_PLACE_PILOT.md)：等长 provider
+使用带 mutation descriptor 的 v3 备份；旧 v1/v2 备份继续可读，旧客户端必须拒绝 v3。
+此扩展不是 v0.5.0 已发布行为，也不声称 Windows/.NET 已具备对应原地恢复能力。
+
 本文冻结 vNext 迁移开始时 Node 实现已经提供的外部行为。这里的“外部”不仅指 npm 最终用户，也包括当前 CLI 与 Local Web UI 对 Node service 的真实依赖。
 
 本文解决三个问题：
