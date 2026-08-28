@@ -154,6 +154,16 @@ jobs:
       - name: Run Utility crash, recovery, Sync, and Switch integration under Xvfb
         if: runner.os == 'Linux'
         run: xvfb-run -a npm run test:e2e --workspace @codex-provider-sync/desktop
+      - name: Upload Electron failure traces
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: electron-desktop-${{ runner.os }}-failure-traces
+          path: |
+            apps/desktop/test-results/**/trace.zip
+            apps/desktop/test-results/**/error-context.md
+          if-no-files-found: warn
+          retention-days: 7
 
   electron-release-candidate:
     runs-on: ${{ matrix.runner }}
@@ -178,8 +188,8 @@ jobs:
           node-version: "24"
           cache: "npm"
       - run: npm ci
-      - name: Verify candidate lockfile byte identity
-        run: node -e "const {execFileSync}=require('node:child_process');const value=execFileSync('git',['ls-files','--eol','package-lock.json'],{encoding:'utf8'});if(!value.includes('w/lf'))throw new Error('package-lock.json must be checked out with LF bytes.');process.stdout.write(value)"
+      - name: Verify candidate input byte identity
+        run: node -e "const {execFileSync}=require('node:child_process');const files=['package-lock.json','apps/desktop/release/artifact-audit-policy.v1.json'];const value=execFileSync('git',['ls-files','--eol',...files],{encoding:'utf8'});for(const file of files){const line=value.split(/\r?\n/).find((entry)=>entry.endsWith('\t'+file));if(!line||!line.includes('w/lf'))throw new Error(file+' must be checked out with LF bytes.');}process.stdout.write(value)"
       - name: Install the pinned Electron runtime
         if: runner.os == 'Linux'
         run: node -e "require('electron')"
