@@ -3289,8 +3289,7 @@ test("applySessionChanges updates equal-length provider IDs without replacing th
   assert.equal(result.inPlaceChanges, 1);
   assert.equal(after.ino, before.ino);
   assert.equal(after.size, before.size);
-  if (process.platform === "win32") assert.equal(Math.round(after.mtimeMs), originalTime.getTime());
-  else assert.ok(after.mtimeMs > originalTime.getTime());
+  assert.equal(Math.round(after.mtimeMs), originalTime.getTime());
   const firstNewline = rollout.indexOf("\n");
   assert.equal(JSON.parse(rollout.slice(0, firstNewline)).payload.model_provider, "prov_a");
   assert.equal(rollout.slice(firstNewline + 1), original.slice(original.indexOf("\n") + 1));

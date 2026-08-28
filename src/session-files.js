@@ -548,18 +548,34 @@ async function writeBytesFully(handle, bytes, position, writeImpl) {
   }
 }
 
-async function finishInPlaceWrite(handle, entry, expectedBytes, options = {}) {
+async function verifyInPlaceWrite(handle, entry, expectedBytes) {
   const mutation = entry.mutation ?? entry.inPlaceMutation;
-  await (options.inPlaceSync ?? ((h) => h.sync()))(handle);
   const expected = Buffer.from(entry.originalFirstLine + entry.originalSeparator, "utf8");
   expectedBytes.copy(expected, mutation.byteOffset);
   const actual = await readBytesFully(handle, expected.length, 0);
-  if (!actual?.equals(expected) || (await handle.stat()).size < mutation.originalSize) {
+  const stat = await handle.stat();
+  if (!actual?.equals(expected) || stat.size < mutation.originalSize) {
     throw new Error(`Provider in-place write verification failed: ${entry.path}`);
   }
   await assertInPlaceIdentity(handle, entry.path, mutation);
-  // POSIX has no exclusive handle here. Even stat followed by utimes races an
-  // append, so retain the actual write time instead of overwriting newer mtime.
+  return stat;
+}
+
+async function finishInPlaceWrite(handle, entry, expectedBytes, options = {}) {
+  const mutation = entry.mutation ?? entry.inPlaceMutation;
+  await (options.inPlaceSync ?? ((h) => h.sync()))(handle);
+  const stat = await verifyInPlaceWrite(handle, entry, expectedBytes);
+  const grew = stat.size !== mutation.originalSize;
+  if (grew && Math.round(stat.mtimeMs) !== Math.round(mutation.originalMtimeMs)) return;
+  if (!grew) await handle.utimes(stat.atime, mutation.originalMtimeMs / 1000);
+  const after = await verifyInPlaceWrite(handle, entry, expectedBytes);
+  if (after.size !== mutation.originalSize) {
+    // An append raced stat/utimes (possibly in interrupted recovery). Reassert
+    // only the guarded bytes for a kernel write time; never backdate again.
+    await writeBytesFully(handle, expectedBytes, mutation.byteOffset, options.inPlaceWrite ?? defaultInPlaceWrite);
+  }
+  await handle.sync();
+  await verifyInPlaceWrite(handle, entry, expectedBytes);
 }
 
 async function assertInPlaceIdentity(handle, filePath, mutation) {
@@ -621,16 +637,15 @@ async function restoreProviderOnHandle(handle, entry, options = {}) {
   if (!current.equals(originalBytes)) {
     await writeBytesFully(handle, originalBytes, mutation.byteOffset, options.inPlaceRestoreWrite ?? defaultInPlaceWrite);
   }
-  await finishInPlaceWrite(handle, entry, originalBytes);
+  await finishInPlaceWrite(handle, entry, originalBytes, { inPlaceWrite: options.inPlaceRestoreWrite });
 }
 
 async function tryRewriteProviderInPlace(change, options = {}) {
   const mutation = change.inPlaceMutation;
-  const { originalBytes, replacementBytes } = validateProviderMutationDescriptor(
+  const { replacementBytes } = validateProviderMutationDescriptor(
     mutation, change.path, change.originalFirstLine, change.originalSeparator);
   const writeImpl = options.inPlaceWrite ?? defaultInPlaceWrite;
   let handle;
-  let writeAttempted = false;
   try {
     const pathStat = await fsp.lstat(change.path);
     if (pathStat.isSymbolicLink() || !pathStat.isFile()) {
@@ -649,12 +664,9 @@ async function tryRewriteProviderInPlace(change, options = {}) {
         || mutation.originalMtimeMs !== change.originalMtimeMs) {
       return "SKIP_CHANGED";
     }
-    const current = await readFirstLineRecordFromHandle(handle);
-    if (current.firstLine !== change.originalFirstLine || current.offset !== change.originalOffset) {
-      return "SKIP_CHANGED";
-    }
-    const currentBytes = await readBytesFully(handle, originalBytes.length, mutation.byteOffset);
-    if (!currentBytes?.equals(originalBytes)) {
+    const expectedHeader = Buffer.from(change.originalFirstLine + change.originalSeparator, "utf8");
+    const current = await readBytesFully(handle, expectedHeader.length, 0);
+    if (!current?.equals(expectedHeader)) {
       return "SKIP_CHANGED";
     }
     try {
@@ -665,21 +677,18 @@ async function tryRewriteProviderInPlace(change, options = {}) {
     }
 
     try {
-      writeAttempted = true;
       await writeBytesFully(handle, replacementBytes, mutation.byteOffset, writeImpl);
       await finishInPlaceWrite(handle, change, replacementBytes, options);
     } catch (error) {
-      if (writeAttempted) {
-        try {
-          await restoreProviderOnHandle(handle, change, options);
-        } catch (restoreError) {
-          const failure = new AggregateError(
-            [error, restoreError],
-            `Provider in-place write and immediate byte restoration both failed for ${change.path}.`
-          );
-          failure.code = "IN_PLACE_RESTORE_FAILED";
-          throw failure;
-        }
+      try {
+        await restoreProviderOnHandle(handle, change, options);
+      } catch (restoreError) {
+        const failure = new AggregateError(
+          [error, restoreError],
+          `Provider in-place write and immediate byte restoration both failed for ${change.path}.`
+        );
+        failure.code = "IN_PLACE_RESTORE_FAILED";
+        throw failure;
       }
       throw error;
     }

@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { applySessionChanges, collectSessionChanges, restoreSessionChanges } from "../src/session-files.js";
 import { createBackup, restoreBackup } from "../src/backup.js";
 import { runRestore, runSync } from "../src/service.js";
+import { listHistory } from "../src/history.js";
 import { TransactionJournal, readTransactionJournal, findPendingTransactions } from "../src/transaction-journal.js";
 
 const repo = fileURLToPath(new URL("..", import.meta.url));
@@ -77,7 +78,7 @@ test("provider-looking text inside a string is not a duplicate field", posix, as
   assert.ok(changes[0].inPlaceMutation);
 });
 
-test("short writes loop to completion, preserve inode/size and retain actual write time", posix, async (t) => {
+test("short writes preserve inode, size, content and original mtime", posix, async (t) => {
   const f = await fixture(t);
   const { changes } = await collectSessionChanges(f.codexHome, "prov_a");
   const before = await fs.stat(f.file);
@@ -88,7 +89,7 @@ test("short writes loop to completion, preserve inode/size and retain actual wri
   const after = await fs.stat(f.file);
   assert.equal(after.ino, before.ino);
   assert.equal(after.size, before.size);
-  assert.ok(after.mtimeMs > f.mtime.getTime());
+  assert.equal(Math.round(after.mtimeMs), f.mtime.getTime());
   assert.equal(await fs.readFile(f.file, "utf8"), f.original.toString().replace('"openai"', '"prov_a"'));
 });
 
@@ -153,14 +154,17 @@ test("in-place recovery accepts old/new/contiguous partial, rejects unknown byte
   }
 });
 
-test("pre-write replaced path or append is skipped without fallback", posix, async (t) => {
-  for (const state of ["replace", "append"]) {
+test("pre-write replaced path, header or append is skipped without fallback", posix, async (t) => {
+  for (const state of ["replace", "header", "append"]) {
     const f = await fixture(t);
     const { changes } = await collectSessionChanges(f.codexHome, "prov_a");
     if (state === "replace") {
       await fs.writeFile(f.file + ".other", f.original);
       await fs.utimes(f.file + ".other", f.mtime, f.mtime);
       await fs.rename(f.file + ".other", f.file);
+    } else if (state === "header") {
+      await fs.writeFile(f.file, f.original.toString().replace(/\n/g, " "));
+      await fs.utimes(f.file, f.mtime, f.mtime);
     } else await fs.appendFile(f.file, tail);
     const before = await fs.readFile(f.file);
     const result = await applySessionChanges(changes);
@@ -216,6 +220,63 @@ test("append between patch and fsync remains visible and never calls utimes", po
   });
   assert.equal((await fs.stat(f.file)).mtimeMs, appended.mtimeMs);
   assert.equal(await fs.readFile(f.file, "utf8"), f.original.toString().replace("openai", "prov_a") + tail);
+});
+
+test("append racing mtime restoration is never backdated, including rollback", posix, async (t) => {
+  for (const restore of [false, true]) for (const timing of ["before", "after"]) {
+    const f = await fixture(t);
+    const { changes, entry } = await prepare(f);
+    const writer = await fs.open(f.file, "a");
+    cleanups.push(() => writer.close());
+    let appended;
+    const write = async (h, b, o, n, p) => {
+      if (!appended) {
+        const utimes = h.utimes.bind(h);
+        h.utimes = async (...args) => {
+          if (timing === "after") await utimes(...args);
+          await writer.write(tail);
+          appended = await writer.stat();
+          if (timing === "before") await utimes(...args);
+        };
+      }
+      return h.write(b, o, n, p);
+    };
+    if (restore) {
+      await applySessionChanges(changes);
+      await restoreSessionChanges([entry], { inPlaceRestoreWrite: write });
+    } else await applySessionChanges(changes, { inPlaceWrite: write });
+    assert.ok(appended);
+    assert.ok((await fs.stat(f.file)).mtimeMs >= appended.mtimeMs);
+    const expected = restore ? f.original.toString() : f.original.toString().replace("openai", "prov_a");
+    assert.equal(await fs.readFile(f.file, "utf8"), expected + tail);
+  }
+});
+
+test("provider-only updates do not make History select an older duplicate", async (t) => {
+  for (const fast of [false, true]) {
+    const f = await fixture(t);
+    const newer = path.join(f.codexHome, "sessions", "rollout-newer.jsonl");
+    await fs.writeFile(newer, f.original.toString().replace("openai", "prov_a"));
+    const date = new Date(f.mtime.getTime() + 10000);
+    await fs.utimes(newer, date, date);
+    assert.equal((await listHistory(f.codexHome)).sessions[0].rolloutPath, newer);
+    await runSync({ codexHome: f.codexHome, fast });
+    assert.equal((await listHistory(f.codexHome)).sessions[0].rolloutPath, newer);
+    assert.equal(Math.round((await fs.stat(f.file)).mtimeMs), f.mtime.getTime());
+  }
+});
+
+test("recovery repairs a crash after backdating an append even when bytes are already old", posix, async (t) => {
+  const f = await fixture(t);
+  const { entry } = await prepare(f);
+  await fs.appendFile(f.file, tail);
+  await fs.utimes(f.file, f.mtime, f.mtime);
+  await restoreSessionChanges([entry]);
+  const restored = await fs.stat(f.file);
+  assert.ok(restored.mtimeMs > f.mtime.getTime());
+  await restoreSessionChanges([entry]);
+  assert.equal((await fs.stat(f.file)).mtimeMs, restored.mtimeMs);
+  assert.equal(await fs.readFile(f.file, "utf8"), f.original + tail);
 });
 
 test("hardlinked files are not eligible and late links prevent byte mutation", posix, async (t) => {
@@ -276,6 +337,21 @@ test("unknown bytes leave a recoveryRequired journal and block later writes", po
   } }), (e) => e.code === "RECOVERY_REQUIRED" && e.recoveryRequired);
   assert.equal((await findPendingTransactions(f.codexHome))[0].state, "recoveryRequired");
   await assert.rejects(runSync({ codexHome: f.codexHome }), { code: "RECOVERY_REQUIRED" });
+});
+
+test("a conflict on B does not prevent compensation of A", async (t) => {
+  const f = await fixture(t);
+  const second = path.join(f.codexHome, "sessions", "rollout-z.jsonl");
+  await fs.writeFile(second, f.original);
+  await assert.rejects(runSync({ codexHome: f.codexHome, faultInjector: async ({ point, path: file }) => {
+    if (point === "after_rollout_mutation_before_applied" && file === second) {
+      const text = await fs.readFile(second, "utf8");
+      await fs.writeFile(second, text.replace("prov_a", "??????"));
+      throw new Error("B conflict");
+    }
+  } }), { code: "RECOVERY_REQUIRED" });
+  assert.deepEqual(await fs.readFile(f.file), f.original);
+  assert.match(await fs.readFile(second, "utf8"), /\?{6}/);
 });
 
 test("actual process exit at applying/applied boundary recovers in place", posix, async (t) => {

@@ -14,12 +14,12 @@
 
 - Node `runSync` / `runSwitch` 新增 `fast=false`。默认保留原检查范围，合并为一次正文扫描。
 - 合格的等长 provider 使用 manifest v3 描述的原地 mutation；执行、回滚和崩溃恢复保留同一 inode/file ID，开始写入后不得回退全文重写。
-- POSIX 原地路径不恢复旧 mtime，Windows 在独占句柄内保留 mtime；`updated_at` 不变，但依赖文件 mtime 的 History 排序可能变化，需维护者确认。
+- 稳定文件保留原 mtime；POSIX 检测并修复 stat/utimes 期间的追加竞争，Windows 使用独占句柄；`updated_at` 和 History 的去重/排序规则不变。
 - `fast=true` 只读首行（上限 1 MiB）及属性，保留根级/历史模型，不检查用户事件与加密内容；保留 provider、首行 cwd、workspace 修复及数据库事务。
 - 快速模式静态不支持项在备份和业务写入前以 `FAST_MODE_UNSUPPORTED` 失败，不隐式全量重写；运行时 busy/changed 沿用 partial 分类。
 - 结果增加 `inPlaceSessionFiles`；快速结果另含 `scanScope="metadata"`、`unchecked=["historyModels","userEventFlags","encryptedContent"]`、`encryptedContentCounts=null` 和未检查警告。
-- 原地/快速备份使用 metadata 和 manifest v3；旧 v1/v2 保持原恢复语义，旧 .NET 仅安全拒绝 v3，不宣称互相恢复。
-- 详见[候选 ADR](../../adr/proposed-transactional-provider-bytes.md)和[实现说明](../../TRANSACTIONAL_IN_PLACE_PILOT.md)。V1/#90 的 Plan/Revision/Restore v2 接入不属于本分支已完成能力。
+- 仅含原地变更的备份使用 metadata 和 manifest v3；其余保持 v2。旧备份保留原恢复语义，旧 .NET 仅安全拒绝 v3，不宣称互相恢复。
+- 详见[候选 ADR](../../adr/proposed-transactional-provider-bytes.md)。V1/#90 的 Plan/Revision/Restore v2 接入不属于本分支已完成能力。
 
 本文冻结 vNext 迁移开始时 Node 实现已经提供的外部行为。这里的“外部”不仅指 npm 最终用户，也包括当前 CLI 与 Local Web UI 对 Node service 的真实依赖。
 

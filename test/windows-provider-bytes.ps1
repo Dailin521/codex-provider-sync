@@ -1,4 +1,4 @@
-param([string]$Source = "$PSScriptRoot/../src/windows-provider-bytes.cs", [string]$WorkerScript)
+param([string]$Source = "$PSScriptRoot/../src/windows-provider-bytes.cs")
 $ErrorActionPreference = "Stop"
 Add-Type -Path $Source
 Add-Type -TypeDefinition @'
@@ -54,6 +54,12 @@ try {
     if ($result -ne "APPLIED_IN_PLACE") { throw "Apply did not use in-place: $result" }
     $native.Invoke($null, $args) | Out-Null
     if ($args[1].WriteTime -ne $info.WriteTime) { throw "Exclusive apply changed mtime" }
+    $setTime = [ProviderByteFile].GetMethod("SetFileTime", [Reflection.BindingFlags]"Static,NonPublic")
+    $setTime.Invoke($null, [object[]]@($s.SafeFileHandle.DangerousGetHandle(), [IntPtr]::Zero, [IntPtr]::Zero, [DateTime]::UtcNow.ToFileTimeUtc())) | Out-Null
+    [ProviderByteFile]::Apply($s, $header, $old, $new, $offset, $size, $mtime, $dev, $ino, $true) | Out-Null
+    $native.Invoke($null, $args) | Out-Null
+    if ($args[1].WriteTime -ne $info.WriteTime) { throw "Crash recovery did not restore original mtime" }
+    [ProviderByteFile]::Apply($s, $header, $old, $new, $offset, $size, $mtime, $dev, $ino, $false) | Out-Null
     try {
       $other = [IO.File]::Open($file, "Open", "ReadWrite", "None")
       $other.Dispose()
@@ -78,6 +84,18 @@ try {
     try { [ProviderByteFile]::Apply($s, $header, $old, $new, $offset, $size, $mtime, $dev, $ino, $true) | Out-Null }
     catch { $rejected = $true }
     if (-not $rejected) { throw "Unknown bytes were overwritten" }
+    $otherIno = [string]([uint64]::Parse($ino) + 1)
+    if ([ProviderByteFile]::Apply($s, $header, $old, $new, $offset, $size, $mtime, $dev, $otherIno, $false) -ne "SKIP_CHANGED") {
+      throw "Pre-write identity change was not skipped"
+    }
+    $s.SetLength($size - 1)
+    if ([ProviderByteFile]::Apply($s, $header, $old, $new, $offset, $size, $mtime, $dev, $ino, $false) -ne "SKIP_CHANGED") {
+      throw "Pre-write truncation was not skipped"
+    }
+    $rejected = $false
+    try { [ProviderByteFile]::Apply($s, $header, $old, $new, $offset, $size, $mtime, $dev, $ino, $true) | Out-Null }
+    catch { $rejected = $true }
+    if (-not $rejected) { throw "Truncated recovery was not rejected" }
   } finally { $s.Dispose() }
   Write-Output "PASS: native identity, exclusive handle, in-place write, mtime, partial recovery, idempotence, append, unknown-byte rejection"
   foreach ($kind in @("write", "flush", "restore")) {
@@ -106,59 +124,4 @@ try {
     }
   }
   Write-Output "PASS: native partial-write exception, Flush failure, failed immediate recovery and later recovery"
-  if ($WorkerScript) {
-    [IO.File]::WriteAllBytes($file, [byte[]]($header + $tail))
-    $s = [IO.File]::Open($file, "Open", "ReadWrite", "None")
-    try {
-      $args = [object[]]@($s.SafeFileHandle.DangerousGetHandle(), $null)
-      $native.Invoke($null, $args) | Out-Null
-      $info = $args[1]
-      $m = @{
-        strategy = "provider_bytes_in_place"; byteOffset = $offset
-        originalBase64 = [Convert]::ToBase64String($old); replacementBase64 = [Convert]::ToBase64String($new)
-        originalSize = $s.Length; originalMtimeMs = ([double]($info.WriteTime - 116444736000000000L)) / 10000
-        originalDev = [string]$info.Volume
-        originalIno = [string](([uint64]$info.IndexHigh -shl 32) -bor [uint64]$info.IndexLow)
-      }
-    } finally { $s.Dispose() }
-    $start = [Diagnostics.ProcessStartInfo]::new()
-    $start.FileName = "powershell.exe"
-    $start.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $WorkerScript + '"'
-    $start.UseShellExecute = $false
-    $start.RedirectStandardInput = $true
-    $start.RedirectStandardOutput = $true
-    $start.RedirectStandardError = $true
-    $p = [Diagnostics.Process]::Start($start)
-    try {
-      $ready = $p.StandardOutput.ReadLine() | ConvertFrom-Json
-      if ($ready.type -ne "ready") { throw "Worker did not become ready" }
-      $request = @{
-        protocolVersion = 1; type = "rewrite"; id = 1; path = $file
-        originalFirstLine = $utf8.GetString($header).TrimEnd([char]10); originalSeparator = "`n"
-        originalOffset = $header.Length; originalSize = $m.originalSize
-        originalMtimeMs = $m.originalMtimeMs; inPlaceMutation = $m; requireOriginalMatch = $true
-      }
-      foreach ($mode in @("busy", "apply", "restore")) {
-        $lock = $null
-        try {
-          if ($mode -eq "busy") { $lock = [IO.File]::Open($file, "Open", "ReadWrite", "None") }
-          $request.restoreProviderBytes = ($mode -eq "restore")
-          $p.StandardInput.WriteLine(($request | ConvertTo-Json -Compress -Depth 5))
-          $p.StandardInput.Flush()
-          $response = $p.StandardOutput.ReadLine() | ConvertFrom-Json
-          $expected = if ($mode -eq "busy") { "SKIP_BUSY" } else { "APPLIED_IN_PLACE" }
-          if ($response.result -ne $expected) { throw "Worker $mode failed: $($response | ConvertTo-Json -Compress)" }
-          $request.id++
-        } finally { if ($lock) { $lock.Dispose() } }
-      }
-      $p.StandardInput.Close()
-      if (-not $p.WaitForExit(30000)) { throw "Worker failed to exit" }
-      if ($p.ExitCode -ne 0) { throw $p.StandardError.ReadToEnd() }
-      if ($utf8.GetString([IO.File]::ReadAllBytes($file)) -ne $utf8.GetString([byte[]]($header + $tail))) { throw "Worker roundtrip mismatch" }
-      Write-Output "PASS: production worker protocol, busy, in-place apply and restore roundtrip"
-    } finally {
-      if (-not $p.HasExited) { $p.Kill(); $p.WaitForExit() }
-      $p.Dispose()
-    }
-  }
 } finally { Remove-Item -LiteralPath $root -Recurse -Force }

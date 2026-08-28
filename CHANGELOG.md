@@ -6,7 +6,7 @@
 
 - 恢复 #51 等长 provider 原地更新，将字节恢复纳入 #71 逐目标事务；覆盖 Node POSIX 和 Windows worker。
 - 合并正文扫描；新增显式 `sync --fast` / `switch --fast`，只读首行、保留模型、提示未执行检查，不支持原地更新时不隐式重写全文。
-- 原地/快速备份升级为 v3，旧工具不能恢复。POSIX 原地路径保留实际写入 mtime，避免回拨并发追加时间；依赖文件时间的 History 排序可能受影响。详见[兼容边界](docs/TRANSACTIONAL_IN_PLACE_PILOT.md)。
+- 含原地变更的备份使用 v3，旧工具不能恢复；其余保持 v2。稳定文件保留原 mtime，并处理并发追加与回滚，保持 History 原有排序和去重规则。详见[兼容边界](docs/adr/proposed-transactional-provider-bytes.md)。
 
 ## [0.5.0] - 2026-08-15
 

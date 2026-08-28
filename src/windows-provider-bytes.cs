@@ -20,14 +20,19 @@ public static class ProviderByteFile
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool SetFileTime(IntPtr handle, IntPtr creation, IntPtr access, ref long write);
 
-    static Info Inspect(FileStream stream, string dev, string ino)
+    static bool Matches(Info info, string dev, string ino)
+    {
+        ulong index = ((ulong)info.IndexHigh << 32) | info.IndexLow;
+        return info.Volume.ToString() == dev && index.ToString() == ino && info.Links == 1
+            && (info.Attributes & (0x400u | 0x10u)) == 0;
+    }
+
+    static Info Inspect(FileStream stream, string dev, string ino, bool requireMatch = true)
     {
         Info info;
         if (!GetFileInformationByHandle(stream.SafeFileHandle.DangerousGetHandle(), out info))
             throw new Win32Exception(Marshal.GetLastWin32Error());
-        ulong index = ((ulong)info.IndexHigh << 32) | info.IndexLow;
-        if (info.Volume.ToString() != dev || index.ToString() != ino || info.Links != 1
-            || (info.Attributes & (0x400u | 0x10u)) != 0)
+        if (requireMatch && !Matches(info, dev, ino))
             throw new IOException("Rollout identity changed before provider byte access.");
         return info;
     }
@@ -93,8 +98,12 @@ public static class ProviderByteFile
     public static string Apply(FileStream stream, byte[] header, byte[] oldBytes, byte[] newBytes,
                                int offset, long size, double mtimeMs, string dev, string ino, bool restore)
     {
-        var before = Inspect(stream, dev, ino);
-        if (stream.Length < size) throw new IOException("Rollout truncated before provider byte access.");
+        var before = Inspect(stream, dev, ino, false);
+        if (!Matches(before, dev, ino) || stream.Length < Math.Max(size, header.Length))
+        {
+            if (!restore) return "SKIP_CHANGED";
+            throw new IOException("Rollout identity changed or file truncated before provider recovery.");
+        }
         var current = Read(stream, header.Length);
         var expected = (byte[])header.Clone();
         Array.Copy(newBytes, 0, expected, offset, newBytes.Length);
@@ -106,8 +115,11 @@ public static class ProviderByteFile
         {
             if (!Recoverable(current, header, oldBytes, newBytes, offset))
                 throw new IOException("Unknown rollout bytes during provider recovery.");
-            if (Equal(current, header)) return "APPLIED_IN_PLACE";
-            Write(stream, oldBytes, offset, header, size, dev, ino, before.WriteTime);
+            if (Equal(current, header) && (stream.Length != size || Math.Abs(currentMs - mtimeMs) <= 0.001))
+                return "APPLIED_IN_PLACE";
+            long restoreTime = stream.Length == size
+                ? 116444736000000000L + (long)Math.Round(mtimeMs * 10000.0) : before.WriteTime;
+            Write(stream, oldBytes, offset, header, size, dev, ino, restoreTime);
             return "APPLIED_IN_PLACE";
         }
         try

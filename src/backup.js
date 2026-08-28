@@ -298,7 +298,7 @@ export async function createBackup({
 
   // Both versions must advance so old readers reject before restoring any
   // config/SQLite data, even when rollout restore was disabled by the caller.
-  const backupVersion = fast || sessionChanges.some((change) => change.inPlaceMutation) ? 3 : 2;
+  const backupVersion = sessionChanges.some((change) => change.inPlaceMutation) ? 3 : 2;
   const sessionManifest = {
     version: backupVersion,
     namespace: BACKUP_NAMESPACE,
@@ -616,10 +616,12 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
     } else {
       sessionRestoreEntries = await selectSessionRestoreEntries(backupDir, sessionManifest);
     }
-    // Detect known byte conflicts before rewinding config or SQLite. Apply
-    // still rechecks through the mutation handle; preflight is not a lock.
-    for (const entry of sessionRestoreEntries) {
-      if (entry.mutation) await validateProviderByteRestore(entry);
+    // Preflight before rewinding other stores. Rollout-only compensation must
+    // attempt every target, even if another target has conflicting bytes.
+    if (restoreConfig || restoreGlobalState || restoreDatabase) {
+      for (const entry of sessionRestoreEntries) {
+        if (entry.mutation) await validateProviderByteRestore(entry);
+      }
     }
   }
 

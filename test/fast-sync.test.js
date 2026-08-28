@@ -169,6 +169,17 @@ test("fast sync rejects a model at the service boundary", async (t) => {
   await assert.rejects(runSync({ codexHome: f.home, fast: true, model: "other" }), /preserves historical models/);
 });
 
+test("fast mode without a byte mutation keeps the compatible v2 backup format", async (t) => {
+  const f = await fixture(t);
+  const result = await runSync({ codexHome: f.home, fast: true });
+  assert.equal(result.inPlaceSessionFiles, 0);
+  assert.equal(result.changedSessionFiles, 0);
+  for (const file of ["metadata.json", "session-meta-backup.json"]) {
+    assert.equal(JSON.parse(await fs.readFile(path.join(result.backupDir, file))).version, 2);
+  }
+  await runRestore({ codexHome: f.home, backupDir: result.backupDir });
+});
+
 test("manual restore preflights unknown provider bytes before changing config or SQLite", async (t) => {
   const f = await fixture(t);
   const result = await runSwitch({ codexHome: f.home, provider: "prov_a", fast: true });
