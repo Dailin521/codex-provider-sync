@@ -296,11 +296,8 @@ export async function createBackup({
   }
   const globalStateFiles = await backupGlobalStateFiles(codexHome, backupDir);
 
-  // Both versions must advance so old readers reject before restoring any
-  // config/SQLite data, even when rollout restore was disabled by the caller.
-  const backupVersion = sessionChanges.some((change) => change.inPlaceMutation) ? 3 : 2;
   const sessionManifest = {
-    version: backupVersion,
+    version: 2,
     namespace: BACKUP_NAMESPACE,
     codexHome,
     targetProvider,
@@ -316,7 +313,9 @@ export async function createBackup({
       originalFirstLine: change.originalFirstLine,
       originalSeparator: change.originalSeparator,
       originalMtimeMs: change.originalMtimeMs,
-      mutation: change.inPlaceMutation ?? null,
+      // Optional byte-level undo; the standard v2 fields remain sufficient
+      // for older readers to use their existing full-header restore path.
+      ...(change.inPlaceMutation ? { mutation: change.inPlaceMutation } : {}),
       // Per-line record of the original turn_context.model values
       // so a failed rollback can put the per-turn model back to
       // what it was before the sync. Without this, a restore
@@ -335,7 +334,7 @@ export async function createBackup({
   );
 
   await writeMetadataWithInventory(backupDir, {
-    version: backupVersion,
+    version: 2,
     namespace: BACKUP_NAMESPACE,
     codexHome,
     sqliteHome: actualSqliteHome,
@@ -357,8 +356,8 @@ export async function updateSessionBackupManifest(backupDir, sessionChanges, opt
   const sessionManifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
   const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
 
-  // Legacy bookkeeping must not retroactively invent in-place undo evidence.
-  sessionManifest.version = Math.max(2, sessionManifest.version);
+  // Preserve the official v1-to-v2 model-snapshot upgrade.
+  if (sessionManifest.version !== 2) sessionManifest.version = 2;
 
   const filesByPath = new Map(
     (sessionManifest.files ?? []).map((entry) => [pathComparisonKey(entry.path), entry])
@@ -393,7 +392,7 @@ export async function refreshBackupInventory(backupDir, options = {}) {
   const normalizedBackupDir = path.resolve(backupDir);
   const metadataPath = path.join(normalizedBackupDir, "metadata.json");
   const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
-  if (metadata?.namespace !== BACKUP_NAMESPACE || !new Set([1, 2, 3]).has(metadata.version)) {
+  if (metadata?.namespace !== BACKUP_NAMESPACE || !new Set([1, 2]).has(metadata.version)) {
     throw new Error(`Unsupported backup metadata in ${metadataPath}.`);
   }
   await writeMetadataWithInventory(normalizedBackupDir, metadata, options);
@@ -494,7 +493,7 @@ async function selectSessionRestoreEntries(backupDir, sessionManifest) {
 async function readValidatedBackupMetadata(backupDir, codexHome) {
   const metadataPath = path.join(backupDir, "metadata.json");
   const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
-  if (metadata.namespace !== BACKUP_NAMESPACE || ![1, 2, 3].includes(metadata.version)) {
+  if (metadata.namespace !== BACKUP_NAMESPACE || ![1, 2].includes(metadata.version)) {
     throw new Error(`Unsupported backup metadata in ${metadataPath}.`);
   }
   if (typeof metadata.codexHome !== "string" || !storagePathsEqual(metadata.codexHome, codexHome)) {
@@ -536,7 +535,7 @@ export async function getBackupRecoveryCoverage(backupDir, storageOrCodexHome) {
 
   const sessionManifestPath = path.join(backupDir, "session-meta-backup.json");
   const sessionManifest = JSON.parse(await fs.readFile(sessionManifestPath, "utf8"));
-  if (sessionManifest.namespace !== BACKUP_NAMESPACE || ![1, 2, 3].includes(sessionManifest.version)) {
+  if (sessionManifest.namespace !== BACKUP_NAMESPACE || ![1, 2].includes(sessionManifest.version)) {
     throw new Error(`Unsupported session backup manifest in ${sessionManifestPath}.`);
   }
   if (typeof sessionManifest.codexHome !== "string"
@@ -601,7 +600,7 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
   if (restoreSessions) {
     const sessionManifestPath = path.join(backupDir, "session-meta-backup.json");
     sessionManifest = JSON.parse(await fs.readFile(sessionManifestPath, "utf8"));
-    if (sessionManifest.namespace !== BACKUP_NAMESPACE || ![1, 2, 3].includes(sessionManifest.version)) {
+    if (sessionManifest.namespace !== BACKUP_NAMESPACE || ![1, 2].includes(sessionManifest.version)) {
       throw new Error(`Unsupported session backup manifest in ${sessionManifestPath}.`);
     }
     if (typeof sessionManifest.codexHome !== "string"

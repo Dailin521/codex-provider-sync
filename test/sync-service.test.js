@@ -1703,7 +1703,7 @@ test("runSync rewrites rollout files and sqlite, then restore reverts both", asy
   assert.deepEqual(syncResult.skippedLockedRolloutFiles, []);
   assert.equal(syncResult.sqliteRowsUpdated, 2);
   const backupMetadata = JSON.parse(await fs.readFile(path.join(syncResult.backupDir, "metadata.json"), "utf8"));
-  assert.equal(backupMetadata.version, 3);
+  assert.equal(backupMetadata.version, 2);
   assert.equal(backupMetadata.sqliteHome, path.join(codexHome, SQLITE_DIR_BASENAME));
   assert.deepEqual(backupMetadata.sqliteDbFiles, [DB_FILE_BASENAME]);
   assert.ok(Number.isSafeInteger(backupMetadata.sizeBytes));
@@ -1835,7 +1835,7 @@ test("runSync uses an explicit SQLite home and never touches a stale Codex Home 
   }
 
   const metadata = JSON.parse(await fs.readFile(path.join(result.backupDir, "metadata.json"), "utf8"));
-  assert.equal(metadata.version, 3);
+  assert.equal(metadata.version, 2);
   assert.equal(metadata.sqliteHome, sqliteHome);
   assert.deepEqual(metadata.dbFiles, []);
   assert.deepEqual(metadata.sqliteDbFiles, [DB_FILE_BASENAME]);

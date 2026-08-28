@@ -23,9 +23,10 @@ inside that journal, not around it. A separate fast scope addresses body reads.
   never backdate again. Recovery also repairs this interrupted timestamp step.
   Windows preserves timestamps under its exclusive handle. `updated_at` stays
   unchanged; History's existing ordering and duplicate selection remain intact.
-- Metadata and manifest v3 prevent old readers from silently applying the
-  wrong restore strategy. Only backups containing byte mutations require v3;
-  all others, including fast no-op backups, keep v2. Old backups remain readable.
+- Keep official v2 metadata/manifests and v1/v2 restore support. `mutation` is
+  optional: all standard original header/model/time/DB fields remain intact.
+  Older readers may ignore it and use their existing restore path; updated
+  readers use it for guarded byte-level undo. No private format version is added.
 - Opt-in `--fast` narrows diagnostics/model scope, never durability or recovery.
   Unsupported headers fail preflight rather than silently copying the body.
 - Full mode fuses encryption, user-event and model checks in one body pass.
@@ -53,9 +54,11 @@ old-backup paths retain their existing active-writer limitations.
 
 ## Acceptance questions
 
-Current .NET rejects v3 safely but cannot recover it. Maintainer approval is
-required for this migration boundary, or a compatible recovery reader must be
-added before release. Windows Node support is not .NET application parity.
+Format interoperability does not retrofit in-place recovery into older tools:
+their original full-rewrite and active-writer restrictions still apply. Verify
+both directions with unmodified upstream Node/.NET readers and producers, as
+well as recovery from applying-only partial writes. This does not claim that
+old binaries implement the new inode-preserving strategy.
 
 Fast scope is new behavior: discuss it separately from restoring #51. If the
 unmerged #90 becomes main, integrate scope into its Plan/Revision/Restore v2

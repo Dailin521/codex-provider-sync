@@ -6,7 +6,7 @@
 
 - 恢复 #51 等长 provider 原地更新，将字节恢复纳入 #71 逐目标事务；覆盖 Node POSIX 和 Windows worker。
 - 合并正文扫描；新增显式 `sync --fast` / `switch --fast`，只读首行、保留模型、提示未执行检查，不支持原地更新时不隐式重写全文。
-- 含原地变更的备份使用 v3，旧工具不能恢复；其余保持 v2。稳定文件保留原 mtime，并处理并发追加与回滚，保持 History 原有排序和去重规则。详见[兼容边界](docs/adr/proposed-transactional-provider-bytes.md)。
+- 备份保持官方 v2，并继续支持 v1/v2 恢复；字节记录是可选扩展，不改变旧工具所需的标准恢复数据。稳定文件保留原 mtime，并处理并发追加与回滚。详见[兼容边界](docs/adr/proposed-transactional-provider-bytes.md)。
 
 ## [0.5.0] - 2026-08-15
 

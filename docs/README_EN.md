@@ -109,7 +109,7 @@ codex-provider sync
 
 By default, `switch` also updates the root-level `model` when the target provider section defines one. Use `--keep-root-model` to preserve the current value, or `--model <name>` to set it explicitly.
 
-This branch adds `sync --fast` / `switch <provider-id> --fast`: read only rollout headers, preserve models, and leave historical user-message/encryption checks unperformed. Unsupported in-place updates fail before mutation, without automatic full rewriting. Backups, transactions and recovery checks remain enabled; backups containing in-place mutations need a v3-compatible restore tool, not the old .NET GUI. See [design and compatibility](adr/proposed-transactional-provider-bytes.md).
+This branch adds `sync --fast` / `switch <provider-id> --fast`: read only rollout headers, preserve models, and leave historical user-message/encryption checks unperformed. Unsupported in-place updates fail before mutation, without automatic full rewriting. Backups retain the official v2 format and v1/v2 restore support; older tools use their existing restore path, while updated code can use optional byte records for in-place recovery. See [design and compatibility](adr/proposed-transactional-provider-bytes.md).
 
 We recommend uniform-length ASCII provider IDs, preferably six characters (for example, `provider_a` as `prov_a`), because built-in `openai` has six characters and is the most common compatibility target. With many or large histories, different lengths require whole-rollout rewrites and substantial disk writes; eligible equal-length values can be replaced in place.
 

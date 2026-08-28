@@ -299,7 +299,7 @@ test("durable manifest and applying precede mutation; observer failure rolls bac
       immutable = await fs.readFile(path.join(backup, "session-meta-backup.json"));
       assert.equal(pending[0].events.at(-1).state, "applying");
       const manifest = JSON.parse(immutable);
-      assert.equal(manifest.version, 3);
+      assert.equal(manifest.version, 2);
       assert.ok(manifest.files[0].mutation.originalBase64);
       assert.deepEqual(await fs.readFile(file), f.original);
     }

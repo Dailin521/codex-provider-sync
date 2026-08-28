@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test, { afterEach } from "node:test";
 import { fileURLToPath } from "node:url";
-import { collectSessionChanges } from "../src/session-files.js";
+import { collectSessionChanges, restoreSessionChanges } from "../src/session-files.js";
 import { runRestore, runSwitch, runSync } from "../src/service.js";
 import { openDatabase } from "../src/sqlite.js";
 import { findPendingTransactions } from "../src/transaction-journal.js";
@@ -75,7 +75,7 @@ test("fast switch/restore never open a rollout body stream and preserve models",
   assert.deepEqual(await row(f), { ...originalRow, model_provider: "prov_a", cwd: "/workspace/test" });
   assert.equal(await fs.readFile(path.join(f.home, "config.toml"), "utf8"), f.config.replace('"openai"', '"prov_a"'));
   const metadata = JSON.parse(await fs.readFile(path.join(result.backupDir, "metadata.json")));
-  assert.equal(metadata.version, 3);
+  assert.equal(metadata.version, 2);
   assert.equal(metadata.scanScope, "metadata");
   guarded = true;
   await runRestore({ codexHome: f.home, backupDir: result.backupDir });
@@ -178,6 +178,27 @@ test("fast mode without a byte mutation keeps the compatible v2 backup format", 
     assert.equal(JSON.parse(await fs.readFile(path.join(result.backupDir, file))).version, 2);
   }
   await runRestore({ codexHome: f.home, backupDir: result.backupDir });
+});
+
+test("standard v2 fields suffice when a reader ignores optional byte-undo records", async (t) => {
+  const f = await fixture(t);
+  const original = await fs.readFile(f.file);
+  const originalRow = await row(f);
+  const result = await runSwitch({ codexHome: f.home, provider: "prov_a", fast: true });
+  const manifest = JSON.parse(await fs.readFile(path.join(result.backupDir, "session-meta-backup.json")));
+  assert.equal(manifest.version, 2);
+  assert.ok(manifest.files[0].mutation);
+  // Project only the official v2 fields, as older readers do. Do not modify
+  // the immutable managed backup just to simulate an older restore path.
+  const entries = manifest.files.map(({ path, originalFirstLine, originalSeparator,
+    originalMtimeMs, originalTurnContextModels, modelOnlyChange }) => ({
+    path, originalFirstLine, originalSeparator, originalMtimeMs, originalTurnContextModels, modelOnlyChange
+  }));
+  await restoreSessionChanges(entries);
+  await runRestore({ codexHome: f.home, backupDir: result.backupDir, restoreSessions: false });
+  assert.deepEqual(await fs.readFile(f.file), original);
+  assert.deepEqual(await row(f), originalRow);
+  assert.equal(await fs.readFile(path.join(f.home, "config.toml"), "utf8"), f.config);
 });
 
 test("manual restore preflights unknown provider bytes before changing config or SQLite", async (t) => {
