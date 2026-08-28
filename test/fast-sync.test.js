@@ -11,6 +11,8 @@ import { runRestore, runSwitch, runSync } from "../src/service.js";
 import { openDatabase } from "../src/sqlite.js";
 import { findPendingTransactions } from "../src/transaction-journal.js";
 
+delete process.env.CODEX_SQLITE_HOME;
+
 const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const cleanups = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });

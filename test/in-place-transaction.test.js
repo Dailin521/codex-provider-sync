@@ -13,6 +13,8 @@ import { runRestore, runSync } from "../src/service.js";
 import { listHistory } from "../src/history.js";
 import { TransactionJournal, readTransactionJournal, findPendingTransactions } from "../src/transaction-journal.js";
 
+delete process.env.CODEX_SQLITE_HOME;
+
 const repo = fileURLToPath(new URL("..", import.meta.url));
 const cleanups = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
