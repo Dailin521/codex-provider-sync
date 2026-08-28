@@ -11,7 +11,7 @@ import { createAppI18n } from "../src/i18n.js";
 
 const profile = { id: "fixture", name: "Fixture", revision: "rev-1" };
 
-function page(pageNumber: number): HistoryPageDto {
+function page(pageNumber: number, messageCountKnown = true): HistoryPageDto {
   return {
     page: pageNumber,
     pageSize: HISTORY_PAGE_SIZE,
@@ -23,7 +23,8 @@ function page(pageNumber: number): HistoryPageDto {
       provider: "fixture-provider",
       archived: false,
       updatedAt: "2026-08-27T00:00:00.000Z",
-      messageCount: 1
+      messageCount: messageCountKnown ? 1 : 0,
+      messageCountKnown
     }]
   };
 }
@@ -42,8 +43,8 @@ function detail(): HistorySessionDetail {
   };
 }
 
-async function renderHistory() {
-  const listHistory = vi.fn(async (input: { page: number }) => page(input.page));
+async function renderHistory({ messageCountKnown = true } = {}) {
+  const listHistory = vi.fn(async (input: { page: number }) => page(input.page, messageCountKnown));
   const getHistorySession = vi.fn(async () => detail());
   const core = { listHistory, getHistorySession } as unknown as CoreClient;
   const i18n = await createAppI18n("en");
@@ -94,5 +95,28 @@ describe("HistoryPage privacy and pagination", () => {
     });
     await user.click(screen.getByRole("button", { name: "Back to sessions" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Open session" })).toHaveFocus());
+  });
+
+  it("loads once, ignores ambient refresh triggers, and refreshes only on request", async () => {
+    const user = userEvent.setup();
+    const { listHistory } = await renderHistory();
+
+    expect(await screen.findByText("Session 1")).toBeVisible();
+    expect(listHistory).toHaveBeenCalledTimes(1);
+    window.dispatchEvent(new Event("focus"));
+    window.dispatchEvent(new Event("online"));
+    await Promise.resolve();
+    expect(listHistory).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(listHistory).toHaveBeenCalledTimes(2));
+  });
+
+  it("does not present an unknown lightweight count as zero messages", async () => {
+    await renderHistory({ messageCountKnown: false });
+
+    expect(await screen.findByText("Session 1")).toBeVisible();
+    expect(screen.queryByText("0 messages")).not.toBeInTheDocument();
+    expect(screen.getByText("fixture-provider")).toBeVisible();
   });
 });

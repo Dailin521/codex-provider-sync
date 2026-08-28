@@ -504,6 +504,7 @@ function isHistorySummary(value: unknown): boolean {
     && typeof value.archived === "boolean"
     && isNonEmptyString(value.updatedAt)
     && isNonNegativeInteger(value.messageCount)
+    && (value.messageCountKnown === undefined || typeof value.messageCountKnown === "boolean")
     && (value.model === undefined || isNullableString(value.model))
     && (value.createdAt === undefined || isNonEmptyString(value.createdAt));
 }

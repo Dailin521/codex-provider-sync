@@ -145,6 +145,7 @@ export interface HistorySessionSummary {
     createdAt?: string;
     updatedAt: string;
     messageCount: number;
+    messageCountKnown?: boolean;
 }
 export interface HistoryPage {
     page: number;

@@ -526,6 +526,7 @@ archived=all | active | archived
 - 相同 thread id 保留 mtime 更新的文件；
 - 无 thread id 的会话使用基于 rollout 绝对路径 Hash 的稳定有界 ID；
 - 结果按 updatedAt、mtime 由新到旧；
+- 无 query 的普通列表只读取最大 64 KiB 的首行 `session_meta` 和文件元数据，不读取消息正文；超限、非首行或格式无效的 metadata 不进入列表；
 - 搜索可以匹配会话标题、cwd、Provider 和安全抽取的用户/助手消息文本。
 
 结果：
@@ -551,11 +552,14 @@ archived
 createdAt
 updatedAt
 messageCount
+messageCountKnown?
 ```
 
 vNext 公共 Core/HTTP/IPC 列表投影不返回 `rolloutPath`、`cwd` 或 `firstUserMessage`。`title` 只能来自显式 session metadata；metadata 没有标题时返回空字符串，由 UI 本地化显示“未命名会话”，不得用消息正文回退。列表搜索可以在本次只读扫描内匹配安全抽取文本，但消息正文不能进入列表 DTO、日志或缓存；正文只能由用户明确调用 `getHistorySession` 后返回。
 
-列表扫描对每个 rollout 只保留计数、最后可见时间与 query 命中等常量聚合状态，不按消息数常驻 descriptor 或正文。详情重新打开时必须绑定列表阶段记录的 regular-file identity、稳定物理路径与 sessions 根边界，从同一文件句柄读取并在读前/读后复核；删除、替换、symlink/junction 逃逸或保留 mtime 的换档均返回 `STALE_STATE`，不得返回另一文件的正文。
+无 query 的普通列表以受限首行 metadata 构造摘要：thread id、title、cwd、Provider/model、timestamp 分别限制为 512、1024、32768、512、128 字符，越界字段为空、使用固定缺省值或基于路径的 fallback ID；`updatedAt` 使用经复核的文件 mtime，`messageCount=0` 且 `messageCountKnown=false`；UI 必须隐藏该占位计数，不得显示为“0 条消息”。旧实现或全文扫描结果缺省 `messageCountKnown`，以及显式 `true`，均表示 `messageCount` 精确。用户显式输入 query 时才允许全文流式扫描，以匹配安全正文并返回精确计数和最后可见时间；扫描仍只保留计数、时间与 query 命中等常量聚合状态，不按消息数常驻 descriptor 或正文。
+
+详情定位先用同一受限 metadata 路径去重并选定 rollout，只对用户选择的目标文件做一次全文读取；其他 rollout 不得因详情定位而扫描正文。目标必须绑定定位阶段记录的 regular-file identity、稳定物理路径与 sessions 根边界，从同一文件句柄读取并在读前/读后复核；删除、替换、symlink/junction 逃逸或保留 mtime 的换档均返回 `STALE_STATE`，不得返回另一文件的正文。
 
 ### 9.3 `getHistorySession`
 

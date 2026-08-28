@@ -471,7 +471,10 @@ function publicHistorySummary(value) {
     archived: value.archived,
     ...(typeof value.createdAt === "string" ? { createdAt: value.createdAt } : {}),
     updatedAt: value.updatedAt,
-    messageCount: value.messageCount
+    messageCount: value.messageCount,
+    ...(typeof value.messageCountKnown === "boolean"
+      ? { messageCountKnown: value.messageCountKnown }
+      : {})
   };
 }
 

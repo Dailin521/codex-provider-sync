@@ -9,6 +9,14 @@ import { CoreError } from "./core-error.js";
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 100;
 const DEFAULT_MESSAGE_LIMIT = 200;
+const HISTORY_METADATA_MAX_BYTES = 64 * 1024;
+const HISTORY_METADATA_READ_CHUNK_BYTES = 16 * 1024;
+const HISTORY_THREAD_ID_MAX_CHARS = 512;
+const HISTORY_TITLE_MAX_CHARS = 1024;
+const HISTORY_CWD_MAX_CHARS = 32 * 1024;
+const HISTORY_PROVIDER_MAX_CHARS = 512;
+const HISTORY_MODEL_MAX_CHARS = 512;
+const HISTORY_TIMESTAMP_MAX_CHARS = 128;
 
 function historyFileError(error, action) {
   if (error?.code === "EACCES" || error?.code === "EPERM") {
@@ -41,6 +49,14 @@ function firstText(...values) {
   for (const value of values) {
     const text = normalizeText(value);
     if (text) return text;
+  }
+  return "";
+}
+
+function firstBoundedText(maxChars, ...values) {
+  for (const value of values) {
+    const text = normalizeText(value);
+    if (text && text.length <= maxChars) return text;
   }
   return "";
 }
@@ -97,6 +113,115 @@ function staleHistoryError(cause) {
     "The selected session changed before its messages could be read.",
     { cause: cause instanceof Error ? cause : undefined, details: { reason: "history-rollout" } }
   );
+}
+
+function sessionMetaFromRecord(record) {
+  if (record?.type !== "session_meta" || !record.payload || typeof record.payload !== "object") {
+    return null;
+  }
+  const payload = record.payload;
+  const timestamp = record.timestamp ?? payload.timestamp ?? null;
+  return {
+    threadId: typeof payload.id === "string"
+      && payload.id.length > 0
+      && payload.id.length <= HISTORY_THREAD_ID_MAX_CHARS
+      ? payload.id
+      : null,
+    title: firstBoundedText(HISTORY_TITLE_MAX_CHARS, payload.title, payload.name),
+    cwd: firstBoundedText(HISTORY_CWD_MAX_CHARS, payload.cwd),
+    provider: firstBoundedText(HISTORY_PROVIDER_MAX_CHARS, payload.model_provider) || "(missing)",
+    model: firstBoundedText(HISTORY_MODEL_MAX_CHARS, payload.model),
+    createdAt: typeof timestamp === "string" && timestamp.length <= HISTORY_TIMESTAMP_MAX_CHARS
+      ? timestamp
+      : null
+  };
+}
+
+async function openRolloutCandidate(candidate, expectedIdentity = null) {
+  const { filePath, lexicalRoot, physicalRoot } = candidate;
+  let handle;
+  try {
+    const [currentRootPhysical, lexicalStat, currentPhysicalPath] = await Promise.all([
+      fs.realpath(lexicalRoot),
+      fs.lstat(filePath, { bigint: true }),
+      fs.realpath(filePath)
+    ]);
+    if (pathKey(currentRootPhysical) !== pathKey(physicalRoot)
+        || lexicalStat.isSymbolicLink()
+        || !lexicalStat.isFile()
+        || !isWithinRoot(physicalRoot, currentPhysicalPath)) {
+      throw staleHistoryError();
+    }
+    const physicalPath = path.resolve(currentPhysicalPath);
+    handle = await fs.open(filePath, fsSync.constants.O_RDONLY);
+    const openedStat = await handle.stat({ bigint: true });
+    const openedIdentity = fileIdentity(openedStat);
+    if (!sameFileObject(fileIdentity(lexicalStat), openedIdentity)
+        || (expectedIdentity && !sameFileIdentity(expectedIdentity, openedIdentity))) {
+      throw staleHistoryError();
+    }
+    return { handle, physicalPath };
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    if (error?.code === "STALE_STATE") throw error;
+    throw historyFileError(error, "opening a history rollout");
+  }
+}
+
+async function validateOpenedRollout(candidate, handle, physicalPath, expectedIdentity = null) {
+  const { filePath, lexicalRoot, physicalRoot } = candidate;
+  try {
+    const finalStat = await handle.stat({ bigint: true });
+    const [currentRootPhysical, currentPhysicalPath, namedStat] = await Promise.all([
+      fs.realpath(lexicalRoot),
+      fs.realpath(filePath),
+      fs.lstat(filePath, { bigint: true })
+    ]);
+    const finalIdentity = fileIdentity(finalStat);
+    const namedIdentity = fileIdentity(namedStat);
+    if (pathKey(currentRootPhysical) !== pathKey(physicalRoot)
+        || pathKey(currentPhysicalPath) !== pathKey(physicalPath)
+        || namedStat.isSymbolicLink()
+        || !namedStat.isFile()
+        || !sameFileIdentity(namedIdentity, finalIdentity)
+        || (expectedIdentity && !sameFileIdentity(expectedIdentity, finalIdentity))) {
+      throw staleHistoryError();
+    }
+    return { finalStat, finalIdentity };
+  } catch (error) {
+    if (error?.code === "STALE_STATE") throw error;
+    throw staleHistoryError(error);
+  }
+}
+
+async function readBoundedFirstLine(handle) {
+  const chunks = [];
+  let position = 0;
+  let totalBytes = 0;
+  while (totalBytes <= HISTORY_METADATA_MAX_BYTES) {
+    const chunkLength = Math.min(
+      HISTORY_METADATA_READ_CHUNK_BYTES,
+      HISTORY_METADATA_MAX_BYTES + 1 - totalBytes
+    );
+    if (chunkLength <= 0) return null;
+    const chunk = Buffer.allocUnsafe(chunkLength);
+    const { bytesRead } = await handle.read(chunk, 0, chunk.length, position);
+    if (bytesRead === 0) break;
+    const data = chunk.subarray(0, bytesRead);
+    const relativeNewline = data.indexOf(0x0a);
+    position += bytesRead;
+    if (relativeNewline >= 0) {
+      const lineLength = totalBytes + relativeNewline;
+      if (lineLength > HISTORY_METADATA_MAX_BYTES) return null;
+      const line = Buffer.concat([...chunks, data.subarray(0, relativeNewline)], lineLength);
+      const end = line.length > 0 && line[line.length - 1] === 0x0d ? line.length - 1 : line.length;
+      return line.subarray(0, end).toString("utf8");
+    }
+    chunks.push(data);
+    totalBytes += bytesRead;
+  }
+  if (totalBytes > HISTORY_METADATA_MAX_BYTES) return null;
+  return Buffer.concat(chunks, totalBytes).toString("utf8");
 }
 
 async function* readHandleLines(handle) {
@@ -208,6 +333,53 @@ async function listRolloutFiles(root, codexHomePhysical) {
   return result;
 }
 
+async function readRolloutMetadata(candidate, archived) {
+  const { filePath, lexicalRoot, physicalRoot } = candidate;
+  let handle;
+  try {
+    const opened = await openRolloutCandidate(candidate);
+    handle = opened.handle;
+    const firstLine = await readBoundedFirstLine(handle);
+    let record = null;
+    if (firstLine !== null) {
+      try {
+        record = JSON.parse(firstLine);
+      } catch {
+        // A malformed or oversized metadata line is not safe to treat as a session.
+      }
+    }
+    const meta = sessionMetaFromRecord(record);
+    const { finalStat, finalIdentity } = await validateOpenedRollout(
+      candidate,
+      handle,
+      opened.physicalPath
+    );
+    if (!meta) return null;
+    const rolloutPath = path.resolve(filePath);
+    return {
+      ...meta,
+      id: meta.threadId ?? fallbackSessionId(rolloutPath),
+      rolloutPath,
+      updatedAt: new Date(Number(finalStat.mtimeMs)).toISOString(),
+      archived,
+      messageCount: 0,
+      messageCountKnown: false,
+      messageQueryMatched: false,
+      filePath,
+      lexicalRoot,
+      physicalRoot,
+      physicalPath: opened.physicalPath,
+      fileIdentity: finalIdentity,
+      mtimeMs: Number(finalStat.mtimeMs)
+    };
+  } catch (error) {
+    if (error?.code === "STALE_STATE") throw error;
+    throw historyFileError(error, "reading history rollout metadata");
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
 async function readRollout(
   candidate,
   archived,
@@ -215,33 +387,10 @@ async function readRollout(
 ) {
   const { filePath, lexicalRoot, physicalRoot } = candidate;
   let handle;
-  let initialIdentity;
   let physicalPath;
-  try {
-    const [currentRootPhysical, lexicalStat, currentPhysicalPath] = await Promise.all([
-      fs.realpath(lexicalRoot),
-      fs.lstat(filePath, { bigint: true }),
-      fs.realpath(filePath)
-    ]);
-    if (pathKey(currentRootPhysical) !== pathKey(physicalRoot)
-        || lexicalStat.isSymbolicLink()
-        || !lexicalStat.isFile()
-        || !isWithinRoot(physicalRoot, currentPhysicalPath)) {
-      throw staleHistoryError();
-    }
-    physicalPath = path.resolve(currentPhysicalPath);
-    handle = await fs.open(filePath, fsSync.constants.O_RDONLY);
-    const openedStat = await handle.stat({ bigint: true });
-    initialIdentity = fileIdentity(openedStat);
-    if (!sameFileObject(fileIdentity(lexicalStat), initialIdentity)
-        || (expectedIdentity && !sameFileIdentity(expectedIdentity, initialIdentity))) {
-      throw staleHistoryError();
-    }
-  } catch (error) {
-    await handle?.close().catch(() => {});
-    if (error?.code === "STALE_STATE") throw error;
-    throw historyFileError(error, "opening a history rollout");
-  }
+  const opened = await openRolloutCandidate(candidate, expectedIdentity);
+  handle = opened.handle;
+  physicalPath = opened.physicalPath;
   let meta = null;
   let sequence = 0;
   let assistantCount = 0;
@@ -268,17 +417,7 @@ async function readRollout(
       if (!line.trim()) continue;
       let record;
       try { record = JSON.parse(line); } catch { continue; }
-      if (!meta && record.type === "session_meta" && record.payload && typeof record.payload === "object") {
-        const payload = record.payload;
-        meta = {
-          threadId: typeof payload.id === "string" && payload.id ? payload.id : null,
-          title: firstText(payload.title, payload.name),
-          cwd: firstText(payload.cwd),
-          provider: firstText(payload.model_provider) || "(missing)",
-          model: firstText(payload.model),
-          createdAt: record.timestamp ?? payload.timestamp ?? null
-        };
-      }
+      if (!meta) meta = sessionMetaFromRecord(record);
       const message = messageFromRecord(record, {
         includeText: includeMessages || Boolean(searchQuery)
       });
@@ -316,26 +455,11 @@ async function readRollout(
     if (readFailure) await handle.close().catch(() => {});
   }
   let finalStat;
+  let identity;
   try {
-    finalStat = await handle.stat({ bigint: true });
-    const [currentRootPhysical, currentPhysicalPath, namedStat] = await Promise.all([
-      fs.realpath(lexicalRoot),
-      fs.realpath(filePath),
-      fs.lstat(filePath, { bigint: true })
-    ]);
-    const finalIdentity = fileIdentity(finalStat);
-    const namedIdentity = fileIdentity(namedStat);
-    if (pathKey(currentRootPhysical) !== pathKey(physicalRoot)
-        || pathKey(currentPhysicalPath) !== pathKey(physicalPath)
-        || namedStat.isSymbolicLink()
-        || !namedStat.isFile()
-        || !sameFileIdentity(namedIdentity, finalIdentity)
-        || (expectedIdentity && !sameFileIdentity(expectedIdentity, finalIdentity))) {
-      throw staleHistoryError();
-    }
-  } catch (error) {
-    if (error?.code === "STALE_STATE") throw error;
-    throw staleHistoryError(error);
+    const validated = await validateOpenedRollout(candidate, handle, physicalPath, expectedIdentity);
+    finalStat = validated.finalStat;
+    identity = validated.finalIdentity;
   } finally {
     await handle.close().catch(() => {});
   }
@@ -364,7 +488,6 @@ async function readRollout(
     .at(-1);
   const rolloutPath = path.resolve(filePath);
   const updatedAt = lastVisible?.timestamp ?? new Date(Number(finalStat.mtimeMs)).toISOString();
-  const identity = fileIdentity(finalStat);
   return {
     ...meta,
     id: meta.threadId ?? fallbackSessionId(rolloutPath),
@@ -373,6 +496,7 @@ async function readRollout(
     archived,
     ...(includeMessages ? { messages: visibleMessages } : {}),
     messageCount,
+    messageCountKnown: true,
     messageQueryMatched,
     filePath,
     lexicalRoot,
@@ -397,7 +521,9 @@ async function collectHistory(codexHome, options = {}) {
     for (const candidate of files) {
       let session;
       try {
-        session = await readRollout(candidate, dirName === "archived_sessions", options);
+        session = options.metadataOnly
+          ? await readRolloutMetadata(candidate, dirName === "archived_sessions")
+          : await readRollout(candidate, dirName === "archived_sessions", options);
       } catch (error) {
         if (error?.code === "ENOENT" || error?.code === "STALE_STATE") continue;
         throw historyFileError(error, "reading a history rollout");
@@ -427,7 +553,10 @@ function publicSession(session) {
     archived: session.archived,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
-    messageCount: session.messageCount
+    messageCount: session.messageCount,
+    ...(typeof session.messageCountKnown === "boolean"
+      ? { messageCountKnown: session.messageCountKnown }
+      : {})
   };
 }
 
@@ -455,7 +584,10 @@ export async function listHistory(codexHome, options = {}) {
   if (!["all", "active", "archived"].includes(archived)) {
     throw new CoreError("INVALID_INPUT", "archived must be all, active, or archived.");
   }
-  const sessions = await collectHistory(codexHome, { searchQuery: query });
+  const sessions = await collectHistory(codexHome, {
+    searchQuery: query,
+    metadataOnly: !query
+  });
   const filtered = sessions.filter((session) => {
     if (provider && session.provider !== provider) return false;
     if (archived !== "all" && session.archived !== (archived === "archived")) return false;
@@ -474,7 +606,7 @@ export async function getHistorySession(codexHome, sessionId, { messageLimit = D
   if (typeof sessionId !== "string" || !sessionId.trim()) {
     throw new CoreError("INVALID_INPUT", "sessionId is required.");
   }
-  const summaries = await collectHistory(codexHome);
+  const summaries = await collectHistory(codexHome, { metadataOnly: true });
   const summary = summaries.find((item) => item.id === sessionId);
   if (!summary) {
     throw new CoreError(

@@ -54,6 +54,28 @@ async function fixture() {
   return { home, file };
 }
 
+function trackHistoryReadBytes() {
+  const originalOpen = fs.open;
+  const bytesByPath = new Map();
+  fs.open = async (...args) => {
+    const handle = await originalOpen(...args);
+    const filePath = path.resolve(String(args[0]));
+    const originalRead = handle.read.bind(handle);
+    handle.read = async (...readArgs) => {
+      const result = await originalRead(...readArgs);
+      bytesByPath.set(filePath, (bytesByPath.get(filePath) ?? 0) + result.bytesRead);
+      return result;
+    };
+    return handle;
+  };
+  return {
+    bytesByPath,
+    restore() {
+      fs.open = originalOpen;
+    }
+  };
+}
+
 test("history lists readable sessions and filters message text", async () => {
   const { home } = await fixture();
   try {
@@ -61,6 +83,88 @@ test("history lists readable sessions and filters message text", async () => {
     assert.equal(result.total, 1);
     assert.equal(result.sessions[0].id, "thread-one");
     assert.equal(result.sessions[0].messageCount, 3);
+    assert.equal(result.sessions[0].messageCountKnown, true);
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test("history list without a query reads only bounded rollout metadata", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "codex-history-metadata-"));
+  const file = path.join(home, "sessions", "rollout-large-body.jsonl");
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, [
+    JSON.stringify({
+      type: "session_meta",
+      timestamp: "2026-08-04T08:00:00.000Z",
+      payload: { id: "metadata-only", title: "Metadata only", cwd: "/work/metadata", model_provider: "openai" }
+    }),
+    JSON.stringify({
+      type: "event_msg",
+      payload: { type: "assistant_message", message: `private-body-${"x".repeat(2 * 1024 * 1024)}` }
+    })
+  ].join("\n") + "\n", "utf8");
+  const tracker = trackHistoryReadBytes();
+  try {
+    const result = await listHistory(home, { page: 1, pageSize: 50 });
+    assert.equal(result.total, 1);
+    assert.equal(result.sessions[0].id, "metadata-only");
+    assert.equal(result.sessions[0].messageCount, 0);
+    assert.equal(result.sessions[0].messageCountKnown, false);
+    assert.ok((tracker.bytesByPath.get(path.resolve(file)) ?? 0) <= 64 * 1024);
+    assert.doesNotMatch(JSON.stringify(result), /private-body/);
+  } finally {
+    tracker.restore();
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test("history skips an oversized first metadata line without scanning later content", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "codex-history-oversized-metadata-"));
+  const file = path.join(home, "sessions", "rollout-oversized-metadata.jsonl");
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, [
+    JSON.stringify({
+      type: "session_meta",
+      payload: { id: "oversized", title: "x".repeat(64 * 1024), cwd: "/work/oversized", model_provider: "openai" }
+    }),
+    JSON.stringify({ type: "session_meta", payload: { id: "must-not-be-used", cwd: "/work/later", model_provider: "openai" } })
+  ].join("\n") + "\n", "utf8");
+  const tracker = trackHistoryReadBytes();
+  try {
+    const result = await listHistory(home, { page: 1, pageSize: 50 });
+    assert.equal(result.total, 0);
+    assert.ok((tracker.bytesByPath.get(path.resolve(file)) ?? 0) <= (64 * 1024) + 1);
+  } finally {
+    tracker.restore();
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test("history bounds retained metadata fields even when the first line is within the byte limit", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "codex-history-bounded-fields-"));
+  const file = path.join(home, "sessions", "rollout-bounded-fields.jsonl");
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, `${JSON.stringify({
+    type: "session_meta",
+    timestamp: "t".repeat(129),
+    payload: {
+      id: "i".repeat(513),
+      title: "t".repeat(1025),
+      cwd: "c".repeat((32 * 1024) + 1),
+      model_provider: "p".repeat(513),
+      model: "m".repeat(513)
+    }
+  })}\n`, "utf8");
+  try {
+    const result = await listHistory(home, { page: 1, pageSize: 50 });
+    assert.equal(result.total, 1);
+    assert.match(result.sessions[0].id, /^rollout:/);
+    assert.equal(result.sessions[0].title, "");
+    assert.equal(result.sessions[0].cwd, "");
+    assert.equal(result.sessions[0].provider, "(missing)");
+    assert.equal(result.sessions[0].model, "");
+    assert.equal(result.sessions[0].createdAt, null);
   } finally {
     await fs.rm(home, { recursive: true, force: true });
   }
@@ -96,7 +200,8 @@ test("history prefers canonical user events over response-item bootstrap and dup
     assert.equal(list.sessions[0].title, "");
     assert.equal("firstUserMessage" in list.sessions[0], false);
     assert.doesNotMatch(JSON.stringify(list), /请检查真实标题|标题已检查/);
-    assert.equal(list.sessions[0].messageCount, 2);
+    assert.equal(list.sessions[0].messageCount, 0);
+    assert.equal(list.sessions[0].messageCountKnown, false);
 
     const detail = await getHistorySession(home, "thread-one");
     assert.deepEqual(detail.messages.map(({ role, text }) => ({ role, text })), [
@@ -113,7 +218,8 @@ test("history prefers canonical user events over response-item bootstrap and dup
     const legacy = await listHistory(home, { page: 1, pageSize: 50 });
     assert.equal(legacy.sessions[0].title, "");
     assert.equal("firstUserMessage" in legacy.sessions[0], false);
-    assert.equal(legacy.sessions[0].messageCount, 2);
+    assert.equal(legacy.sessions[0].messageCount, 0);
+    assert.equal(legacy.sessions[0].messageCountKnown, false);
   } finally {
     await fs.rm(home, { recursive: true, force: true });
   }
@@ -186,12 +292,46 @@ test("history list aggregates a large rollout while detail retains only its boun
     const page = await listHistory(home, { page: 1, pageSize: 50, query: "bounded-message-4999" });
     assert.equal(page.total, 1);
     assert.equal(page.sessions[0].messageCount, 5_000);
+    assert.equal(page.sessions[0].messageCountKnown, true);
     const detail = await getHistorySession(home, "thread-large", { messageLimit: 10 });
     assert.equal(detail.returnedMessageCount, 10);
     assert.equal(detail.truncated, true);
     assert.equal(detail.messages[0].sequence, 4_991);
     assert.equal(detail.messages.at(-1).text, "bounded-message-4999");
   } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test("history detail reads decoy rollouts as metadata and deep-reads only the selected rollout", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "codex-history-detail-target-"));
+  const sessions = path.join(home, "sessions");
+  await fs.mkdir(sessions, { recursive: true });
+  const decoys = [];
+  for (let index = 0; index < 3; index += 1) {
+    const decoy = path.join(sessions, `rollout-decoy-${index}.jsonl`);
+    decoys.push(decoy);
+    await fs.writeFile(decoy, [
+      JSON.stringify({ type: "session_meta", payload: { id: `decoy-${index}`, cwd: "/work/decoy", model_provider: "openai" } }),
+      JSON.stringify({ type: "event_msg", payload: { type: "assistant_message", message: `decoy-body-${"x".repeat(256 * 1024)}` } })
+    ].join("\n") + "\n", "utf8");
+  }
+  const target = path.join(sessions, "rollout-target.jsonl");
+  await fs.writeFile(target, [
+    JSON.stringify({ type: "session_meta", payload: { id: "selected-target", cwd: "/work/target", model_provider: "openai" } }),
+    JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "selected body" } })
+  ].join("\n") + "\n", "utf8");
+  const tracker = trackHistoryReadBytes();
+  try {
+    const result = await getHistorySession(home, "selected-target");
+    assert.equal(result.returnedMessageCount, 1);
+    assert.equal(result.messages[0].text, "selected body");
+    assert.equal(result.session.messageCountKnown, true);
+    for (const decoy of decoys) {
+      assert.ok((tracker.bytesByPath.get(path.resolve(decoy)) ?? 0) <= 64 * 1024);
+    }
+  } finally {
+    tracker.restore();
     await fs.rm(home, { recursive: true, force: true });
   }
 });

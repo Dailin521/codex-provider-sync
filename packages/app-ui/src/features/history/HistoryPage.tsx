@@ -1,11 +1,12 @@
 import type { HistorySessionDetail } from "@codex-provider-sync/contracts";
 import { useQuery } from "@tanstack/react-query";
+import { RefreshCw } from "lucide-react";
 import { Fragment, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { formatDate, PageHeading, profileSelector, safeErrorText } from "../../shared/presentation.js";
 import type { AppUiProps, HostProfile } from "../../types.js";
-import { Badge, Button, Card } from "../../ui.js";
+import { Badge, Button, Card, cn } from "../../ui.js";
 
 export const HISTORY_PAGE_SIZE = 50;
 
@@ -30,7 +31,10 @@ export function HistoryPage({ core, profile }: {
       pageSize: HISTORY_PAGE_SIZE
     }, { signal }),
     gcTime: 0,
-    staleTime: 0
+    retry: false,
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false
   });
 
   useEffect(() => {
@@ -118,10 +122,14 @@ export function HistoryPage({ core, profile }: {
   const sessions = list.data?.sessions ?? [];
   return (
     <Fragment>
-      <PageHeading title={t("history.title")} subtitle={t("history.subtitle")} />
-      <Card>
+      <PageHeading
+        title={t("history.title")}
+        subtitle={t("history.subtitle")}
+        action={<Button disabled={list.isFetching} onClick={() => void list.refetch()} type="button" variant="secondary"><RefreshCw className={cn(list.isFetching && "animate-spin")} size={16} />{t("common.refresh")}</Button>}
+      />
+      <Card aria-busy={list.isPending || list.isFetching}>
         {list.isPending
-          ? <span>{t("common.loading")}</span>
+          ? <span aria-live="polite" role="status">{t("common.loading")}</span>
           : list.isError
             ? <span className="text-[var(--danger)]" role="alert">{safeErrorText(list.error, t("global.failed"))}</span>
             : sessions.length === 0
@@ -132,7 +140,7 @@ export function HistoryPage({ core, profile }: {
                       <div className="flex flex-wrap items-center justify-between gap-4 py-4" key={session.id}>
                         <div className="min-w-0">
                           <div className="truncate font-semibold">{session.title || t("history.untitled")}</div>
-                          <div className="mt-1 flex flex-wrap gap-2 text-xs text-[var(--muted)]"><span>{session.provider}</span><span>{session.messageCount} {t("history.messages")}</span><span>{formatDate(session.updatedAt, i18n.language)}</span>{session.archived ? <Badge>{t("history.archived")}</Badge> : null}</div>
+                          <div className="mt-1 flex flex-wrap gap-2 text-xs text-[var(--muted)]"><span>{session.provider}</span>{session.messageCountKnown !== false ? <span>{session.messageCount} {t("history.messages")}</span> : null}<span>{formatDate(session.updatedAt, i18n.language)}</span>{session.archived ? <Badge>{t("history.archived")}</Badge> : null}</div>
                         </div>
                         <Button onClick={() => { setReturnFocusId(null); setSelectedId(session.id); }} ref={(button) => { if (button) openButtons.current.set(session.id, button); else openButtons.current.delete(session.id); }} type="button" variant="secondary">{t("history.open")}</Button>
                       </div>

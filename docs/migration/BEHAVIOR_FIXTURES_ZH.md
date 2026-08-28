@@ -129,7 +129,7 @@ C8 的 executable mapping 为 `test/restore-v2-state-machine.test.js`、`Restore
 | Fixture ID | 输入语义 | 关键预期 |
 | --- | --- | --- |
 | `workspace-roots` | global state、rollout cwd 与 SQLite cwd 不一致，含跨平台路径形式 | 只修复合同允许的 workspace/cwd 元数据；路径规范化一致；Backup/Restore 覆盖 global state |
-| `history-safe-content` | user/event/response-item 重复消息、无 thread id、同 id 多 rollout | 列表选择稳定会话；详情只在用户主动读取时返回安全消息；正文不进入日志、诊断包或应用数据库 |
+| `history-safe-content` | user/event/response-item 重复消息、无 thread id、同 id 多 rollout，并包含大正文 rollout 与多个大 decoy | 无 query 列表只读受限首行 metadata、返回 `messageCountKnown=false` 且 UI 不显示伪 0；显式搜索仍可全文匹配并返回精确计数；详情定位只深读用户选择的 rollout；列表选择稳定会话；正文不进入日志、诊断包、Query cache 或应用数据库 |
 | `desktop-readonly-c6` | 临时 Codex Home 含无标题 rollout、真实 SQLite row、valid pending journal 与正文 marker | production bridge 无测试/Node 能力；列表/Profiles/Diagnostics 无路径和正文；显式详情后才显示 marker；写 IPC 拒绝；Utility crash 后按 profile preflight 并恢复；测试前后 Codex Home 全树 Hash 不变 |
 | `desktop-release-candidate-c9` | 四个 host-native target 各自生成两个最终发行容器；容器只含 synthetic build content 与 target-native SQLite binding | 每个容器解包/安装后重新审计 ASAR/Fuse/embedded integrity/native binding，隐藏执行 Status 与 Sync→Restore，正常退出；NSIS 卸载清理；SBOM/manifest/checksum 完整闭包；四目标 aggregate 的 version/commit/lock/tool/policy 一致；任何 source map、fixture、凭据名、真实数据、非目标 binding 或未清单文件均阻断 |
 

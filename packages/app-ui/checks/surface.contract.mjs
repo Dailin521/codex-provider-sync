@@ -128,6 +128,10 @@ test("shared UI has no transport, Node, Electron or persistent history access", 
   assert.match(historySource, /core\.getHistorySession/);
   assert.match(historySource, /messageLimit:\s*200/);
   assert.doesNotMatch(historySource, /queryKey:\s*\["history-detail"/);
+  assert.doesNotMatch(historySource, /refetchInterval/);
+  assert.match(historySource, /staleTime:\s*Infinity/);
+  assert.match(historySource, /refetchOnWindowFocus:\s*false/);
+  assert.match(historySource, /refetchOnReconnect:\s*false/);
   assert.match(appSource, /schemaVersion:\s*1 as const, planId: summary\.planId/);
   assert.match(appSource, /onOperationStarted/);
   assert.match(appSource, /onProgress/);

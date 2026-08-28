@@ -153,6 +153,26 @@ test("method output guards reject structurally invalid successes", () => {
   }));
   assert.throws(() => assertCoreMethodOutput("prepareSync", { schemaVersion: 1 }));
   assert.throws(() => assertCoreMethodOutput("listBackups", { backups: [{ backupId: "b", sizeBytes: -1, metadata: {} }] }));
+  const lightweightHistory = {
+    page: 1,
+    pageSize: 50,
+    total: 1,
+    hasNextPage: false,
+    sessions: [{
+      id: "history-1",
+      title: "",
+      provider: "openai",
+      archived: false,
+      updatedAt: "2026-08-25T00:00:00.000Z",
+      messageCount: 0,
+      messageCountKnown: false
+    }]
+  };
+  assert.doesNotThrow(() => assertCoreMethodOutput("listHistory", lightweightHistory));
+  assert.throws(() => assertCoreMethodOutput("listHistory", {
+    ...lightweightHistory,
+    sessions: [{ ...lightweightHistory.sessions[0], messageCountKnown: "unknown" }]
+  }));
   assert.throws(() => assertCoreMethodOutput("getStatus", {
     ...status,
     pendingTransactions: [{ leak: () => "private" }]

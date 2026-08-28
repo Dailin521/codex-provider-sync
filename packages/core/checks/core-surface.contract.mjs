@@ -142,6 +142,8 @@ test("trusted profile selection never falls back to the process default Codex Ho
     assert.deepEqual(backups, { backups: [] });
     assert.equal(history.sessions.length, 1);
     assert.equal(history.sessions[0].id, "synthetic-session");
+    assert.equal(history.sessions[0].messageCount, 0);
+    assert.equal(history.sessions[0].messageCountKnown, false);
     assert.equal("cwd" in history.sessions[0], false);
     assert.ok(plan.warnings.includes(
       "Some encrypted histories may require their original Provider or account for continuation."
