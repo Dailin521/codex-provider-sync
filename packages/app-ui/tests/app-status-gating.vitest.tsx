@@ -35,6 +35,7 @@ describe("App write gating", () => {
     const user = userEvent.setup();
     render(
       <AppUi
+        surface="desktop"
         core={core}
         host={{ listProfiles: async () => [{ id: "default", name: "Default", revision: "profile-r1" }] }}
         initialLocale="en"

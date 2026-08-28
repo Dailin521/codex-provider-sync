@@ -7,17 +7,18 @@ import { z } from "zod";
 
 import { profileSchema } from "../../schemas.js";
 import { PageHeading, safeErrorText } from "../../shared/presentation.js";
-import type { AppUiProps, HostProfile } from "../../types.js";
+import type { AppUiProps, AppUiSurface, HostProfile } from "../../types.js";
 import { Badge, Button, Card, Field, Input, cn, useToast } from "../../ui.js";
 
 type ProfileValues = z.infer<typeof profileSchema>;
 
-export function ProfilesPage({ profiles, refresh, host, canManage, revealPaths }: {
+export function ProfilesPage({ profiles, refresh, host, canManage, revealPaths, surface }: {
   profiles: HostProfile[];
   refresh(): Promise<unknown>;
   host: AppUiProps["host"];
   canManage: boolean;
   revealPaths: boolean;
+  surface: AppUiSurface;
 }) {
   const { t } = useTranslation();
   const toast = useToast();
@@ -77,7 +78,7 @@ export function ProfilesPage({ profiles, refresh, host, canManage, revealPaths }
                   <div className="mt-2 font-mono text-xs text-[var(--muted)]">{profile.id}</div>
                   {revealPaths && profile.codexHome
                     ? <div className="mt-1 max-w-full truncate font-mono text-xs text-[var(--muted)]">{profile.codexHome}</div>
-                    : <div className="mt-1 text-xs text-[var(--muted)]">{t("profiles.pathManaged")}</div>}
+                    : <div className="mt-1 text-xs text-[var(--muted)]">{t(`profiles.pathManaged.${surface}`)}</div>}
                 </Fragment>
               );
               if (!canManage || profile.id === "default") return <div className="min-w-0 max-w-full overflow-hidden rounded-lg border border-[var(--border)] p-4 text-left" key={profile.id}>{content}</div>;

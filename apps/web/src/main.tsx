@@ -37,6 +37,7 @@ if (!deviceCredential) {
         initialTheme="system"
         onForgetBrowser={() => forgetBrowser(host)}
         preferences={preferenceStore}
+        surface="web"
       />
     </React.StrictMode>
   );

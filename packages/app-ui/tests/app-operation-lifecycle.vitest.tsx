@@ -42,6 +42,7 @@ describe("App operation lifecycle", () => {
 
     render(
       <AppUi
+        surface="desktop"
         core={core}
         host={host}
         initialLocale="en"
@@ -84,6 +85,7 @@ describe("App operation lifecycle", () => {
 
     render(
       <AppUi
+        surface="desktop"
         core={core}
         host={host}
         initialLocale="en"
@@ -126,6 +128,7 @@ describe("App operation lifecycle", () => {
 
     render(
       <AppUi
+        surface="desktop"
         core={core}
         host={host}
         initialLocale="en"
@@ -177,6 +180,7 @@ describe("App operation lifecycle", () => {
 
     render(
       <AppUi
+        surface="desktop"
         core={core}
         host={{ listProfiles: async () => [{ id: "default", name: "Default", revision: "profile-r1" }] }}
         initialLocale="en"

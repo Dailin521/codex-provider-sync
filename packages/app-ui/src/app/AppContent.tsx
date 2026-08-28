@@ -312,7 +312,7 @@ export function AppContent({ props }: { props: AppUiProps }) {
             : route === "history"
               ? <HistoryPage core={props.core} key={`${profile.id}:${profile.revision}`} profile={profile} />
               : route === "profiles"
-                ? <ProfilesPage canManage={capabilities.manageProfiles} host={props.host} profiles={profiles} refresh={() => profilesQuery.refetch()} revealPaths={capabilities.revealProfilePaths} />
+                ? <ProfilesPage canManage={capabilities.manageProfiles} host={props.host} profiles={profiles} refresh={() => profilesQuery.refetch()} revealPaths={capabilities.revealProfilePaths} surface={props.surface} />
                 : route === "diagnostics"
                   ? <DiagnosticsPage canExport={capabilities.exportDiagnostics && Boolean(props.host.exportDiagnostics)} diagnostics={diagnosticsQuery.data} exportBundle={() => exportDiagnostics.mutate()} exporting={exportDiagnostics.isPending} loading={diagnosticsQuery.isFetching} refresh={() => void diagnosticsQuery.refetch()} />
                   : route === "settings"
@@ -323,7 +323,7 @@ export function AppContent({ props }: { props: AppUiProps }) {
     <div className="min-h-screen bg-[var(--surface)] text-[var(--text)]">
       <a className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[70] focus:rounded focus:bg-[var(--accent)] focus:px-4 focus:py-2 focus:text-white" href="#main-content" onClick={(event) => { event.preventDefault(); document.getElementById("main-content")?.focus(); }}>{t("a11y.skipToContent")}</a>
       <header className="sticky top-0 z-30 flex min-h-16 flex-wrap items-center justify-between gap-3 border-b border-[var(--border)] bg-[color:var(--surface-raised)/.96] px-4 py-3 backdrop-blur md:px-6">
-        <div className="flex items-center gap-3"><div className="grid h-10 w-10 place-items-center rounded-xl bg-[var(--accent)] text-white"><Database size={20} /></div><div><div className="font-bold">Codex Provider Sync</div><div className="text-xs text-[var(--muted)]">{t("brandSubtitle")}</div></div></div>
+        <div className="flex min-w-0 items-center gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[var(--accent)] text-white"><Database size={20} /></div><div className="min-w-0"><div className="flex min-w-0 items-center gap-2"><div className="truncate font-bold">Codex Provider Sync</div><Badge>{t(`brand.${props.surface}.label`)}</Badge></div><div className="truncate text-xs text-[var(--muted)]">{t(`brand.${props.surface}.subtitle`)}</div></div></div>
         <div className="flex w-full min-w-0 items-center justify-between gap-3 sm:w-auto sm:justify-end"><select aria-label={t("a11y.profile")} className="min-w-0 max-w-[min(12rem,70vw)] rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--input)] px-3 py-2 text-sm" disabled={mutationCount > 0 || externalWriteActive} onChange={(event) => setSelectedProfileId(event.target.value)} value={profile?.id ?? ""}>{profiles.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select><Badge tone={mutationCount > 0 || externalWriteActive ? "warning" : "success"}>{mutationCount > 0 || externalWriteActive ? t("global.busy") : t("global.ready")}</Badge></div>
       </header>
       <div className="mx-auto grid w-full min-w-0 max-w-[1600px] md:grid-cols-[240px_minmax(0,1fr)]">

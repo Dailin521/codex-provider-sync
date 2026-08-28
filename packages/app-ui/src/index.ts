@@ -11,6 +11,7 @@ export {
 export type {
   AppUiCapabilities,
   AppUiProps,
+  AppUiSurface,
   HostClient,
   HostDiagnosticsExportResult,
   HostProfile,

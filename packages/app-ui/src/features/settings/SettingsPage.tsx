@@ -69,7 +69,7 @@ export function SettingsPage({ props, profile, capabilities, recoveryBlocked, wr
   };
   return (
     <Fragment>
-      <PageHeading title={t("settings.title")} subtitle={t("settings.subtitle")} />
+      <PageHeading title={t("settings.title")} subtitle={t(`settings.subtitle.${props.surface}`)} />
       <div className="grid gap-4 lg:grid-cols-2">
         <Card>
           <Field label={t("settings.language")}>

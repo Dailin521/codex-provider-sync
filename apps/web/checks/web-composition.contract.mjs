@@ -9,6 +9,7 @@ test("Web composition injects HttpCoreClient and keeps host APIs separate", asyn
   const themeBootstrap = await fs.readFile(new URL("../public/theme-bootstrap.js", import.meta.url), "utf8");
   assert.match(main, /new HttpCoreClient/);
   assert.match(main, /<AppUi/);
+  assert.match(main, /surface="web"/);
   assert.doesNotMatch(main, /\/api\/(?:status|backups|history|sync|switch|restore|prune)/);
   assert.match(pairing, /\/api\/pair/);
   assert.match(pairing, /\/api\/profiles/);

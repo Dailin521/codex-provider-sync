@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -30,6 +31,7 @@ const fixtureHostDll = process.env.CPS_DOTNET_FIXTURE_HOST
 const crashHostDll = process.env.CPS_DOTNET_CRASH_HOST
   ?? path.join(repositoryRoot, "desktop", "CodexProviderSync.Core.Tests", "CrashHost", "bin", "Release", "net10.0", "CodexProviderSync.CrashHost.dll");
 const nodeCrashHost = path.join(repositoryRoot, "test-support", "cross-runtime-node-crash-host.mjs");
+const nodeWriterHost = path.join(repositoryRoot, "test-support", "cross-runtime-writer-host.mjs");
 const nodeRestoreCrashHost = path.join(repositoryRoot, "test-support", "restore-v2-crash-host.mjs");
 const ordinalCompare = (left, right) => left < right ? -1 : left > right ? 1 : 0;
 const physicalPathKey = (value) => process.platform === "win32"
@@ -104,7 +106,10 @@ async function rolloutFiles(root) {
   return result;
 }
 
-async function canonicalState(codexHome) {
+async function canonicalState(
+  codexHome,
+  databasePath = path.join(codexHome, "sqlite", "state_5.sqlite")
+) {
   const files = [];
   const configPath = path.join(codexHome, "config.toml");
   files.push(["config.toml", digest(await fs.readFile(configPath))]);
@@ -125,7 +130,6 @@ async function canonicalState(codexHome) {
       ]);
     }
   }
-  const databasePath = path.join(codexHome, "sqlite", "state_5.sqlite");
   const sidecars = [];
   for (const suffix of ["-wal", "-shm"]) {
     try {
@@ -278,6 +282,65 @@ function runProcessFailure(command, args, expectedCode = "RECOVERY_REQUIRED") {
   return output;
 }
 
+function startProcess(command, args) {
+  const child = spawn(command, args, {
+    cwd: repositoryRoot,
+    windowsHide: true,
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, NO_COLOR: "1" }
+  });
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const completed = new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (status, signal) => resolve({ status, signal, stdout, stderr }));
+  });
+  return { child, completed };
+}
+
+async function finishProcess(runner) {
+  const result = await runner.completed;
+  assert.equal(
+    result.status,
+    0,
+    [
+      `The gated writer exited with status ${result.status ?? "null"} and signal ${result.signal ?? "none"}.`,
+      result.stdout,
+      result.stderr
+    ].filter(Boolean).join("\n")
+  );
+  const line = result.stdout.trim().split(/\r?\n/).filter(Boolean).at(-1);
+  const output = JSON.parse(line);
+  assert.equal(output.schemaVersion, 1);
+  assert.equal(output.ok, true);
+  return output;
+}
+
+async function waitForPath(filePath, timeoutMs = 20_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await fs.access(filePath);
+      return;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    await delay(25);
+  }
+  assert.fail(`Timed out waiting for gated writer marker: ${filePath}`);
+}
+
+async function releaseAndFinish(runner, releasePath) {
+  await fs.writeFile(releasePath, "release\n", { flag: "wx" }).catch((error) => {
+    if (error?.code !== "EEXIST") throw error;
+  });
+  return finishProcess(runner);
+}
+
 function runDotnet(operation, codexHome, argument) {
   return runProcess("dotnet", [fixtureHostDll, operation, codexHome, argument]);
 }
@@ -288,6 +351,19 @@ function runDotnetFailure(operation, codexHome, argument, expectedCode = "RECOVE
     [fixtureHostDll, operation, codexHome, argument],
     expectedCode
   );
+}
+
+async function createSharedStateDbCase(fixture, name) {
+  const nodeHome = await createCase(fixture, `${name}-node-home`);
+  const dotnetHome = await createCase(fixture, `${name}-dotnet-home`);
+  const sharedSqliteHome = path.join(fixture.root, "work", name, "shared-sqlite");
+  const sharedStateDb = path.join(sharedSqliteHome, "state_5.sqlite");
+  await fs.mkdir(sharedSqliteHome, { recursive: true });
+  await fs.copyFile(
+    path.join(nodeHome.codexHome, "sqlite", "state_5.sqlite"),
+    sharedStateDb
+  );
+  return { nodeHome, dotnetHome, sharedSqliteHome, sharedStateDb };
 }
 
 async function writeUnknownRestoreJournal(codexHome, sourceBackupDir, suffix) {
@@ -519,6 +595,125 @@ test("bidirectional-backup-roundtrip uses one synthetic corpus across Node and .
       node: { restored: true },
       dotnet: { restored: true },
       decision: "Both directed backup/restore paths match the synthetic canonical state."
+    });
+  });
+  assert.equal(evidence.status, "matched");
+});
+
+test("actual Node and .NET writers contend across different Homes sharing one State DB", async () => {
+  await Promise.all([fs.access(fixtureHostDll), fs.access(nodeWriterHost)]);
+  const fixtureRoot = path.join(staticRoot, "bidirectional-backup-roundtrip");
+  const evidence = await runFixtureInTemp(fixtureRoot, async (fixture) => {
+    const nodeWinnerCase = await createSharedStateDbCase(fixture, "node-winner");
+    const nodeReadyPath = path.join(fixture.root, "work", "node-winner.ready");
+    const nodeReleasePath = path.join(fixture.root, "work", "node-winner.release");
+    const nodeWinner = startProcess(process.execPath, [
+      nodeWriterHost,
+      nodeWinnerCase.nodeHome.codexHome,
+      "openai",
+      nodeWinnerCase.sharedSqliteHome,
+      nodeReadyPath,
+      nodeReleasePath
+    ]);
+    try {
+      await waitForPath(nodeReadyPath);
+      const loserBefore = await canonicalState(
+        nodeWinnerCase.dotnetHome.codexHome,
+        nodeWinnerCase.sharedStateDb
+      );
+      const loserBackupsBefore = await managedBackupTree(nodeWinnerCase.dotnetHome.codexHome);
+      const failure = runProcessFailure(
+        "dotnet",
+        [
+          fixtureHostDll,
+          "sync-explicit",
+          nodeWinnerCase.dotnetHome.codexHome,
+          "openai",
+          nodeWinnerCase.sharedSqliteHome
+        ],
+        "OPERATION_BUSY"
+      );
+      assert.equal(failure.busyScope, "state-db");
+      assert.deepEqual(
+        (await canonicalState(
+          nodeWinnerCase.dotnetHome.codexHome,
+          nodeWinnerCase.sharedStateDb
+        )).canonical,
+        loserBefore.canonical
+      );
+      assert.deepEqual(
+        await managedBackupTree(nodeWinnerCase.dotnetHome.codexHome),
+        loserBackupsBefore
+      );
+      assert.equal((await findPendingTransactions(nodeWinnerCase.dotnetHome.codexHome)).length, 0);
+    } finally {
+      await releaseAndFinish(nodeWinner, nodeReleasePath);
+    }
+    assert.equal(
+      (await canonicalState(nodeWinnerCase.nodeHome.codexHome, nodeWinnerCase.sharedStateDb)).provider,
+      "openai"
+    );
+
+    const dotnetWinnerCase = await createSharedStateDbCase(fixture, "dotnet-winner");
+    const dotnetReadyPath = path.join(fixture.root, "work", "dotnet-winner.ready");
+    const dotnetReleasePath = path.join(fixture.root, "work", "dotnet-winner.release");
+    const dotnetWinner = startProcess("dotnet", [
+      fixtureHostDll,
+      "sync-gated",
+      dotnetWinnerCase.dotnetHome.codexHome,
+      "openai",
+      dotnetWinnerCase.sharedSqliteHome,
+      dotnetReadyPath,
+      dotnetReleasePath
+    ]);
+    try {
+      await waitForPath(dotnetReadyPath);
+      const loserBefore = await canonicalState(
+        dotnetWinnerCase.nodeHome.codexHome,
+        dotnetWinnerCase.sharedStateDb
+      );
+      const loserBackupsBefore = await managedBackupTree(dotnetWinnerCase.nodeHome.codexHome);
+      await assert.rejects(
+        () => runSync({
+          codexHome: dotnetWinnerCase.nodeHome.codexHome,
+          provider: "openai",
+          sqliteHome: dotnetWinnerCase.sharedSqliteHome
+        }),
+        (error) => error?.code === "OPERATION_BUSY"
+          && error?.details?.busyScope === "state-db"
+      );
+      assert.deepEqual(
+        (await canonicalState(
+          dotnetWinnerCase.nodeHome.codexHome,
+          dotnetWinnerCase.sharedStateDb
+        )).canonical,
+        loserBefore.canonical
+      );
+      assert.deepEqual(
+        await managedBackupTree(dotnetWinnerCase.nodeHome.codexHome),
+        loserBackupsBefore
+      );
+      assert.equal((await findPendingTransactions(dotnetWinnerCase.nodeHome.codexHome)).length, 0);
+    } finally {
+      await releaseAndFinish(dotnetWinner, dotnetReleasePath);
+    }
+    assert.equal(
+      (await canonicalState(dotnetWinnerCase.dotnetHome.codexHome, dotnetWinnerCase.sharedStateDb)).provider,
+      "openai"
+    );
+
+    return createRuntimeDifference({
+      fixtureId: "shared-sqlite-home-actual-writer-contention",
+      status: "matched",
+      node: {
+        heldStateDbLockAgainstDotnetWriter: true,
+        rejectedByDotnetWriter: true
+      },
+      dotnet: {
+        heldStateDbLockAgainstNodeWriter: true,
+        rejectedByNodeWriter: true
+      },
+      decision: "Actual Node and .NET Sync writers both fail the losing Home before Backup, Journal, or business mutation."
     });
   });
   assert.equal(evidence.status, "matched");

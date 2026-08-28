@@ -4,7 +4,16 @@ import type { SupportedLocale } from "@codex-provider-sync/design-system";
 export const resources = {
   en: {
     translation: {
-      brandSubtitle: "Local metadata alignment",
+      brand: {
+        desktop: {
+          label: "Desktop",
+          subtitle: "New primary desktop · .NET Legacy fallback retained"
+        },
+        web: {
+          label: "Web",
+          subtitle: "Local Web companion"
+        }
+      },
       a11y: {
         skipToContent: "Skip to content",
         profile: "Profile",
@@ -126,7 +135,10 @@ export const resources = {
         create: "Create profile",
         update: "Update profile",
         defaultManaged: "The default profile is managed by startup flags.",
-        pathManaged: "Storage paths are retained by the trusted desktop host.",
+        pathManaged: {
+          desktop: "Storage paths are retained by the trusted desktop Host.",
+          web: "Storage paths are retained by the local Web Host."
+        },
         readOnly: "This build exposes profile IDs and revisions only; profile editing is not enabled."
       },
       diagnostics: {
@@ -167,7 +179,10 @@ export const resources = {
       },
       settings: {
         title: "Settings",
-        subtitle: "Only language and theme preferences are stored in this browser.",
+        subtitle: {
+          desktop: "Language and theme preferences stay on this device.",
+          web: "Language and theme preferences stay in this browser; pairing remains managed by the local Web Host."
+        },
         language: "Language",
         theme: "Theme",
         system: "System",
@@ -335,7 +350,16 @@ export const resources = {
   },
   "zh-CN": {
     translation: {
-      brandSubtitle: "本机元数据一致性工具",
+      brand: {
+        desktop: {
+          label: "桌面端",
+          subtitle: "新版主桌面端 · 保留 .NET Legacy 兼容回退"
+        },
+        web: {
+          label: "Web",
+          subtitle: "本地 Web companion"
+        }
+      },
       a11y: {
         skipToContent: "跳到主要内容",
         profile: "存储配置",
@@ -457,7 +481,10 @@ export const resources = {
         create: "新建配置",
         update: "更新配置",
         defaultManaged: "默认配置由启动参数管理。",
-        pathManaged: "存储路径仅由可信桌面 Host 持有。",
+        pathManaged: {
+          desktop: "存储路径仅由可信桌面 Host 持有。",
+          web: "存储路径仅由本地 Web Host 持有。"
+        },
         readOnly: "此构建只公开配置 ID 与 revision；未开放配置编辑。"
       },
       diagnostics: {
@@ -498,7 +525,10 @@ export const resources = {
       },
       settings: {
         title: "设置",
-        subtitle: "此浏览器只持久化语言和主题偏好。",
+        subtitle: {
+          desktop: "语言和主题偏好仅保存在此设备。",
+          web: "语言和主题偏好仅保存在此浏览器；配对仍由本地 Web Host 管理。"
+        },
         language: "语言",
         theme: "主题",
         system: "跟随系统",

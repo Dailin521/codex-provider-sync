@@ -31,6 +31,7 @@ test("Renderer has no Node, Electron, filesystem, Core or arbitrary IPC imports"
   assert.doesNotMatch(text, /ipcRenderer|BrowserWindow|child_process|node:fs|node:path/);
   assert.match(text, /DesktopCoreClient/);
   assert.match(text, /DESKTOP_C8_APP_UI_CAPABILITIES/);
+  assert.match(text, /surface="desktop"/);
 });
 
 test("Renderer applies an allowlisted persisted theme before the application bundle", async () => {

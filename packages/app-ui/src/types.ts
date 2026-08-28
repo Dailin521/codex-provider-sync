@@ -139,9 +139,12 @@ export interface PreferenceStore {
   setTheme(theme: ThemeMode): void;
 }
 
+export type AppUiSurface = "desktop" | "web";
+
 export interface AppUiProps {
   core: CoreClient;
   host: HostClient;
+  surface: AppUiSurface;
   capabilities?: Partial<AppUiCapabilities>;
   preferences: PreferenceStore;
   initialLocale: SupportedLocale;

@@ -73,6 +73,7 @@ test("shared UI exposes explicit read-only, C7, and C8 capability profiles", asy
   assert.equal(Object.isFrozen(DESKTOP_C8_APP_UI_CAPABILITIES), true);
   const appContentSource = await fs.readFile(new URL("../src/app/AppContent.tsx", import.meta.url), "utf8");
   const settingsSource = await fs.readFile(new URL("../src/features/settings/SettingsPage.tsx", import.meta.url), "utf8");
+  const typesSource = await fs.readFile(new URL("../src/types.ts", import.meta.url), "utf8");
   assert.match(appContentSource, /route === "sync" && capabilities\.sync/);
   assert.match(settingsSource, /enabled: capabilities\.watch/);
   assert.match(settingsSource, /recoveryBlocked \|\| writeBlocked/);
@@ -85,6 +86,9 @@ test("shared UI exposes explicit read-only, C7, and C8 capability profiles", asy
   assert.match(settingsSource, /host\.downloadUpdate/);
   assert.match(settingsSource, /host\.installUpdate/);
   assert.match(appContentSource, /recoveryWriteDisabled/);
+  assert.match(typesSource, /AppUiSurface = "desktop" \| "web"/);
+  assert.match(appContentSource, /brand\.\$\{props\.surface\}/);
+  assert.match(settingsSource, /settings\.subtitle\.\$\{props\.surface\}/);
 });
 
 test("shared UI translations and write forms keep one strict schema", () => {

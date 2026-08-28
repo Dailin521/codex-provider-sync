@@ -25,10 +25,12 @@ describe("App localization and keyboard navigation", () => {
           getTheme: () => "system",
           setTheme: vi.fn()
         }}
+        surface="desktop"
       />
     );
 
     await screen.findByRole("button", { name: "Overview", exact: true });
+    expect(screen.getByText("New primary desktop · .NET Legacy fallback retained")).toBeVisible();
     await user.tab();
     const skipLink = screen.getByRole("link", { name: "Skip to content" });
     expect(skipLink).toHaveFocus();
@@ -51,5 +53,32 @@ describe("App localization and keyboard navigation", () => {
     await waitFor(() => expect(document.documentElement.lang).toBe("zh-CN"));
     expect(await screen.findByRole("button", { name: "设置", exact: true })).toHaveAttribute("aria-current", "page");
     expect(resourcesHaveMatchingKeys()).toBe(true);
+  });
+
+  it("renders Web-only host copy without desktop Legacy messaging", async () => {
+    const core = new MockCoreClient({ getStatus: async () => statusFor() });
+    const user = userEvent.setup();
+    render(
+      <AppUi
+        core={core}
+        host={{ listProfiles: async () => [{ id: "default", name: "Default", revision: "profile-r1" }] }}
+        initialLocale="en"
+        initialTheme="system"
+        preferences={{
+          getLocale: () => "en",
+          setLocale: vi.fn(),
+          getTheme: () => "system",
+          setTheme: vi.fn()
+        }}
+        surface="web"
+      />
+    );
+
+    expect(await screen.findByText("Local Web companion")).toBeVisible();
+    expect(screen.queryByText(/Legacy fallback/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Settings", exact: true }));
+    expect(await screen.findByText("Language and theme preferences stay in this browser; pairing remains managed by the local Web Host.")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Profiles", exact: true }));
+    expect(await screen.findByText("Storage paths are retained by the local Web Host.")).toBeVisible();
   });
 });

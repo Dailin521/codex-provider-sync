@@ -73,6 +73,7 @@ createRoot(document.getElementById("root")!).render(
       initialLocale={navigator.language.toLowerCase().startsWith("zh") ? "zh-CN" : "en"}
       initialTheme="system"
       preferences={preferences}
+      surface="desktop"
     />
   </React.StrictMode>
 );
