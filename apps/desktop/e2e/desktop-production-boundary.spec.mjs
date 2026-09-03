@@ -246,7 +246,8 @@ test("production desktop bundle has no test bridge and reads the real SQLite fix
     ));
     expect(status.ok).toBe(true);
     expect(status.result.sqliteCounts.sessions.openai).toBe(1);
-    expect(status.result.pendingRecovery).toBe(true);
+    expect(status.result.pendingRecovery).toBe(false);
+    expect(status.result.pendingTransactions).toHaveLength(1);
 
     const denied = await test.step("reject a write over the read-only bridge", () => withDeadline(
       "Production read-only permission check",
@@ -261,18 +262,18 @@ test("production desktop bundle has no test bridge and reads the real SQLite fix
     expect(denied.ok).toBe(false);
     expect(denied.error.code).toBe("PERMISSION_DENIED");
 
-    const recoveryBlocked = await test.step("block a real write while recovery is pending", () => withDeadline(
-      "Production recovery write gate",
+    const ordinaryPlan = await test.step("allow a real write plan beside a legacy ordinary journal", () => withDeadline(
+      "Production legacy-journal write gate",
       page.evaluate(async ({ profile }) => window.codexProvider.core.requestSyncSwitch({
         protocolVersion: 1,
-        requestId: "c7-production-recovery-blocked",
+        requestId: "c7-production-legacy-journal-plan",
         method: "prepareSync",
         payload: { profile: { profileId: profile.id, profileRevision: profile.revision }, keepCount: 5 }
       }), { profile }),
       PRODUCTION_BRIDGE_TIMEOUT_MS
     ));
-    expect(recoveryBlocked.ok).toBe(false);
-    expect(recoveryBlocked.error.code).toBe("PENDING_TRANSACTION");
+    expect(ordinaryPlan.ok).toBe(true);
+    expect(ordinaryPlan.result.operation).toBe("sync");
 
     await page.getByRole("button", { name: "History" }).click({
       timeout: PRODUCTION_READY_TIMEOUT_MS

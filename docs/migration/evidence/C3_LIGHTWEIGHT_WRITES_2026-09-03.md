@@ -1,6 +1,6 @@
 # C3 轻量普通写与重试收敛证据（2026-09-03）
 
-状态：本地候选门禁通过，等待 checkpoint commit 与远端 CI。输入 checkpoint 为 `3f1aa5c`；输出 SHA 由包含本文的 C3 commit 固定。
+状态：C3 checkpoint `c09d8a2` 已完成；本地候选门禁通过，等待当前修正提交与远端 CI。
 
 ## 已实现边界
 
@@ -28,9 +28,10 @@
 
 | 命令 | 结果 |
 | --- | --- |
-| `npm test` | 422 tests：365 passed，0 failed，57 expected skipped |
+| `npm test` | 418 tests：365 passed，0 failed，53 expected skipped |
 | `node --test test/plan-apply.test.js` | 15 passed，0 failed/skipped；包含备份后取消与 SQLite 已对齐时 busy preflight |
 | `npm run workspaces:check` | 全部 workspace build、unit/contract 与依赖边界通过；Desktop 74、Core 18、CoreClient 21、Contracts 12 |
+| `npm run fixtures:cross-runtime` | 11 passed，0 failed/skipped；新 Node Sync source 从 config 读取 Provider，Restore 继续兼容 Node/.NET 旧备份与 journal。旧 State DB 资源锁对抗用例随 C3 协议退役 |
 | 隐藏 Electron `playwright test -c playwright.config.mjs` | 15 passed，0 failed，1 个真实 WSL 条件用例 skipped；包含 native SQLite fallback、Repair、partial、四个 Utility crash/retry 点和 Restore relocation |
 | Web Playwright | 2 passed，0 failed |
 | Node 16.20.2 根包门禁 | runtime verify、package smoke、lifecycle/SQLite smoke 全部通过 |

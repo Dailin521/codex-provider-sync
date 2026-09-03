@@ -2,13 +2,17 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
-import { setTimeout as delay } from "node:timers/promises";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { createRuntimeDifference, runFixtureInTemp } from "../packages/test-fixtures/src/index.js";
-import { runRestore, runSync } from "../src/public-api.js";
+import {
+  readConfigText,
+  setRootProviderInConfigText,
+  writeConfigText
+} from "../src/config-file.js";
+import { runRestore, runSwitch, runSync } from "../src/public-api.js";
 import {
   captureRestoreSourceIdentity,
   RESTORE_SNAPSHOT_MANIFEST_BASENAME
@@ -31,7 +35,6 @@ const fixtureHostDll = process.env.CPS_DOTNET_FIXTURE_HOST
 const crashHostDll = process.env.CPS_DOTNET_CRASH_HOST
   ?? path.join(repositoryRoot, "desktop", "CodexProviderSync.Core.Tests", "CrashHost", "bin", "Release", "net10.0", "CodexProviderSync.CrashHost.dll");
 const nodeCrashHost = path.join(repositoryRoot, "test-support", "cross-runtime-node-crash-host.mjs");
-const nodeWriterHost = path.join(repositoryRoot, "test-support", "cross-runtime-writer-host.mjs");
 const nodeRestoreCrashHost = path.join(repositoryRoot, "test-support", "restore-v2-crash-host.mjs");
 const ordinalCompare = (left, right) => left < right ? -1 : left > right ? 1 : 0;
 const physicalPathKey = (value) => process.platform === "win32"
@@ -222,6 +225,19 @@ async function createCase(fixture, name) {
   return { codexHome, initial: await canonicalState(codexHome) };
 }
 
+async function selectProviderThenSync(caseState, provider) {
+  const configPath = path.join(caseState.codexHome, "config.toml");
+  const configText = await readConfigText(configPath);
+  await writeConfigText(
+    configPath,
+    setRootProviderInConfigText(configText, provider)
+  );
+  // The config change models an external Provider switch and is therefore the
+  // pre-Sync state that a later Restore must reproduce.
+  caseState.initial = await canonicalState(caseState.codexHome);
+  return runSync({ codexHome: caseState.codexHome });
+}
+
 function runProcess(command, args, { expectCrash = false } = {}) {
   const result = spawnSync(command, args, {
     cwd: repositoryRoot,
@@ -282,65 +298,6 @@ function runProcessFailure(command, args, expectedCode = "RECOVERY_REQUIRED") {
   return output;
 }
 
-function startProcess(command, args) {
-  const child = spawn(command, args, {
-    cwd: repositoryRoot,
-    windowsHide: true,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, NO_COLOR: "1" }
-  });
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  let stdout = "";
-  let stderr = "";
-  child.stdout.on("data", (chunk) => { stdout += chunk; });
-  child.stderr.on("data", (chunk) => { stderr += chunk; });
-  const completed = new Promise((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", (status, signal) => resolve({ status, signal, stdout, stderr }));
-  });
-  return { child, completed };
-}
-
-async function finishProcess(runner) {
-  const result = await runner.completed;
-  assert.equal(
-    result.status,
-    0,
-    [
-      `The gated writer exited with status ${result.status ?? "null"} and signal ${result.signal ?? "none"}.`,
-      result.stdout,
-      result.stderr
-    ].filter(Boolean).join("\n")
-  );
-  const line = result.stdout.trim().split(/\r?\n/).filter(Boolean).at(-1);
-  const output = JSON.parse(line);
-  assert.equal(output.schemaVersion, 1);
-  assert.equal(output.ok, true);
-  return output;
-}
-
-async function waitForPath(filePath, timeoutMs = 20_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      await fs.access(filePath);
-      return;
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
-    }
-    await delay(25);
-  }
-  assert.fail(`Timed out waiting for gated writer marker: ${filePath}`);
-}
-
-async function releaseAndFinish(runner, releasePath) {
-  await fs.writeFile(releasePath, "release\n", { flag: "wx" }).catch((error) => {
-    if (error?.code !== "EEXIST") throw error;
-  });
-  return finishProcess(runner);
-}
-
 function runDotnet(operation, codexHome, argument) {
   return runProcess("dotnet", [fixtureHostDll, operation, codexHome, argument]);
 }
@@ -351,19 +308,6 @@ function runDotnetFailure(operation, codexHome, argument, expectedCode = "RECOVE
     [fixtureHostDll, operation, codexHome, argument],
     expectedCode
   );
-}
-
-async function createSharedStateDbCase(fixture, name) {
-  const nodeHome = await createCase(fixture, `${name}-node-home`);
-  const dotnetHome = await createCase(fixture, `${name}-dotnet-home`);
-  const sharedSqliteHome = path.join(fixture.root, "work", name, "shared-sqlite");
-  const sharedStateDb = path.join(sharedSqliteHome, "state_5.sqlite");
-  await fs.mkdir(sharedSqliteHome, { recursive: true });
-  await fs.copyFile(
-    path.join(nodeHome.codexHome, "sqlite", "state_5.sqlite"),
-    sharedStateDb
-  );
-  return { nodeHome, dotnetHome, sharedSqliteHome, sharedStateDb };
 }
 
 async function writeUnknownRestoreJournal(codexHome, sourceBackupDir, suffix) {
@@ -484,7 +428,9 @@ async function assertRestored(caseState, backupDir, expectedJournal) {
       restoreEvidence
     })
   );
-  await assertJournal(backupDir, expectedJournal);
+  if (expectedJournal !== null) {
+    await assertJournal(backupDir, expectedJournal);
+  }
 }
 
 async function assertCompletedRestoreEvidence({
@@ -543,7 +489,7 @@ test("bidirectional-backup-roundtrip uses one synthetic corpus across Node and .
   const fixtureRoot = path.join(staticRoot, "bidirectional-backup-roundtrip");
   const evidence = await runFixtureInTemp(fixtureRoot, async (fixture) => {
     const nodeToDotnet = await createCase(fixture, "node-to-dotnet");
-    const nodeResult = await runSync({ codexHome: nodeToDotnet.codexHome, provider: "openai" });
+    const nodeResult = await selectProviderThenSync(nodeToDotnet, "openai");
     const nodeIdentity = await captureRestoreSourceIdentity(nodeResult.backupDir);
     const dotnetIdentity = runDotnet("source-identity", nodeToDotnet.codexHome, nodeResult.backupDir);
     assert.equal(dotnetIdentity.Revision, nodeIdentity);
@@ -551,7 +497,7 @@ test("bidirectional-backup-roundtrip uses one synthetic corpus across Node and .
     const dotnetRestore = runDotnet("restore-v2", nodeToDotnet.codexHome, nodeResult.backupDir);
     assert.equal(dotnetRestore.RestoreVersion, 2);
     assert.equal(dotnetRestore.RestoreJournalState, "completed");
-    await assertRestored(nodeToDotnet, nodeResult.backupDir, fixture.manifest.expected.journalTerminal);
+    await assertRestored(nodeToDotnet, nodeResult.backupDir, null);
     const nodeToDotnetJournals = await restoreJournals(nodeToDotnet.codexHome);
     await assertCompletedRestoreEvidence({
       result: dotnetRestore,
@@ -600,125 +546,6 @@ test("bidirectional-backup-roundtrip uses one synthetic corpus across Node and .
   assert.equal(evidence.status, "matched");
 });
 
-test("actual Node and .NET writers contend across different Homes sharing one State DB", async () => {
-  await Promise.all([fs.access(fixtureHostDll), fs.access(nodeWriterHost)]);
-  const fixtureRoot = path.join(staticRoot, "bidirectional-backup-roundtrip");
-  const evidence = await runFixtureInTemp(fixtureRoot, async (fixture) => {
-    const nodeWinnerCase = await createSharedStateDbCase(fixture, "node-winner");
-    const nodeReadyPath = path.join(fixture.root, "work", "node-winner.ready");
-    const nodeReleasePath = path.join(fixture.root, "work", "node-winner.release");
-    const nodeWinner = startProcess(process.execPath, [
-      nodeWriterHost,
-      nodeWinnerCase.nodeHome.codexHome,
-      "openai",
-      nodeWinnerCase.sharedSqliteHome,
-      nodeReadyPath,
-      nodeReleasePath
-    ]);
-    try {
-      await waitForPath(nodeReadyPath);
-      const loserBefore = await canonicalState(
-        nodeWinnerCase.dotnetHome.codexHome,
-        nodeWinnerCase.sharedStateDb
-      );
-      const loserBackupsBefore = await managedBackupTree(nodeWinnerCase.dotnetHome.codexHome);
-      const failure = runProcessFailure(
-        "dotnet",
-        [
-          fixtureHostDll,
-          "sync-explicit",
-          nodeWinnerCase.dotnetHome.codexHome,
-          "openai",
-          nodeWinnerCase.sharedSqliteHome
-        ],
-        "OPERATION_BUSY"
-      );
-      assert.equal(failure.busyScope, "state-db");
-      assert.deepEqual(
-        (await canonicalState(
-          nodeWinnerCase.dotnetHome.codexHome,
-          nodeWinnerCase.sharedStateDb
-        )).canonical,
-        loserBefore.canonical
-      );
-      assert.deepEqual(
-        await managedBackupTree(nodeWinnerCase.dotnetHome.codexHome),
-        loserBackupsBefore
-      );
-      assert.equal((await findPendingTransactions(nodeWinnerCase.dotnetHome.codexHome)).length, 0);
-    } finally {
-      await releaseAndFinish(nodeWinner, nodeReleasePath);
-    }
-    assert.equal(
-      (await canonicalState(nodeWinnerCase.nodeHome.codexHome, nodeWinnerCase.sharedStateDb)).provider,
-      "openai"
-    );
-
-    const dotnetWinnerCase = await createSharedStateDbCase(fixture, "dotnet-winner");
-    const dotnetReadyPath = path.join(fixture.root, "work", "dotnet-winner.ready");
-    const dotnetReleasePath = path.join(fixture.root, "work", "dotnet-winner.release");
-    const dotnetWinner = startProcess("dotnet", [
-      fixtureHostDll,
-      "sync-gated",
-      dotnetWinnerCase.dotnetHome.codexHome,
-      "openai",
-      dotnetWinnerCase.sharedSqliteHome,
-      dotnetReadyPath,
-      dotnetReleasePath
-    ]);
-    try {
-      await waitForPath(dotnetReadyPath);
-      const loserBefore = await canonicalState(
-        dotnetWinnerCase.nodeHome.codexHome,
-        dotnetWinnerCase.sharedStateDb
-      );
-      const loserBackupsBefore = await managedBackupTree(dotnetWinnerCase.nodeHome.codexHome);
-      await assert.rejects(
-        () => runSync({
-          codexHome: dotnetWinnerCase.nodeHome.codexHome,
-          provider: "openai",
-          sqliteHome: dotnetWinnerCase.sharedSqliteHome
-        }),
-        (error) => error?.code === "OPERATION_BUSY"
-          && error?.details?.busyScope === "state-db"
-      );
-      assert.deepEqual(
-        (await canonicalState(
-          dotnetWinnerCase.nodeHome.codexHome,
-          dotnetWinnerCase.sharedStateDb
-        )).canonical,
-        loserBefore.canonical
-      );
-      assert.deepEqual(
-        await managedBackupTree(dotnetWinnerCase.nodeHome.codexHome),
-        loserBackupsBefore
-      );
-      assert.equal((await findPendingTransactions(dotnetWinnerCase.nodeHome.codexHome)).length, 0);
-    } finally {
-      await releaseAndFinish(dotnetWinner, dotnetReleasePath);
-    }
-    assert.equal(
-      (await canonicalState(dotnetWinnerCase.dotnetHome.codexHome, dotnetWinnerCase.sharedStateDb)).provider,
-      "openai"
-    );
-
-    return createRuntimeDifference({
-      fixtureId: "shared-sqlite-home-actual-writer-contention",
-      status: "matched",
-      node: {
-        heldStateDbLockAgainstDotnetWriter: true,
-        rejectedByDotnetWriter: true
-      },
-      dotnet: {
-        heldStateDbLockAgainstNodeWriter: true,
-        rejectedByNodeWriter: true
-      },
-      decision: "Actual Node and .NET Sync writers both fail the losing Home before Backup, Journal, or business mutation."
-    });
-  });
-  assert.equal(evidence.status, "matched");
-});
-
 test("foreign-pending-restore converges both crash directions to rolledBack", async () => {
   await Promise.all([fs.access(fixtureHostDll), fs.access(crashHostDll)]);
   const fixtureRoot = path.join(staticRoot, "foreign-pending-restore");
@@ -757,7 +584,7 @@ test("Restore v2 crash recovery is bidirectional across Node and .NET", async ()
   const fixtureRoot = path.join(staticRoot, "bidirectional-backup-roundtrip");
   const evidence = await runFixtureInTemp(fixtureRoot, async (fixture) => {
     const nodeToDotnet = await createCase(fixture, "node-restore-crash-to-dotnet");
-    const nodeSource = await runSync({ codexHome: nodeToDotnet.codexHome, provider: "openai" });
+    const nodeSource = await selectProviderThenSync(nodeToDotnet, "openai");
     const nodeSourceRevision = await captureRestoreSourceIdentity(nodeSource.backupDir);
     runProcess(
       process.execPath,
@@ -782,7 +609,7 @@ test("Restore v2 crash recovery is bidirectional across Node and .NET", async ()
     );
     assert.equal(recoveredByDotnet.RestoreJournalState, "completed");
     assert.equal(recoveredByDotnet.ResolvedOperationIds.length, 1);
-    await assertRestored(nodeToDotnet, nodeSource.backupDir, fixture.manifest.expected.journalTerminal);
+    await assertRestored(nodeToDotnet, nodeSource.backupDir, null);
     const nodeOriginJournals = await restoreJournals(nodeToDotnet.codexHome);
     assert.equal(nodeOriginJournals.length, 2);
     assert.equal(nodeOriginJournals.filter((journal) => journal.state === "applying").length, 1);
@@ -853,7 +680,7 @@ test("Restore v2 recovery accepts real Windows 8.3 aliases across Node and .NET"
   const fixtureRoot = path.join(staticRoot, "bidirectional-backup-roundtrip");
   const evidence = await runFixtureInTemp(fixtureRoot, async (fixture) => {
     const nodeToDotnet = await createCase(fixture, "node-short-alias-to-dotnet");
-    const nodeSource = await runSync({ codexHome: nodeToDotnet.codexHome, provider: "openai" });
+    const nodeSource = await selectProviderThenSync(nodeToDotnet, "openai");
     runProcess(process.execPath, [
       nodeRestoreCrashHost,
       nodeToDotnet.codexHome,
@@ -871,7 +698,7 @@ test("Restore v2 recovery accepts real Windows 8.3 aliases across Node and .NET"
     assert.equal(recoveredByDotnet.RestoreJournalState, "completed");
     assert.deepEqual(recoveredByDotnet.ResolvedOperationIds, [nodePending.operationId]);
     assert.deepEqual(await fs.readFile(nodePending.filePath), nodePendingBytes);
-    await assertRestored(nodeToDotnet, nodeSource.backupDir, fixture.manifest.expected.journalTerminal);
+    await assertRestored(nodeToDotnet, nodeSource.backupDir, null);
 
     const dotnetToNode = await createCase(fixture, "dotnet-short-alias-to-node");
     const dotnetSource = runDotnet("sync", dotnetToNode.codexHome, "openai");
@@ -894,7 +721,7 @@ test("Restore v2 recovery accepts real Windows 8.3 aliases across Node and .NET"
     await assertRestored(dotnetToNode, dotnetSource.BackupDir, fixture.manifest.expected.journalTerminal);
 
     const nodeAliasCreated = await createCase(fixture, "node-created-via-short-alias");
-    const nodeAliasSource = await runSync({ codexHome: nodeAliasCreated.codexHome, provider: "openai" });
+    const nodeAliasSource = await selectProviderThenSync(nodeAliasCreated, "openai");
     runProcess(process.execPath, [
       nodeRestoreCrashHost,
       windowsShortDirectoryPath(nodeAliasCreated.codexHome),
@@ -964,7 +791,7 @@ test("Restore v2 recovery binds Windows junction aliases at creation across Node
   const fixtureRoot = path.join(staticRoot, "bidirectional-backup-roundtrip");
   const evidence = await runFixtureInTemp(fixtureRoot, async (fixture) => {
     const nodeToDotnet = await createCase(fixture, "node-junction-create-to-dotnet");
-    const nodeSource = await runSync({ codexHome: nodeToDotnet.codexHome, provider: "openai" });
+    const nodeSource = await selectProviderThenSync(nodeToDotnet, "openai");
     const nodeSourceAlias = path.join(path.dirname(nodeToDotnet.codexHome), "source-backup-junction");
     await fs.symlink(nodeSource.backupDir, nodeSourceAlias, "junction");
     runProcess(process.execPath, [
@@ -986,7 +813,7 @@ test("Restore v2 recovery binds Windows junction aliases at creation across Node
     );
     assert.equal(nodeRecoveredByDotnet.RestoreJournalState, "completed");
     assert.deepEqual(nodeRecoveredByDotnet.ResolvedOperationIds, [nodePending.operationId]);
-    await assertRestored(nodeToDotnet, nodeSource.backupDir, fixture.manifest.expected.journalTerminal);
+    await assertRestored(nodeToDotnet, nodeSource.backupDir, null);
 
     const dotnetToNode = await createCase(fixture, "dotnet-junction-create-to-node");
     const dotnetSource = runDotnet("sync", dotnetToNode.codexHome, "openai");
@@ -1047,7 +874,7 @@ test("Restore v2 prepared, committing and rollback-pending crashes recover acros
   const evidence = await runFixtureInTemp(fixtureRoot, async (fixture) => {
     for (const scenario of scenarios) {
       const nodeToDotnet = await createCase(fixture, `node-${scenario.name}-to-dotnet`);
-      const nodeSource = await runSync({ codexHome: nodeToDotnet.codexHome, provider: "openai" });
+      const nodeSource = await selectProviderThenSync(nodeToDotnet, "openai");
       const nodeSourceRevision = await captureRestoreSourceIdentity(nodeSource.backupDir);
       const nodeCrashArgs = [
         nodeRestoreCrashHost,
@@ -1069,7 +896,7 @@ test("Restore v2 prepared, committing and rollback-pending crashes recover acros
       );
       assert.equal(recoveredByDotnet.RestoreJournalState, "completed");
       assert.deepEqual(recoveredByDotnet.ResolvedOperationIds, [nodePending.operationId]);
-      await assertRestored(nodeToDotnet, nodeSource.backupDir, fixture.manifest.expected.journalTerminal);
+      await assertRestored(nodeToDotnet, nodeSource.backupDir, null);
       const nodeJournals = await restoreJournals(nodeToDotnet.codexHome);
       assert.equal(nodeJournals.length, 2);
       assert.equal(nodeJournals.filter((journal) => journal.state === scenario.state).length, 1);
@@ -1135,8 +962,8 @@ test("foreign Restore v2 pending is rejected without mutation in both runtime di
   const fixtureRoot = path.join(staticRoot, "bidirectional-backup-roundtrip");
   const evidence = await runFixtureInTemp(fixtureRoot, async (fixture) => {
     const nodeToDotnet = await createCase(fixture, "node-foreign-v2-to-dotnet");
-    const nodeSourceA = await runSync({ codexHome: nodeToDotnet.codexHome, provider: "openai" });
-    const nodeSourceB = await runSync({ codexHome: nodeToDotnet.codexHome, provider: "relay" });
+    const nodeSourceA = await runSwitch({ codexHome: nodeToDotnet.codexHome, provider: "openai" });
+    const nodeSourceB = await runSwitch({ codexHome: nodeToDotnet.codexHome, provider: "relay" });
     assert.notEqual(path.resolve(nodeSourceA.backupDir), path.resolve(nodeSourceB.backupDir));
     runProcess(process.execPath, [
       nodeRestoreCrashHost,
@@ -1202,7 +1029,7 @@ test("unknown Restore journal schema blocks Node and .NET writes without rewriti
   const fixtureRoot = path.join(staticRoot, "bidirectional-backup-roundtrip");
   const evidence = await runFixtureInTemp(fixtureRoot, async (fixture) => {
     const nodeToDotnet = await createCase(fixture, "unknown-schema-to-dotnet");
-    const nodeSource = await runSync({ codexHome: nodeToDotnet.codexHome, provider: "openai" });
+    const nodeSource = await selectProviderThenSync(nodeToDotnet, "openai");
     const nodeUnknown = await writeUnknownRestoreJournal(
       nodeToDotnet.codexHome,
       nodeSource.backupDir,
@@ -1226,8 +1053,9 @@ test("unknown Restore journal schema blocks Node and .NET writes without rewriti
     const dotnetCanonicalBefore = await canonicalState(dotnetToNode.codexHome);
     const dotnetTreeBefore = await managedBackupTree(dotnetToNode.codexHome);
     await assert.rejects(
-      () => runSync({ codexHome: dotnetToNode.codexHome, provider: "relay" }),
-      (error) => error?.code === "RECOVERY_REQUIRED"
+      () => runSync({ codexHome: dotnetToNode.codexHome }),
+      (error) => error?.code === "PENDING_TRANSACTION"
+        && error?.recoveryRequired === true
     );
     await assert.rejects(
       () => runRestore({ codexHome: dotnetToNode.codexHome, backupDir: dotnetSource.BackupDir }),
@@ -1253,7 +1081,7 @@ test("Restore v2 commit acknowledgement is forward-only across runtimes", async 
   const fixtureRoot = path.join(staticRoot, "bidirectional-backup-roundtrip");
   const evidence = await runFixtureInTemp(fixtureRoot, async (fixture) => {
     const nodeToDotnet = await createCase(fixture, "node-ack-to-dotnet");
-    const nodeSource = await runSync({ codexHome: nodeToDotnet.codexHome, provider: "openai" });
+    const nodeSource = await selectProviderThenSync(nodeToDotnet, "openai");
     const nodeSourceRevision = await captureRestoreSourceIdentity(nodeSource.backupDir);
     runProcess(
       process.execPath,
@@ -1282,7 +1110,7 @@ test("Restore v2 commit acknowledgement is forward-only across runtimes", async 
       expectedSourceRevision: nodeSourceRevision,
       journals: nodeAcknowledged
     });
-    await assertRestored(nodeToDotnet, nodeSource.backupDir, fixture.manifest.expected.journalTerminal);
+    await assertRestored(nodeToDotnet, nodeSource.backupDir, null);
 
     const dotnetToNode = await createCase(fixture, "dotnet-ack-to-node");
     const dotnetSource = runDotnet("sync", dotnetToNode.codexHome, "openai");
@@ -1335,7 +1163,7 @@ test("Restore v2 manifest and prepared journal binding fails closed across runti
   const fixtureRoot = path.join(staticRoot, "bidirectional-backup-roundtrip");
   const evidence = await runFixtureInTemp(fixtureRoot, async (fixture) => {
     const nodeToDotnet = await createCase(fixture, "node-binding-to-dotnet");
-    const nodeSource = await runSync({ codexHome: nodeToDotnet.codexHome, provider: "openai" });
+    const nodeSource = await selectProviderThenSync(nodeToDotnet, "openai");
     runProcess(
       process.execPath,
       [
@@ -1403,7 +1231,7 @@ test("Restore v2 persisted physical Home binding fails closed across runtimes", 
     await fs.mkdir(foreignPhysicalHome, { recursive: true });
 
     const nodeToDotnet = await createCase(fixture, "node-home-binding-to-dotnet");
-    const nodeSource = await runSync({ codexHome: nodeToDotnet.codexHome, provider: "openai" });
+    const nodeSource = await selectProviderThenSync(nodeToDotnet, "openai");
     runProcess(
       process.execPath,
       [

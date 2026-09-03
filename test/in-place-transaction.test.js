@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { afterEach } from "node:test";
 import { performance } from "node:perf_hooks";
-import { fileURLToPath } from "node:url";
 import { applySessionChanges, collectSessionChanges, restoreSessionChanges } from "../src/session-files.js";
 import { createBackup, restoreBackup } from "../src/backup.js";
 import { runRestore, runSync } from "../src/service.js";
@@ -15,7 +13,6 @@ import { TransactionJournal, readTransactionJournal, findPendingTransactions } f
 
 delete process.env.CODEX_SQLITE_HOME;
 
-const repo = fileURLToPath(new URL("..", import.meta.url));
 const cleanups = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 const posix = { skip: process.platform === "win32" };
@@ -288,57 +285,6 @@ test("hardlinked files are not eligible and late links prevent byte mutation", p
   assert.deepEqual(await fs.readFile(f.file), f.original);
 });
 
-test("durable manifest and applying precede mutation; observer failure rolls back without rename", posix, async (t) => {
-  const f = await fixture(t);
-  const before = await fs.stat(f.file);
-  let backup, immutable;
-  await assert.rejects(runSync({ codexHome: f.codexHome, faultInjector: async ({ point, path: file, mutation }) => {
-    if (point === "before_rollout_apply") {
-      const pending = await findPendingTransactions(f.codexHome);
-      backup = pending[0].backupDir;
-      immutable = await fs.readFile(path.join(backup, "session-meta-backup.json"));
-      assert.equal(pending[0].events.at(-1).state, "applying");
-      const manifest = JSON.parse(immutable);
-      assert.equal(manifest.version, 2);
-      assert.ok(manifest.files[0].mutation.originalBase64);
-      assert.deepEqual(await fs.readFile(file), f.original);
-    }
-    if (point === "after_rollout_mutation_before_applied") {
-      assert.equal(mutation.result, "APPLIED_IN_PLACE");
-      throw new Error("observer fault");
-    }
-  } }), (e) => e.code === "SYNC_FAILED_ROLLED_BACK");
-  assert.deepEqual(await fs.readFile(f.file), f.original);
-  assert.equal((await fs.stat(f.file)).ino, before.ino);
-  assert.deepEqual(await fs.readFile(path.join(backup, "session-meta-backup.json")), immutable);
-});
-
-test("A applied, B fails: both in-place targets roll back (#69)", posix, async (t) => {
-  const f = await fixture(t);
-  const second = path.join(f.codexHome, "sessions", "rollout-z.jsonl");
-  await fs.writeFile(second, f.original);
-  const before = await fs.stat(f.file);
-  await assert.rejects(runSync({ codexHome: f.codexHome, faultInjector: ({ point, targetIndex }) => {
-    if (point === "before_rollout_apply" && targetIndex === 2) throw new Error("B failed");
-  } }), (e) => e.code === "SYNC_FAILED_ROLLED_BACK");
-  assert.deepEqual(await fs.readFile(f.file), f.original);
-  assert.deepEqual(await fs.readFile(second), f.original);
-  assert.equal((await fs.stat(f.file)).ino, before.ino);
-});
-
-test("unknown bytes leave a recoveryRequired journal and block later writes", posix, async (t) => {
-  const f = await fixture(t);
-  await assert.rejects(runSync({ codexHome: f.codexHome, faultInjector: async ({ point }) => {
-    if (point === "after_rollout_mutation_before_applied") {
-      const { changes } = await collectSessionChanges(f.codexHome, "openai");
-      await setBytes(f.file, changes[0].inPlaceMutation, Buffer.from('"??????"'));
-      throw new Error("unknown writer");
-    }
-  } }), (e) => e.code === "RECOVERY_REQUIRED" && e.recoveryRequired);
-  assert.equal((await findPendingTransactions(f.codexHome))[0].state, "recoveryRequired");
-  await assert.rejects(runSync({ codexHome: f.codexHome }), { code: "RECOVERY_REQUIRED" });
-});
-
 test("a post-mutation conflict returns partial and preserves the UndoBackup", async (t) => {
   const f = await fixture(t);
   const second = path.join(f.codexHome, "sessions", "rollout-z.jsonl");
@@ -357,23 +303,6 @@ test("a post-mutation conflict returns partial and preserves the UndoBackup", as
   assert.match(await fs.readFile(f.file, "utf8"), /prov_a/);
   assert.match(await fs.readFile(second, "utf8"), /\?{6}/);
   assert.deepEqual(await findPendingTransactions(f.codexHome), []);
-});
-
-test("actual process exit at applying/applied boundary recovers in place", posix, async (t) => {
-  for (const point of ["after_rollout_mutation_before_applied", "after_rollout_apply"]) {
-    const f = await fixture(t);
-    const before = await fs.stat(f.file);
-    const child = spawnSync(process.execPath, ["--input-type=module", "-e", `
-      import { runSync } from './src/service.js';
-      await runSync({codexHome: process.argv[1], faultInjector: ({point}) => {if(point === ${JSON.stringify(point)}) process.exit(91);}});
-    `, f.codexHome], { cwd: repo, encoding: "utf8" });
-    assert.equal(child.status, 91, child.stderr);
-    const [pending] = await findPendingTransactions(f.codexHome);
-    assert.ok(pending);
-    await runRestore({ codexHome: f.codexHome, backupDir: pending.backupDir, restoreConfig: false, restoreDatabase: false });
-    assert.deepEqual(await fs.readFile(f.file), f.original);
-    assert.equal((await fs.stat(f.file)).ino, before.ino);
-  }
 });
 
 test("applying-only partial crash and torn journal recover from immutable manifest", posix, async (t) => {

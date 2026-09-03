@@ -38,8 +38,20 @@ delete process.env.CODEX_SQLITE_HOME;
 // model. Keep these historical cases visible as legacy documentation while the
 // active lightweight-path coverage lives in provider-sync-lite.test.js and
 // plan-apply.test.js.
-const legacyOrdinaryJournalTest = test.skip;
-const legacySyncRepairTest = test.skip;
+function legacySkippedTest(reason) {
+  return (name, optionsOrFn, maybeFn) => {
+    const options = typeof optionsOrFn === "function" ? {} : (optionsOrFn ?? {});
+    const fn = typeof optionsOrFn === "function" ? optionsOrFn : maybeFn;
+    return test(name, { ...options, skip: reason }, fn);
+  };
+}
+
+const legacyOrdinaryJournalTest = legacySkippedTest(
+  "Legacy ordinary journal/automatic rollback behavior was superseded by ADR-0016."
+);
+const legacySyncRepairTest = legacySkippedTest(
+  "Implicit Sync repair behavior was superseded by explicit Repair in ADR-0016."
+);
 
 test("public write adapters expose typed invalid-input errors", async () => {
   const cases = [
