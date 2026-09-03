@@ -1,0 +1,5 @@
+model_provider = "relay"
+
+[model_providers.relay]
+name = "Synthetic Relay"
+base_url = "https://example.invalid/v1"

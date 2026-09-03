@@ -1,0 +1,22 @@
+{
+  "name": "@codex-provider-sync/core-client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "node --test checks/core-client.contract.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@codex-provider-sync/contracts": "0.0.0"
+  }
+}

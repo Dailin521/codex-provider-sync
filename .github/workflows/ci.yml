@@ -27,14 +27,325 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: "npm"
+      - name: Install root production tree for Node 16 compatibility
+        if: matrix.node-version == '16.20.2'
+        run: npm ci --workspaces=false --omit=dev
+      - name: Verify the frozen Node 16 and npm 8 toolchain
+        if: matrix.node-version == '16.20.2'
+        run: npm run runtime:verify-node16
+      - name: Install complete workspace tree on Node 24
+        if: matrix.node-version == '24'
+        run: npm ci
+      - run: npm test
+
+  workspace-contract:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run workspaces:check
+
+  root-package-compat:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "16.20.2"
+          cache: "npm"
+      - run: npm ci --workspaces=false --omit=dev
+      - run: npm run runtime:verify-node16
+      - run: npm run package:verify-root-tree
+      - run: npm run package:smoke
+      - run: npm run package:smoke:lifecycle
+
+  web-build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: "npm"
       - run: npm ci
       - run: npm run web:build
-      - run: npm test
+
+  web-browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run web:build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run web:test:e2e
+
+  electron-desktop:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - ubuntu-latest
+          - macos-latest
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: "npm"
+      - run: npm ci
+      - name: Install the pinned Electron runtime
+        if: runner.os == 'Linux'
+        run: node -e "require('electron')"
+      - name: Configure the Linux Electron runtime sandbox
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo -- "$(command -v node)" apps/desktop/scripts/configure-linux-sandbox.mjs node_modules/electron/dist chrome-sandbox
+      - name: Install Linux Electron runtime dependencies
+        if: runner.os == 'Linux'
+        run: npx playwright install-deps
+      - run: npm run desktop:test
+      - run: npm run desktop:build
+      - run: npm run desktop:verify-production-bundle
+      - run: npm run desktop:pack:dir
+      - name: Configure the unpacked Linux production sandbox
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo -- "$(command -v node)" apps/desktop/scripts/configure-linux-sandbox.mjs dist-desktop/linux-unpacked chrome-sandbox
+      - name: Run unpacked production Electron smoke
+        if: runner.os != 'Linux'
+        run: npm run desktop:test:e2e:packaged
+      - name: Run unpacked production Electron smoke under Xvfb
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run desktop:test:e2e:packaged
+      - run: npm run desktop:build:test
+      - name: Run Utility crash, recovery, Sync, and Switch integration
+        if: runner.os != 'Linux'
+        run: npm run test:e2e --workspace @codex-provider-sync/desktop
+      - name: Run Utility crash, recovery, Sync, and Switch integration under Xvfb
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:e2e --workspace @codex-provider-sync/desktop
+      - name: Upload Electron failure traces
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: electron-desktop-${{ runner.os }}-failure-traces
+          path: |
+            apps/desktop/test-results/**/trace.zip
+            apps/desktop/test-results/**/error-context.md
+          if-no-files-found: warn
+          retention-days: 7
+
+  electron-release-candidate:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-x64
+            runner: windows-latest
+          - target: macos-x64
+            runner: macos-15-intel
+          - target: macos-arm64
+            runner: macos-15
+          - target: linux-x64
+            runner: ubuntu-latest
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: "npm"
+      - run: npm ci
+      - name: Verify candidate input byte identity
+        run: node -e "const {execFileSync}=require('node:child_process');const files=['package-lock.json','apps/desktop/release/artifact-audit-policy.v1.json'];const value=execFileSync('git',['ls-files','--eol',...files],{encoding:'utf8'});for(const file of files){const line=value.split(/\r?\n/).find((entry)=>entry.endsWith('\t'+file));if(!line||!line.includes('w/lf'))throw new Error(file+' must be checked out with LF bytes.');}process.stdout.write(value)"
+      - name: Install the pinned Electron runtime
+        if: runner.os == 'Linux'
+        run: node -e "require('electron')"
+      - name: Configure the Linux Electron runtime sandbox
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo -- "$(command -v node)" apps/desktop/scripts/configure-linux-sandbox.mjs node_modules/electron/dist chrome-sandbox
+      - name: Install Linux Electron runtime dependencies
+        if: runner.os == 'Linux'
+        run: npx playwright install-deps chromium
+      - name: Resolve immutable candidate identity
+        id: candidate
+        env:
+          CPS_CANDIDATE_CHANNEL: rc
+          CPS_CANDIDATE_RUN_NUMBER: ${{ github.run_number }}
+          CPS_CANDIDATE_SHA: ${{ github.sha }}
+          CPS_CANDIDATE_TARGET: ${{ matrix.target }}
+        run: node apps/desktop/scripts/resolve-candidate-build.mjs
+      - name: Build native release candidate without publishing
+        env:
+          CPS_CANDIDATE_TARGET: ${{ matrix.target }}
+          CPS_DESKTOP_VERSION: ${{ steps.candidate.outputs.version }}
+          CPS_DESKTOP_BUILD_ID: ${{ steps.candidate.outputs.build_id }}
+        run: npm run desktop:pack:candidate
+      - name: Configure the unpacked Linux candidate sandbox
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo -- "$(command -v node)" apps/desktop/scripts/configure-linux-sandbox.mjs dist-desktop/linux-unpacked chrome-sandbox
+      - name: Audit and stage candidate
+        if: runner.os != 'Linux'
+        env:
+          CPS_CANDIDATE_TARGET: ${{ matrix.target }}
+          CPS_DESKTOP_VERSION: ${{ steps.candidate.outputs.version }}
+          CPS_DESKTOP_BUILD_ID: ${{ steps.candidate.outputs.build_id }}
+          CPS_CANDIDATE_SHA: ${{ steps.candidate.outputs.commit }}
+        run: npm run desktop:stage:candidate
+      - name: Audit and stage Linux candidate under Xvfb
+        if: runner.os == 'Linux'
+        env:
+          CPS_CANDIDATE_TARGET: ${{ matrix.target }}
+          CPS_DESKTOP_VERSION: ${{ steps.candidate.outputs.version }}
+          CPS_DESKTOP_BUILD_ID: ${{ steps.candidate.outputs.build_id }}
+          CPS_CANDIDATE_SHA: ${{ steps.candidate.outputs.commit }}
+        run: xvfb-run -a npm run desktop:stage:candidate
+      - name: Smoke final candidate containers
+        if: runner.os != 'Linux'
+        env:
+          CPS_CANDIDATE_TARGET: ${{ matrix.target }}
+          CPS_DESKTOP_VERSION: ${{ steps.candidate.outputs.version }}
+        run: npm run desktop:smoke:candidate:artifacts
+      - name: Smoke final Linux candidate containers under Xvfb
+        if: runner.os == 'Linux'
+        env:
+          CPS_CANDIDATE_TARGET: ${{ matrix.target }}
+          CPS_DESKTOP_VERSION: ${{ steps.candidate.outputs.version }}
+          CPS_LINUX_SANDBOX_SETUP: setuid
+        run: xvfb-run -a npm run desktop:smoke:candidate:artifacts
+      - name: Upload audited candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: electron-release-candidate-${{ matrix.target }}
+          path: artifacts/c9/${{ matrix.target }}
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 30
+
+  electron-candidate-set:
+    needs: electron-release-candidate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: "npm"
+      - run: npm ci
+      - name: Download all native candidates
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: electron-release-candidate-*
+          path: artifacts/c9-download
+          merge-multiple: false
+      - run: npm run desktop:verify:candidate:set
+      - name: Upload candidate-set index
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: electron-release-candidate-set
+          path: artifacts/c9-index
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 30
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: "npm"
+      - run: npm ci
+      - name: Reject production moderate, high, and critical vulnerabilities
+        run: npm audit --omit=dev --audit-level=moderate
+      - name: Reject full-tree high and critical vulnerabilities
+        run: npm audit --audit-level=high
+
+  cross-runtime-fixtures:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: "npm"
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "10.0.x"
+      - run: npm ci
+      - run: dotnet build desktop/CodexProviderSync.Core.Tests/FixtureHost/CodexProviderSync.FixtureHost.csproj --configuration Release
+      - run: dotnet build desktop/CodexProviderSync.Core.Tests/CrashHost/CodexProviderSync.CrashHost.csproj --configuration Release
+      - run: npm run fixtures:cross-runtime
+      - run: npm run fixtures:historical-tags
+      - name: Refuse hosted Release binary execution for an untrusted fork
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        shell: pwsh
+        run: throw 'Hosted historical binaries are verified only from a same-repository branch; a maintainer must run the release-evidence gate from trusted repository code.'
+      - name: Verify a hosted formal Release backup with current Node Restore
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: npm run fixtures:historical-formal-release
+      - name: Upload historical tag backup evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: historical-tag-backup-evidence
+          path: artifacts/test-fixtures/historical-tag-backup-evidence.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload hosted formal Release backup evidence
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: historical-formal-release-backup-evidence
+          path: artifacts/test-fixtures/historical-formal-release-backup-evidence.json
+          if-no-files-found: error
+          retention-days: 30
 
   desktop-test:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: "10.0.x"
@@ -50,6 +361,9 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: "10.0.x"
@@ -66,27 +380,110 @@ jobs:
           dotnet-version: "10.0.x"
       - run: dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj --filter FullyQualifiedName~LockServiceTests
 
-  ci-gate:
-    name: ci-gate
+  c10-evidence-bundle:
     if: ${{ always() }}
     needs:
       - test
+      - workspace-contract
+      - root-package-compat
+      - web-build
+      - web-browser
+      - electron-desktop
+      - electron-release-candidate
+      - electron-candidate-set
+      - dependency-audit
+      - cross-runtime-fixtures
       - desktop-test
       - desktop-macos
       - desktop-linux-lock
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: "npm"
+      - run: npm ci
+      - name: Download the verified four-target candidate index
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: electron-release-candidate-set
+          path: artifacts/c9-index
+      - name: Download the hosted formal Release backup evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: historical-formal-release-backup-evidence
+          path: artifacts/formal-release
+      - name: Generate the redacted commit-bound C10 evidence bundle
+        env:
+          CPS_CANDIDATE_INDEX: artifacts/c9-index/candidate-index.v1.json
+          CPS_FORMAL_RELEASE_EVIDENCE: artifacts/formal-release/historical-formal-release-backup-evidence.json
+          CPS_REQUIRED_JOB_RESULTS_JSON: ${{ toJSON(needs) }}
+          CPS_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          CPS_EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: npm run evidence:c10
+      - name: Upload the non-release C10 evidence bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vnext-c10-evidence-${{ github.sha }}
+          path: artifacts/c10
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 30
+
+  ci-gate:
+    name: ci-gate
+    if: ${{ always() }}
+    needs:
+      - test
+      - workspace-contract
+      - root-package-compat
+      - web-build
+      - web-browser
+      - electron-desktop
+      - electron-release-candidate
+      - electron-candidate-set
+      - dependency-audit
+      - cross-runtime-fixtures
+      - desktop-test
+      - desktop-macos
+      - desktop-linux-lock
+      - c10-evidence-bundle
+    runs-on: ubuntu-latest
+    steps:
       - name: Verify required jobs
         env:
           NODE_TEST_RESULT: ${{ needs.test.result }}
+          WORKSPACE_CONTRACT_RESULT: ${{ needs.workspace-contract.result }}
+          ROOT_PACKAGE_COMPAT_RESULT: ${{ needs.root-package-compat.result }}
+          WEB_BUILD_RESULT: ${{ needs.web-build.result }}
+          WEB_BROWSER_RESULT: ${{ needs.web-browser.result }}
+          ELECTRON_DESKTOP_RESULT: ${{ needs.electron-desktop.result }}
+          ELECTRON_RELEASE_CANDIDATE_RESULT: ${{ needs.electron-release-candidate.result }}
+          ELECTRON_CANDIDATE_SET_RESULT: ${{ needs.electron-candidate-set.result }}
+          DEPENDENCY_AUDIT_RESULT: ${{ needs.dependency-audit.result }}
+          CROSS_RUNTIME_FIXTURES_RESULT: ${{ needs.cross-runtime-fixtures.result }}
           DESKTOP_TEST_RESULT: ${{ needs.desktop-test.result }}
           MACOS_TEST_RESULT: ${{ needs.desktop-macos.result }}
           LINUX_LOCK_RESULT: ${{ needs.desktop-linux-lock.result }}
+          C10_EVIDENCE_RESULT: ${{ needs.c10-evidence-bundle.result }}
         run: |
           if [ "$NODE_TEST_RESULT" != "success" ] ||
+             [ "$WORKSPACE_CONTRACT_RESULT" != "success" ] ||
+             [ "$ROOT_PACKAGE_COMPAT_RESULT" != "success" ] ||
+             [ "$WEB_BUILD_RESULT" != "success" ] ||
+             [ "$WEB_BROWSER_RESULT" != "success" ] ||
+             [ "$ELECTRON_DESKTOP_RESULT" != "success" ] ||
+             [ "$ELECTRON_RELEASE_CANDIDATE_RESULT" != "success" ] ||
+             [ "$ELECTRON_CANDIDATE_SET_RESULT" != "success" ] ||
+             [ "$DEPENDENCY_AUDIT_RESULT" != "success" ] ||
+             [ "$CROSS_RUNTIME_FIXTURES_RESULT" != "success" ] ||
              [ "$DESKTOP_TEST_RESULT" != "success" ] ||
              [ "$MACOS_TEST_RESULT" != "success" ] ||
-             [ "$LINUX_LOCK_RESULT" != "success" ]; then
+             [ "$LINUX_LOCK_RESULT" != "success" ] ||
+             [ "$C10_EVIDENCE_RESULT" != "success" ]; then
             echo "One or more required CI jobs did not succeed."
             exit 1
           fi

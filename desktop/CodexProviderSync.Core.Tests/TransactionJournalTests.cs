@@ -24,6 +24,7 @@ public sealed class TransactionJournalTests
         PendingTransactionInfo prepared = await fixture.Journal.ReadCurrentInfoAsync();
         Assert.Equal(1, prepared.LastSequence);
         Assert.Equal("prepared", prepared.State);
+        Assert.Equal(Path.Combine(fixture.Root, "backup"), prepared.DeclaredBackupDir);
 
         fixture.Journal.AppendFaultInjector = null;
         await fixture.Journal.ApplyingAsync("rollout", fixture.Targets[0]);

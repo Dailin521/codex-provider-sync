@@ -1,5 +1,7 @@
 # Codex Provider Sync GUI
 
+> **V1 候选交接目标：保留的 .NET Legacy fallback；公开发行状态：当前仍是已发布的 Windows GUI。**该实现不是已退役产品，仍保持可构建、可测试并作为兼容行为依据。Electron 在 `V1` 中标记为新版主桌面端候选，但尚未合入 `main`、公开发布、签名或进入更新通道；候选角色不等于公开入口已经切换。
+
 ## 适用场景
 
 这是 Windows 用户可用的图形界面版本。

@@ -4,6 +4,8 @@ import { randomUUID } from "node:crypto";
 
 import { defaultBackupRoot } from "./constants.js";
 import { writeFileAtomic, syncDirectory } from "./atomic-file.js";
+import { CoreError } from "./core-error.js";
+import { findBlockingRestoreJournals } from "./restore-journal.js";
 
 export const TRANSACTION_JOURNAL_BASENAME = "transaction-journal.jsonl";
 const TERMINAL_STATES = new Set(["committed", "rolledBack"]);
@@ -307,6 +309,7 @@ export async function readTransactionJournal(filePath) {
   const lastEvent = events.at(-1) ?? null;
   return {
     filePath,
+    operationKind: "sync",
     events,
     invalidTail,
     validationError,
@@ -348,7 +351,7 @@ export function getAppliedJournalTargets(journal) {
     .map((target) => target.targetPath);
 }
 
-export async function findPendingTransactions(codexHome) {
+export async function findLegacyPendingTransactions(codexHome) {
   const root = defaultBackupRoot(codexHome);
   let entries;
   try {
@@ -376,6 +379,7 @@ export async function findPendingTransactions(codexHome) {
         pending.push({
           filePath: journalPath,
           backupDir: path.dirname(journalPath),
+          operationKind: "sync",
           state: "recoveryRequired",
           terminal: false,
           readError: error.message
@@ -386,12 +390,24 @@ export async function findPendingTransactions(codexHome) {
   return pending.sort((left, right) => left.filePath.localeCompare(right.filePath));
 }
 
-export class RecoveryRequiredError extends Error {
+export async function findPendingTransactions(codexHome) {
+  const [legacy, restore] = await Promise.all([
+    findLegacyPendingTransactions(codexHome),
+    findBlockingRestoreJournals(codexHome)
+  ]);
+  return [...legacy, ...restore]
+    .sort((left, right) => left.filePath.localeCompare(right.filePath));
+}
+
+export class RecoveryRequiredError extends CoreError {
   constructor(pendingTransactions) {
     const backups = pendingTransactions.map((item) => item.backupDir).join(", ");
-    super(`An unfinished provider-sync transaction requires recovery before another write. Restore the bound backup, then retry. Backup(s): ${backups}`);
+    super(
+      "RECOVERY_REQUIRED",
+      `An unfinished provider-sync transaction requires recovery before another write. Restore the bound backup, then retry. Backup(s): ${backups}`,
+      { suggestedAction: "Restore the transaction-bound managed backup before starting another write." }
+    );
     this.name = "RecoveryRequiredError";
-    this.code = "RECOVERY_REQUIRED";
     this.pendingTransactions = pendingTransactions;
   }
 }

@@ -1,0 +1,13 @@
+{
+  "name": "@codex-provider-sync/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/ownership.js",
+  "scripts": {
+    "test": "node --test checks/ownership.contract.mjs"
+  },
+  "engines": {
+    "node": ">=16.20.2"
+  }
+}

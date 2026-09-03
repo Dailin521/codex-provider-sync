@@ -35,15 +35,17 @@
 > Windows GUI와 로컬 Web UI의 화면 언어는 현재 중국어 간체만 지원합니다.
 >
 > CLI/Web과 Windows GUI는 별도로 릴리스되므로 버전 번호가 다를 수 있습니다.
+>
+> **V1 후보 지정:** 이 PR은 C10 인계 목표로 Electron을 새로운 주 데스크톱 후보로, 기존 .NET Windows/macOS 구현을 인계 후 Legacy fallback으로 표시합니다. **공개 릴리스 상태는 별개입니다:** 현재 Releases는 Windows .NET GUI만 제공하며 Electron은 `main`에 병합되지 않았고, 게시·서명·다운로드·자동 업데이트되지 않습니다. 이 후보 표시는 Electron이 공개 제품에서 이미 .NET을 대체했다는 뜻이 아닙니다.
 
 | 상황 | 권장 방법 |
 | --- | --- |
-| Windows 데스크톱 | [Windows GUI 다운로드](https://github.com/Dailin521/codex-provider-sync/releases/latest) / [사용 방법](#windows-gui) |
+| Windows 데스크톱 | [현재 공개된 Windows GUI(.NET) 다운로드](https://github.com/Dailin521/codex-provider-sync/releases/latest) / [`V1` Electron 주 데스크톱 후보 안내(공개 다운로드 없음)](README_DESKTOP_EN.md) |
 | macOS 데스크톱 | [로컬 Web UI (CLI 필요)](#로컬-web-ui) / [네이티브 GUI 빌드 안내 (영문)](README_MAC_GUI_EN.md) |
 | 브라우저 UI 또는 크로스 플랫폼 사용 | [로컬 Web UI (CLI 필요)](#로컬-web-ui) |
 | 스크립트, CI 또는 WSL | [CLI](#cli) |
 
-### Windows GUI
+### 현재 공개된 Windows GUI (.NET, V1 Legacy fallback 목표)
 
 [Releases](https://github.com/Dailin521/codex-provider-sync/releases/latest)에서 `CodexProviderSync.exe`를 다운로드합니다.
 
@@ -54,6 +56,8 @@
 프로그램은 코드 서명되지 않았으므로 Windows에서 보안 경고가 표시될 수 있습니다. 이 프로젝트의 Releases에서만 다운로드하세요.
 
 [Windows GUI 전체 안내 (중국어)](README_GUI_ZH.md)
+
+새 Electron 주 데스크톱의 기능, 보안 경계, 내부 검증은 [Electron primary desktop candidate guide (영문)](README_DESKTOP_EN.md)를 참조하세요. 소스 역할은 공개 릴리스를 의미하지 않으며 이 문서는 다운로드나 릴리스 권한을 제공하지 않습니다.
 
 ### 로컬 Web UI
 
@@ -115,15 +119,21 @@ SQLite Home 해석 순서: `--sqlite-home` → `config.toml` 루트의 `sqlite_h
 
 ```mermaid
 flowchart LR
-    Browser["Browser Web UI"] --> WebServer["Local Node Web Server<br/>127.0.0.1"]
-    WebServer --> NodeService["Node Service"]
-    CLI["Node CLI"] --> NodeService
+    Browser["Browser React UI"] --> HttpClient["HttpCoreClient"]
+    HttpClient --> WebServer["Local Web Host<br/>127.0.0.1 + pairing"]
+    WebServer --> NodeCore["Node Core public facade"]
+    CLI["Node CLI"] --> NodeCore
 
-    WindowsGUI["Windows GUI"] --> Application[".NET Application"]
+    ElectronRenderer["Electron Renderer<br/>V1 primary desktop candidate"] --> DesktopClient["DesktopCoreClient"]
+    DesktopClient --> ElectronHost["Preload / Main<br/>narrow IPC"]
+    ElectronHost --> Utility["Utility Process"]
+    Utility --> NodeCore
+
+    WindowsGUI[".NET GUI<br/>published now; V1 Legacy fallback target"] --> Application[".NET Application"]
     Application --> DotNetCore[".NET Core"]
     MacGUI["macOS GUI"] --> DotNetCore
 
-    NodeService --> Storage["Codex Storage"]
+    NodeCore --> Storage["Codex Storage"]
     DotNetCore --> Storage
 
     Storage --> Config["config.toml"]
@@ -132,9 +142,12 @@ flowchart LR
     Storage --> Backups["managed backups"]
 ```
 
-- Web UI와 CLI는 동일한 Node 서비스 로직을 사용합니다.
+- Web UI는 `HttpCoreClient → /api/core → Node Core public facade`를 사용하고 CLI는 같은 공개 Core 경계를 직접 호출합니다.
+- `V1` Electron 주 데스크톱 후보는 `DesktopCoreClient → 제한된 Preload/Main IPC → Utility Process → Node Core` 경로를 사용하며 Renderer에서는 Node, 임의 경로 또는 범용 IPC에 접근할 수 없습니다.
 - Windows GUI는 Application 계층을 통해 .NET Core를 호출하고, macOS GUI는 현재 .NET Core를 직접 호출합니다.
 - Node 서비스와 .NET Core는 동일한 설정, rollout, SQLite, 백업 안전 범위를 처리합니다.
+
+`V1` 후보는 C10 인계 목표로 Electron을 새로운 주 데스크톱으로, 기존 .NET Windows/macOS 구현을 Legacy fallback으로 표시합니다. .NET은 계속 빌드·테스트되며 최소 두 번의 유지보수 주기 동안 보존됩니다. 공개 Releases는 아직 .NET이고 Electron은 병합·게시·서명되지 않았습니다. 이 후보 표시를 공개 진입점 전환 완료로 표현해서는 안 됩니다.
 
 ## 안전 범위
 
@@ -149,6 +162,7 @@ flowchart LR
 
 - [AI / Agent 가이드](../AGENTS.md)
 - [Windows GUI (중국어)](README_GUI_ZH.md)
+- [V1 Electron 주 데스크톱 후보 (영어)](README_DESKTOP_EN.md)
 - [Web UI (중국어)](README_WEB_UI_ZH.md)
 - [中文](../README.md) · [English](README_EN.md) · [日本語](README_JA.md)
 - [macOS GUI: 中文](README_MAC_GUI_ZH.md) · [English](README_MAC_GUI_EN.md)

@@ -136,7 +136,7 @@ codex-provider sync \
   --sqlite-home /home/you/.codex/sqlite
 ```
 
-## 4. 一次同步的完整流程
+## 4. 一次 Provider 同步流程
 
 一次 `codex-provider sync` 可以概括为：
 
@@ -144,39 +144,36 @@ codex-provider sync \
 读取 config.toml
         │
         ├─确定目标 model_provider
-        ├─读取根级 model
         └─解析 SQLite Home
         │
         ▼
-扫描 sessions 和 archived_sessions
+只读取 sessions 和 archived_sessions 的 session_meta 首行
         │
         ├─统计 rollout Provider 分布
         ├─生成需要修改的文件清单
-        ├─提取 thread id、cwd 和用户消息标记
-        ├─检查 turn_context.model
-        └─检测 locked 文件和 encrypted_content
+        └─检测 locked 文件
         │
         ▼
 检查 rollout 文件锁和 SQLite 可写性
         │
         ▼
-创建同步前备份
+存在实际写入时创建 UndoBackup
         │
         ▼
-BEGIN IMMEDIATE
+更新可写 rollout 的 Provider
         │
-        ├─更新 SQLite threads 元数据
-        ├─重写可写的 rollout 元数据
-        ├─修复 Desktop workspace roots
-        └─COMMIT
+        ▼
+BEGIN IMMEDIATE → 更新 SQLite Provider → COMMIT
         │
         ▼
 清理旧的托管备份，默认保留最近 5 份
 ```
 
-主编排逻辑位于 [`src/service.js`](../src/service.js)。
+Provider 等长时只覆盖目标字节；长度不同时流式生成临时文件并原子替换，聊天正文不解析且逐字节保持。noop 不创建备份；mutation 后故障返回带 UndoBackup 和重试提示的 partial。
 
-## 5. Rollout 扫描与修复
+模型、cwd、user-event、workspace roots 与加密内容问题由用户手动运行 Diagnostics 完整只读扫描；需要修改时再通过显式 Repair target 执行。加密内容只诊断、不修改。
+
+## 5. Rollout 首行同步与显式修复
 
 ### 5.1 扫描范围
 
@@ -636,7 +633,7 @@ codex-provider watch
 
 事件经过默认 750ms 防抖后触发同步。SQLite 临时忙碌会跳过本次并等待后续事件；连续出现非 busy 错误时，watcher 会在达到阈值后退出，避免无限刷错误日志。
 
-实现位于 [`src/watch.js`](../src/watch.js)。
+实现位于 [`packages/core/src/application/watch-runtime.js`](../packages/core/src/application/watch-runtime.js)；[`src/watch.js`](../src/watch.js) 仅保留兼容转发。
 
 ### 11.6 `web` 与 `prune-backups`
 
@@ -655,7 +652,7 @@ codex-provider prune-backups --keep 5
 - CLI 提供的 Local Web UI
 - Windows/macOS 桌面 GUI
 
-CLI 入口是 [`src/cli.js`](../src/cli.js)，Web 服务位于 [`src/web-server.js`](../src/web-server.js)，二者的主要业务逻辑位于 [`src/service.js`](../src/service.js)。
+CLI 入口是 [`src/cli.js`](../src/cli.js)，Web 服务位于 [`src/web-server.js`](../src/web-server.js)。业务编排按 Status、ProviderSync、ProviderSwitch、Repair、Backups、Restore 等用例分布在 [`packages/core/src/application/`](../packages/core/src/application/)；[`src/service.js`](../src/service.js) 与 [`service-runtime.js`](../packages/core/src/application/service-runtime.js) 仅保留兼容转发，Electron 通过 CoreFacade 调用。
 
 桌面 GUI 不是简单启动 Node CLI，而是在 `desktop/CodexProviderSync.Core` 中用 C# 实现了相同的核心流程，包括：
 

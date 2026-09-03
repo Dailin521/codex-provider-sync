@@ -208,7 +208,7 @@ public sealed class ApplicationServiceTests
     }
 
     [Fact]
-    public async Task ConcurrentOperation_IsRejectedImmediatelyWithoutReplacingTheActivePlan()
+    public async Task ConcurrentStatus_BypassesTheWriteGateAndUsesTheReadOnlyCoreGuard()
     {
         TestRig rig = new();
         TaskCompletionSource<ApplicationPlanPreview> pending = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -222,12 +222,13 @@ public sealed class ApplicationServiceTests
         Task<ApplicationOutcome<ApplicationOperationPlan>> active = rig.Service.CreatePlanAsync(
             new CreateApplicationPlanRequest(new SyncIntent("/first", null, "relay")));
         await started.Task;
-        ApplicationOutcome<StatusSnapshot> rejected = await rig.Service.GetStatusAsync(
+        ApplicationOutcome<StatusSnapshot> status = await rig.Service.GetStatusAsync(
             new ApplicationStatusRequest("/second"));
 
-        Assert.Equal(ApplicationOperationLifecycle.Rejected, rejected.Lifecycle);
-        Assert.Equal("operation_busy", Assert.Single(rejected.Errors).Code);
-        Assert.Empty(rig.Status.Requests);
+        Assert.Equal(ApplicationOperationLifecycle.Succeeded, status.Lifecycle);
+        Assert.Equal("/second", status.Data!.CodexHome);
+        Assert.Empty(status.Errors);
+        Assert.Single(rig.Status.Requests);
 
         pending.SetResult(rig.Write.CreatePreview(new SyncIntent("/first", null, "relay")));
         ApplicationOutcome<ApplicationOperationPlan> completed = await active;

@@ -409,6 +409,51 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
+    public async Task Restore_RejectsPendingJournalWhoseDeclaredBackupDiffersFromItsDirectory()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"openai\"");
+        await fixture.WriteStateDbAsync([("thread-forged-binding", "openai", false)]);
+        string configPath = Path.Combine(fixture.CodexHome, "config.toml");
+        BackupService backupService = new(new SessionRolloutService(), new SqliteStateService());
+        string backupDir = await backupService.CreateBackupAsync(
+            fixture.CodexHome,
+            "openai",
+            [],
+            configPath);
+        await using (FileTransactionJournal journal = await FileTransactionJournal.CreateAsync(
+            backupDir,
+            fixture.CodexHome,
+            "openai",
+            [configPath]))
+        {
+        }
+
+        string declaredElsewhere = fixture.BackupPath("99991231T235959999Z");
+        Directory.CreateDirectory(declaredElsewhere);
+        string journalPath = Path.Combine(backupDir, FileTransactionJournal.FileName);
+        string originalJournal = await File.ReadAllTextAsync(journalPath);
+        string forgedJournal = originalJournal.Replace(
+            JsonSerializer.Serialize(Path.GetFullPath(backupDir)),
+            JsonSerializer.Serialize(Path.GetFullPath(declaredElsewhere)),
+            StringComparison.Ordinal);
+        Assert.NotEqual(originalJournal, forgedJournal);
+        await File.WriteAllTextAsync(journalPath, forgedJournal);
+        string configBefore = await File.ReadAllTextAsync(configPath);
+
+        CodexSyncService service = new();
+        RecoveryRequiredException error = await Assert.ThrowsAsync<RecoveryRequiredException>(
+            () => service.RunRestoreAsync(fixture.CodexHome, backupDir));
+
+        Assert.Contains(Path.GetFullPath(backupDir), error.PendingBackupDirectories);
+        Assert.Equal(configBefore, await File.ReadAllTextAsync(configPath));
+        PendingTransactionInfo pending = Assert.Single(
+            await FileTransactionJournal.FindPendingAsync(fixture.CodexHome));
+        Assert.Equal(Path.GetFullPath(backupDir), pending.BackupDir);
+        Assert.Equal(Path.GetFullPath(declaredElsewhere), pending.DeclaredBackupDir);
+    }
+
+    [Fact]
     public async Task CrashRecovery_RestoresActuallyMutatedRolloutAndDatabase_FromPendingJournal()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
@@ -1578,9 +1623,14 @@ public sealed class CoreIntegrationTests
         begin.CommandText = "BEGIN IMMEDIATE";
         await begin.ExecuteNonQueryAsync();
 
+        Stopwatch timer = Stopwatch.StartNew();
         InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => service.RunSyncAsync(fixture.CodexHome, sqliteBusyTimeoutMs: 0));
+            () => service.RunSyncAsync(fixture.CodexHome));
+        timer.Stop();
         Assert.Contains("state_5.sqlite is currently in use", error.Message);
+        Assert.True(
+            timer.Elapsed < TimeSpan.FromSeconds(3),
+            $"The default SQLite busy policy must fail fast; elapsed {timer.Elapsed}.");
 
         string rollout = await File.ReadAllTextAsync(sessionPath);
         Assert.Contains("\"model_provider\":\"apigather\"", rollout);
@@ -2746,7 +2796,7 @@ public sealed class CoreIntegrationTests
     }
 
     [Fact]
-    public async Task RestoreVersionOne_RebuildsMissingDefaultSqliteDatabase()
+    public async Task RestoreVersionOne_MissingDefaultSqliteParentFailsBeforeMutation()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
         await fixture.WriteConfigAsync("model_provider = \"openai\"");
@@ -2769,18 +2819,29 @@ public sealed class CoreIntegrationTests
         });
         await File.WriteAllTextAsync(Path.Combine(backupDir, "metadata.json"), metadata);
 
-        CodexSyncService service = new();
-        await service.RunRestoreAsync(
-            fixture.CodexHome,
-            backupDir,
-            new RestoreBackupOptions
-            {
-                RestoreConfig = false,
-                RestoreDatabase = true,
-                RestoreSessions = false
-            });
+        string configPath = Path.Combine(fixture.CodexHome, "config.toml");
+        string configBefore = await File.ReadAllTextAsync(configPath);
+        string metadataBefore = await File.ReadAllTextAsync(Path.Combine(backupDir, "metadata.json"));
 
-        Assert.Equal("custom", await ReadProviderAsync(fixture.StateDbPath(), "thread-v1-missing"));
+        CodexSyncService service = new();
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.RunRestoreAsync(
+                fixture.CodexHome,
+                backupDir,
+                new RestoreBackupOptions
+                {
+                    RestoreConfig = false,
+                    RestoreDatabase = true,
+                    RestoreSessions = false
+                }));
+
+        Assert.True(LockService.IsLockUnverifiable(error));
+        Assert.Equal("state-db", error.Data["codex-provider-sync/lock-scope"]);
+        Assert.False(File.Exists(fixture.StateDbPath()));
+        Assert.False(Directory.Exists(Path.GetDirectoryName(fixture.StateDbPath())));
+        Assert.Equal(configBefore, await File.ReadAllTextAsync(configPath));
+        Assert.Equal(metadataBefore, await File.ReadAllTextAsync(Path.Combine(backupDir, "metadata.json")));
+        Assert.Empty(Directory.EnumerateFiles(backupDir, "transaction.json", SearchOption.AllDirectories));
     }
 
     [Fact]

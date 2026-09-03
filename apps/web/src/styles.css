@@ -1,0 +1,7 @@
+@import "tailwindcss";
+@import "@codex-provider-sync/design-system/tokens.css";
+@source "../../../packages/app-ui/src";
+
+html { min-width: 320px; background: var(--surface); }
+body { margin: 0; min-width: 320px; min-height: 100vh; background: var(--surface); }
+button, input, select { font: inherit; }

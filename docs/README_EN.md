@@ -34,16 +34,18 @@ This tool synchronizes session files and the SQLite index, restoring session vis
 
 > The Windows GUI and Local Web UI currently use a Simplified Chinese interface.
 >
-> CLI/Web and the Windows GUI are released independently, so their version numbers may differ.
+> CLI/Web and the current Windows GUI are released independently, so their version numbers may differ.
+>
+> **V1 candidate designation:** This PR labels Electron as the new primary desktop candidate and the retained .NET Windows/macOS implementations as post-handoff Legacy fallbacks. **Public release status is separate:** Releases still provide only the Windows .NET GUI; Electron is not merged into `main`, published, signed, downloadable, or on an update channel. The candidate designation does not claim that Electron has publicly replaced .NET.
 
 | Scenario | Recommended interface |
 | --- | --- |
-| Windows desktop | [Download Windows GUI](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [Usage guide](#windows-gui) |
+| Windows desktop | [Download the currently published Windows GUI (.NET)](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [`V1` Electron primary desktop candidate guide (no public download)](README_DESKTOP_EN.md) |
 | macOS desktop | [Local Web UI (CLI required)](#local-web-ui); [native GUI build guide](README_MAC_GUI_EN.md) |
 | Browser interface or cross-platform use | [Local Web UI (CLI required)](#local-web-ui) |
 | Scripts, CI, or WSL | [CLI](#cli) |
 
-### Windows GUI
+### Currently published Windows GUI (.NET; V1 Legacy fallback target)
 
 Download `CodexProviderSync.exe` from [Releases](https://github.com/Dailin521/codex-provider-sync/releases/latest):
 
@@ -54,6 +56,8 @@ Download `CodexProviderSync.exe` from [Releases](https://github.com/Dailin521/co
 The application is not code-signed, so Windows may show a security warning. Download only from this project's Releases.
 
 [Full Windows GUI guide (Chinese)](README_GUI_ZH.md)
+
+See the [Electron primary desktop candidate guide](README_DESKTOP_EN.md) for its capabilities, security boundaries, and internal acceptance workflow. A source role is not a public release; that guide provides no download and authorizes no release.
 
 ### Local Web UI
 
@@ -104,10 +108,16 @@ codex-provider sync
 | `codex-provider status` | Inspect provider, rollout, and SQLite state |
 | `codex-provider sync` | Synchronize to the current provider |
 | `codex-provider switch <provider-id>` | Switch provider, then synchronize |
+| `codex-provider diagnostics` | Run one explicit full read-only diagnostic scan |
+| `codex-provider repair <targets>` | Explicitly repair models, cwd, user-event, or workspace roots |
 | `codex-provider restore <backup-dir>` | Restore a backup |
 | `codex-provider watch` | Watch configuration and SQLite changes |
 
 By default, `switch` also updates the root-level `model` when the target provider section defines one. Use `--keep-root-model` to preserve the current value, or `--model <name>` to set it explicitly.
+
+`sync` always uses the current root `model_provider` in `config.toml` and reads only each rollout header. Equal-length Provider values are updated in place; unequal-length values use a streamed temporary file and atomic replacement while preserving the conversation body byte for byte. Sync never changes models, cwd, user-event flags, workspace roots, or encrypted content.
+
+A full scan occurs only when the user explicitly runs `diagnostics`, and it is read-only. Use `repair` to explicitly select `models`, `cwd`, `userEvent`, or `workspaceRoots`; selecting `workspaceRoots` also includes `cwd`. The shared Web and Electron UI expose the same Diagnostics and Repair capabilities. See [ADR-0016](adr/0016-node-core-responsibility-boundaries-and-lightweight-writes.md).
 
 SQLite Home resolution order: `--sqlite-home` → root-level `sqlite_home` in `config.toml` → `CODEX_SQLITE_HOME` → `<Codex Home>/sqlite`. Only the default layout falls back to `<Codex Home>/state_5.sqlite`.
 
@@ -115,15 +125,21 @@ SQLite Home resolution order: `--sqlite-home` → root-level `sqlite_home` in `c
 
 ```mermaid
 flowchart LR
-    Browser["Browser Web UI"] --> WebServer["Local Node Web Server<br/>127.0.0.1"]
-    WebServer --> NodeService["Node Service"]
-    CLI["Node CLI"] --> NodeService
+    Browser["Browser React UI"] --> HttpClient["HttpCoreClient"]
+    HttpClient --> WebServer["Local Web Host<br/>127.0.0.1 + pairing"]
+    WebServer --> NodeCore["Node Core public facade"]
+    CLI["Node CLI"] --> NodeCore
 
-    WindowsGUI["Windows GUI"] --> Application[".NET Application"]
+    ElectronRenderer["Electron Renderer<br/>V1 primary desktop candidate"] --> DesktopClient["DesktopCoreClient"]
+    DesktopClient --> ElectronHost["Preload / Main<br/>narrow IPC"]
+    ElectronHost --> Utility["Utility Process"]
+    Utility --> NodeCore
+
+    WindowsGUI[".NET GUI<br/>published now; V1 Legacy fallback target"] --> Application[".NET Application"]
     Application --> DotNetCore[".NET Core"]
     MacGUI["macOS GUI"] --> DotNetCore
 
-    NodeService --> Storage["Codex Storage"]
+    NodeCore --> Storage["Codex Storage"]
     DotNetCore --> Storage
 
     Storage --> Config["config.toml"]
@@ -132,9 +148,12 @@ flowchart LR
     Storage --> Backups["managed backups"]
 ```
 
-- The Web UI and CLI share the same Node service logic.
+- Web requests flow through `HttpCoreClient → /api/core → Node Core public facade`; the CLI calls the same public Core boundary directly.
+- The `V1` Electron primary desktop candidate uses `DesktopCoreClient → narrow Preload/Main IPC → Utility Process → Node Core`; its Renderer has no Node, arbitrary-path, or generic-IPC access.
 - The Windows GUI calls .NET Core through the Application layer; the macOS GUI currently calls .NET Core directly.
 - The Node service and .NET Core enforce the same configuration, rollout, SQLite, and backup safety boundaries.
+
+The `V1` candidate carries the C10 handoff target of Electron as the new primary desktop and .NET as a retained Legacy fallback. .NET remains buildable, tested, and retained for at least two maintenance cycles. Public Releases still provide .NET; Electron has not been merged, published, or signed. Do not describe this candidate label as a completed public entry-point switch; remaining release gates are tracked in the [vNext migration execution index](migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md).
 
 ## Safety boundaries
 
@@ -149,6 +168,7 @@ flowchart LR
 
 - [AI / Agent Guide](../AGENTS.md)
 - [Windows GUI guide (Chinese)](README_GUI_ZH.md)
+- [V1 Electron primary desktop candidate guide](README_DESKTOP_EN.md)
 - [Web UI guide (Chinese)](README_WEB_UI_ZH.md)
 - [中文](../README.md) · [日本語](README_JA.md) · [한국어](README_KO.md)
 - [macOS GUI: 中文](README_MAC_GUI_ZH.md) · [English](README_MAC_GUI_EN.md)

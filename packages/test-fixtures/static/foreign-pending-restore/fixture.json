@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "foreign-pending-restore",
+  "description": "Synthetic cross-runtime recovery of a transaction interrupted after rollout mutation.",
+  "containsRealUserData": false,
+  "inputs": {
+    "codexHome": "input/codex-home",
+    "sqliteHome": "input/codex-home/sqlite"
+  },
+  "expected": {
+    "directions": [
+      "node-pending-to-dotnet",
+      "dotnet-pending-to-node"
+    ],
+    "restoredProvider": "relay",
+    "journalTerminal": "rolledBack",
+    "pendingCount": 0
+  }
+}

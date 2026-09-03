@@ -1,4 +1,27 @@
+import path from "node:path";
+
 let databaseFactoryPromise = null;
+
+// electron-vite replaces this identifier only in the Desktop bundle. Regular
+// Node/CLI execution sees it as undefined, while the hidden test bundle can
+// exercise the real Core through the packaged native fallback without adding
+// a production environment-variable switch.
+// @ts-ignore -- compile-time Desktop test-bundle define guarded by typeof.
+const forceBetterSqlite3ForDesktopTestBuild = typeof __CPS_DESKTOP_FORCE_BETTER_SQLITE3__ !== "undefined"
+  // @ts-ignore -- compile-time Desktop test-bundle define guarded above.
+  && __CPS_DESKTOP_FORCE_BETTER_SQLITE3__ === true;
+
+function nativeSqlitePath(value) {
+  if (process.platform !== "win32"
+      || typeof value !== "string"
+      || value === ":memory:"
+      || value.startsWith("file:")) {
+    return value;
+  }
+  // SQLite's Windows VFS needs the extended-length form once deeply nested
+  // managed backup/snapshot paths cross MAX_PATH.
+  return path.toNamespacedPath(path.resolve(value));
+}
 
 function normalizeImportDefault(moduleNamespace) {
   return moduleNamespace.default ?? moduleNamespace;
@@ -7,7 +30,7 @@ function normalizeImportDefault(moduleNamespace) {
 class BetterSqliteDatabase {
   constructor(Database, dbPath, options = {}) {
     this.driver = "better-sqlite3";
-    this.db = new Database(dbPath, {
+    this.db = new Database(nativeSqlitePath(dbPath), {
       readonly: Boolean(options.readOnly)
     });
   }
@@ -21,7 +44,7 @@ class BetterSqliteDatabase {
   }
 
   async backup(destinationPath, options = {}) {
-    return this.db.backup(destinationPath, options);
+    return this.db.backup(nativeSqlitePath(destinationPath), options);
   }
 
   close() {
@@ -33,7 +56,7 @@ class NodeSqliteDatabase {
   constructor(sqlite, dbPath, options = {}) {
     this.driver = "node:sqlite";
     this.sqlite = sqlite;
-    this.db = new sqlite.DatabaseSync(dbPath, options);
+    this.db = new sqlite.DatabaseSync(nativeSqlitePath(dbPath), options);
   }
 
   prepare(sql) {
@@ -45,7 +68,7 @@ class NodeSqliteDatabase {
   }
 
   async backup(destinationPath, options = {}) {
-    return this.sqlite.backup(this.db, destinationPath, options);
+    return this.sqlite.backup(this.db, nativeSqlitePath(destinationPath), options);
   }
 
   close() {
@@ -54,13 +77,15 @@ class NodeSqliteDatabase {
 }
 
 async function loadDatabaseFactory() {
-  try {
-    const sqlite = await import("node:sqlite");
-    if (sqlite.DatabaseSync && typeof sqlite.backup === "function") {
-      return (dbPath, options) => new NodeSqliteDatabase(sqlite, dbPath, options);
+  if (!forceBetterSqlite3ForDesktopTestBuild) {
+    try {
+      const sqlite = await import("node:sqlite");
+      if (sqlite.DatabaseSync && typeof sqlite.backup === "function") {
+        return (dbPath, options) => new NodeSqliteDatabase(sqlite, dbPath, options);
+      }
+    } catch {
+      // Older Node.js releases do not include node:sqlite.
     }
-  } catch {
-    // Older Node.js releases do not include node:sqlite.
   }
 
   try {

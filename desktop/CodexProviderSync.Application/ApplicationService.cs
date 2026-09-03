@@ -75,7 +75,8 @@ public sealed class ApplicationService : IApplicationService
                     token);
                 return OperationResult<StatusSnapshot>.Succeeded(status);
             },
-            cancellationToken);
+            cancellationToken,
+            useExclusiveGate: false);
     }
 
     public Task<ApplicationOutcome<ApplicationOperationPlan>> CreatePlanAsync(
@@ -265,7 +266,7 @@ public sealed class ApplicationService : IApplicationService
                 }
                 catch (ApplicationPortException error) when (
                     !error.RecoveryRequired
-                    && (error.Code == "target_busy"
+                    && (error.Code is "target_busy" or "lock_unverifiable"
                         || error.Code.StartsWith("plan_", StringComparison.Ordinal)))
                 {
                     await TryCompletePlanAsync(plan.PlanId, ApplicationOperationLifecycle.Rejected);
@@ -421,13 +422,16 @@ public sealed class ApplicationService : IApplicationService
     private async Task<ApplicationOutcome<T>> RunExclusiveAsync<T>(
         ApplicationOperationKind operation,
         Func<OperationContext, CancellationToken, Task<OperationResult<T>>> run,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool useExclusiveGate = true)
         where T : class
     {
         string operationId = NewId();
         DateTimeOffset startedAt = _timeProvider.GetUtcNow();
         OperationContext context = new(operationId, startedAt, _timeProvider);
-        if (Interlocked.CompareExchange(ref _operationInProgress, 1, 0) != 0)
+        bool gateAcquired = false;
+        if (useExclusiveGate
+            && Interlocked.CompareExchange(ref _operationInProgress, 1, 0) != 0)
         {
             context.MoveTo(ApplicationOperationLifecycle.Rejected);
             return BuildOutcome<T>(
@@ -438,6 +442,7 @@ public sealed class ApplicationService : IApplicationService
                 [],
                 [new ApplicationError("operation_busy", "Another Application operation is already in progress.")]);
         }
+        gateAcquired = useExclusiveGate;
 
         try
         {
@@ -533,7 +538,7 @@ public sealed class ApplicationService : IApplicationService
         {
             ApplicationOperationLifecycle lifecycle = error.RecoveryRequired
                 ? ApplicationOperationLifecycle.RecoveryRequired
-                : error.Code == "target_busy"
+                : error.Code is "target_busy" or "lock_unverifiable"
                     || error.Code.StartsWith("plan_", StringComparison.Ordinal)
                         ? ApplicationOperationLifecycle.Rejected
                         : ApplicationOperationLifecycle.Failed;
@@ -563,7 +568,10 @@ public sealed class ApplicationService : IApplicationService
         }
         finally
         {
-            Volatile.Write(ref _operationInProgress, 0);
+            if (gateAcquired)
+            {
+                Volatile.Write(ref _operationInProgress, 0);
+            }
         }
     }
 

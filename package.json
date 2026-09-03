@@ -1,8 +1,12 @@
 {
   "name": "@dailin521/codex-provider-sync",
-  "version": "0.5.0",
+  "version": "1.0.0",
   "description": "Synchronize Codex session provider metadata across rollout files and SQLite state.",
   "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "files": [
     "README.md",
     "CHANGELOG.md",
@@ -11,6 +15,8 @@
     "AGENTS.md",
     "docs",
     "images/README",
+    "packages/contracts/dist",
+    "packages/core/src",
     "src",
     "web/dist"
   ],
@@ -18,9 +24,33 @@
     "codex-provider": "src/cli.js"
   },
   "scripts": {
-    "test": "node --test",
-    "web:build": "vite build --config web/vite.config.js",
+    "test": "node scripts/run-root-tests.js",
+    "web:build": "npm run workspaces:build && npm run build --workspace @codex-provider-sync/web",
+    "web:test:e2e": "npm run test:e2e --workspace @codex-provider-sync/web",
+    "desktop:build": "npm run workspaces:build && npm run build:electron --workspace @codex-provider-sync/desktop",
+    "desktop:build:test": "npm run workspaces:build && npm run build:electron:test --workspace @codex-provider-sync/desktop",
+    "desktop:test": "npm run workspaces:build && npm run test --workspace @codex-provider-sync/desktop",
+    "desktop:test:e2e": "npm run desktop:build:test && npm run test:e2e --workspace @codex-provider-sync/desktop",
+    "desktop:test:e2e:production": "npm run test:e2e:production --workspace @codex-provider-sync/desktop",
+    "desktop:verify-production-bundle": "npm run verify:production-bundle --workspace @codex-provider-sync/desktop",
+    "desktop:pack:dir": "npm run pack:dir --workspace @codex-provider-sync/desktop",
+    "desktop:pack:candidate": "npm run pack:candidate --workspace @codex-provider-sync/desktop",
+    "desktop:stage:candidate": "npm run stage:candidate --workspace @codex-provider-sync/desktop",
+    "desktop:smoke:candidate:artifacts": "npm run smoke:candidate:artifacts --workspace @codex-provider-sync/desktop",
+    "desktop:verify:candidate:set": "npm run verify:candidate:set --workspace @codex-provider-sync/desktop",
+    "desktop:test:e2e:packaged": "npm run test:e2e:packaged --workspace @codex-provider-sync/desktop",
+    "fixtures:cross-runtime": "node --test test-support/cross-runtime-fixtures.mjs",
+    "fixtures:historical-tags": "node --test test-support/historical-tag-backup-fixtures.mjs",
+    "fixtures:historical-formal-release": "node --test test-support/formal-release-backup-fixtures.mjs",
     "web:start": "node src/cli.js web",
+    "workspaces:build": "tsc -b tsconfig.workspaces.json && tsc -p packages/core/tsconfig.json",
+    "workspaces:test": "npm run test --workspaces --if-present",
+    "workspaces:check": "npm run workspaces:build && npm run workspaces:test && node scripts/verify-workspace-boundaries.js",
+    "package:smoke": "node scripts/smoke-root-tarball.js",
+    "package:smoke:lifecycle": "node scripts/smoke-root-tarball.js --install-lifecycle",
+    "package:verify-root-tree": "node scripts/verify-root-production-tree.js",
+    "evidence:c10": "node scripts/write-c10-evidence-bundle.mjs",
+    "runtime:verify-node16": "node scripts/verify-node16-runtime.js",
     "publish:npm": "node scripts/publish-npm.js"
   },
   "engines": {
@@ -48,13 +78,9 @@
   "optionalDependencies": {
     "better-sqlite3": "8.7.0"
   },
-  "dependencies": {
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
-  },
   "devDependencies": {
-    "@vitejs/plugin-react": "^4.3.4",
-    "vite": "^4.5.14"
+    "@types/node": "24.13.3",
+    "ajv": "8.20.0"
   },
   "overrides": {
     "node-releases": "2.0.18"

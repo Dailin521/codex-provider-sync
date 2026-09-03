@@ -16,15 +16,21 @@ This project welcomes issues, pull requests, documentation, and tests in either 
 
 ## 项目结构
 
+当前公开发布的桌面端仍是 .NET Windows GUI；`apps/desktop` 是 vNext Electron 未发布候选。只有 Phase 6 退出门槛和单独发布授权闭合后，文档才会切换为 Electron 主入口并把 .NET 标记为 Legacy。贡献和评审中不得提前把候选描述为默认、Stable 或已发布产品。
+
 | 路径 | 内容 |
 | --- | --- |
-| `src/` | Node.js CLI、Web 服务和共享同步逻辑 |
-| `web/` | Local Web UI 前端 |
+| `src/` | 兼容 Node.js CLI、Local Web Host 与 Node Core 实现 |
+| `apps/cli/` | vNext CLI workspace 边界 |
+| `apps/web/` | 共享 React UI 的 Local Web 组合与浏览器 E2E |
+| `apps/desktop/` | vNext Electron 候选：Main、Preload、Renderer、Utility Process、打包与 E2E |
+| `packages/` | Core、Contracts、CoreClient、App UI、Design System 与脱敏 Test Fixtures |
+| `web/` | 根 npm 包携带的 Local Web UI production 输出与兼容入口 |
 | `test/` | Node.js 自动化测试 |
-| `desktop/CodexProviderSync.Core/` | Windows 与 macOS GUI 共用的 .NET 核心逻辑 |
-| `desktop/CodexProviderSync.Application/` | Windows GUI 与 Automation 共用的应用用例 |
-| `desktop/CodexProviderSync.App/` | Windows WinForms GUI |
-| `desktop/CodexProviderSync.Mac/` | macOS Avalonia GUI |
+| `desktop/CodexProviderSync.Core/` | 当前发布桌面端共用的 .NET 核心；迁移期保持锁协议和兼容维护 |
+| `desktop/CodexProviderSync.Application/` | 当前 Windows GUI 与 Automation 共用的应用用例 |
+| `desktop/CodexProviderSync.App/` | 当前已发布的 Windows WinForms GUI |
+| `desktop/CodexProviderSync.Mac/` | 迁移期保留的 macOS Avalonia 本地构建 |
 | `desktop/CodexProviderSync.Automation/` | 实验性的 Windows Automation 接口 |
 | `desktop/*Tests/` | .NET 自动化测试 |
 | `scripts/` | GUI 构建和 WSL 安全验证脚本 |
@@ -35,7 +41,7 @@ This project welcomes issues, pull requests, documentation, and tests in either 
 基础开发需要：
 
 - Git
-- Node.js 16.20.2 或更高版本；CI 验证最低版本和当前发布矩阵
+- Node.js 16.20.2 或更高版本用于根 CLI 包；现代 workspace、Web 构建和 Electron 使用 Node 24
 - npm
 - .NET 10 SDK（修改 .NET Core 或 GUI 时）
 - PowerShell 7（修改或验证 Windows 打包脚本时）
@@ -46,6 +52,7 @@ This project welcomes issues, pull requests, documentation, and tests in either 
 npm ci
 npm test
 npm run web:build
+npm run workspaces:check
 ```
 
 运行共享 Core 和 Windows GUI 测试：
@@ -85,6 +92,7 @@ dotnet build desktop/CodexProviderSync.Mac/CodexProviderSync.Mac.csproj --config
 | 文档 | 检查链接、路径和命令；同一内容有多个语言版本时保持一致 |
 | Node.js CLI | `npm test` |
 | Local Web UI | `npm run web:build`、`npm test`；界面改动附浏览器截图或说明未手测原因 |
+| vNext Electron 候选 | `npm run desktop:test`、`npm run desktop:test:e2e`、production bundle 审计；界面自动化默认 hidden，平台打包改动还需原生候选容器 smoke |
 | 共享 .NET Core | Core Tests；涉及 CLI 时同时运行 `npm test` |
 | Windows GUI | Core Tests、App Tests；布局改动附 Windows 截图或说明未手测原因 |
 | macOS GUI | Core Tests、macOS Release build；真实 macOS GUI 手测无法完成时，在 PR 中明确记录 |
@@ -113,13 +121,13 @@ PR 中请特别说明：
 
 ## 准备发布
 
-CLI/Web npm 包和 Windows GitHub Release 独立发布，版本号可能不同。
+CLI/Web npm 包、当前 .NET Windows GitHub Release 和未来 Electron Release 是不同的受控发布路径，版本号可能不同。任何贡献或 CI 候选都不会自动授权公开发布。
 
 ### CLI / Web npm 包
 
 按 [npm 发布维护指南](docs/NPM_PUBLISHING.md) 更新 `package.json` 与 `package-lock.json`、完成构建和测试，并从 `main` 手动运行受信发布工作流。仅发布 CLI/Web 时不创建 Git tag 或 Windows Release。
 
-### Windows GitHub Release
+### 当前 .NET Windows GitHub Release
 
 发布 tag 前需要：
 
@@ -131,11 +139,13 @@ CLI/Web npm 包和 Windows GitHub Release 独立发布，版本号可能不同�
 
 发布工作流会读取与 tag 同名的中文发布说明，并生成单文件 GUI、独立 Automation ZIP、Windows 完整包和对应 SHA-256。缺少发布说明、标题与 tag 不匹配，或遗漏固定的下载、安全和限制声明时会直接停止。
 
+这一流程只描述当前 .NET Windows Release，不授权发布 `apps/desktop` Electron。Electron 候选固定使用 `--publish never`；公开 tag、GitHub Release、签名、公证、更新 metadata 和跨版本升级验证都必须在 C10 证据闭合后另行授权。
+
 ## English quick guide
 
 - Small fixes, tests, and documentation updates can be submitted directly as a PR. Please open an Issue before starting a large feature, behavior change, or refactor.
 - If you do not have write access, fork the repository, push your branch to your fork, and open a PR against this repository's `main` branch.
-- Use Node.js 16.20.2 or later and run `npm ci`, `npm test`, and `npm run web:build`. Changes to shared .NET or desktop code also require the relevant .NET 10 tests listed above.
+- Use Node.js 16.20.2 or later for the compatible root CLI package. Modern workspaces, Web builds, and Electron use Node 24; run `npm ci`, `npm test`, `npm run workspaces:check`, and the affected Web or Electron gates. Changes to shared .NET code also require the relevant .NET 10 tests listed above.
 - Automated tests and reproduction scripts must use temporary directories or fixtures and must not depend on, read, or modify a real user's `~/.codex`. Prefer a dedicated test Codex Home for manual validation and describe its scope in the PR.
 - Never include unredacted credentials, `auth.json`, Codex sessions, SQLite databases, backups, logs, tokens, or personal data.
 - Keep each PR focused. Explain why the change is needed, what it writes, which platforms it affects, what was tested, and what was not tested.
@@ -143,6 +153,7 @@ CLI/Web npm 包和 Windows GitHub Release 独立发布，版本号可能不同�
 - Update affected documentation when user-visible behavior, command options, or safety boundaries change.
 - All changes go through a PR and must pass `ci-gate`.
 - The CLI/Web npm package and Windows GitHub Release are independent release channels; follow `docs/NPM_PUBLISHING.md` for npm releases.
+- The published desktop product is still the Windows .NET GUI. `apps/desktop` is an unreleased Electron candidate and must not be called default, Stable, or released until Phase 6 and separately authorized release validation close.
 
 ## License
 

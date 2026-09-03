@@ -1,8 +1,10 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace CodexProviderSync.Core;
 
@@ -17,11 +19,15 @@ public sealed class LockService
     private const int DefaultLockCreateRetryDelayMs = 75;
     private const int DefaultOwnedClaimDeleteRetryCount = 3;
     private const int DefaultOwnedClaimDeleteRetryDelayMs = 75;
-    private const string BusyErrorDataKey = "codex-provider-sync/error-code";
-    public const string OperationBusyErrorCode = "TARGET_BUSY";
+    private const string ErrorCodeDataKey = "codex-provider-sync/error-code";
+    private const string LockScopeDataKey = "codex-provider-sync/lock-scope";
+    private const string ResourceKeyDataKey = "codex-provider-sync/resource-key";
+    public const string OperationBusyErrorCode = "OPERATION_BUSY";
+    public const string LockUnverifiableErrorCode = "LOCK_UNVERIFIABLE";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
-        WriteIndented = true
+        WriteIndented = true,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
     private readonly Func<string, string, Task>? _testHook;
@@ -39,7 +45,35 @@ public sealed class LockService
         string codexHome,
         string label = "codex-provider-sync")
     {
-        return AcquirePathLockAsync(AppConstants.LockPath(codexHome), label);
+        return AcquirePathLockAsync(AppConstants.LockPath(codexHome), label, "codex-home");
+    }
+
+    public Task<LockHandle> AcquireStateDbLockAsync(
+        StateDbLockResource resource,
+        string label = "codex-provider-sync")
+    {
+        ArgumentNullException.ThrowIfNull(resource);
+        return AcquirePathLockAsync(resource.LockPath, label, "state-db", resource.ResourceKey);
+    }
+
+    /// <summary>
+    /// Observes the Home lock without creating, reclaiming, or deleting any
+    /// protocol resource. Status uses this fail-closed probe so it never scans
+    /// files while another runtime may be mutating them.
+    /// </summary>
+    public Task<LockInspection> InspectLockAsync(string codexHome)
+    {
+        return InspectPathLockAsync(AppConstants.LockPath(codexHome), "codex-home", null);
+    }
+
+    /// <summary>
+    /// Observes the resolved State DB lock without acquiring it. The supplied
+    /// resource identity must be the same physical identity used by writers.
+    /// </summary>
+    public Task<LockInspection> InspectStateDbLockAsync(StateDbLockResource resource)
+    {
+        ArgumentNullException.ThrowIfNull(resource);
+        return InspectPathLockAsync(resource.LockPath, "state-db", resource.ResourceKey);
     }
 
     /// <summary>
@@ -49,8 +83,20 @@ public sealed class LockService
     /// </summary>
     public async Task<LockHandle> AcquirePathLockAsync(
         string lockPath,
-        string label = "codex-provider-sync")
+        string label = "codex-provider-sync",
+        string scope = "codex-home",
+        string? resourceKey = null)
     {
+        if (scope is not ("codex-home" or "state-db"))
+        {
+            throw new ArgumentOutOfRangeException(nameof(scope), scope, "Lock scope must be codex-home or state-db.");
+        }
+        if (scope == "state-db"
+            && (resourceKey is null || resourceKey.Length != 64
+                || resourceKey.Any(static value => !((value >= '0' && value <= '9') || (value >= 'a' && value <= 'f')))))
+        {
+            throw new ArgumentException("State DB resourceKey must be a 64-character SHA-256 hex value.", nameof(resourceKey));
+        }
         string canonicalPath = Path.GetFullPath(lockPath);
         string parentPath = Path.GetDirectoryName(canonicalPath)
             ?? throw new InvalidOperationException($"Cannot resolve the parent directory for lock {canonicalPath}.");
@@ -59,7 +105,7 @@ public sealed class LockService
         Directory.CreateDirectory(claimsPath);
         SetOwnerOnlyDirectoryMode(claimsPath);
 
-        LockOwner owner = CreateCurrentOwner(label);
+        LockOwner owner = CreateCurrentOwner(label, scope, resourceKey);
         string claimPath = Path.Combine(claimsPath, owner.InstanceId + ".json");
         string candidatePath = $"{canonicalPath}.candidate.{owner.ProcessId}.{owner.InstanceId}";
         string reservationMarkerPath = ReservationMarkerPath(canonicalPath, owner.InstanceId);
@@ -76,13 +122,13 @@ public sealed class LockService
                 await _testHook("claim-published", owner.InstanceId);
             }
 
-            await AssertSoleLiveClaimAsync(canonicalPath, claimsPath, claimPath, owner);
-            await ReclaimCanonicalIfStaleAsync(canonicalPath);
+            await AssertSoleLiveClaimAsync(canonicalPath, claimsPath, claimPath, owner, scope, resourceKey);
+            await ReclaimCanonicalIfStaleAsync(canonicalPath, scope, resourceKey);
 
             // A contender can publish while a stale canonical lock is being
             // quarantined. Re-check immediately before publishing ours. A new
             // protocol contender will see this live claim and withdraw.
-            await AssertSoleLiveClaimAsync(canonicalPath, claimsPath, claimPath, owner);
+            await AssertSoleLiveClaimAsync(canonicalPath, claimsPath, claimPath, owner, scope, resourceKey);
 
             Directory.CreateDirectory(candidatePath);
             SetOwnerOnlyDirectoryMode(candidatePath);
@@ -106,23 +152,30 @@ public sealed class LockService
             }
             catch (IOException error) when (IsAlreadyExistsError(error))
             {
-                throw LockAlreadyExists(
+                throw LockUnverifiable(
                     canonicalPath,
                     "another owner populated the canonical reservation before owner.json could be published");
             }
             ownerLinked = true;
             if (!await ReservationMarkerMatchesAsync(reservationMarkerPath, owner.InstanceId))
             {
-                throw LockAlreadyExists(
+                throw LockUnverifiable(
                     canonicalPath,
                     "the canonical reservation changed identity while owner.json was being published");
             }
 
             TryDeleteDirectory(candidatePath);
-            return new LockHandle(canonicalPath, claimsPath, claimPath, owner.InstanceId);
+            return new LockHandle(
+                canonicalPath,
+                claimsPath,
+                claimPath,
+                owner.InstanceId,
+                scope,
+                resourceKey);
         }
         catch (Exception acquisitionError)
         {
+            AnnotateLockError(acquisitionError, scope, resourceKey);
             TryDeleteDirectory(candidatePath);
             if (canonicalReserved && !ownerLinked)
             {
@@ -145,24 +198,289 @@ public sealed class LockService
                 }
                 catch (Exception cleanupError)
                 {
-                    throw new AggregateException(
+                    AggregateException aggregate = new(
                         $"Lock acquisition failed and owned-claim cleanup threw unexpectedly: {acquisitionError.Message} Cleanup failure: {cleanupError.Message}",
                         acquisitionError,
                         cleanupError);
+                    MarkLockUnverifiable(aggregate, scope, resourceKey);
+                    throw aggregate;
                 }
                 if (!cleanup.Succeeded)
                 {
-                    throw new AggregateException(
+                    AggregateException aggregate = new(
                         $"Lock acquisition failed and owned-claim cleanup was incomplete: {acquisitionError.Message} Cleanup failure: {cleanup.Failure!.Message}",
                         acquisitionError,
                         cleanup.Failure!);
+                    MarkLockUnverifiable(aggregate, scope, resourceKey);
+                    throw aggregate;
                 }
             }
             throw;
         }
     }
 
-    private static LockOwner CreateCurrentOwner(string label)
+    private static async Task<LockInspection> InspectPathLockAsync(
+        string lockPath,
+        string scope,
+        string? resourceKey)
+    {
+        string canonicalPath;
+        string claimsPath;
+        try
+        {
+            canonicalPath = Path.GetFullPath(lockPath);
+            claimsPath = canonicalPath + ".claims";
+        }
+        catch (Exception error)
+        {
+            return LockInspection.Unverifiable(scope, resourceKey, string.Empty, error.Message);
+        }
+
+        try
+        {
+            string observationBefore = CaptureLockObservation(canonicalPath, claimsPath);
+            FileAttributes? canonicalAttributes = TryGetPathAttributes(canonicalPath);
+            if (canonicalAttributes is not null)
+            {
+                if ((canonicalAttributes.Value & FileAttributes.ReparsePoint) != 0)
+                {
+                    return LockInspection.Unverifiable(
+                        scope,
+                        resourceKey,
+                        observationBefore,
+                        "the canonical lock path is a symbolic link or reparse point");
+                }
+                if ((canonicalAttributes.Value & FileAttributes.Directory) == 0)
+                {
+                    return LockInspection.Unverifiable(
+                        scope,
+                        resourceKey,
+                        observationBefore,
+                        "the canonical lock path is not a directory");
+                }
+
+                string ownerPath = Path.Combine(canonicalPath, "owner.json");
+                OwnerReadResult first = await ReadOwnerAsync(
+                    ownerPath,
+                    requireVersionTwo: false,
+                    scope,
+                    resourceKey);
+                if (!first.Valid)
+                {
+                    return LockInspection.Unverifiable(
+                        scope,
+                        resourceKey,
+                        observationBefore,
+                        $"owner.json cannot be verified: {first.Error ?? "unknown owner-read failure"}");
+                }
+                if (!IsOwnerLive(first.Owner!))
+                {
+                    return LockInspection.Unverifiable(
+                        scope,
+                        resourceKey,
+                        observationBefore,
+                        "the canonical owner is stale and is preserved fail-closed");
+                }
+
+                OwnerReadResult second = await ReadOwnerAsync(
+                    ownerPath,
+                    requireVersionTwo: false,
+                    scope,
+                    resourceKey);
+                string observationAfter = CaptureLockObservation(canonicalPath, claimsPath);
+                if (!second.Valid
+                    || !SameOwnerGeneration(first.Owner!, second.Owner!)
+                    || !string.Equals(observationBefore, observationAfter, StringComparison.Ordinal))
+                {
+                    return LockInspection.Unverifiable(
+                        scope,
+                        resourceKey,
+                        observationAfter,
+                        "the canonical lock identity changed during read-only inspection");
+                }
+                return LockInspection.Active(
+                    scope,
+                    resourceKey,
+                    observationAfter,
+                    ToInspectionOwner(first.Owner!));
+            }
+
+            FileAttributes? claimsAttributes = TryGetPathAttributes(claimsPath);
+            if (claimsAttributes is not null)
+            {
+                if ((claimsAttributes.Value & FileAttributes.ReparsePoint) != 0
+                    || (claimsAttributes.Value & FileAttributes.Directory) == 0)
+                {
+                    return LockInspection.Unverifiable(
+                        scope,
+                        resourceKey,
+                        observationBefore,
+                        "the claims path is not a verified regular directory");
+                }
+
+                string[] claims = Directory
+                    .EnumerateFiles(claimsPath, "*.json", SearchOption.TopDirectoryOnly)
+                    .Order(StringComparer.Ordinal)
+                    .ToArray();
+                if (claims.Length > 1)
+                {
+                    return LockInspection.Unverifiable(
+                        scope,
+                        resourceKey,
+                        observationBefore,
+                        "multiple protocol claims are present");
+                }
+                if (claims.Length == 1)
+                {
+                    OwnerReadResult claim = await ReadOwnerAsync(
+                        claims[0],
+                        requireVersionTwo: true,
+                        scope,
+                        resourceKey);
+                    if (!claim.Valid
+                        || !string.Equals(
+                            Path.GetFileNameWithoutExtension(claims[0]),
+                            claim.Owner?.InstanceId,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        return LockInspection.Unverifiable(
+                            scope,
+                            resourceKey,
+                            observationBefore,
+                            $"the protocol claim cannot be verified: {claim.Error ?? "owner identity mismatch"}");
+                    }
+                    if (!IsOwnerLive(claim.Owner!))
+                    {
+                        return LockInspection.Unverifiable(
+                            scope,
+                            resourceKey,
+                            observationBefore,
+                            "the protocol claim is stale and is preserved fail-closed");
+                    }
+
+                    OwnerReadResult verified = await ReadOwnerAsync(
+                        claims[0],
+                        requireVersionTwo: true,
+                        scope,
+                        resourceKey);
+                    string observationAfter = CaptureLockObservation(canonicalPath, claimsPath);
+                    if (!verified.Valid
+                        || !SameOwnerGeneration(claim.Owner!, verified.Owner!)
+                        || !string.Equals(observationBefore, observationAfter, StringComparison.Ordinal))
+                    {
+                        return LockInspection.Unverifiable(
+                            scope,
+                            resourceKey,
+                            observationAfter,
+                            "the protocol claim changed during read-only inspection");
+                    }
+                    return LockInspection.Active(
+                        scope,
+                        resourceKey,
+                        observationAfter,
+                        ToInspectionOwner(claim.Owner!));
+                }
+            }
+
+            if (TryGetPathAttributes(canonicalPath) is not null)
+            {
+                return LockInspection.Unverifiable(
+                    scope,
+                    resourceKey,
+                    observationBefore,
+                    "a canonical lock appeared during read-only inspection");
+            }
+            string finalObservation = CaptureLockObservation(canonicalPath, claimsPath);
+            if (!string.Equals(observationBefore, finalObservation, StringComparison.Ordinal))
+            {
+                return LockInspection.Unverifiable(
+                    scope,
+                    resourceKey,
+                    finalObservation,
+                    "the lock protocol resources changed during read-only inspection");
+            }
+            return LockInspection.Absent(scope, resourceKey, finalObservation);
+        }
+        catch (Exception error) when (error is IOException
+            or UnauthorizedAccessException
+            or System.Security.SecurityException
+            or InvalidOperationException)
+        {
+            string observation;
+            try
+            {
+                observation = CaptureLockObservation(canonicalPath, claimsPath);
+            }
+            catch
+            {
+                observation = string.Empty;
+            }
+            return LockInspection.Unverifiable(scope, resourceKey, observation, error.Message);
+        }
+    }
+
+    private static LockInspectionOwner ToInspectionOwner(LockOwnerSnapshot owner)
+    {
+        return new LockInspectionOwner(
+            owner.ProcessId,
+            owner.InstanceId,
+            owner.Runtime,
+            owner.Label,
+            owner.StartedAt);
+    }
+
+    private static string CaptureLockObservation(string canonicalPath, string claimsPath)
+    {
+        StringBuilder canonical = new();
+        AppendPathObservation(canonical, "canonical", canonicalPath, includeChildren: true);
+        AppendPathObservation(canonical, "claims", claimsPath, includeChildren: true);
+        return Convert.ToHexString(
+            SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString())))
+            .ToLowerInvariant();
+    }
+
+    private static void AppendPathObservation(
+        StringBuilder destination,
+        string label,
+        string observedPath,
+        bool includeChildren)
+    {
+        FileAttributes? attributes = TryGetPathAttributes(observedPath);
+        destination.Append(label).Append('|').Append(observedPath).Append('|');
+        if (attributes is null)
+        {
+            destination.Append("missing\n");
+            return;
+        }
+
+        destination.Append((int)attributes.Value).Append('|')
+            .Append(File.GetLastWriteTimeUtc(observedPath).Ticks).Append('\n');
+        if (!includeChildren || (attributes.Value & FileAttributes.Directory) == 0)
+        {
+            if ((attributes.Value & FileAttributes.Directory) == 0)
+            {
+                destination.Append(new FileInfo(observedPath).Length).Append('\n');
+            }
+            return;
+        }
+
+        foreach (string entry in Directory
+            .EnumerateFileSystemEntries(observedPath, "*", SearchOption.TopDirectoryOnly)
+            .Order(StringComparer.Ordinal))
+        {
+            FileAttributes entryAttributes = File.GetAttributes(entry);
+            destination.Append(Path.GetFileName(entry)).Append('|')
+                .Append((int)entryAttributes).Append('|')
+                .Append(File.GetLastWriteTimeUtc(entry).Ticks).Append('|');
+            if ((entryAttributes & FileAttributes.Directory) == 0)
+            {
+                destination.Append(new FileInfo(entry).Length);
+            }
+            destination.Append('\n');
+        }
+    }
+
+    private static LockOwner CreateCurrentOwner(string label, string scope, string? resourceKey)
     {
         using Process process = Process.GetCurrentProcess();
         string processStartedAt = FormatUtcSecond(process.StartTime.ToUniversalTime());
@@ -177,7 +495,9 @@ public sealed class LockService
             StartedAt = FormatUtcSecond(DateTime.UtcNow),
             Label = label,
             Cwd = Environment.CurrentDirectory,
-            CurrentDirectory = Environment.CurrentDirectory
+            CurrentDirectory = Environment.CurrentDirectory,
+            Scope = scope,
+            ResourceKey = resourceKey
         };
     }
 
@@ -221,7 +541,9 @@ public sealed class LockService
         string canonicalPath,
         string claimsPath,
         string ownClaimPath,
-        LockOwner ownOwner)
+        LockOwner ownOwner,
+        string expectedScope,
+        string? expectedResourceKey)
     {
         foreach (string candidate in Directory
             .EnumerateFiles(claimsPath, "*.json", SearchOption.TopDirectoryOnly)
@@ -229,26 +551,34 @@ public sealed class LockService
         {
             if (PathComparer.Equals(Path.GetFullPath(candidate), Path.GetFullPath(ownClaimPath)))
             {
-                OwnerReadResult ownRead = await ReadOwnerAsync(candidate, requireVersionTwo: true);
+                OwnerReadResult ownRead = await ReadOwnerAsync(
+                    candidate,
+                    requireVersionTwo: true,
+                    expectedScope,
+                    expectedResourceKey);
                 if (!ownRead.Valid
                     || !string.Equals(ownRead.Owner!.InstanceId, ownOwner.InstanceId, StringComparison.OrdinalIgnoreCase))
                 {
-                    throw LockAlreadyExists(canonicalPath, "this process's claim identity changed before acquisition");
+                    throw LockUnverifiable(canonicalPath, "this process's claim identity changed before acquisition");
                 }
                 continue;
             }
 
-            OwnerReadResult read = await ReadOwnerAsync(candidate, requireVersionTwo: true);
+            OwnerReadResult read = await ReadOwnerAsync(
+                candidate,
+                requireVersionTwo: true,
+                expectedScope,
+                expectedResourceKey);
             if (!read.Valid)
             {
-                throw LockAlreadyExists(canonicalPath, $"claim {candidate} cannot be verified and is retained fail-closed");
+                throw LockUnverifiable(canonicalPath, $"claim {candidate} cannot be verified and is retained fail-closed");
             }
             if (!string.Equals(
                     Path.GetFileNameWithoutExtension(candidate),
                     read.Owner!.InstanceId,
                     StringComparison.OrdinalIgnoreCase))
             {
-                throw LockAlreadyExists(canonicalPath, $"claim {candidate} does not match its owner instanceId");
+                throw LockUnverifiable(canonicalPath, $"claim {candidate} does not match its owner instanceId");
             }
 
             if (IsOwnerLive(read.Owner))
@@ -258,7 +588,7 @@ public sealed class LockService
 
             if (!await TryQuarantineAndDeleteStaleClaimAsync(candidate, read.Owner!))
             {
-                throw LockAlreadyExists(canonicalPath, $"stale claim {candidate} changed while it was being reclaimed");
+                throw LockUnverifiable(canonicalPath, $"stale claim {candidate} changed while it was being reclaimed");
             }
         }
 
@@ -272,7 +602,7 @@ public sealed class LockService
                 Path.GetFullPath(ownClaimPath)));
         if (otherClaim is not null)
         {
-            throw LockAlreadyExists(canonicalPath, $"a concurrent claim appeared at {otherClaim}");
+            throw LockUnverifiable(canonicalPath, $"a concurrent claim appeared at {otherClaim}");
         }
     }
 
@@ -309,7 +639,10 @@ public sealed class LockService
         return !File.Exists(quarantinePath);
     }
 
-    private async Task ReclaimCanonicalIfStaleAsync(string canonicalPath)
+    private async Task ReclaimCanonicalIfStaleAsync(
+        string canonicalPath,
+        string expectedScope,
+        string? expectedResourceKey)
     {
         FileAttributes? attributes = TryGetPathAttributes(canonicalPath);
         if (attributes is null)
@@ -318,18 +651,22 @@ public sealed class LockService
         }
         if ((attributes.Value & FileAttributes.ReparsePoint) != 0)
         {
-            throw LockAlreadyExists(canonicalPath, "the canonical lock path is a symbolic link or reparse point");
+            throw LockUnverifiable(canonicalPath, "the canonical lock path is a symbolic link or reparse point");
         }
         if ((attributes.Value & FileAttributes.Directory) == 0)
         {
-            throw LockAlreadyExists(canonicalPath, "the canonical lock path is not a directory");
+            throw LockUnverifiable(canonicalPath, "the canonical lock path is not a directory");
         }
 
         string ownerPath = Path.Combine(canonicalPath, "owner.json");
-        OwnerReadResult read = await ReadOwnerAsync(ownerPath, requireVersionTwo: false);
+        OwnerReadResult read = await ReadOwnerAsync(
+            ownerPath,
+            requireVersionTwo: false,
+            expectedScope,
+            expectedResourceKey);
         if (!read.Valid)
         {
-            throw LockAlreadyExists(canonicalPath, "owner.json cannot be verified and is retained fail-closed");
+            throw LockUnverifiable(canonicalPath, "owner.json cannot be verified and is retained fail-closed");
         }
         if (IsOwnerLive(read.Owner!))
         {
@@ -351,19 +688,21 @@ public sealed class LockService
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
-            throw LockAlreadyExists(canonicalPath, "the canonical lock changed during stale-owner reclamation");
+            throw LockUnverifiable(canonicalPath, "the canonical lock changed during stale-owner reclamation");
         }
 
         OwnerReadResult moved = await ReadOwnerAsync(
             Path.Combine(quarantinePath, "owner.json"),
-            requireVersionTwo: false);
+            requireVersionTwo: false,
+            expectedScope,
+            expectedResourceKey);
         if (!moved.Valid || !SameOwnerGeneration(moved.Owner!, read.Owner!))
         {
             bool restored = await TryRestoreQuarantinedOwnerAsync(
                 quarantinePath,
                 canonicalPath,
                 moved.Owner?.InstanceId);
-            throw LockAlreadyExists(
+            throw LockUnverifiable(
                 canonicalPath,
                 restored
                     ? "the owner changed during reclamation, so the moved lock was restored"
@@ -379,7 +718,9 @@ public sealed class LockService
 
     private static async Task<OwnerReadResult> ReadOwnerAsync(
         string ownerPath,
-        bool requireVersionTwo)
+        bool requireVersionTwo,
+        string? expectedScope = null,
+        string? expectedResourceKey = null)
     {
         string text;
         try
@@ -409,6 +750,11 @@ public sealed class LockService
             }
 
             string? instanceId = TryReadString(root, "instanceId");
+            string? runtime = TryReadString(root, "runtime");
+            string? label = TryReadString(root, "label");
+            string? startedAt = TryReadString(root, "startedAt");
+            string? scope = TryReadString(root, "scope");
+            string? resourceKey = TryReadString(root, "resourceKey");
             string? processStartedAtText = TryReadString(root, "processStartedAt");
             DateTimeOffset? processStartedAt = null;
             if (processStartedAtText is not null)
@@ -442,6 +788,19 @@ public sealed class LockService
             {
                 return new OwnerReadResult(null, "version 2 owner identity is incomplete");
             }
+            if (expectedScope is not null)
+            {
+                if (scope is not null && !string.Equals(scope, expectedScope, StringComparison.Ordinal))
+                {
+                    return new OwnerReadResult(null, "owner lock scope does not match the requested resource");
+                }
+                if (expectedScope == "state-db"
+                    && (!string.Equals(scope, expectedScope, StringComparison.Ordinal)
+                        || !string.Equals(resourceKey, expectedResourceKey, StringComparison.Ordinal)))
+                {
+                    return new OwnerReadResult(null, "State DB owner scope or resourceKey is missing or mismatched");
+                }
+            }
             if (processStartedAt is null && string.IsNullOrWhiteSpace(processStartMarker))
             {
                 // Legacy records without a process start identity can only be
@@ -456,6 +815,11 @@ public sealed class LockService
                 processStartedAt,
                 processStartMarker,
                 instanceId,
+                runtime,
+                label,
+                startedAt,
+                scope,
+                resourceKey,
                 text), null);
         }
         catch (Exception error) when (error is JsonException or InvalidOperationException)
@@ -592,7 +956,12 @@ public sealed class LockService
             return string.Equals(left.InstanceId, right.InstanceId, StringComparison.OrdinalIgnoreCase)
                 && left.ProcessId == right.ProcessId
                 && left.ProcessStartedAt == right.ProcessStartedAt
-                && string.Equals(left.ProcessStartMarker, right.ProcessStartMarker, StringComparison.Ordinal);
+                && string.Equals(left.ProcessStartMarker, right.ProcessStartMarker, StringComparison.Ordinal)
+                && string.Equals(left.Runtime, right.Runtime, StringComparison.Ordinal)
+                && string.Equals(left.Label, right.Label, StringComparison.Ordinal)
+                && string.Equals(left.StartedAt, right.StartedAt, StringComparison.Ordinal)
+                && string.Equals(left.Scope, right.Scope, StringComparison.Ordinal)
+                && string.Equals(left.ResourceKey, right.ResourceKey, StringComparison.Ordinal);
         }
         return string.Equals(left.RawText, right.RawText, StringComparison.Ordinal);
     }
@@ -754,10 +1123,17 @@ public sealed class LockService
 
     public static bool IsOperationBusy(Exception error)
     {
-        return error is InvalidOperationException
-            && string.Equals(
-                error.Data[BusyErrorDataKey] as string,
+        return string.Equals(
+                error.Data[ErrorCodeDataKey] as string,
                 OperationBusyErrorCode,
+                StringComparison.Ordinal);
+    }
+
+    public static bool IsLockUnverifiable(Exception error)
+    {
+        return string.Equals(
+                error.Data[ErrorCodeDataKey] as string,
+                LockUnverifiableErrorCode,
                 StringComparison.Ordinal);
     }
 
@@ -765,8 +1141,49 @@ public sealed class LockService
     {
         InvalidOperationException error = new(
             $"Lock already exists at {lockPath}: {reason}. Close Codex/App and retry; do not remove it unless the recorded owner is known to be gone.");
-        error.Data[BusyErrorDataKey] = OperationBusyErrorCode;
+        error.Data[ErrorCodeDataKey] = OperationBusyErrorCode;
         return error;
+    }
+
+    private static InvalidOperationException LockUnverifiable(string lockPath, string reason)
+    {
+        InvalidOperationException error = new(
+            $"Lock ownership cannot be verified at {lockPath}: {reason}. The resource was preserved fail-closed.");
+        error.Data[ErrorCodeDataKey] = LockUnverifiableErrorCode;
+        return error;
+    }
+
+    private static void AnnotateLockError(Exception error, string scope, string? resourceKey)
+    {
+        if (error.Data.Contains(ErrorCodeDataKey))
+        {
+            error.Data[LockScopeDataKey] = scope;
+            if (resourceKey is not null)
+            {
+                error.Data[ResourceKeyDataKey] = resourceKey;
+            }
+        }
+        if (error is AggregateException aggregate)
+        {
+            foreach (Exception inner in aggregate.InnerExceptions)
+            {
+                AnnotateLockError(inner, scope, resourceKey);
+            }
+        }
+    }
+
+    internal static void MarkLockUnverifiable(
+        Exception error,
+        string scope,
+        string? resourceKey)
+    {
+        error.Data[ErrorCodeDataKey] = LockUnverifiableErrorCode;
+        error.Data[LockScopeDataKey] = scope;
+        if (resourceKey is not null)
+        {
+            error.Data[ResourceKeyDataKey] = resourceKey;
+        }
+        AnnotateLockError(error, scope, resourceKey);
     }
 
     private static int? TryReadInt(JsonElement root, string name)
@@ -1076,7 +1493,7 @@ public sealed class LockService
 
             if (errorCode == Win32ErrorAlreadyExists)
             {
-                throw LockAlreadyExists(lockPath, "the canonical directory already exists");
+                throw LockUnverifiable(lockPath, "the canonical directory already exists");
             }
 
             if (!IsTransientLockCreateError(errorCode) || attempts >= retryCount)
@@ -1149,6 +1566,8 @@ public sealed class LockService
         public required string Label { get; init; }
         public required string Cwd { get; init; }
         public required string CurrentDirectory { get; init; }
+        public string? Scope { get; init; }
+        public string? ResourceKey { get; init; }
     }
 
     private sealed record LockOwnerSnapshot(
@@ -1157,6 +1576,11 @@ public sealed class LockService
         DateTimeOffset? ProcessStartedAt,
         string? ProcessStartMarker,
         string? InstanceId,
+        string? Runtime,
+        string? Label,
+        string? StartedAt,
+        string? Scope,
+        string? ResourceKey,
         string RawText);
 
     private sealed record OwnerReadResult(LockOwnerSnapshot? Owner, string? Error)
@@ -1172,24 +1596,76 @@ public sealed class LockService
     }
 }
 
+public sealed record LockInspectionOwner(
+    int ProcessId,
+    string? InstanceId,
+    string? Runtime,
+    string? Label,
+    string? StartedAt);
+
+public sealed record LockInspection(
+    string State,
+    string Scope,
+    string? ResourceKey,
+    string ObservationRevision,
+    LockInspectionOwner? Owner,
+    string? ErrorCode,
+    string? Error)
+{
+    public bool IsAbsent => string.Equals(State, "absent", StringComparison.Ordinal);
+
+    internal static LockInspection Absent(
+        string scope,
+        string? resourceKey,
+        string observationRevision) =>
+        new("absent", scope, resourceKey, observationRevision, null, null, null);
+
+    internal static LockInspection Active(
+        string scope,
+        string? resourceKey,
+        string observationRevision,
+        LockInspectionOwner owner) =>
+        new("active", scope, resourceKey, observationRevision, owner, null, null);
+
+    internal static LockInspection Unverifiable(
+        string scope,
+        string? resourceKey,
+        string observationRevision,
+        string error) =>
+        new(
+            "unverifiable",
+            scope,
+            resourceKey,
+            observationRevision,
+            null,
+            LockService.LockUnverifiableErrorCode,
+            error);
+}
+
 public sealed class LockHandle : IAsyncDisposable
 {
     private readonly string _canonicalPath;
     private readonly string _claimsPath;
     private readonly string _claimPath;
     private readonly string _instanceId;
+    private readonly string _scope;
+    private readonly string? _resourceKey;
     private bool _released;
 
     internal LockHandle(
         string canonicalPath,
         string claimsPath,
         string claimPath,
-        string instanceId)
+        string instanceId,
+        string scope,
+        string? resourceKey)
     {
         _canonicalPath = canonicalPath;
         _claimsPath = claimsPath;
         _claimPath = claimPath;
         _instanceId = instanceId;
+        _scope = scope;
+        _resourceKey = resourceKey;
     }
 
     public string LockPath => _canonicalPath;
@@ -1203,11 +1679,19 @@ public sealed class LockHandle : IAsyncDisposable
             return;
         }
 
-        await LockService.ReleaseAsync(
-            _canonicalPath,
-            _claimsPath,
-            _claimPath,
-            _instanceId);
+        try
+        {
+            await LockService.ReleaseAsync(
+                _canonicalPath,
+                _claimsPath,
+                _claimPath,
+                _instanceId);
+        }
+        catch (Exception error)
+        {
+            LockService.MarkLockUnverifiable(error, _scope, _resourceKey);
+            throw;
+        }
         _released = true;
     }
 }

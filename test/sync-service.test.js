@@ -13,15 +13,18 @@ import {
   restoreBackup,
   updateSessionBackupManifest
 } from "../src/backup.js";
-import { getStatus, renderStatus, runRestore, runSwitch, runSync } from "../src/service.js";
+import { getStatus, prepareSync, runPruneBackups, runRepair, runRestore, runSwitch, runSync } from "../src/service.js";
+import { renderStatus } from "../src/cli-presenter.js";
 import { DB_FILE_BASENAME, DEFAULT_BACKUP_RETENTION_COUNT, SQLITE_DIR_BASENAME } from "../src/constants.js";
 import { getUnsupportedNodeVersionMessage } from "../src/node-version.js";
 import {
   applySessionChanges,
   collectSessionChanges,
-  createWindowsExclusiveRewriteWorker
+  createWindowsExclusiveRewriteWorker,
+  restoreSessionChanges
 } from "../src/session-files.js";
 import { openDatabase } from "../src/sqlite.js";
+import { assertSqliteWritable } from "../src/sqlite-state.js";
 import {
   TransactionJournal,
   findPendingTransactions,
@@ -31,7 +34,78 @@ import { syncDirectory, writeFileAtomic } from "../src/atomic-file.js";
 
 delete process.env.CODEX_SQLITE_HOME;
 
-test("runSync rolls back the first rollout when a later target fails (#69)", async () => {
+// ADR-0016 removed the ordinary Sync/Switch journal and automatic rollback
+// model. Keep these historical cases visible as legacy documentation while the
+// active lightweight-path coverage lives in provider-sync-lite.test.js and
+// plan-apply.test.js.
+function legacySkippedTest(reason) {
+  return (name, optionsOrFn, maybeFn) => {
+    const options = typeof optionsOrFn === "function" ? {} : (optionsOrFn ?? {});
+    const fn = typeof optionsOrFn === "function" ? optionsOrFn : maybeFn;
+    return test(name, { ...options, skip: reason }, fn);
+  };
+}
+
+const legacyOrdinaryJournalTest = legacySkippedTest(
+  "Legacy ordinary journal/automatic rollback behavior was superseded by ADR-0016."
+);
+const legacySyncRepairTest = legacySkippedTest(
+  "Implicit Sync repair behavior was superseded by explicit Repair in ADR-0016."
+);
+
+test("public write adapters expose typed invalid-input errors", async () => {
+  const cases = [
+    () => runSync({ keepCount: 0 }),
+    () => runSwitch({}),
+    () => runRestore({}),
+    () => runPruneBackups({ keepCount: -1 })
+  ];
+
+  for (const invoke of cases) {
+    await assert.rejects(
+      invoke,
+      (error) => error?.code === "INVALID_INPUT"
+        && typeof error.toDto === "function"
+    );
+  }
+});
+
+test("public write adapters expose typed validation and stale-confirmation errors", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome);
+
+  await assert.rejects(
+    () => runSwitch({ codexHome, provider: "apigather", model: "" }),
+    (error) => error?.code === "INVALID_INPUT" && /Invalid --model value/.test(error.message)
+  );
+  await assert.rejects(
+    () => runRestore({
+      codexHome,
+      backupDir: path.join(codexHome, "unused-backup"),
+      allowSqliteHomeRelocation: true
+    }),
+    (error) => error?.code === "INVALID_INPUT"
+      && /requires an explicit --sqlite-home/.test(error.message)
+  );
+
+  const staleCalls = [
+    () => runSync({ codexHome, expectedConfigText: "stale" }),
+    () => runSwitch({ codexHome, provider: "apigather", expectedConfigText: "stale" }),
+    () => runRestore({
+      codexHome,
+      backupDir: path.join(codexHome, "unused-backup"),
+      expectedConfigText: "stale"
+    })
+  ];
+  for (const invoke of staleCalls) {
+    await assert.rejects(
+      invoke,
+      (error) => error?.code === "PLAN_STALE" && typeof error.toDto === "function"
+    );
+  }
+});
+
+legacyOrdinaryJournalTest("runSync rolls back the first rollout when a later target fails (#69)", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const firstPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");
@@ -82,7 +156,7 @@ test("runSync rolls back the first rollout when a later target fails (#69)", asy
   assert.equal(sqliteBackupRestoreAttempts, 0, "a pre-COMMIT failure must use SQLite ROLLBACK, not backup restore");
 });
 
-test("runSync restores global-state primary when backup write fails (#69)", async () => {
+legacyOrdinaryJournalTest("runSync restores global-state primary when backup write fails (#69)", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const originalState = {
@@ -116,7 +190,7 @@ test("runSync restores global-state primary when backup write fails (#69)", asyn
   assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
-test("failure after SQLite commit restores rollout and database", async () => {
+legacyOrdinaryJournalTest("failure after SQLite commit restores rollout and database", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-after-sqlite.jsonl");
@@ -151,7 +225,7 @@ test("failure after SQLite commit restores rollout and database", async () => {
   assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
-test("unknown SQLite COMMIT acknowledgement restores switch config, rollout, and database", async () => {
+legacyOrdinaryJournalTest("unknown SQLite COMMIT acknowledgement restores switch config, rollout, and database", async () => {
   const { codexHome } = await makeTempCodexHome();
   const originalConfig = `model_provider = "openai"\nmodel = "gpt-5.4-mini"\n\n[model_providers.apigather]\nmodel = "apigather-prod"\nbase_url = "https://example.com"\n`;
   const configPath = path.join(codexHome, "config.toml");
@@ -198,7 +272,7 @@ test("unknown SQLite COMMIT acknowledgement restores switch config, rollout, and
   assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
-test("cancellation after SQLite commit restores rollout and database", async () => {
+legacyOrdinaryJournalTest("cancellation after SQLite commit restores rollout and database", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-cancel-after-sqlite.jsonl");
@@ -233,7 +307,7 @@ test("cancellation after SQLite commit restores rollout and database", async () 
   assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
-test("cancellation after transaction commit does not roll back committed state", async () => {
+legacyOrdinaryJournalTest("cancellation after transaction commit does not roll back committed state", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-cancel-after-commit.jsonl");
@@ -258,7 +332,7 @@ test("cancellation after transaction commit does not roll back committed state",
   assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
-test("a lost acknowledgement after a durable journal commit is reconciled as success", async () => {
+legacyOrdinaryJournalTest("a lost acknowledgement after a durable journal commit is reconciled as success", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-commit-ack.jsonl");
@@ -283,7 +357,7 @@ test("a lost acknowledgement after a durable journal commit is reconciled as suc
   assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
-test("commit acknowledgement reconciliation rejects a terminal from another operation", async () => {
+legacyOrdinaryJournalTest("commit acknowledgement reconciliation rejects a terminal from another operation", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-foreign-commit.jsonl");
@@ -321,7 +395,7 @@ test("commit acknowledgement reconciliation rejects a terminal from another oper
   assert.equal(journal.operationId, "foreign-operation-id");
 });
 
-test("an exception after the committed terminal never triggers rollback", async () => {
+legacyOrdinaryJournalTest("an exception after the committed terminal never triggers rollback", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-post-commit-error.jsonl");
@@ -352,7 +426,7 @@ test("an exception after the committed terminal never triggers rollback", async 
   assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
-test("progress observer failures before and after commit are non-fatal", async () => {
+legacyOrdinaryJournalTest("progress observer failures before and after commit are non-fatal", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-progress-failure.jsonl");
@@ -380,7 +454,7 @@ test("progress observer failures before and after commit are non-fatal", async (
   assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
-test("failure before transaction commit rolls back before pruning old backups", async () => {
+legacyOrdinaryJournalTest("failure before transaction commit rolls back before pruning old backups", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-before-commit-failure.jsonl");
@@ -415,7 +489,7 @@ test("failure before transaction commit rolls back before pruning old backups", 
   assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
-test("SQLite rollback failure preserves recovery evidence and manual restore recovers", async () => {
+legacyOrdinaryJournalTest("SQLite rollback failure preserves recovery evidence and manual restore recovers", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-sqlite-rollback-failure.jsonl");
@@ -461,7 +535,7 @@ test("SQLite rollback failure preserves recovery evidence and manual restore rec
   assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
-test("unfinished journal blocks writes until the bound backup is restored", async () => {
+legacyOrdinaryJournalTest("unfinished journal blocks writes until the bound backup is restored", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   await writeStateDb(codexHome, [{ id: "thread-recovery", model_provider: "openai" }]);
@@ -523,7 +597,7 @@ test("runRestore reports a warning instead of failing when the inventory refresh
   assert.match(await fs.readFile(sessionPath, "utf8"), /"model_provider":"apigather"/);
 });
 
-test("crash recovery restores actually mutated rollout and database from a pending journal", async () => {
+legacyOrdinaryJournalTest("crash recovery restores actually mutated rollout and database from a pending journal", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-crash-recovery.jsonl");
@@ -570,7 +644,7 @@ test("crash recovery restores actually mutated rollout and database from a pendi
   assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
-test("rollback failure preserves both errors and manual recovery evidence", async () => {
+legacyOrdinaryJournalTest("rollback failure preserves both errors and manual recovery evidence", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-rollback-failure.jsonl");
@@ -609,7 +683,7 @@ test("rollback failure preserves both errors and manual recovery evidence", asyn
   assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
-test("cancellation after the first target rolls back disk and SQLite with structured evidence", async () => {
+legacyOrdinaryJournalTest("cancellation after the first target rolls back disk and SQLite with structured evidence", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const firstPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-cancel-a.jsonl");
@@ -658,7 +732,7 @@ test("cancellation after the first target rolls back disk and SQLite with struct
   assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
-test("cancellation after the only rollout is observed before SQLite commit", async () => {
+legacyOrdinaryJournalTest("cancellation after the only rollout is observed before SQLite commit", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-cancel-only.jsonl");
@@ -693,7 +767,7 @@ test("cancellation after the only rollout is observed before SQLite commit", asy
   assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
-test("concurrent sync is rejected by the operation lock without competing mutation", async () => {
+legacyOrdinaryJournalTest("concurrent sync is rejected by the operation lock without competing mutation", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-concurrent.jsonl");
@@ -734,7 +808,7 @@ test("concurrent sync is rejected by the operation lock without competing mutati
   assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
-test("repeated sync is idempotent for rollout and SQLite state", async () => {
+legacyOrdinaryJournalTest("repeated sync is idempotent for rollout and SQLite state", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-idempotent.jsonl");
@@ -755,7 +829,7 @@ test("repeated sync is idempotent for rollout and SQLite state", async () => {
   assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
-test("runSync leaves the backup manifest and metadata payload unchanged after creation", async () => {
+legacyOrdinaryJournalTest("runSync leaves the backup manifest and metadata payload unchanged after creation", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-immutable-backup.jsonl");
@@ -809,7 +883,7 @@ test("runSync leaves the backup manifest and metadata payload unchanged after cr
   assert.equal(manifest.appliedPaths, null);
 });
 
-test("failure after model mutation but before journal applied restores full rollout bytes", async () => {
+legacyOrdinaryJournalTest("failure after model mutation but before journal applied restores full rollout bytes", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "gpt-new"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "06", "09", "rollout-model-window.jsonl");
@@ -893,7 +967,7 @@ test("lost Windows worker acknowledgement after File.Replace restores the applyi
   assert.deepEqual(await fs.readFile(sessionPath), before);
 });
 
-test("immutable full manifest restores a later applying target after abrupt exit", async () => {
+legacyOrdinaryJournalTest("immutable full manifest restores a later applying target after abrupt exit", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const firstPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-crash-full-a.jsonl");
@@ -949,7 +1023,7 @@ test("immutable full manifest restores a later applying target after abrupt exit
   assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
-test("abrupt parent exit after the first applied rollout never mutates the next rollout", {
+legacyOrdinaryJournalTest("abrupt parent exit after the first applied rollout never mutates the next rollout", {
   skip: process.platform !== "win32"
 }, async () => {
   const { codexHome } = await makeTempCodexHome();
@@ -1153,6 +1227,7 @@ test("partial restore cannot clear a pending SQLite transaction", async () => {
       restoreSessions: false
     }),
     (error) => error?.code === "RECOVERY_REQUIRED"
+      && typeof error.toDto === "function"
       && error.missingRestoreKinds.includes("SQLite database")
   );
   assert.equal(await readProvider(codexHome, "thread-partial-restore"), "openai");
@@ -1193,7 +1268,7 @@ test("pruning protects the journal directory instead of trusting recorded backup
   assert.equal((await findPendingTransactions(codexHome)).length, 1);
 });
 
-test("rollback removes a global-state backup that did not exist before the operation", async () => {
+legacyOrdinaryJournalTest("rollback removes a global-state backup that did not exist before the operation", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const statePath = path.join(codexHome, ".codex-global-state.json");
@@ -1221,7 +1296,7 @@ test("rollback removes a global-state backup that did not exist before the opera
   await assert.rejects(fs.access(stateBackupPath), (error) => error?.code === "ENOENT");
 });
 
-test("switch preserves structured original and config rollback failures inside the operation lock", async () => {
+legacyOrdinaryJournalTest("switch preserves structured original and config rollback failures inside the operation lock", async () => {
   const { codexHome } = await makeTempCodexHome();
   const originalConfig = `model_provider = "openai"\n\n[model_providers.apigather]\nbase_url = "https://example.com"\n`;
   const configPath = path.join(codexHome, "config.toml");
@@ -2096,8 +2171,8 @@ test("runSync reports stage progress and backup duration", async () => {
       "scan_rollout_files",
       "check_locked_rollout_files",
       "create_backup",
-      "update_sqlite",
       "rewrite_rollout_files",
+      "update_sqlite",
       "clean_backups"
     ]
   );
@@ -2108,7 +2183,7 @@ test("runSync reports stage progress and backup duration", async () => {
   assert.ok(backupCompleteEvent.durationMs >= 0);
 });
 
-test("runSync repairs SQLite has_user_event from rollout user messages", async () => {
+test("runRepair updates SQLite has_user_event from rollout user messages", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");
@@ -2117,7 +2192,7 @@ test("runSync repairs SQLite has_user_event from rollout user messages", async (
     { id: "thread-a", model_provider: "openai", archived: false, has_user_event: false }
   ]);
 
-  const syncResult = await runSync({ codexHome });
+  const syncResult = await runRepair({ codexHome, targets: ["userEvent"] });
 
   assert.equal(syncResult.changedSessionFiles, 0);
   assert.equal(syncResult.sqliteRowsUpdated, 1);
@@ -2134,7 +2209,7 @@ test("runSync repairs SQLite has_user_event from rollout user messages", async (
   }
 });
 
-test("runSync repairs SQLite cwd from rollout session metadata", async () => {
+test("runRepair updates SQLite cwd from rollout session metadata", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-cwd.jsonl");
@@ -2155,7 +2230,7 @@ test("runSync repairs SQLite cwd from rollout session metadata", async () => {
     }
   ]);
 
-  const syncResult = await runSync({ codexHome });
+  const syncResult = await runRepair({ codexHome, targets: ["cwd"] });
 
   assert.equal(syncResult.changedSessionFiles, 0);
   assert.equal(syncResult.sqliteRowsUpdated, 1);
@@ -2172,7 +2247,7 @@ test("runSync repairs SQLite cwd from rollout session metadata", async () => {
   }
 });
 
-test("runSync normalizes extended rollout cwd before repairing SQLite", async () => {
+test("runRepair normalizes extended rollout cwd before repairing SQLite", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-cwd-extended.jsonl");
@@ -2193,7 +2268,7 @@ test("runSync normalizes extended rollout cwd before repairing SQLite", async ()
     }
   ]);
 
-  const syncResult = await runSync({ codexHome });
+  const syncResult = await runRepair({ codexHome, targets: ["cwd"] });
 
   assert.equal(syncResult.sqliteRowsUpdated, 1);
   assert.equal(syncResult.sqliteCwdRowsUpdated, 1);
@@ -2209,7 +2284,7 @@ test("runSync normalizes extended rollout cwd before repairing SQLite", async ()
   }
 });
 
-test("runSync restores workspace roots from project order and normalizes them to Desktop path variants", async () => {
+test("runRepair restores workspace roots from project order and normalizes them to Desktop path variants", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const originalState = {
@@ -2242,8 +2317,24 @@ test("runSync restores workspace roots from project order and normalizes them to
       cwd: "\\\\?\\E:\\NewRich\\BrainLife\\Code\\BrainLife\\Assets"
     }
   ]);
+  await writeCustomRollout(
+    path.join(codexHome, "sessions", "2026", "03", "19", "rollout-thread-a.jsonl"),
+    {
+      id: "thread-a",
+      cwd: "D:\\GitHubProject\\codex-provider-sync",
+      model_provider: "openai"
+    }
+  );
+  await writeCustomRollout(
+    path.join(codexHome, "sessions", "2026", "03", "19", "rollout-thread-b.jsonl"),
+    {
+      id: "thread-b",
+      cwd: "E:\\NewRich\\BrainLife\\Code\\BrainLife\\Assets",
+      model_provider: "openai"
+    }
+  );
 
-  const syncResult = await runSync({ codexHome });
+  const syncResult = await runRepair({ codexHome, targets: ["workspaceRoots"] });
   assert.equal(syncResult.updatedWorkspaceRoots, 2);
 
   const syncedState = JSON.parse(await fs.readFile(path.join(codexHome, ".codex-global-state.json"), "utf8"));
@@ -2337,7 +2428,7 @@ test("runSwitch does not touch config when pre-switch backup creation fails", as
   assert.equal((await fs.stat(configPath)).mtimeMs, pinnedMtime.getTime());
 });
 
-test("runSwitch restores config after a post-backup sync failure", async () => {
+legacyOrdinaryJournalTest("runSwitch restores config after a post-backup sync failure", async () => {
   const { codexHome } = await makeTempCodexHome();
   const originalConfig = `model_provider = "openai"\nmodel = "gpt-5.4-mini"\n\n[model_providers.apigather]\nbase_url = "https://example.com"\n`;
   const configPath = path.join(codexHome, "config.toml");
@@ -2448,7 +2539,8 @@ test("runSwitch rejects --model and --keep-root-model together", async () => {
 
   await assert.rejects(
     () => runSwitch({ codexHome, provider: "apigather", model: "X", keepRootModel: true }),
-    /--model and --keep-root-model are mutually exclusive/
+    (error) => error?.code === "INVALID_INPUT"
+      && /--model and --keep-root-model are mutually exclusive/.test(error.message)
   );
 
   // Confirm the file on disk was not mutated by the failed call.
@@ -2456,7 +2548,7 @@ test("runSwitch rejects --model and --keep-root-model together", async () => {
   assert.equal(after, before);
 });
 
-test("runSync rewrites the per-thread model column when a model is provided", async () => {
+legacySyncRepairTest("runSync rewrites the per-thread model column when a model is provided", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "gpt-5.4"\n');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");
@@ -2499,7 +2591,7 @@ test("runSync leaves the per-thread model column untouched when no model is prov
   }
 });
 
-test("runSync rewrites the per-turn turn_context model field in rollout files", async () => {
+legacySyncRepairTest("runSync rewrites the per-turn turn_context model field in rollout files", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "MiniMax-M3"\n');
   const sessionPath = path.join(codexHome, "sessions", "2026", "06", "09", "rollout-a.jsonl");
@@ -2523,7 +2615,7 @@ test("runSync rewrites the per-turn turn_context model field in rollout files", 
   }
 });
 
-test("runSync rewrites turn_context model even when the line is larger than 64 KB", async () => {
+legacySyncRepairTest("runSync rewrites turn_context model even when the line is larger than 64 KB", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "MiniMax-M3"\n');
   const sessionPath = path.join(codexHome, "sessions", "2026", "06", "09", "rollout-huge.jsonl");
@@ -2567,7 +2659,7 @@ test("runSync rewrites turn_context model even when the line is larger than 64 K
   }
 });
 
-test("runSync rewrites turn_context whose model name contains regex metacharacters", async () => {
+legacySyncRepairTest("runSync rewrites turn_context whose model name contains regex metacharacters", async () => {
   // Names like `gpt-5.4-mini` and `apigather.fixed+name` should
   // be matched literally — `.` is a regex any-char, `+` is a
   // quantifier, and an unbalanced `{` would refuse to compile. We
@@ -2614,7 +2706,7 @@ test("runSync rewrites turn_context whose model name contains regex metacharacte
   assert.equal(userMessage.payload.message, "echo weird(target)+v2 please");
 });
 
-test("runSync rewrites turn_context model when the provider is already correct (model-only change)", async () => {
+legacySyncRepairTest("runSync rewrites turn_context model when the provider is already correct (model-only change)", async () => {
   // Owner review regression: when the root-level `model = "..."`
   // in config.toml changes but `model_provider` is the same as
   // what every rollout already has, the rollout's
@@ -2653,7 +2745,7 @@ test("runSync rewrites turn_context model when the provider is already correct (
   }
 });
 
-test("runSync normalises multiple distinct models in the same session to the target model", async () => {
+legacySyncRepairTest("runSync normalises multiple distinct models in the same session to the target model", async () => {
   // Owner review regression: a single Codex session can use
   // different models in different turn_context lines (the user
   // switched models mid-conversation). The per-turn rewrite
@@ -2697,7 +2789,7 @@ test("runSync normalises multiple distinct models in the same session to the tar
   }
 });
 
-test("runSync preserves CRLF line separators and the original mtime when rewriting turn_context model", async () => {
+legacySyncRepairTest("runSync preserves CRLF line separators and the original mtime when rewriting turn_context model", async () => {
   // Owner review regression: rewriting the per-turn model field
   // must preserve the original newline format (CRLF on Windows)
   // and the original mtime. The previous code joined lines with
@@ -2846,7 +2938,7 @@ test("runSync restores turn_context model on failure rollback (no half-completed
   assert.equal(appended.payload.message, "after-rewrite");
 });
 
-test("runSync leaves rollout files alone when original turn_context model already equals target", async () => {
+legacySyncRepairTest("runSync leaves rollout files alone when original turn_context model already equals target", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "MiniMax-M3"\n');
   const sessionPath = path.join(codexHome, "sessions", "2026", "06", "09", "rollout-a.jsonl");
@@ -2900,6 +2992,106 @@ test("runSync leaves turn_context model field alone when no model is provided", 
     .filter((entry) => entry.type === "turn_context");
   for (const entry of turnContextLines) {
     assert.equal(entry.payload.model, "gpt-5.4", "turn_context model must stay put when caller does not pass a target");
+  }
+});
+
+test("a provider-only managed backup restores its original turn_context models after a later switch", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"\n');
+  const configPath = path.join(codexHome, "config.toml");
+  const sessionPath = path.join(
+    codexHome,
+    "sessions",
+    "2026",
+    "06",
+    "09",
+    "rollout-provider-only-backup.jsonl"
+  );
+  await writeRolloutWithTurnContext(sessionPath, {
+    id: "thread-provider-only-backup",
+    provider: "legacy-provider",
+    model: "legacy-model"
+  });
+  const original = await fs.readFile(sessionPath);
+
+  const firstScan = await collectSessionChanges(codexHome, "openai");
+  assert.equal(firstScan.changes.length, 1);
+  assert.equal(firstScan.changes[0].modelRewriteRequired, false);
+  assert.equal(firstScan.changes[0].originalTurnContextModels.length, 2);
+  const firstBackup = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: firstScan.changes,
+    configPath
+  });
+  await applySessionChanges(firstScan.changes);
+  await updateSessionBackupManifest(firstBackup, firstScan.changes);
+
+  const laterScan = await collectSessionChanges(codexHome, "relay", {
+    targetModel: "later-model"
+  });
+  await applySessionChanges(laterScan.changes, { targetModel: "later-model" });
+  assert.match(await fs.readFile(sessionPath, "utf8"), /"model":"later-model"/);
+
+  await restoreBackup(firstBackup, codexHome, {
+    restoreConfig: false,
+    restoreDatabase: false,
+    restoreSessions: true
+  });
+
+  assert.deepEqual(await fs.readFile(sessionPath), original);
+});
+
+test("rollout restore fails closed when an expected turn_context changes after provider restore", async () => {
+  const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "provider-sync-restore-race-"));
+  const sessionPath = path.join(testRoot, "rollout.jsonl");
+  const originalFirstLine = JSON.stringify({
+    type: "session_meta",
+    payload: { id: "restore-race", model_provider: "openai" }
+  });
+  const currentFirstLine = JSON.stringify({
+    type: "session_meta",
+    payload: { id: "restore-race", model_provider: "relay" }
+  });
+  const currentTurnContext = JSON.stringify({
+    type: "turn_context",
+    payload: { model: "relay-model" }
+  });
+  try {
+    await fs.writeFile(sessionPath, `${currentFirstLine}\n${currentTurnContext}\n`, "utf8");
+    const originalMtimeMs = (await fs.stat(sessionPath)).mtimeMs;
+    await assert.rejects(
+      () => restoreSessionChanges([{
+        path: sessionPath,
+        originalFirstLine,
+        originalSeparator: "\n",
+        originalMtimeMs,
+        modelOnlyChange: false,
+        originalTurnContextModels: [{
+          lineIndex: 1,
+          originalModel: "legacy-model",
+          originalModels: ["legacy-model"]
+        }]
+      }], {
+        async onAfterFirstLineRestore() {
+          const externalEvent = JSON.stringify({
+            type: "event_msg",
+            payload: { type: "agent_reasoning", marker: "external-change" }
+          });
+          await fs.writeFile(sessionPath, `${originalFirstLine}\n${externalEvent}\n`, "utf8");
+        }
+      }),
+      (error) => error instanceof AggregateError
+        && error.errors.some((failure) => failure.cause?.code === "ROLLOUT_CHANGED")
+    );
+    const [restoredMeta, externalLine] = (await fs.readFile(sessionPath, "utf8"))
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    assert.equal(restoredMeta.payload.model_provider, "openai");
+    assert.equal(externalLine.payload.marker, "external-change");
+  } finally {
+    await fs.rm(testRoot, { recursive: true, force: true });
   }
 });
 
@@ -3014,7 +3206,7 @@ test("status chooses legacy root sqlite database when sqlite-dir state is stale"
   assert.match(renderStatus(status), /legacy root/);
 });
 
-test("status reports pending SQLite user-event and cwd repairs", async () => {
+legacySyncRepairTest("status reports pending SQLite user-event and cwd repairs", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-repair-status.jsonl");
@@ -3044,7 +3236,7 @@ test("status reports pending SQLite user-event and cwd repairs", async () => {
   assert.match(renderStatus(status), /cwd paths needing repair: 1/);
 });
 
-test("status reports project visibility ranks and cwd exact-match diagnostics", async () => {
+legacySyncRepairTest("status reports project visibility ranks and cwd exact-match diagnostics", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "dal"');
   await writeGlobalState(codexHome, {
@@ -3085,7 +3277,8 @@ test("runSwitch rejects unknown custom providers", async () => {
   await writeConfig(codexHome);
   await assert.rejects(
     () => runSwitch({ codexHome, provider: "missing" }),
-    /Provider "missing" is not available/
+    (error) => error?.code === "INVALID_INPUT"
+      && /Provider "missing" is not available/.test(error.message)
   );
 });
 
@@ -3144,7 +3337,7 @@ test("runSync leaves rollout files and sqlite untouched when sqlite is locked", 
   try {
     lockDb.exec("BEGIN IMMEDIATE");
     await assert.rejects(
-      () => runSync({ codexHome, sqliteBusyTimeoutMs: 0 }),
+      () => runSync({ codexHome }),
       /state_5\.sqlite is currently in use/
     );
   } finally {
@@ -3167,6 +3360,33 @@ test("runSync leaves rollout files and sqlite untouched when sqlite is locked", 
     assert.equal(row.model_provider, "apigather");
   } finally {
     db.close();
+  }
+});
+
+test("assertSqliteWritable defaults to a fail-fast SQLite busy policy", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeStateDb(codexHome, [
+    { id: "thread-default-busy", model_provider: "openai", archived: false }
+  ]);
+  const lockDb = await openDatabase(stateDbPath(codexHome));
+  try {
+    lockDb.exec("BEGIN IMMEDIATE");
+    const startedAt = Date.now();
+    await assert.rejects(
+      () => assertSqliteWritable(codexHome),
+      (error) => error?.code === "SQLITE_BUSY"
+    );
+    assert.ok(
+      Date.now() - startedAt < 1500,
+      "The default SQLite busy timeout must not wait before reporting contention."
+    );
+  } finally {
+    try {
+      lockDb.exec("ROLLBACK");
+    } catch {
+      // Ignore cleanup failures in tests.
+    }
+    lockDb.close();
   }
 });
 
@@ -3195,6 +3415,8 @@ test("runSync skips locked rollout files and still updates sqlite", async () => 
   assert.equal(result.changedSessionFiles, 0);
   assert.equal(result.sqliteRowsUpdated, 1);
   assert.deepEqual(result.skippedLockedRolloutFiles, [sessionPath]);
+  assert.deepEqual(result.skippedChangedRolloutFiles, []);
+  assert.equal(result.retryRecommended, true);
 
   const rollout = await fs.readFile(sessionPath, "utf8");
   assert.match(rollout, /"model_provider":"apigather"/);
@@ -3207,6 +3429,26 @@ test("runSync skips locked rollout files and still updates sqlite", async () => 
     assert.equal(row.model_provider, "openai");
   } finally {
     db.close();
+  }
+});
+
+test("prepareSync reports a numeric locked rollout impact", async () => {
+  if (process.platform !== "win32") return;
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-plan-locked.jsonl");
+  await writeRollout(sessionPath, "thread-plan-locked", "apigather");
+  await writeStateDb(codexHome, [{ id: "thread-plan-locked", model_provider: "apigather", archived: false }]);
+
+  const lockProcess = await lockRolloutFile(sessionPath);
+  try {
+    const plan = await prepareSync({ codexHome });
+    assert.equal(plan.impact.lockedRolloutFiles, 1);
+    assert.equal(typeof plan.impact.lockedRolloutFiles, "number");
+    assert.match(plan.warnings.join("\n"), /1 rollout file\(s\) are currently locked/);
+  } finally {
+    lockProcess.kill();
+    await new Promise((resolve) => lockProcess.once("exit", resolve));
   }
 });
 
@@ -3226,6 +3468,8 @@ test("applySessionChanges skips rollout files that changed after collection", as
   const result = await applySessionChanges(changes);
   assert.equal(result.appliedChanges, 0);
   assert.deepEqual(result.skippedPaths, [sessionPath]);
+  assert.deepEqual(result.skippedLockedPaths, []);
+  assert.deepEqual(result.skippedChangedPaths, [sessionPath]);
 
   const rollout = await fs.readFile(sessionPath, "utf8");
   assert.match(rollout, /"model_provider":"openai"/);
@@ -3263,7 +3507,7 @@ test("applySessionChanges preserves large UTF-8 session metadata", async () => {
   assert.match(rollout, /"large_blob":"数据块数据块/);
 });
 
-test("applySessionChanges atomically replaces equal-length provider IDs", async () => {
+test("applySessionChanges updates equal-length provider IDs without replacing the inode", async () => {
   const { codexHome } = await makeTempCodexHome();
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-in-place.jsonl");
   await writeRollout(sessionPath, "thread-in-place", "openai");
@@ -3278,6 +3522,7 @@ test("applySessionChanges atomically replaces equal-length provider IDs", async 
   await fs.writeFile(sessionPath, original, "utf8");
   const originalTime = new Date("2026-01-02T03:04:05.000Z");
   await fs.utimes(sessionPath, originalTime, originalTime);
+  const before = await fs.stat(sessionPath);
 
   const { changes } = await collectSessionChanges(codexHome, "prov_a");
   const result = await applySessionChanges(changes);
@@ -3285,7 +3530,9 @@ test("applySessionChanges atomically replaces equal-length provider IDs", async 
   const rollout = await fs.readFile(sessionPath, "utf8");
 
   assert.equal(result.appliedChanges, 1);
-  assert.equal(result.inPlaceChanges, 0);
+  assert.equal(result.inPlaceChanges, 1);
+  assert.equal(after.ino, before.ino);
+  assert.equal(after.size, before.size);
   assert.equal(Math.round(after.mtimeMs), originalTime.getTime());
   const firstNewline = rollout.indexOf("\n");
   assert.equal(JSON.parse(rollout.slice(0, firstNewline)).payload.model_provider, "prov_a");
@@ -3522,6 +3769,91 @@ test("restoreBackup rejects escaped and non-rollout session manifest targets", a
     }),
     /outside the allowed rollout roots/
   );
+});
+
+test("restoreBackup rejects rollout targets that traverse a directory link", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const configPath = path.join(codexHome, "config.toml");
+  const sessionsRoot = path.join(codexHome, "sessions");
+  const realDirectory = path.join(sessionsRoot, "2026", "linked-target");
+  const linkedDirectory = path.join(sessionsRoot, "linked-alias");
+  const realPath = path.join(realDirectory, "rollout-linked.jsonl");
+  await fs.mkdir(realDirectory, { recursive: true });
+  await writeRollout(realPath, "thread-linked", "apigather");
+  const { changes } = await collectSessionChanges(codexHome, "openai");
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: changes,
+    configPath
+  });
+  await fs.symlink(realDirectory, linkedDirectory, process.platform === "win32" ? "junction" : "dir");
+  const manifestPath = path.join(backupDir, "session-meta-backup.json");
+  const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+  manifest.files[0].path = path.join(linkedDirectory, "rollout-linked.jsonl");
+  await fs.writeFile(manifestPath, JSON.stringify(manifest), "utf8");
+
+  await assert.rejects(
+    restoreBackup(backupDir, codexHome, {
+      restoreConfig: false,
+      restoreDatabase: false,
+      restoreSessions: true
+    }),
+    /symbolic link or reparse point/
+  );
+});
+
+test("restoreBackup revalidates a rollout target immediately before restore", async () => {
+  const { root, codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionDirectory = path.join(codexHome, "sessions", "2026", "swap-target");
+  const originalDirectory = path.join(codexHome, "sessions", "2026", "swap-original");
+  const sessionPath = path.join(sessionDirectory, "rollout-swap.jsonl");
+  await fs.mkdir(sessionDirectory, { recursive: true });
+  await writeRollout(sessionPath, "thread-swap", "apigather");
+  const { changes } = await collectSessionChanges(codexHome, "openai");
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: changes,
+    configPath: path.join(codexHome, "config.toml")
+  });
+  await writeRollout(sessionPath, "thread-swap", "openai");
+
+  const outsideDirectory = path.join(root, "outside-swap-target");
+  const outsidePath = path.join(outsideDirectory, "rollout-swap.jsonl");
+  await fs.mkdir(outsideDirectory, { recursive: true });
+  await writeRollout(outsidePath, "outside-thread", "outside-provider");
+  const outsideBefore = await fs.readFile(outsidePath, "utf8");
+  let swapped = false;
+  try {
+    await assert.rejects(
+      restoreBackup(backupDir, codexHome, {
+        restoreConfig: false,
+        restoreDatabase: false,
+        restoreSessions: true,
+        onBeforeSessionRestore: async () => {
+          if (swapped) return;
+          swapped = true;
+          await fs.rename(sessionDirectory, originalDirectory);
+          await fs.symlink(
+            outsideDirectory,
+            sessionDirectory,
+            process.platform === "win32" ? "junction" : "dir"
+          );
+        }
+      }),
+      (error) => error instanceof AggregateError
+        && error.failures.some((failure) => /symbolic link or reparse point/.test(failure.message))
+    );
+    assert.equal(await fs.readFile(outsidePath, "utf8"), outsideBefore);
+  } finally {
+    if (swapped) {
+      await fs.unlink(sessionDirectory);
+      await fs.rename(originalDirectory, sessionDirectory);
+    }
+  }
 });
 
 test("Windows restore attempts every rollout even when one target is locked", async () => {
@@ -3787,35 +4119,19 @@ test("runSync succeeds with a warning and still prunes when the inventory refres
     ]);
   }
 
+  let metadataWrites = 0;
   const result = await runSync({
     codexHome,
-    // Break the inventory refresh that runs right after the journal commit. The
-    // transaction is durable by then, so the sync must report success with a
-    // warning instead of failing and skipping the prune below.
-    async faultInjector({ point }) {
-      if (point !== "before_transaction_commit") {
-        return;
-      }
-      const dirs = await fs.readdir(backupRoot(codexHome));
-      for (const dir of dirs) {
-        const candidate = path.join(backupRoot(codexHome), dir);
-        try {
-          await fs.access(path.join(candidate, "transaction-journal.jsonl"));
-        } catch {
-          continue;
-        }
-        // Keep the namespace so the directory is still a managed backup for the
-        // prune pass, but make the version unreadable so only the inventory
-        // refresh fails.
-        const metadataPath = path.join(candidate, "metadata.json");
-        const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
-        await fs.writeFile(metadataPath, JSON.stringify({ ...metadata, version: 99 }, null, 2));
-      }
+    faultInjector({ point, filePath }) {
+      if (point !== "before_stage_write" || path.basename(filePath ?? "") !== "metadata.json") return;
+      metadataWrites += 1;
+      if (metadataWrites === 1) throw new Error("injected inventory refresh failure");
     }
   });
 
   assert.equal(result.autoPruneResult.deletedCount, 1);
-  assert.match(result.autoPruneWarning, /Backup inventory refresh failed/);
+  assert.equal(result.backupInventoryWarning, "Backup inventory refresh did not complete.");
+  assert.equal(result.autoPruneWarning, null);
   assert.match(await fs.readFile(sessionPath, "utf8"), /"model_provider":"openai"/);
   assert.equal(await readProvider(codexHome, "thread-a"), "openai");
   assert.deepEqual(await findPendingTransactions(codexHome), []);
@@ -3876,11 +4192,139 @@ test("cli sync prints stage progress and backup timing", async () => {
   assert.match(result.stdout, /\[1\/6\] Scanning rollout files\.\.\./);
   assert.match(result.stdout, /\[2\/6\] Checking locked rollout files\.\.\./);
   assert.match(result.stdout, /\[3\/6\] Creating backup\.\.\./);
-  assert.match(result.stdout, /\[4\/6\] Updating SQLite\.\.\./);
-  assert.match(result.stdout, /\[5\/6\] Rewriting rollout files\.\.\./);
+  assert.match(result.stdout, /\[4\/6\] Rewriting rollout files\.\.\./);
+  assert.match(result.stdout, /\[5\/6\] Updating SQLite\.\.\./);
   assert.match(result.stdout, /\[6\/6\] Cleaning backups\.\.\./);
   assert.match(result.stdout, /Backup created in .*: .+/);
   assert.match(result.stdout, /Backup creation time: /);
+});
+
+test("real cli sync JSON keeps the terminal envelope on stdout and progress on stderr", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-json.jsonl");
+  await writeRollout(sessionPath, "thread-json", "apigather");
+  await writeStateDb(codexHome, [
+    { id: "thread-json", model_provider: "apigather", archived: false }
+  ]);
+
+  const result = await runCli(["sync", "--json", "--codex-home", codexHome]);
+  assert.equal(result.code, 0);
+  assert.equal((result.stdout.match(/\n/g) ?? []).length, 1);
+  const envelope = JSON.parse(result.stdout);
+  assert.deepEqual(Object.keys(envelope), [
+    "schemaVersion",
+    "command",
+    "ok",
+    "outcome",
+    "result",
+    "warnings",
+    "error"
+  ]);
+  assert.equal(envelope.command, "sync");
+  assert.equal(envelope.ok, true);
+  assert.equal(envelope.outcome, "completed");
+  assert.equal(envelope.result.changedSessionFiles, 1);
+  assert.equal(envelope.result.sqliteRowsUpdated, 1);
+  assert.equal(envelope.error, null);
+  assert.doesNotMatch(result.stdout, /\[1\/6\]/);
+  assert.match(result.stderr, /\[1\/6\] Scanning rollout files/);
+  assert.match(result.stderr, /\[6\/6\] Cleaning backups/);
+});
+
+test("real CLI Sync ignores a legacy ordinary journal without creating a new backup", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  await writeStateDb(codexHome, [{ id: "thread-json-pending", model_provider: "openai" }]);
+  const configPath = path.join(codexHome, "config.toml");
+  const backupDir = await createBackup({
+    codexHome,
+    targetProvider: "openai",
+    sessionChanges: [],
+    configPath
+  });
+  await TransactionJournal.create(backupDir, {
+    codexHome,
+    targetProvider: "openai",
+    potentialTargets: [configPath]
+  });
+
+  const beforeBackups = await fs.readdir(backupRoot(codexHome));
+  const result = await runCli(["sync", "--json", "--codex-home", codexHome]);
+  assert.equal(result.code, 0);
+  assert.equal((result.stdout.match(/\n/g) ?? []).length, 1);
+  const envelope = JSON.parse(result.stdout);
+  assert.equal(envelope.ok, true);
+  assert.equal(envelope.outcome, "noop");
+  assert.equal(envelope.result.noop, true);
+  assert.equal(envelope.error, null);
+  assert.deepEqual(await fs.readdir(backupRoot(codexHome)), beforeBackups);
+});
+
+test("real cli sync JSON returns exit 5 before backup when SQLite is busy", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-json-busy.jsonl");
+  await writeRollout(sessionPath, "thread-json-busy", "apigather");
+  await writeStateDb(codexHome, [
+    { id: "thread-json-busy", model_provider: "apigather", archived: false }
+  ]);
+  const rolloutBefore = await fs.readFile(sessionPath, "utf8");
+
+  const lockDb = await openDatabase(stateDbPath(codexHome));
+  let result;
+  try {
+    lockDb.exec("BEGIN IMMEDIATE");
+    result = await runCli(["sync", "--json", "--codex-home", codexHome]);
+  } finally {
+    try {
+      lockDb.exec("ROLLBACK");
+    } catch {
+      // Ignore cleanup failures in tests.
+    }
+    lockDb.close();
+  }
+
+  assert.equal(result.code, 5);
+  assert.equal((result.stdout.match(/\n/g) ?? []).length, 1);
+  const envelope = JSON.parse(result.stdout);
+  assert.equal(envelope.ok, false);
+  assert.equal(envelope.error.code, "SQLITE_BUSY");
+  assert.equal(await fs.readFile(sessionPath, "utf8"), rolloutBefore);
+  await assert.rejects(() => fs.access(backupRoot(codexHome)));
+});
+
+test("real cli sync JSON reports a locked rollout as partial", {
+  skip: process.platform !== "win32"
+}, async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-json-locked.jsonl");
+  await writeRollout(sessionPath, "thread-json-locked", "apigather");
+  await writeStateDb(codexHome, [
+    { id: "thread-json-locked", model_provider: "apigather", archived: false }
+  ]);
+
+  const lockProcess = await lockRolloutFile(sessionPath);
+  let result;
+  try {
+    result = await runCli(["sync", "--json", "--codex-home", codexHome]);
+  } finally {
+    lockProcess.kill();
+    if (lockProcess.exitCode === null) {
+      await new Promise((resolve) => lockProcess.once("exit", resolve));
+    }
+  }
+
+  assert.equal(result.code, 3);
+  assert.equal((result.stdout.match(/\n/g) ?? []).length, 1);
+  const envelope = JSON.parse(result.stdout);
+  assert.equal(envelope.ok, true);
+  assert.equal(envelope.outcome, "partial");
+  assert.deepEqual(envelope.result.skippedLockedRolloutFiles, [path.basename(sessionPath)]);
+  assert.equal(envelope.result.sqliteRowsUpdated, 1);
+  assert.match(result.stderr, /\[1\/6\] Scanning rollout files/);
+  assert.equal(await readProvider(codexHome, "thread-json-locked"), "openai");
 });
 
 test("syncDirectory only downgrades known unsupported flush errors on Windows", async () => {
@@ -3937,6 +4381,7 @@ test("runRestore rejects all-disabled recovery when the first journal record is 
     }),
     (error) => {
       assert.equal(error.code, "RECOVERY_REQUIRED");
+      assert.equal(typeof error.toDto, "function");
       assert.deepEqual(
         new Set(error.missingRestoreKinds),
         new Set(["rollout sessions", "SQLite database", "config.toml", "global state"])
@@ -4086,7 +4531,7 @@ test("missing or empty journal restores the full immutable session manifest", as
   }
 });
 
-test("automatic rollback does not report success unless the rolledBack terminal re-reads valid", async () => {
+legacyOrdinaryJournalTest("automatic rollback does not report success unless the rolledBack terminal re-reads valid", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-terminal-verify.jsonl");
@@ -4130,7 +4575,7 @@ test("automatic rollback does not report success unless the rolledBack terminal 
   assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
-test("a lost rolledBack acknowledgement never appends recoveryRequired", async () => {
+legacyOrdinaryJournalTest("a lost rolledBack acknowledgement never appends recoveryRequired", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-rollback-ack.jsonl");
@@ -4167,7 +4612,7 @@ test("a lost rolledBack acknowledgement never appends recoveryRequired", async (
   assert.deepEqual(await findPendingTransactions(codexHome), []);
 });
 
-test("a turn_context appended after first-line mutation remains byte-original on rollback", async () => {
+legacyOrdinaryJournalTest("a turn_context appended after first-line mutation remains byte-original on rollback", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"\nmodel = "target-model"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-concurrent-model.jsonl");

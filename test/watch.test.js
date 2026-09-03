@@ -4,7 +4,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { runWatch } from "../src/watch.js";
+import { getWatchStatus, runWatch, startWatch, stopWatch } from "../src/watch.js";
+import { OperationCoordinator } from "../src/operation-coordinator.js";
 
 delete process.env.CODEX_SQLITE_HOME;
 
@@ -49,7 +50,8 @@ test("runWatch rejects invalid debounce-ms values", async () => {
   const { codexHome } = await makeTempCodexHome();
   await assert.rejects(
     () => runWatch({ codexHome, debounceMs: -1 }),
-    /Invalid --debounce-ms value/
+    (error) => error?.code === "INVALID_INPUT"
+      && /Invalid --debounce-ms value/.test(error.message)
   );
   await fs.rm(codexHome, { recursive: true, force: true });
 });
@@ -58,15 +60,30 @@ test("runWatch rejects when codex home or config.toml is missing", async () => {
   const root = await fs.mkdtemp(path.join(testTempDir, "codex-provider-sync-watch-"));
   await assert.rejects(
     () => runWatch({ codexHome: path.join(root, "does-not-exist") }),
-    /Codex home not found/
+    (error) => error?.code === "CODEX_HOME_NOT_FOUND"
+      && /Codex home not found/.test(error.message)
   );
   const codexHome = path.join(root, ".codex");
   await fs.mkdir(codexHome, { recursive: true });
   await assert.rejects(
     () => runWatch({ codexHome }),
-    /config\.toml not found/
+    (error) => error?.code === "CODEX_HOME_NOT_FOUND"
+      && /config\.toml not found/.test(error.message)
   );
   await fs.rm(root, { recursive: true, force: true });
+});
+
+test("runWatch distinguishes access denial from a missing Codex home", async () => {
+  const denied = new Error("permission denied fixture");
+  denied.code = "EACCES";
+  await assert.rejects(
+    () => runWatch({
+      codexHome: path.join(testTempDir, "permission-denied-codex-home"),
+      accessImpl: async () => { throw denied; }
+    }),
+    (error) => error?.code === "PERMISSION_DENIED"
+      && error.details?.causeCode === "EACCES"
+  );
 });
 
 test("runWatch blocks Windows WSL UNC SQLite homes before creating watchers", async () => {
@@ -133,7 +150,7 @@ test("runWatch invokes the injected sync handler when config.toml changes and st
   await fs.rm(codexHome, { recursive: true, force: true });
 });
 
-test("runWatch swallows 'sqlite in use' errors and keeps watching", async () => {
+test("runWatch uses the typed SQLITE_BUSY code and keeps watching", async () => {
   const { codexHome } = await makeTempCodexHome();
   const configPath = path.join(codexHome, "config.toml");
 
@@ -145,7 +162,9 @@ test("runWatch swallows 'sqlite in use' errors and keeps watching", async () => 
     includeStateDb: false,
     onSync: async () => {
       firstSyncCalls += 1;
-      throw new Error("state_5.sqlite is currently in use by another process");
+      const error = new Error("localized busy diagnostic");
+      error.code = "SQLITE_BUSY";
+      throw error;
     },
     onLog: (line) => logs.push(line)
   });
@@ -155,7 +174,7 @@ test("runWatch swallows 'sqlite in use' errors and keeps watching", async () => 
 
   assert.ok(firstSyncCalls >= 1, "first sync should have been attempted");
   assert.ok(
-    logs.some((line) => /state_5\.sqlite is currently in use/.test(line)),
+    logs.some((line) => /Sync skipped: localized busy diagnostic/.test(line)),
     "the locked-sqlite error should have been logged as a soft skip"
   );
 
@@ -168,6 +187,326 @@ test("runWatch swallows 'sqlite in use' errors and keeps watching", async () => 
   );
   await handle.stop();
   await fs.rm(codexHome, { recursive: true, force: true });
+});
+
+test("runWatch coalesces in-flight events and never overlaps applies", async () => {
+  const { root, codexHome } = await makeTempCodexHome();
+  const configPath = path.join(codexHome, "config.toml");
+  const firstStarted = deferred();
+  const releaseFirst = deferred();
+  let calls = 0;
+  let concurrent = 0;
+  let maxConcurrent = 0;
+  const observedReasons = [];
+  const handle = await runWatch({
+    codexHome,
+    debounceMs: 20,
+    includeStateDb: false,
+    onLog: () => {},
+    onSync: async ({ reasons }) => {
+      calls += 1;
+      concurrent += 1;
+      maxConcurrent = Math.max(maxConcurrent, concurrent);
+      observedReasons.push(reasons);
+      if (calls === 1) {
+        firstStarted.resolve();
+        await releaseFirst.promise;
+      }
+      concurrent -= 1;
+      return { targetProvider: "openai", changedSessionFiles: 0, sqliteRowsUpdated: 0 };
+    }
+  });
+
+  try {
+    await fs.writeFile(configPath, 'model_provider = "first"\n', "utf8");
+    await firstStarted.promise;
+    await fs.writeFile(configPath, 'model_provider = "second"\n', "utf8");
+    await fs.writeFile(configPath, 'model_provider = "third"\n', "utf8");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(calls, 1, "an in-flight Apply must not be overlapped");
+    releaseFirst.resolve();
+    await waitUntil(() => calls === 2, "coalesced follow-up Apply did not run");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(calls, 2, "all in-flight events must merge into exactly one follow-up Apply");
+    assert.equal(maxConcurrent, 1);
+    assert.ok(observedReasons.every((reasons) => Array.isArray(reasons) && reasons.includes("config.toml")));
+  } finally {
+    releaseFirst.resolve();
+    await handle.stop();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("runWatch yields on OPERATION_BUSY without counting consecutive failures", async () => {
+  const { root, codexHome } = await makeTempCodexHome();
+  const configPath = path.join(codexHome, "config.toml");
+  const logs = [];
+  let attempts = 0;
+  let shutdownReason = null;
+  const handle = await runWatch({
+    codexHome,
+    debounceMs: 10,
+    includeStateDb: false,
+    onLog: (line) => logs.push(line),
+    onShutdown: (reason) => { shutdownReason = reason; },
+    onSync: async () => {
+      attempts += 1;
+      const error = new Error("manual operation owns the lock");
+      error.code = "OPERATION_BUSY";
+      error.details = { busyScope: "codex-home" };
+      throw error;
+    }
+  });
+
+  try {
+    for (let index = 0; index < 6; index += 1) {
+      await fs.writeFile(configPath, `model_provider = "busy-${index}"\n`, "utf8");
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    }
+    assert.ok(attempts >= 5, `expected repeated event-driven attempts, got ${attempts}`);
+    assert.equal(shutdownReason, null);
+    assert.ok(logs.some((line) => /yielded to an active manual operation/.test(line)));
+    assert.ok(!logs.some((line) => /giving up after/.test(line)));
+  } finally {
+    await handle.stop();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("runWatch retains a busy batch and applies it exactly once after a local manual operation ends", async () => {
+  const { root, codexHome } = await makeTempCodexHome();
+  const configPath = path.join(codexHome, "config.toml");
+  const manualCompleted = deferred();
+  let attempts = 0;
+  let cancelled = 0;
+  const handle = await runWatch({
+    codexHome,
+    debounceMs: 15,
+    includeStateDb: false,
+    onLog: () => {},
+    manualOperationWaiter: () => ({
+      promise: manualCompleted.promise,
+      cancel: () => { cancelled += 1; }
+    }),
+    onSync: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        const error = new Error("manual operation owns the lock");
+        error.code = "OPERATION_BUSY";
+        error.details = { busyScope: "codex-home" };
+        throw error;
+      }
+      return { targetProvider: "openai", changedSessionFiles: 0, sqliteRowsUpdated: 0 };
+    }
+  });
+
+  try {
+    await fs.writeFile(configPath, 'model_provider = "manual-busy"\n', "utf8");
+    await waitUntil(() => attempts === 1, "Watch did not yield to the manual operation");
+    await fs.writeFile(configPath, 'model_provider = "coalesced-a"\n', "utf8");
+    await fs.writeFile(configPath, 'model_provider = "coalesced-b"\n', "utf8");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(attempts, 1, "events must remain queued while the manual operation is active");
+
+    manualCompleted.resolve();
+    await waitUntil(() => attempts === 2, "Watch did not retry after manual completion");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(attempts, 2, "the retained busy batch must merge into one follow-up Apply");
+    assert.equal(cancelled, 0);
+  } finally {
+    manualCompleted.resolve();
+    await handle.stop();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("runWatch cancels its manual-completion subscription when stopped", async () => {
+  const { root, codexHome } = await makeTempCodexHome();
+  const configPath = path.join(codexHome, "config.toml");
+  const manualCompleted = deferred();
+  let attempts = 0;
+  let cancelled = 0;
+  const handle = await runWatch({
+    codexHome,
+    debounceMs: 10,
+    includeStateDb: false,
+    onLog: () => {},
+    manualOperationWaiter: () => ({
+      promise: manualCompleted.promise,
+      cancel: () => { cancelled += 1; }
+    }),
+    onSync: async () => {
+      attempts += 1;
+      const error = new Error("manual operation owns the lock");
+      error.code = "OPERATION_BUSY";
+      error.details = { busyScope: "codex-home" };
+      throw error;
+    }
+  });
+
+  await fs.writeFile(configPath, 'model_provider = "manual-stop"\n', "utf8");
+  await waitUntil(() => attempts === 1, "Watch did not enter the busy wait");
+  await handle.stop();
+  assert.equal(cancelled, 1);
+  manualCompleted.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(attempts, 1, "a stopped watcher must not apply after completion notification");
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test("runWatch retries one retained batch when a prepared manual intent expires", async () => {
+  const { root, codexHome } = await makeTempCodexHome();
+  const configPath = path.join(codexHome, "config.toml");
+  let operationSequence = 0;
+  const coordinator = new OperationCoordinator({
+    randomOperationId: () => `watch-${++operationSequence}`
+  });
+  coordinator.registerManualIntent(codexHome, "abandoned-plan", Date.now() + 80);
+  let attempts = 0;
+  const handle = await runWatch({
+    codexHome,
+    debounceMs: 10,
+    includeStateDb: false,
+    onLog: () => {},
+    manualOperationWaiter: () => coordinator.waitForManualOperation(codexHome),
+    onSync: async () => {
+      attempts += 1;
+      const active = coordinator.begin(codexHome, "sync", { actor: "watch" });
+      coordinator.end(codexHome, active.operationId);
+      return { targetProvider: "openai", changedSessionFiles: 0, sqliteRowsUpdated: 0 };
+    }
+  });
+
+  try {
+    await fs.writeFile(configPath, 'model_provider = "manual-intent"\n', "utf8");
+    await waitUntil(() => attempts === 1, "Watch did not observe the prepared manual intent");
+    await waitUntil(() => attempts === 2, "Watch did not resume after manual intent expiry");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(attempts, 2, "the retained batch must be applied exactly once after expiry");
+  } finally {
+    await handle.stop();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("runWatch stops immediately when explicit recovery is required", async () => {
+  for (const code of ["RECOVERY_REQUIRED", "PENDING_TRANSACTION"]) {
+    const { root, codexHome } = await makeTempCodexHome();
+    const configPath = path.join(codexHome, "config.toml");
+    let attempts = 0;
+    const handle = await runWatch({
+      codexHome,
+      debounceMs: 10,
+      includeStateDb: false,
+      onLog: () => {},
+      onSync: async () => {
+        attempts += 1;
+        const error = new Error("fixture recovery blocker");
+        error.code = code;
+        throw error;
+      }
+    });
+    try {
+      await fs.writeFile(configPath, `model_provider = "${code}"\n`, "utf8");
+      assert.equal(await handle.done, "recovery-required", code);
+      assert.equal(attempts, 1, code);
+      await fs.writeFile(configPath, 'model_provider = "after-stop"\n', "utf8");
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      assert.equal(attempts, 1, `${code} must stop all later Watch applies`);
+    } finally {
+      await handle.stop();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("startWatch exposes registry status and stopWatch is idempotent", async () => {
+  const { root, codexHome } = await makeTempCodexHome();
+  try {
+    const started = await startWatch({
+      codexHome,
+      includeStateDb: false,
+      onLog: () => {},
+      onSync: async () => ({ targetProvider: "openai", changedSessionFiles: 0, sqliteRowsUpdated: 0 })
+    });
+    assert.equal(started.schemaVersion, 1);
+    assert.equal(started.status, "running");
+    assert.equal(getWatchStatus({ watchId: started.watchId }).status, "running");
+    const stopped = await stopWatch({ watchId: started.watchId });
+    assert.equal(stopped.status, "stopped");
+    assert.equal((await stopWatch({ watchId: started.watchId })).status, "stopped");
+    assert.ok(getWatchStatus().watches.some((watch) => watch.watchId === started.watchId));
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("startWatch deduplicates one physical Codex Home and releases the scope after stop", async () => {
+  const { root, codexHome } = await makeTempCodexHome();
+  const aliasHome = path.join(root, "codex-home-alias");
+  try {
+    await fs.symlink(codexHome, aliasHome, process.platform === "win32" ? "junction" : "dir");
+    const options = {
+      codexHome,
+      includeStateDb: false,
+      onLog: () => {},
+      onSync: async () => ({ targetProvider: "openai", changedSessionFiles: 0, sqliteRowsUpdated: 0 })
+    };
+    const left = await startWatch(options);
+    const right = await startWatch({
+      ...options,
+      codexHome: aliasHome,
+      includeStateDb: true,
+      once: true
+    });
+    assert.equal(left.watchId, right.watchId);
+    assert.equal(right.includeStateDb, false);
+    assert.equal(right.once, false);
+    assert.equal(getWatchStatus().watches.filter((watch) => watch.status !== "stopped"
+      && watch.watchId === left.watchId).length, 1);
+
+    await stopWatch({ watchId: left.watchId });
+    const [restarted, concurrent] = await Promise.all([
+      startWatch(options),
+      startWatch({ ...options, codexHome: aliasHome })
+    ]);
+    assert.equal(restarted.watchId, concurrent.watchId);
+    assert.notEqual(restarted.watchId, left.watchId);
+    assert.equal(getWatchStatus({ watchId: left.watchId }).status, "stopped");
+    assert.equal((await stopWatch({ watchId: left.watchId })).status, "stopped");
+    await stopWatch({ watchId: restarted.watchId });
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("stopped Watch remains immediately idempotent when active watches exceed retained history", async () => {
+  const fixtures = [];
+  const started = [];
+  try {
+    for (let index = 0; index < 65; index += 1) {
+      const fixture = await makeTempCodexHome();
+      fixtures.push(fixture);
+      started.push(await startWatch({
+        codexHome: fixture.codexHome,
+        includeStateDb: false,
+        onLog: () => {},
+        onSync: async () => ({
+          targetProvider: "openai",
+          changedSessionFiles: 0,
+          sqliteRowsUpdated: 0
+        })
+      }));
+    }
+
+    const first = started[0];
+    assert.equal((await stopWatch({ watchId: first.watchId })).status, "stopped");
+    assert.equal((await stopWatch({ watchId: first.watchId })).status, "stopped");
+    assert.equal(getWatchStatus({ watchId: first.watchId }).status, "stopped");
+  } finally {
+    await Promise.allSettled(started.map(({ watchId }) => stopWatch({ watchId })));
+    await Promise.all(fixtures.map(({ root }) => fs.rm(root, { recursive: true, force: true })));
+  }
 });
 
 test("runWatch stops itself after consecutive non-busy sync failures and resolves done", async () => {
@@ -406,13 +745,7 @@ test("runWatch attaches when the SQLite WAL sidecar is created later", async () 
   await fs.rm(codexHome, { recursive: true, force: true });
 });
 
-test("runWatch uses the top-level model field, ignoring provider sections", async () => {
-  // Regression guard for owner review: the watcher must read the
-  // root-level `model = "..."` line for the per-turn model sync
-  // and must not pick up a `model = "..."` value that lives
-  // inside a `[model_providers.*]` section — otherwise the
-  // provider-section model would be propagated to every
-  // rollout's turn_context.model.
+test("runWatch invokes ProviderSync without a historical model override", async () => {
   const root = await fs.mkdtemp(path.join(testTempDir, "codex-provider-sync-watch-"));
   const codexHome = path.join(root, ".codex");
   await fs.mkdir(path.join(codexHome, "sqlite"), { recursive: true });
@@ -431,13 +764,13 @@ test("runWatch uses the top-level model field, ignoring provider sections", asyn
   );
   await fs.writeFile(path.join(codexHome, "sqlite", "state_5.sqlite"), "", "utf8");
 
-  let observedModel = null;
+  let observedInput = null;
   const handle = await runWatch({
     codexHome,
     debounceMs: 30,
     includeStateDb: false,
-    onSync: async ({ model }) => {
-      observedModel = model;
+    onSync: async (input) => {
+      observedInput = input;
       return { targetProvider: "foo", changedSessionFiles: 0, sqliteRowsUpdated: 0 };
     }
   });
@@ -456,15 +789,11 @@ test("runWatch uses the top-level model field, ignoring provider sections", asyn
     "utf8"
   );
 
-  // Wait for the debounce + sync.
-  for (let i = 0; i < 50 && observedModel === null; i += 1) {
+  for (let i = 0; i < 50 && observedInput === null; i += 1) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  assert.equal(
-    observedModel,
-    "gpt-5.1",
-    "watcher must read the root-level model; provider-section model must be ignored"
-  );
+  assert.ok(observedInput);
+  assert.equal(Object.hasOwn(observedInput, "model"), false);
 
   await handle.stop();
   await fs.rm(codexHome, { recursive: true, force: true });

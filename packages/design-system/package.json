@@ -1,0 +1,20 @@
+{
+  "name": "@codex-provider-sync/design-system",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./tokens.css": "./src/tokens.css"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "node --test checks/surface.contract.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

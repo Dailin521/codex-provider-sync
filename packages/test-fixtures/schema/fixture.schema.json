@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://codex-provider-sync.local/contracts/fixture.schema.json",
+  "title": "Codex Provider Sync behavior fixture",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "description",
+    "containsRealUserData",
+    "inputs",
+    "expected"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,79}$" },
+    "description": { "type": "string", "minLength": 1 },
+    "containsRealUserData": { "const": false },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["codexHome"],
+      "properties": {
+        "codexHome": { "type": "string", "minLength": 1 },
+        "sqliteHome": { "type": "string", "minLength": 1 }
+      }
+    },
+    "expected": { "type": "object" }
+  }
+}

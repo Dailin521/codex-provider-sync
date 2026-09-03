@@ -32,16 +32,18 @@
 
 ## 快速开始
 
-> CLI/Web 与 Windows GUI 独立发布，版本号可能不同。
+> CLI/Web 与当前 Windows GUI 独立发布，版本号可能不同。
+>
+> **V1 候选定位：**本 PR 按 C10 将 Electron 标记为新版主桌面端候选，将保留的 .NET Windows/macOS 实现标记为交接后的 Legacy fallback。**公开发行状态另计：**当前 Releases 仍只提供 Windows .NET GUI；Electron 尚未合入 `main`、未发布、未签名，也不是当前可下载或自动更新的产品。候选角色不表示 Electron 已经公开替代 .NET。
 
 | 场景 | 推荐入口 |
 | --- | --- |
-| Windows 桌面 | [下载 Windows GUI](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [使用说明](#windows-gui) |
+| Windows 桌面 | [下载当前公开 Windows GUI（.NET）](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [`V1` Electron 主桌面端候选说明（尚无公开下载）](docs/README_DESKTOP_ZH.md) |
 | macOS 桌面 | [本地 Web UI（需 CLI）](#本地-web-ui)；[原生 GUI 构建说明](docs/README_MAC_GUI_ZH.md) |
 | 需要浏览器界面或跨平台使用 | [本地 Web UI（需 CLI）](#本地-web-ui) |
 | 脚本、CI 或 WSL | [CLI](#cli) |
 
-### Windows GUI
+### 当前公开 Windows GUI（.NET；V1 候选中的 Legacy fallback）
 
 从 [Releases](https://github.com/Dailin521/codex-provider-sync/releases/latest) 下载 `CodexProviderSync.exe`：
 
@@ -52,6 +54,8 @@
 程序未做代码签名，Windows 可能显示安全警告。请只从本项目 Releases 下载。
 
 [Windows GUI 完整说明](docs/README_GUI_ZH.md)
+
+新版 Electron 主桌面端候选的能力、安全边界和内部验收方式见 [Electron 主桌面端候选说明](docs/README_DESKTOP_ZH.md)。候选角色不等于公开发行；该说明不提供下载，也不构成发布授权。
 
 ### 本地 Web UI
 
@@ -74,13 +78,13 @@ codex-provider web --port 8792     # 指定端口
 codex-provider web --reset-access  # 重新配对浏览器
 ```
 
-Web UI 默认只监听 `127.0.0.1`，并自动打开浏览器完成配对。存储路径由页面顶部的存储配置（Profile）管理，写操作需要确认。
+Web UI 默认只监听 `127.0.0.1`，并自动打开浏览器完成配对。共享 React 界面通过版本化 `HttpCoreClient` 调用本地 Web Host；存储路径由服务端 Profile 管理，Sync、Switch 与 Restore 均先显示计划再确认。
 
 #### 切换 Provider 后同步历史
 
 1. 使用 CCSwitch 等常用工具切换 Provider。
-2. 在 Web UI 点击“读取状态”（可跳过）。
-3. 保持“仅同步元数据”，选择目标 Provider（供应商），确认执行同步。
+2. 在“概览”检查当前 Provider 与两侧分布。
+3. 进入“同步”，生成计划并确认执行。
 4. 显示“Provider 元数据已对齐”即完成。
 
 > **注意：** 元数据同步只能恢复历史可见性。跨供应商继续旧会话时，目标后端可能无法解密会话中的 `encrypted_content` 推理内容，导致继续对话或压缩（compact）失败。
@@ -102,10 +106,28 @@ codex-provider sync
 | `codex-provider status` | 检查 Provider、rollout 和 SQLite 状态 |
 | `codex-provider sync` | 同步到当前 Provider |
 | `codex-provider switch <provider-id>` | 切换 Provider 后同步 |
+| `codex-provider diagnostics` | 手动执行一次完整只读诊断 |
+| `codex-provider repair <targets>` | 显式修复模型、cwd、user-event 或 workspace roots |
 | `codex-provider restore <backup-dir>` | 恢复备份 |
 | `codex-provider watch` | 监听配置和 SQLite 变化 |
 
 `switch` 默认会在目标 Provider section 定义了 `model` 时同步根级 `model`。使用 `--keep-root-model` 保留当前值，或使用 `--model <name>` 显式指定。
+
+有限命令可使用 `--json` 供自动化读取。stdout 只输出一个 schema v1 终态对象，进度和运行时诊断进入 stderr；JSON Mode 使用 `0/1/2/3/4/5/130` 细分退出码，Human Mode 继续保持既有 `0/1` 行为。例如：
+
+```bash
+codex-provider status --json
+codex-provider sync --json
+codex-provider switch openai --json
+codex-provider diagnostics --json
+codex-provider repair models,cwd --json
+```
+
+`watch` 和 `web` 是长运行命令，当前不支持单文档 JSON Mode；传入 `--json` 会在启动 watcher/server 前返回结构化输入错误。完整合同见 [CLI 命令兼容合同](docs/architecture/contracts/CLI_CONTRACT_ZH.md)。
+
+`sync` 始终以 `config.toml` 当前根级 `model_provider` 为目标，并且只读取 rollout 首行。Provider 等长时原地替换字节；长度不同时流式生成临时文件并原子替换，聊天正文逐字节保持不变。模型、cwd、user-event、workspace roots 和加密内容不会被 Sync 修改。
+
+完整扫描只在用户主动执行 `diagnostics` 时发生，而且全程只读。需要修改非 Provider 元数据时，使用 `repair` 显式选择 `models`、`cwd`、`userEvent`、`workspaceRoots`；选择 `workspaceRoots` 会自动包含 `cwd`。Web 与新版 Electron 桌面端提供相同的 Diagnostics/Repair 能力。详见 [ADR-0016](docs/adr/0016-node-core-responsibility-boundaries-and-lightweight-writes.md)。
 
 SQLite Home 解析顺序：`--sqlite-home` → `config.toml` 根级 `sqlite_home` → `CODEX_SQLITE_HOME` → `<Codex Home>/sqlite`。只有默认布局会回退到 `<Codex Home>/state_5.sqlite`。
 
@@ -113,15 +135,21 @@ SQLite Home 解析顺序：`--sqlite-home` → `config.toml` 根级 `sqlite_home
 
 ```mermaid
 flowchart LR
-    Browser["Browser Web UI"] --> WebServer["Local Node Web Server<br/>127.0.0.1"]
-    WebServer --> NodeService["Node Service"]
-    CLI["Node CLI"] --> NodeService
+    Browser["Browser React UI"] --> HttpClient["HttpCoreClient"]
+    HttpClient --> WebServer["Local Web Host<br/>127.0.0.1 + pairing"]
+    WebServer --> NodeCore["Node Core public facade"]
+    CLI["Node CLI"] --> NodeCore
 
-    WindowsGUI["Windows GUI"] --> Application[".NET Application"]
+    ElectronRenderer["Electron Renderer<br/>V1 primary desktop candidate"] --> DesktopClient["DesktopCoreClient"]
+    DesktopClient --> ElectronHost["Preload / Main<br/>narrow IPC"]
+    ElectronHost --> Utility["Utility Process"]
+    Utility --> NodeCore
+
+    WindowsGUI[".NET GUI<br/>published now; V1 Legacy fallback target"] --> Application[".NET Application"]
     Application --> DotNetCore[".NET Core"]
     MacGUI["macOS GUI"] --> DotNetCore
 
-    NodeService --> Storage["Codex Storage"]
+    NodeCore --> Storage["Codex Storage"]
     DotNetCore --> Storage
 
     Storage --> Config["config.toml"]
@@ -130,9 +158,12 @@ flowchart LR
     Storage --> Backups["managed backups"]
 ```
 
-- Web UI 和 CLI 使用同一套 Node 服务逻辑。
+- Web UI 的业务请求经 `HttpCoreClient → /api/core → Node Core public facade`；CLI 直接调用同一公开 Core 边界，不解析彼此的人类输出。
+- `V1` 新版 Electron 主桌面端候选经 `DesktopCoreClient → 窄 Preload/Main IPC → Utility Process → Node Core`，Renderer 不接触 Node、任意路径或通用 IPC。
 - Windows GUI 通过 Application 层调用 .NET Core；macOS GUI 当前直接调用 .NET Core。
 - Node 服务和 .NET Core 处理相同的配置、rollout、SQLite 和备份安全边界。
+
+`V1` 候选按 C10 携带“Electron 新版主桌面端 / .NET Legacy fallback”的交接目标；.NET 仍可构建、测试并至少保留两个维护周期。当前公开 Releases 仍是 .NET，Electron 尚未合入、发布或签名。不得把候选中的角色标识表述成已经发生的公开入口切换；后续发布门槛见 [vNext 分阶段迁移执行索引](docs/migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md)。
 
 ## 安全边界
 
@@ -149,6 +180,7 @@ flowchart LR
 - [vNext 分阶段迁移执行索引](docs/migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md)
 - [AI / Agent 操作指南](AGENTS.md)
 - [Windows GUI](docs/README_GUI_ZH.md)
+- [V1 Electron 主桌面端候选说明](docs/README_DESKTOP_ZH.md)
 - [Web UI](docs/README_WEB_UI_ZH.md)
 - [English](docs/README_EN.md) · [日本語](docs/README_JA.md) · [한국어](docs/README_KO.md)
 - [macOS GUI：中文](docs/README_MAC_GUI_ZH.md) · [English](docs/README_MAC_GUI_EN.md)

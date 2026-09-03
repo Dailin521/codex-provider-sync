@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <Compile Remove="CrashHost\**\*.cs" />
+    <Compile Remove="FixtureHost\**\*.cs" />
   </ItemGroup>
 
   <ItemGroup>

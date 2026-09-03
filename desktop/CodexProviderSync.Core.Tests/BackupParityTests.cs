@@ -38,6 +38,7 @@ public sealed class BackupParityTests
         Assert.False(metadataRoot.GetProperty("globalStateBackupFilePresent").GetBoolean());
         Assert.True(metadataRoot.GetProperty("sizeBytes").GetInt64() > 0);
         Assert.True(metadataRoot.GetProperty("fileCount").GetInt32() > 0);
+        Assert.False(metadataRoot.TryGetProperty("undoTargets", out _));
         Assert.Equal(
             Directory.EnumerateFiles(backupDir, "*", SearchOption.AllDirectories)
                 .Sum(static path => new FileInfo(path).Length),
@@ -205,6 +206,215 @@ public sealed class BackupParityTests
     }
 
     [Fact]
+    public async Task RestoreBackup_NodeReducedUndoTargets_RestoresOnlyCapturedRollout()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"apigather\"");
+        string rolloutPath = fixture.RolloutPath("sessions", "rollout-node-reduced.jsonl");
+        await fixture.WriteRolloutAsync(rolloutPath, "thread-node-reduced", "apigather");
+        string originalFirstLine = (await File.ReadAllLinesAsync(rolloutPath))[0];
+        string backupDir = fixture.BackupPath("20260708T091011457Z");
+        Directory.CreateDirectory(backupDir);
+        await File.WriteAllTextAsync(
+            Path.Combine(backupDir, "metadata.json"),
+            JsonSerializer.Serialize(new
+            {
+                version = 2,
+                @namespace = AppConstants.BackupNamespace,
+                codexHome = fixture.CodexHome,
+                targetProvider = "openai",
+                createdAt = "2026-07-08T09:10:11.457Z",
+                dbFiles = Array.Empty<string>(),
+                sqliteDbFiles = Array.Empty<string>(),
+                changedSessionFiles = 1,
+                undoTargets = new
+                {
+                    config = new { captured = false },
+                    globalState = new { captured = false },
+                    sqlite = new { captured = false },
+                    rollout = new { captured = true, entryCount = 1 }
+                }
+            }));
+        await File.WriteAllTextAsync(
+            Path.Combine(backupDir, "session-meta-backup.json"),
+            JsonSerializer.Serialize(new
+            {
+                version = 2,
+                @namespace = AppConstants.BackupNamespace,
+                codexHome = fixture.CodexHome,
+                targetProvider = "openai",
+                createdAt = "2026-07-08T09:10:11.457Z",
+                files = new[]
+                {
+                    new
+                    {
+                        path = rolloutPath,
+                        originalFirstLine,
+                        originalSeparator = "\n",
+                        modelOnlyChange = false,
+                        originalTurnContextModels = Array.Empty<object>()
+                    }
+                }
+            }));
+
+        await fixture.WriteConfigAsync("model_provider = \"manual\"");
+        await fixture.WriteGlobalStateAsync(new { source = "current" });
+        await fixture.WriteRolloutAsync(rolloutPath, "thread-node-reduced", "openai");
+
+        BackupService backups = new(new SessionRolloutService(), new SqliteStateService());
+        await backups.RefreshMetadataInventoryAsync(backupDir);
+        await backups.RestoreBackupAsync(backupDir, fixture.CodexHome, new RestoreBackupOptions());
+
+        Assert.Equal(originalFirstLine, (await File.ReadAllLinesAsync(rolloutPath))[0]);
+        Assert.Contains("manual", await File.ReadAllTextAsync(Path.Combine(fixture.CodexHome, "config.toml")));
+        Assert.Contains("current", await File.ReadAllTextAsync(
+            Path.Combine(fixture.CodexHome, AppConstants.GlobalStateFileBasename)));
+    }
+
+    [Fact]
+    public async Task CheckedRestore_NodeReducedUndoTargets_UsesOnlyCapturedRolloutTargets()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"apigather\"");
+        string rolloutPath = fixture.RolloutPath("sessions", "rollout-node-reduced-checked.jsonl");
+        await fixture.WriteRolloutAsync(rolloutPath, "thread-node-reduced-checked", "apigather");
+        await fixture.WriteStateDbAsync([("thread-node-reduced-checked", "apigather", false)]);
+        string originalFirstLine = (await File.ReadAllLinesAsync(rolloutPath))[0];
+        string backupDir = await WriteNodeReducedRolloutBackupAsync(
+            fixture,
+            "20260708T091011458Z",
+            rolloutPath,
+            originalFirstLine);
+
+        await fixture.WriteConfigAsync("model_provider = \"manual\"");
+        await fixture.WriteGlobalStateAsync(new { source = "current" });
+        await fixture.WriteRolloutAsync(rolloutPath, "thread-node-reduced-checked", "openai");
+        byte[] databaseBefore = await File.ReadAllBytesAsync(fixture.StateDbPath());
+
+        CodexSyncService service = new();
+        RestoreBackupOptions options = new();
+        CoreWritePlanSnapshot plan = await service.CreateRestorePlanSnapshotAsync(
+            fixture.CodexHome,
+            backupDir,
+            options);
+        Assert.DoesNotContain(plan.Targets, target =>
+            string.Equals(target.Path, Path.Combine(fixture.CodexHome, "config.toml"), StringComparison.Ordinal)
+            && target.Action == "restore");
+        Assert.DoesNotContain(plan.Targets, target =>
+            string.Equals(target.Path, fixture.StateDbPath(), StringComparison.OrdinalIgnoreCase));
+
+        await service.RunRestoreCheckedAsync(plan, fixture.CodexHome, backupDir, options);
+
+        Assert.Equal(originalFirstLine, (await File.ReadAllLinesAsync(rolloutPath))[0]);
+        Assert.Contains("manual", await File.ReadAllTextAsync(Path.Combine(fixture.CodexHome, "config.toml")));
+        Assert.Contains("current", await File.ReadAllTextAsync(
+            Path.Combine(fixture.CodexHome, AppConstants.GlobalStateFileBasename)));
+        Assert.Equal(databaseBefore, await File.ReadAllBytesAsync(fixture.StateDbPath()));
+    }
+
+    [Fact]
+    public async Task NodeReducedUndoBackup_CannotResolveLegacyJournalTargetItDidNotCapture()
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        await fixture.WriteConfigAsync("model_provider = \"apigather\"");
+        string rolloutPath = fixture.RolloutPath("sessions", "rollout-node-reduced-pending.jsonl");
+        await fixture.WriteRolloutAsync(rolloutPath, "thread-node-reduced-pending", "apigather");
+        await fixture.WriteStateDbAsync([("thread-node-reduced-pending", "apigather", false)]);
+        string backupDir = await WriteNodeReducedRolloutBackupAsync(
+            fixture,
+            "20260708T091011459Z",
+            rolloutPath,
+            (await File.ReadAllLinesAsync(rolloutPath))[0]);
+        await using FileTransactionJournal journal = await FileTransactionJournal.CreateAsync(
+            backupDir,
+            fixture.CodexHome,
+            "openai",
+            [fixture.StateDbPath()]);
+        await journal.ApplyingAsync("sqlite", fixture.StateDbPath());
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new CodexSyncService().RunRestoreAsync(
+                fixture.CodexHome,
+                backupDir,
+                new RestoreBackupOptions()));
+
+        Assert.Contains("SQLite", error.Message, StringComparison.Ordinal);
+        Assert.Single(await FileTransactionJournal.FindPendingAsync(fixture.CodexHome));
+    }
+
+    [Theory]
+    [InlineData("config")]
+    [InlineData("globalState")]
+    [InlineData("sqlite")]
+    [InlineData("rollout")]
+    public async Task NodeReducedUndoBackup_MissingTargetDeclarationFailsClosed(string missingTarget)
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        string backupDir = fixture.BackupPath("20260708T091011460Z");
+        Directory.CreateDirectory(backupDir);
+        Dictionary<string, object> undoTargets = new()
+        {
+            ["config"] = new { captured = false },
+            ["globalState"] = new { captured = false },
+            ["sqlite"] = new { captured = false },
+            ["rollout"] = new { captured = false }
+        };
+        undoTargets.Remove(missingTarget);
+        await File.WriteAllTextAsync(
+            Path.Combine(backupDir, "metadata.json"),
+            JsonSerializer.Serialize(new
+            {
+                version = 2,
+                @namespace = AppConstants.BackupNamespace,
+                codexHome = fixture.CodexHome,
+                targetProvider = "openai",
+                createdAt = "2026-07-08T09:10:11.460Z",
+                dbFiles = Array.Empty<string>(),
+                sqliteDbFiles = Array.Empty<string>(),
+                changedSessionFiles = 0,
+                undoTargets
+            }));
+
+        BackupService backups = new(new SessionRolloutService(), new SqliteStateService());
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            backups.RestoreBackupAsync(backupDir, fixture.CodexHome, new RestoreBackupOptions()));
+
+        Assert.Contains($"required target {missingTarget}", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"captured\":\"false\"}")]
+    public async Task NodeReducedUndoBackup_MalformedCapturedDeclarationFailsClosed(string configTarget)
+    {
+        TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
+        string backupDir = fixture.BackupPath("20260708T091011461Z");
+        Directory.CreateDirectory(backupDir);
+        string metadata = $$"""
+            {
+              "version": 2,
+              "namespace": "{{AppConstants.BackupNamespace}}",
+              "codexHome": {{JsonSerializer.Serialize(fixture.CodexHome)}},
+              "targetProvider": "openai",
+              "dbFiles": [],
+              "sqliteDbFiles": [],
+              "changedSessionFiles": 0,
+              "undoTargets": {
+                "config": {{configTarget}},
+                "globalState": { "captured": false },
+                "sqlite": { "captured": false },
+                "rollout": { "captured": false }
+              }
+            }
+            """;
+        await File.WriteAllTextAsync(Path.Combine(backupDir, "metadata.json"), metadata);
+
+        BackupService backups = new(new SessionRolloutService(), new SqliteStateService());
+        await Assert.ThrowsAnyAsync<Exception>(() =>
+            backups.RestoreBackupAsync(backupDir, fixture.CodexHome, new RestoreBackupOptions()));
+    }
+
+    [Fact]
     public async Task RestoreGlobalState_RejectsCanonicalAndLegacyPresenceConflictBeforeMutation()
     {
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
@@ -242,5 +452,57 @@ public sealed class BackupParityTests
 
         Assert.Contains("disagrees", error.Message, StringComparison.Ordinal);
         Assert.Equal("current\n", await File.ReadAllTextAsync(statePath));
+    }
+
+    private static async Task<string> WriteNodeReducedRolloutBackupAsync(
+        TestCodexHomeFixture fixture,
+        string backupName,
+        string rolloutPath,
+        string originalFirstLine)
+    {
+        string backupDir = fixture.BackupPath(backupName);
+        Directory.CreateDirectory(backupDir);
+        await File.WriteAllTextAsync(
+            Path.Combine(backupDir, "metadata.json"),
+            JsonSerializer.Serialize(new
+            {
+                version = 2,
+                @namespace = AppConstants.BackupNamespace,
+                codexHome = fixture.CodexHome,
+                targetProvider = "openai",
+                createdAt = "2026-07-08T09:10:11.458Z",
+                dbFiles = Array.Empty<string>(),
+                sqliteDbFiles = Array.Empty<string>(),
+                changedSessionFiles = 1,
+                undoTargets = new
+                {
+                    config = new { captured = false },
+                    globalState = new { captured = false },
+                    sqlite = new { captured = false },
+                    rollout = new { captured = true, entryCount = 1 }
+                }
+            }));
+        await File.WriteAllTextAsync(
+            Path.Combine(backupDir, "session-meta-backup.json"),
+            JsonSerializer.Serialize(new
+            {
+                version = 2,
+                @namespace = AppConstants.BackupNamespace,
+                codexHome = fixture.CodexHome,
+                targetProvider = "openai",
+                createdAt = "2026-07-08T09:10:11.458Z",
+                files = new[]
+                {
+                    new
+                    {
+                        path = rolloutPath,
+                        originalFirstLine,
+                        originalSeparator = "\n",
+                        modelOnlyChange = false,
+                        originalTurnContextModels = Array.Empty<object>()
+                    }
+                }
+            }));
+        return backupDir;
     }
 }

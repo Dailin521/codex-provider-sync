@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "bidirectional-backup-roundtrip",
+  "description": "Synthetic Node and .NET backup/restore interoperability corpus.",
+  "containsRealUserData": false,
+  "inputs": {
+    "codexHome": "input/codex-home",
+    "sqliteHome": "input/codex-home/sqlite"
+  },
+  "expected": {
+    "directions": [
+      "node-to-dotnet",
+      "dotnet-to-node"
+    ],
+    "restoredProvider": "relay",
+    "journalTerminal": "committed"
+  }
+}
