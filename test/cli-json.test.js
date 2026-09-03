@@ -94,6 +94,22 @@ test("CLI JSON exposes only fixed partial convergence fields and uses exit code 
   assert.doesNotMatch(JSON.stringify(envelope), /secret internal/);
 });
 
+test("CLI JSON preserves changed rollout partial evidence", () => {
+  const envelope = createCliSuccessEnvelope("sync", {
+    partial: true,
+    partialReason: "rollout-changed",
+    retryRecommended: true,
+    skippedLockedRolloutFiles: ["C:\\private\\locked.jsonl"],
+    skippedChangedRolloutFiles: ["/private/changed.jsonl"]
+  });
+  assert.equal(envelope.outcome, "partial");
+  assert.equal(cliJsonExitCode(envelope), 3);
+  assert.deepEqual(envelope.result.skippedLockedRolloutFiles, ["locked.jsonl"]);
+  assert.deepEqual(envelope.result.skippedChangedRolloutFiles, ["changed.jsonl"]);
+  assert.equal(envelope.result.partialReason, "rollout-changed");
+  assert.doesNotMatch(JSON.stringify(envelope), /private/);
+});
+
 test("CLI JSON failure exit codes follow the frozen matrix", () => {
   const cases = [
     ["INVALID_INPUT", 2, "failed"],

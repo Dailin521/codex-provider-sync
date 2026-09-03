@@ -1483,6 +1483,26 @@ test("Web UI marks skipped locked rollout files as a partial operation outcome",
   }
 });
 
+test("Web UI marks changed rollout files as a partial operation outcome", async () => {
+  const handle = await startFixture({
+    applySync: async () => ({
+      skippedLockedRolloutFiles: ["C:\\private\\rollout-locked.jsonl"],
+      skippedChangedRolloutFiles: ["/private/rollout-changed.jsonl"]
+    })
+  });
+  try {
+    const { credential } = await handle.pair();
+    const response = await api(handle, "/api/sync/apply", { schemaVersion: 1, planId: "changed-plan" }, credential);
+    assert.equal(response.status, 200);
+    assert.equal(response.payload.result.outcome, "partial");
+    assert.deepEqual(response.payload.result.skippedLockedRolloutFiles, ["rollout-locked.jsonl"]);
+    assert.deepEqual(response.payload.result.skippedChangedRolloutFiles, ["rollout-changed.jsonl"]);
+    assert.doesNotMatch(JSON.stringify(response.payload), /private/);
+  } finally {
+    await handle.close();
+  }
+});
+
 test("Web UI restore requires an explicit SQLite Home for relocation and rejects WSL UNC storage", async () => {
   let restorePrepareCalls = 0;
   const handle = await startFixture({ prepareRestore: async () => { restorePrepareCalls += 1; return {}; } });

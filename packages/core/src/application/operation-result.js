@@ -14,7 +14,9 @@ export function operationWarnings(result) {
 export function operationResult(operation, operationId, result, sourceBackup = null) {
   const partial = result?.partial === true
     || (Array.isArray(result?.skippedLockedRolloutFiles)
-      && result.skippedLockedRolloutFiles.length > 0);
+      && result.skippedLockedRolloutFiles.length > 0)
+    || (Array.isArray(result?.skippedChangedRolloutFiles)
+      && result.skippedChangedRolloutFiles.length > 0);
   const backupDir = result?.backupDir ?? sourceBackup?.backupDir ?? null;
   return {
     schemaVersion: 1,

@@ -66,7 +66,7 @@ export async function prepareProviderPlan(operation, options, switchIntent = nul
     impact: {
       rolloutFilesToChange: writableChanges.length,
       sqliteRowsToChange,
-      lockedRolloutFiles: context.revisions.lockedRolloutFiles,
+      lockedRolloutFiles: lockedCount,
       backupExpected: writableChanges.length > 0
         || sqliteRowsToChange > 0
         || switchIntent?.configMutationExpected === true

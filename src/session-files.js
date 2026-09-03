@@ -1789,6 +1789,11 @@ export async function applySessionChanges(changes, options = {}) {
     inPlaceSync
   } = options ?? {};
   const skippedPaths = [];
+  // Keep the historical union for compatibility, while retaining the reason
+  // needed by the lightweight-write coordinator to distinguish an active
+  // session from a rollout that drifted after its first-line scan.
+  const skippedLockedPaths = [];
+  const skippedChangedPaths = [];
   const appliedPaths = [];
   let appliedChanges = 0;
   let inPlaceChanges = 0;
@@ -1833,6 +1838,8 @@ export async function applySessionChanges(changes, options = {}) {
           await onApplied?.(change);
         } else {
           skippedPaths.push(change.path);
+          if (result === "SKIP_BUSY") skippedLockedPaths.push(change.path);
+          else skippedChangedPaths.push(change.path);
           await onSkipped?.(change, result);
         }
       }
@@ -1875,6 +1882,8 @@ export async function applySessionChanges(changes, options = {}) {
         await onApplied?.(change);
       } else {
         skippedPaths.push(change.path);
+        if (result === "SKIP_BUSY") skippedLockedPaths.push(change.path);
+        else skippedChangedPaths.push(change.path);
         await onSkipped?.(change, result);
       }
     }
@@ -1906,17 +1915,22 @@ export async function applySessionChanges(changes, options = {}) {
       await onApplied?.(change);
     } else {
       skippedPaths.push(change.path);
+      skippedChangedPaths.push(change.path);
       await onSkipped?.(change, "SKIP_CHANGED");
     }
   }
 
   appliedPaths.sort((left, right) => left.localeCompare(right));
   skippedPaths.sort((left, right) => left.localeCompare(right));
+  skippedLockedPaths.sort((left, right) => left.localeCompare(right));
+  skippedChangedPaths.sort((left, right) => left.localeCompare(right));
   return {
     appliedChanges,
     inPlaceChanges,
     appliedPaths,
-    skippedPaths
+    skippedPaths,
+    skippedLockedPaths,
+    skippedChangedPaths
   };
 }
 

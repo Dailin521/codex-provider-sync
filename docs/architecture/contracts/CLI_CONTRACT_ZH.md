@@ -191,6 +191,7 @@ codex-provider sync [--keep N] [--codex-home PATH] [--sqlite-home PATH]
 - 只有存在实际写入目标时才创建覆盖该集合的 UndoBackup；noop 不创建备份；
 - 锁定的 rollout 可以被跳过，其他可写 rollout 和 SQLite 仍继续处理；
 - 锁定 rollout 导致的是部分成功，而不是事务整体失败；
+- 锁定与 Apply 期间变更的 rollout 分别在 `skippedLockedRolloutFiles`、`skippedChangedRolloutFiles` 报告；Human Mode 提示重新 Prepare 后重试，JSON partial 仍为 exit `3`；
 - mutation 前失败不产生业务写入；mutation 后失败返回可重试 `partial`、backupId、失败阶段和错误码，不执行普通写路径的自动全量回滚；
 - 成功提交后自动按 `--keep` 清理旧托管备份；
 - 备份 inventory 刷新或自动清理失败，在主事务已提交后降级为 warning。

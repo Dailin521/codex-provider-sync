@@ -317,6 +317,14 @@ export const resources = {
         operationId: "Operation ID",
         backupId: "Managed backup ID",
         skippedRollouts: "Skipped locked rollout files",
+        skippedChangedRollouts: "Skipped changed rollout files",
+        retryAfterSession: "After the active session ends, prepare a fresh operation and retry to converge.",
+        retryFreshPlan: "Prepare a fresh operation and retry to converge.",
+        partialReasons: {
+          "locked-session": "Active session lock",
+          "rollout-changed": "Rollout changed during the operation",
+          "mutation-failed": "Mutation failed after writes began"
+        },
         resolveBeforeClose: "Resolve the pending recovery before closing this result.",
         fields: {
           inPlaceSessionFiles: "In-place rollout updates",
@@ -696,6 +704,14 @@ export const resources = {
         operationId: "操作 ID",
         backupId: "受管备份 ID",
         skippedRollouts: "跳过的锁定 rollout 文件",
+        skippedChangedRollouts: "跳过的已变化 rollout 文件",
+        retryAfterSession: "请在活动会话结束后重新准备操作并重试，以完成收敛。",
+        retryFreshPlan: "请重新准备操作后重试，以完成收敛。",
+        partialReasons: {
+          "locked-session": "活动会话锁定",
+          "rollout-changed": "操作期间 rollout 已变化",
+          "mutation-failed": "写入开始后发生失败"
+        },
         resolveBeforeClose: "请先完成待处理的恢复，再关闭此结果。",
         fields: {
           inPlaceSessionFiles: "原地更新的 rollout",

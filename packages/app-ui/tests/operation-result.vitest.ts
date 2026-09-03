@@ -107,4 +107,32 @@ describe("operation result presentation", () => {
     await user.click((await screen.findAllByRole("button", { name: "Close" })).at(-1)!);
     await waitFor(() => expect(screen.getByRole("button", { name: "Prepare sync" })).toHaveFocus());
   });
+
+  it("separates locked and changed rollout evidence and recommends a fresh retry", async () => {
+    const i18n = await createAppI18n("en");
+    const result: OperationResult = {
+      schemaVersion: 1,
+      operationId: "11111111-1111-4111-8111-111111111120",
+      operation: "sync",
+      outcome: "partial",
+      backup: { backupId: "managed-backup" },
+      warnings: [],
+      result: {
+        partialReason: "locked-session",
+        retryRecommended: true,
+        skippedLockedRolloutFiles: ["locked.jsonl"],
+        skippedChangedRolloutFiles: ["changed.jsonl"]
+      }
+    };
+    render(createElement(I18nextProvider, { i18n }, createElement(OperationResultDialog, {
+      close: () => {}, restoreFocus: () => {}, result
+    })));
+
+    expect(await screen.findByText("Skipped locked rollout files")).toBeVisible();
+    expect(screen.getByText("Skipped changed rollout files")).toBeVisible();
+    expect(screen.getByText("Active session lock")).toBeVisible();
+    expect(screen.getByText("After the active session ends, prepare a fresh operation and retry to converge.")).toBeVisible();
+    expect(screen.getByText("locked.jsonl")).toBeVisible();
+    expect(screen.getByText("changed.jsonl")).toBeVisible();
+  });
 });

@@ -185,10 +185,12 @@ export async function executeOrdinaryWrite({
         noop: initiallySkipped.length === 0,
         partial: initiallySkipped.length > 0,
         partialReason: initiallySkipped.length > 0 ? "locked-session" : null,
+        retryRecommended: initiallySkipped.length > 0,
         changedSessionFiles: 0,
         inPlaceSessionFiles: 0,
         rewrittenSessionFiles: 0,
         skippedLockedRolloutFiles: initiallySkipped,
+        skippedChangedRolloutFiles: [],
         sqliteRowsUpdated: 0,
         sqliteProviderRowsUpdated: 0,
         sqliteModelRowsUpdated: 0,
@@ -230,7 +232,14 @@ export async function executeOrdinaryWrite({
     throwIfAborted(signal);
 
     let failedStage = "mutation";
-    let applyResult = { appliedChanges: 0, inPlaceChanges: 0, appliedPaths: [], skippedPaths: [] };
+    let applyResult = {
+      appliedChanges: 0,
+      inPlaceChanges: 0,
+      appliedPaths: [],
+      skippedPaths: [],
+      skippedLockedPaths: [],
+      skippedChangedPaths: []
+    };
     let sqliteResult = emptySqliteMutationResult(Boolean(storage.stateDbLocation));
     let workspaceRootResult = {
       updated: false,
@@ -317,8 +326,11 @@ export async function executeOrdinaryWrite({
       if (!mutationStarted) throw error;
       const skippedLockedRolloutFiles = [...new Set([
         ...initiallySkipped,
-        ...(applyResult.skippedPaths ?? [])
+        ...(applyResult.skippedLockedPaths ?? [])
       ])].sort((left, right) => left.localeCompare(right));
+      const skippedChangedRolloutFiles = [...new Set(
+        applyResult.skippedChangedPaths ?? []
+      )].sort((left, right) => left.localeCompare(right));
       await tryRefreshBackupInventory(backupDir);
       return {
         codexHome,
@@ -339,6 +351,7 @@ export async function executeOrdinaryWrite({
         inPlaceSessionFiles: applyResult.inPlaceChanges ?? 0,
         rewrittenSessionFiles: Math.max(0, (applyResult.appliedChanges ?? 0) - (applyResult.inPlaceChanges ?? 0)),
         skippedLockedRolloutFiles,
+        skippedChangedRolloutFiles,
         sqliteRowsUpdated: sqliteResult.updatedRows,
         sqliteProviderRowsUpdated: sqliteResult.providerRowsUpdated,
         sqliteModelRowsUpdated: sqliteResult.modelRowsUpdated,
@@ -355,8 +368,11 @@ export async function executeOrdinaryWrite({
 
     const skippedLockedRolloutFiles = [...new Set([
       ...initiallySkipped,
-      ...(applyResult.skippedPaths ?? [])
+      ...(applyResult.skippedLockedPaths ?? [])
     ])].sort((left, right) => left.localeCompare(right));
+    const skippedChangedRolloutFiles = [...new Set(
+      applyResult.skippedChangedPaths ?? []
+    )].sort((left, right) => left.localeCompare(right));
     let backupInventoryWarning = null;
     try {
       await undoBackup.refreshInventory(backupDir, { faultInjector });
@@ -386,12 +402,16 @@ export async function executeOrdinaryWrite({
       previousProvider: current.provider,
       backupDir,
       backupDurationMs,
-      partial: skippedLockedRolloutFiles.length > 0,
-      partialReason: skippedLockedRolloutFiles.length > 0 ? "locked-session" : null,
+      partial: skippedLockedRolloutFiles.length > 0 || skippedChangedRolloutFiles.length > 0,
+      partialReason: skippedLockedRolloutFiles.length > 0
+        ? "locked-session"
+        : (skippedChangedRolloutFiles.length > 0 ? "rollout-changed" : null),
+      retryRecommended: skippedLockedRolloutFiles.length > 0 || skippedChangedRolloutFiles.length > 0,
       changedSessionFiles: applyResult.appliedChanges,
       inPlaceSessionFiles: applyResult.inPlaceChanges ?? 0,
       rewrittenSessionFiles: Math.max(0, applyResult.appliedChanges - (applyResult.inPlaceChanges ?? 0)),
       skippedLockedRolloutFiles,
+      skippedChangedRolloutFiles,
       sqliteRowsUpdated: sqliteResult.updatedRows,
       sqliteProviderRowsUpdated: sqliteResult.providerRowsUpdated,
       ...(repair

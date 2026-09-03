@@ -73,6 +73,18 @@ function skippedRollouts(value: OperationResult["result"]): string[] {
   return Array.isArray(candidate) ? candidate.filter((entry): entry is string => typeof entry === "string") : [];
 }
 
+function skippedChangedRollouts(value: OperationResult["result"]): string[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const candidate = value.skippedChangedRolloutFiles;
+  return Array.isArray(candidate) ? candidate.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function displayResultValue(key: string, value: string, t: (key: string, options?: Record<string, unknown>) => string): string {
+  return key === "partialReason"
+    ? t(`operationResult.partialReasons.${value}`, { defaultValue: value })
+    : value;
+}
+
 export function OperationResultDialog({ result, close, closeDisabled = false, restoreFocus }: {
   result: OperationResult | null;
   close(): void;
@@ -83,6 +95,17 @@ export function OperationResultDialog({ result, close, closeDisabled = false, re
   const presentation = result ? operationResultPresentation(result.outcome) : null;
   const entries = result ? publicResultEntries(result.result) : [];
   const skipped = result ? skippedRollouts(result.result) : [];
+  const skippedChanged = result ? skippedChangedRollouts(result.result) : [];
+  const partialReason = result?.result
+    && typeof result.result === "object"
+    && !Array.isArray(result.result)
+    && typeof result.result.partialReason === "string"
+    ? result.result.partialReason
+    : null;
+  const retryRecommended = result?.result
+    && typeof result.result === "object"
+    && !Array.isArray(result.result)
+    && result.result.retryRecommended === true;
   const alert = result?.outcome === "recovery_required";
   return (
     <Dialog
@@ -105,11 +128,13 @@ export function OperationResultDialog({ result, close, closeDisabled = false, re
             <dl className="grid gap-3 text-sm">
               <div><dt className="text-[var(--muted)]">{t("operationResult.operationId")}</dt><dd className="mt-1 break-all font-mono text-xs">{result.operationId}</dd></div>
               {result.backup ? <div><dt className="text-[var(--muted)]">{t("operationResult.backupId")}</dt><dd className="mt-1 break-all font-mono text-xs">{result.backup.backupId}</dd></div> : null}
-              {entries.map(([key, value]) => <div key={key}><dt className="text-[var(--muted)]">{t(`operationResult.fields.${key}`, { defaultValue: key })}</dt><dd className="mt-1 break-words">{value}</dd></div>)}
+              {entries.map(([key, value]) => <div key={key}><dt className="text-[var(--muted)]">{t(`operationResult.fields.${key}`, { defaultValue: key })}</dt><dd className="mt-1 break-words">{displayResultValue(key, value, t)}</dd></div>)}
             </dl>
           </Card>
           {result.warnings.length ? <div><h3 className="font-semibold">{t("common.warnings")}</h3><ul className="mt-2 list-disc space-y-1 pl-5 text-sm">{result.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul></div> : null}
           {skipped.length ? <div><h3 className="font-semibold">{t("operationResult.skippedRollouts")}</h3><ul className="mt-2 list-disc space-y-1 pl-5 font-mono text-xs">{skipped.map((file) => <li key={file}>{file}</li>)}</ul></div> : null}
+          {skippedChanged.length ? <div><h3 className="font-semibold">{t("operationResult.skippedChangedRollouts")}</h3><ul className="mt-2 list-disc space-y-1 pl-5 font-mono text-xs">{skippedChanged.map((file) => <li key={file}>{file}</li>)}</ul></div> : null}
+          {retryRecommended ? <p className="text-sm text-[var(--warning)]">{t(partialReason === "locked-session" ? "operationResult.retryAfterSession" : "operationResult.retryFreshPlan")}</p> : null}
           {closeDisabled ? <p className="text-sm text-[var(--danger)]">{t("operationResult.resolveBeforeClose")}</p> : null}
         </div>
       ) : null}

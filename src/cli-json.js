@@ -1,3 +1,5 @@
+import path from "node:path";
+
 export const CLI_JSON_SCHEMA_VERSION = 1;
 
 const SUCCESS_OUTCOMES = new Set(["completed", "noop", "partial"]);
@@ -174,6 +176,11 @@ function sanitizeStringArray(value, maxLength = 32768) {
     .filter((entry) => entry !== undefined);
 }
 
+function sanitizeFileNameArray(value) {
+  const entries = sanitizeStringArray(value);
+  return entries?.map((entry) => path.win32.basename(path.posix.basename(entry)));
+}
+
 function sanitizeNumberArray(value) {
   if (!Array.isArray(value)) return undefined;
   return value
@@ -263,7 +270,7 @@ function sanitizeSyncResult(value) {
   put(result, "sqlitePresent", safeBoolean(value.sqlitePresent));
   put(result, "partial", safeBoolean(value.partial));
   putNullable(result, "partialReason", value.partialReason, (entry) => (
-    ["locked-session", "mutation-failed"].includes(entry) ? entry : undefined
+    ["locked-session", "rollout-changed", "mutation-failed"].includes(entry) ? entry : undefined
   ));
   putNullable(result, "failedStage", value.failedStage, (entry) => (
     PARTIAL_FAILURE_STAGES.has(entry) ? entry : undefined
@@ -272,7 +279,8 @@ function sanitizeSyncResult(value) {
     PARTIAL_FAILURE_CODES.has(entry) ? entry : undefined
   ));
   put(result, "retryRecommended", safeBoolean(value.retryRecommended));
-  put(result, "skippedLockedRolloutFiles", sanitizeStringArray(value.skippedLockedRolloutFiles));
+  put(result, "skippedLockedRolloutFiles", sanitizeFileNameArray(value.skippedLockedRolloutFiles));
+  put(result, "skippedChangedRolloutFiles", sanitizeFileNameArray(value.skippedChangedRolloutFiles));
   put(result, "rolloutCountsBefore", sanitizeDistribution(value.rolloutCountsBefore));
   putNullable(result, "autoPruneResult", value.autoPruneResult, sanitizePruneResult);
   if (value.autoPruneWarning) result.autoPruneWarning = WARNING_MESSAGES.autoPruneWarning;
@@ -568,6 +576,8 @@ export function inferCliSuccessOutcome(result) {
   if (result?.partial === true) return "partial";
   if (Array.isArray(result?.skippedLockedRolloutFiles)
       && result.skippedLockedRolloutFiles.length > 0) return "partial";
+  if (Array.isArray(result?.skippedChangedRolloutFiles)
+      && result.skippedChangedRolloutFiles.length > 0) return "partial";
   if (result?.noop === true) return "noop";
   return "completed";
 }

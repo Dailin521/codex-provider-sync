@@ -21,7 +21,7 @@ const plan: PlanSummary = {
   impact: {
     rolloutFilesToChange: 2,
     sqliteRowsToChange: 1,
-    lockedRolloutFiles: [],
+    lockedRolloutFiles: 2,
     backupExpected: true
   },
   warnings: [],
@@ -52,6 +52,8 @@ describe("PlanReview", () => {
     expect(screen.getByText("Provider")).toBeVisible();
     expect(screen.getByText("openai")).toBeVisible();
     expect(screen.getByText("Rollout files affected")).toBeVisible();
+    expect(screen.getByText("Currently locked rollouts")).toBeVisible();
+    expect(screen.getAllByText("2")).toHaveLength(2);
     expect(screen.getByText("A backup will be created before writes.")).toBeVisible();
     expect(screen.getByText("Technical details")).toBeVisible();
     expect(screen.getByText(/"provider": "openai"/)).not.toBeVisible();

@@ -42,7 +42,7 @@ interface CoreErrorDto {
 - 一个失败只选择一个最能指导恢复动作的顶层 Canonical Code；底层 OS/SQLite Code 可放入安全的 `details.causeCode`。
 - Partial Result 可以携带 warning 级错误码，但不能把未完成写入伪装成完整成功。
 
-普通写的 partial 使用固定安全字段：`partialReason=locked-session|mutation-failed`；mutation 后失败还携带枚举化 `failedStage`、`failureCode` 与 `retryRecommended=true`，并在顶层返回可用于手动 Restore 的受管 `backupId`。这些字段不得包含路径或底层异常文本。
+普通写的 partial 使用固定安全字段：`partialReason=locked-session|rollout-changed|mutation-failed`。`skippedLockedRolloutFiles` 与 `skippedChangedRolloutFiles` 分别列出活动会话锁定和 Apply 期间漂移的 rollout；两者同时存在时主原因固定为 `locked-session`，mutation 后失败优先为 `mutation-failed`。所有 partial 都携带 `retryRecommended=true`；mutation 后失败还携带枚举化 `failedStage`、`failureCode` 与可用于手动 Restore 的受管 `backupId`。这些字段不得包含路径或底层异常文本。
 
 ## 3. Canonical vNext CoreErrorCode
 

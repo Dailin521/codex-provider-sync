@@ -245,8 +245,8 @@ signal?
 
 - 启动/活动进程锁定的 rollout 可以被跳过；
 - 可写 rollout 与 SQLite Provider 仍可提交；
-- 所有跳过路径必须出现在 `skippedLockedRolloutFiles`；
-- 新普通写以 `OperationResult.outcome="partial"` 表示锁定 session 或 mutation 后故障；
+- 活动会话锁定必须出现在 `skippedLockedRolloutFiles`；Apply 期间发生状态漂移的文件必须出现在 `skippedChangedRolloutFiles`，不得混报为锁定；
+- 新普通写以 `OperationResult.outcome="partial"` 表示锁定 session、rollout 漂移或 mutation 后故障；所有 partial 建议重新 Prepare 后重试以收敛；
 - v0.5 CLI 仍以 exit `0` 返回 partial。
 
 ### 5.6 当前结果字段
@@ -263,6 +263,7 @@ backupDir
 backupDurationMs
 changedSessionFiles
 skippedLockedRolloutFiles
+skippedChangedRolloutFiles
 sqliteRowsUpdated
 sqliteProviderRowsUpdated
 sqlitePresent

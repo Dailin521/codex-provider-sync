@@ -274,6 +274,17 @@ function summarizeSync(result, label) {
     lines.push(`Skipped locked rollout files: ${result.skippedLockedRolloutFiles.length}`);
     lines.push(`Locked file(s): ${preview}${extraCount > 0 ? ` (+${extraCount} more)` : ""}`);
   }
+  if (result.skippedChangedRolloutFiles?.length) {
+    const preview = result.skippedChangedRolloutFiles.slice(0, 5).join(", ");
+    const extraCount = result.skippedChangedRolloutFiles.length - Math.min(result.skippedChangedRolloutFiles.length, 5);
+    lines.push(`Skipped changed rollout files: ${result.skippedChangedRolloutFiles.length}`);
+    lines.push(`Changed file(s): ${preview}${extraCount > 0 ? ` (+${extraCount} more)` : ""}`);
+  }
+  if (result.retryRecommended) {
+    lines.push(result.partialReason === "locked-session"
+      ? "Retry recommendation: after the active session ends, prepare a fresh operation and retry to converge."
+      : "Retry recommendation: prepare a fresh operation and retry to converge.");
+  }
   if (result.encryptedContentWarning) {
     lines.push(result.encryptedContentWarning);
   }

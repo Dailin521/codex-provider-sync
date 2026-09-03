@@ -564,9 +564,19 @@ export function createWebUiServer({
         ? result.outcome
         : (Array.isArray(result?.skippedLockedRolloutFiles) && result.skippedLockedRolloutFiles.length > 0
             ? "partial"
-            : "success");
+            : (Array.isArray(result?.skippedChangedRolloutFiles) && result.skippedChangedRolloutFiles.length > 0
+                ? "partial"
+                : "success"));
+      const publicResult = { ...result };
+      for (const key of ["skippedLockedRolloutFiles", "skippedChangedRolloutFiles"]) {
+        if (Array.isArray(publicResult[key])) {
+          publicResult[key] = publicResult[key]
+            .filter((entry) => typeof entry === "string")
+            .map((entry) => path.win32.basename(path.posix.basename(entry)));
+        }
+      }
       record(outcome === "partial" ? "warning" : "success", `${kind} completed`);
-      sendJson(response, 200, { result: { ...result, outcome } });
+      sendJson(response, 200, { result: { ...publicResult, outcome } });
     } catch (error) {
       record("error", `${kind} failed`, typeof error?.code === "string" ? error.code : "INTERNAL_ERROR");
       sendError(response, coreErrorHttpStatus(error, 400), error);

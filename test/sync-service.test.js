@@ -13,7 +13,7 @@ import {
   restoreBackup,
   updateSessionBackupManifest
 } from "../src/backup.js";
-import { getStatus, runPruneBackups, runRepair, runRestore, runSwitch, runSync } from "../src/service.js";
+import { getStatus, prepareSync, runPruneBackups, runRepair, runRestore, runSwitch, runSync } from "../src/service.js";
 import { renderStatus } from "../src/cli-presenter.js";
 import { DB_FILE_BASENAME, DEFAULT_BACKUP_RETENTION_COUNT, SQLITE_DIR_BASENAME } from "../src/constants.js";
 import { getUnsupportedNodeVersionMessage } from "../src/node-version.js";
@@ -3415,6 +3415,8 @@ test("runSync skips locked rollout files and still updates sqlite", async () => 
   assert.equal(result.changedSessionFiles, 0);
   assert.equal(result.sqliteRowsUpdated, 1);
   assert.deepEqual(result.skippedLockedRolloutFiles, [sessionPath]);
+  assert.deepEqual(result.skippedChangedRolloutFiles, []);
+  assert.equal(result.retryRecommended, true);
 
   const rollout = await fs.readFile(sessionPath, "utf8");
   assert.match(rollout, /"model_provider":"apigather"/);
@@ -3427,6 +3429,26 @@ test("runSync skips locked rollout files and still updates sqlite", async () => 
     assert.equal(row.model_provider, "openai");
   } finally {
     db.close();
+  }
+});
+
+test("prepareSync reports a numeric locked rollout impact", async () => {
+  if (process.platform !== "win32") return;
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-plan-locked.jsonl");
+  await writeRollout(sessionPath, "thread-plan-locked", "apigather");
+  await writeStateDb(codexHome, [{ id: "thread-plan-locked", model_provider: "apigather", archived: false }]);
+
+  const lockProcess = await lockRolloutFile(sessionPath);
+  try {
+    const plan = await prepareSync({ codexHome });
+    assert.equal(plan.impact.lockedRolloutFiles, 1);
+    assert.equal(typeof plan.impact.lockedRolloutFiles, "number");
+    assert.match(plan.warnings.join("\n"), /1 rollout file\(s\) are currently locked/);
+  } finally {
+    lockProcess.kill();
+    await new Promise((resolve) => lockProcess.once("exit", resolve));
   }
 });
 
@@ -3446,6 +3468,8 @@ test("applySessionChanges skips rollout files that changed after collection", as
   const result = await applySessionChanges(changes);
   assert.equal(result.appliedChanges, 0);
   assert.deepEqual(result.skippedPaths, [sessionPath]);
+  assert.deepEqual(result.skippedLockedPaths, []);
+  assert.deepEqual(result.skippedChangedPaths, [sessionPath]);
 
   const rollout = await fs.readFile(sessionPath, "utf8");
   assert.match(rollout, /"model_provider":"openai"/);
@@ -4297,7 +4321,7 @@ test("real cli sync JSON reports a locked rollout as partial", {
   const envelope = JSON.parse(result.stdout);
   assert.equal(envelope.ok, true);
   assert.equal(envelope.outcome, "partial");
-  assert.deepEqual(envelope.result.skippedLockedRolloutFiles, [sessionPath]);
+  assert.deepEqual(envelope.result.skippedLockedRolloutFiles, [path.basename(sessionPath)]);
   assert.equal(envelope.result.sqliteRowsUpdated, 1);
   assert.match(result.stderr, /\[1\/6\] Scanning rollout files/);
   assert.equal(await readProvider(codexHome, "thread-json-locked"), "openai");

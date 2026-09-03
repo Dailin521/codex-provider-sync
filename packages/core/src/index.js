@@ -435,6 +435,11 @@ function publicOperationResult(value) {
       .filter((entry) => typeof entry === "string")
       .map((entry) => path.basename(entry));
   }
+  if (Array.isArray(source.skippedChangedRolloutFiles)) {
+    result.skippedChangedRolloutFiles = source.skippedChangedRolloutFiles
+      .filter((entry) => typeof entry === "string")
+      .map((entry) => path.basename(entry));
+  }
   if (Array.isArray(source.repairTargets)) {
     result.repairTargets = source.repairTargets.filter((entry) => (
       typeof entry === "string"

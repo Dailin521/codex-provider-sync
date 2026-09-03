@@ -269,6 +269,8 @@ test("ordinary Sync noop completes without creating an UndoBackup", async () => 
   const value = await fixture();
   const plan = await prepareSync({ codexHome: value.home });
   assert.equal(plan.impact.backupExpected, false);
+  assert.equal(plan.impact.lockedRolloutFiles, 0);
+  assert.equal(typeof plan.impact.lockedRolloutFiles, "number");
   const applied = await applySync({ schemaVersion: 1, planId: plan.planId });
   assert.equal(applied.outcome, "completed");
   assert.equal(applied.backup, null);
@@ -330,4 +332,28 @@ test("post-mutation failure returns partial with backup evidence and retry conve
   const retry = await applySync({ schemaVersion: 1, planId: retryPlan.planId });
   assert.equal(retry.outcome, "completed");
   assert.equal((await row(value)).model_provider, "openai");
+});
+
+test("rollout changed during Apply is reported separately and a fresh retry converges", async () => {
+  const value = await fixture({ rolloutProvider: "prov_a", configProvider: "openai" });
+  const plan = await prepareSync({
+    codexHome: value.home,
+    async faultInjector({ point, path: targetPath }) {
+      if (point === "before_rollout_apply" && targetPath === value.file) {
+        await fs.appendFile(value.file, '{"type":"event_msg","payload":{"type":"assistant_message","message":"later"}}\n');
+      }
+    }
+  });
+  const partial = await applySync({ schemaVersion: 1, planId: plan.planId });
+  assert.equal(partial.outcome, "partial");
+  assert.equal(partial.result.partialReason, "rollout-changed");
+  assert.equal(partial.result.retryRecommended, true);
+  assert.deepEqual(partial.result.skippedLockedRolloutFiles, []);
+  assert.deepEqual(partial.result.skippedChangedRolloutFiles, [value.file]);
+  assert.equal((await row(value)).model_provider, "openai");
+
+  const retryPlan = await prepareSync({ codexHome: value.home });
+  const retry = await applySync({ schemaVersion: 1, planId: retryPlan.planId });
+  assert.equal(retry.outcome, "completed");
+  assert.match(await fs.readFile(value.file, "utf8"), /"model_provider":"openai"/);
 });
