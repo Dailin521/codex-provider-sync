@@ -13,7 +13,7 @@ import {
   path
 } from "../infrastructure/node-core-ports.js";
 import { prepareProviderPlan, executeProviderSyncMutation } from "./provider-sync.js";
-import { prepareStorage, emitProgress } from "./runtime-support.js";
+import { prepareStorage } from "./runtime-support.js";
 import { operationRuntime } from "./runtime-context.js";
 
 const {
@@ -127,22 +127,25 @@ export async function executeProviderSwitch({
       platform
     },
     {
+      operationKind: "switch",
       targetProvider: provider,
-      configBackupText: originalConfigText,
-      configMutationExpected: nextConfigText !== originalConfigText,
-      afterBackup: async () => {
-        emitProgress(onProgress, {
-          stage: "update_config",
-          status: "start",
-          provider
-        });
-        await writeConfigText(configPath, nextConfigText);
-        emitProgress(onProgress, {
-          stage: "update_config",
-          status: "complete",
-          provider
-        });
-      }
+      createConfigStep: nextConfigText === originalConfigText
+        ? null
+        : async (context) => {
+            if (context.configText !== originalConfigText) {
+              throw new CoreError(
+                "PLAN_STALE",
+                "config.toml changed before the switch acquired its lock. Refresh and retry."
+              );
+            }
+            return {
+              targetProvider: provider,
+              configBackupText: originalConfigText,
+              start: { provider },
+              complete: { provider },
+              run: async ({ context: writeContext }) => writeConfigText(writeContext.configPath, nextConfigText)
+            };
+          }
     }
   );
   return {

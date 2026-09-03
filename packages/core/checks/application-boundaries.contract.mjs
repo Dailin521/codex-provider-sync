@@ -46,11 +46,20 @@ test("compatibility runtime is a thin adapter and concrete use cases own their p
   assert.doesNotMatch(compat, /codexStorage\.|acquireLock\(|executeRestoreV2\(|collectProviderChanges\(/);
   for (const [relativePath, ports] of [
     ["src/application/status.js", ["config", "sessions", "stateDb", "globalState"]],
-    ["src/application/ordinary-write-runtime.js", ["config", "sessions", "stateDb", "globalState"]]
+    ["src/application/provider-sync.js", ["config", "sessions", "stateDb"]],
+    ["src/application/repair.js", ["config", "sessions", "stateDb", "globalState"]],
+    ["src/application/ordinary-write-runtime.js", ["config", "stateDb"]]
   ]) {
     const source = await fs.readFile(path.join(coreRoot, relativePath), "utf8");
     for (const port of ports) assert.match(source, new RegExp(`codexStorage\\.${port}`), relativePath);
   }
+  const ordinary = await fs.readFile(path.join(coreRoot, "src", "application", "ordinary-write-runtime.js"), "utf8");
+  assert.doesNotMatch(ordinary, /collectProviderChanges|collectRepairChanges|applySessionChanges|syncWorkspaceRoots/);
+  assert.doesNotMatch(ordinary, /sqliteTransaction|sqliteProviderRowsToChange|repairSqliteRowsToChange/);
+  assert.doesNotMatch(ordinary, /readCurrentProviderFromConfigText|readRootModelFromConfigText|splitLockedSessionChanges/);
+  assert.doesNotMatch(ordinary, /readSqliteProviderCounts|readSqliteRepairStats|readWorkspaceRootRepairStats/);
+  assert.doesNotMatch(ordinary, /DEFAULT_PROVIDER|targetModel|workspaceRoots|configMutationExpected|afterBackup/);
+  assert.doesNotMatch(ordinary, /codexStorage\.(?:sessions|globalState)/);
 });
 
 test("CoreFacade delegates into concrete use cases without a handler round-trip", async () => {

@@ -293,6 +293,59 @@ test("ordinary Sync creates an UndoBackup but no transaction journal or State DB
   );
 });
 
+test("ordinary writes publish their concrete operation in the Home lock owner", async () => {
+  const cases = [
+    {
+      expected: "sync",
+      value: await fixture({ rolloutProvider: "prov_a", configProvider: "openai" }),
+      run: (value, faultInjector) => runSync({ codexHome: value.home, faultInjector })
+    },
+    {
+      expected: "switch",
+      value: await fixture({ rolloutProvider: "prov_a", configProvider: "openai" }),
+      run: (value, faultInjector) => runSwitch({
+        codexHome: value.home,
+        provider: "prov_a",
+        keepRootModel: true,
+        faultInjector
+      })
+    },
+    {
+      expected: "repair",
+      value: await fixture(),
+      run: (value, faultInjector) => runRepair({
+        codexHome: value.home,
+        targets: ["models"],
+        faultInjector
+      })
+    }
+  ];
+
+  for (const item of cases) {
+    let observedLabel = null;
+    await item.run(item.value, async ({ point }) => {
+      if (point !== "before_backup") return;
+      const owner = JSON.parse(await fs.readFile(
+        path.join(item.value.home, "tmp", "provider-sync.lock", "owner.json"),
+        "utf8"
+      ));
+      observedLabel = owner.label;
+    });
+    assert.equal(observedLabel, item.expected);
+  }
+});
+
+test("Provider Sync rejects an unreadable aligned SQLite database before reporting noop", async () => {
+  const value = await fixture();
+  await fs.writeFile(value.dbPath, "not sqlite", "utf8");
+
+  await assert.rejects(
+    () => runSync({ codexHome: value.home }),
+    /state_5\.sqlite is malformed or unreadable/
+  );
+  await assert.rejects(fs.access(path.join(value.home, "backups_state")), { code: "ENOENT" });
+});
+
 test("Provider Sync UndoBackup captures only the SQLite and rollout targets it can mutate", async () => {
   const value = await fixture({ rolloutProvider: "prov_a", configProvider: "openai" });
   await fs.writeFile(path.join(value.home, ".codex-global-state.json"), "before\n");

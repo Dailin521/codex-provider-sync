@@ -63,6 +63,8 @@ test("Core workspace owns orchestration and root service remains compatibility-o
   const application = await fs.readFile(new URL("../src/application/core-application.js", import.meta.url), "utf8");
   const serviceRuntime = await fs.readFile(new URL("../src/application/service-runtime.js", import.meta.url), "utf8");
   const statusUseCase = await fs.readFile(new URL("../src/application/status.js", import.meta.url), "utf8");
+  const providerSyncUseCase = await fs.readFile(new URL("../src/application/provider-sync.js", import.meta.url), "utf8");
+  const repairUseCase = await fs.readFile(new URL("../src/application/repair.js", import.meta.url), "utf8");
   const ordinaryWriteRuntime = await fs.readFile(new URL("../src/application/ordinary-write-runtime.js", import.meta.url), "utf8");
   const storagePorts = await fs.readFile(new URL("../src/infrastructure/node-core-ports.js", import.meta.url), "utf8");
   const rootService = await fs.readFile(new URL("../../../src/service.js", import.meta.url), "utf8");
@@ -78,12 +80,31 @@ test("Core workspace owns orchestration and root service remains compatibility-o
   assert.match(application, /createProviderSyncUseCase\(\)/);
   assert.doesNotMatch(application, /UseCase\(handlers\)/);
   assert.doesNotMatch(serviceRuntime, /codexStorage\.|runSyncCore|runSwitchCore|runRestoreCore/);
-  for (const source of [statusUseCase, ordinaryWriteRuntime]) {
+  for (const source of [statusUseCase]) {
     assert.match(source, /codexStorage\.config/);
     assert.match(source, /codexStorage\.sessions/);
     assert.match(source, /codexStorage\.stateDb/);
     assert.match(source, /codexStorage\.globalState/);
   }
+  for (const source of [providerSyncUseCase]) {
+    assert.match(source, /codexStorage\.config/);
+    assert.match(source, /codexStorage\.sessions/);
+    assert.match(source, /codexStorage\.stateDb/);
+  }
+  for (const source of [repairUseCase]) {
+    assert.match(source, /codexStorage\.config/);
+    assert.match(source, /codexStorage\.sessions/);
+    assert.match(source, /codexStorage\.stateDb/);
+    assert.match(source, /codexStorage\.globalState/);
+  }
+  assert.match(ordinaryWriteRuntime, /codexStorage\.config/);
+  assert.match(ordinaryWriteRuntime, /codexStorage\.stateDb/);
+  assert.doesNotMatch(ordinaryWriteRuntime, /codexStorage\.(?:sessions|globalState)/);
+  assert.doesNotMatch(ordinaryWriteRuntime, /collectProviderChanges|collectRepairChanges|applySessionChanges|syncWorkspaceRoots/);
+  assert.doesNotMatch(ordinaryWriteRuntime, /sqliteTransaction|sqliteProviderRowsToChange|repairSqliteRowsToChange/);
+  assert.doesNotMatch(ordinaryWriteRuntime, /readCurrentProviderFromConfigText|readRootModelFromConfigText|splitLockedSessionChanges/);
+  assert.doesNotMatch(ordinaryWriteRuntime, /readSqliteProviderCounts|readSqliteRepairStats|readWorkspaceRootRepairStats/);
+  assert.doesNotMatch(ordinaryWriteRuntime, /DEFAULT_PROVIDER|targetModel|workspaceRoots|configMutationExpected|afterBackup/);
   assert.match(storagePorts, /src\/config-file\.js/);
   assert.match(rootService, /packages\/core\/src\/application\/service-runtime\.js/);
   assert.doesNotMatch(rootService, /function\s+runSyncCore/);
