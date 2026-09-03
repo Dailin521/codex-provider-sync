@@ -7,16 +7,17 @@ import { _electron as electron, chromium, expect, test } from "@playwright/test"
 
 import { createDesktopReadOnlyFixture } from "../../../test-support/desktop-readonly-fixture.mjs";
 import { createDesktopSyncSwitchFixture } from "../../../test-support/desktop-sync-switch-fixture.mjs";
+import { shouldRetryPackagedCdpActivation } from "./packaged-cdp-retry.mjs";
 
 const require = createRequire(import.meta.url);
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packagedExecutable = process.env.CPS_DESKTOP_EXECUTABLE;
 const electronExecutable = packagedExecutable || require("electron");
-const PRODUCTION_SMOKE_TIMEOUT_MS = 150_000;
+const PRODUCTION_SMOKE_TIMEOUT_MS = 180_000;
 const PRODUCTION_OPERATION_TIMEOUT_MS = 30_000;
 const PRODUCTION_READY_TIMEOUT_MS = 20_000;
 const PRODUCTION_BRIDGE_TIMEOUT_MS = 30_000;
-const PRODUCTION_CDP_TIMEOUT_MS = 60_000;
+const PRODUCTION_CDP_TIMEOUT_MS = 20_000;
 const PRODUCTION_CLOSE_TIMEOUT_MS = 10_000;
 
 async function withDeadline(label, task, timeoutMs) {
@@ -73,100 +74,132 @@ async function forceStopPackagedChild(child) {
 }
 
 async function launchPackagedDesktop({ args, env }) {
-  const child = spawn(packagedExecutable, [...args, "--remote-debugging-port=0"], {
-    env,
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true
-  });
-  let launchOutput = "";
-  let browser;
-  let page;
-  try {
-    const endpoint = await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => finish(new Error(`Timed out waiting for packaged DevTools endpoint. ${launchOutput}`)), 15_000);
-      const finish = (error, value) => {
-        clearTimeout(timeout);
-        child.stdout?.off("data", onData);
-        child.stderr?.off("data", onData);
-        child.off("error", onError);
-        child.off("exit", onExit);
-        if (error) reject(error);
-        else resolve(value);
-      };
-      const onData = (chunk) => {
-        launchOutput = `${launchOutput}${chunk}`.slice(-16_384);
-        const match = launchOutput.match(/DevTools listening on (ws:\/\/[^\s]+)/);
-        if (match) finish(null, match[1]);
-      };
-      const onError = (error) => finish(error);
-      const onExit = (code) => finish(new Error(`Packaged desktop exited before CDP was ready (${code}). ${launchOutput}`));
-      child.stdout?.on("data", onData);
-      child.stderr?.on("data", onData);
-      child.once("error", onError);
-      child.once("exit", onExit);
+  let firstRetryableFailure;
+  const maxAttempts = process.platform === "win32" ? 2 : 1;
+
+  for (let activationAttempt = 1; activationAttempt <= maxAttempts; activationAttempt += 1) {
+    const child = spawn(packagedExecutable, [...args, "--remote-debugging-port=0"], {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true
     });
-    browser = await chromium.connectOverCDP(endpoint, {
-      timeout: PRODUCTION_CDP_TIMEOUT_MS
-    });
-    for (let attempt = 0; attempt < 100 && !page; attempt += 1) {
-      page = browser.contexts().flatMap((context) => context.pages())[0];
-      if (!page) await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    if (!page) throw new Error("Packaged desktop did not create a renderer page.");
-  } catch (activationError) {
-    let cleanupError;
+    let launchOutput = "";
+    let endpointReady = false;
+    let browser;
+    let page;
     try {
-      if (browser) {
-        await withDeadline("Failed packaged desktop CDP close", browser.close(), 5_000).catch(() => {});
+      const endpoint = await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => finish(new Error(`Timed out waiting for packaged DevTools endpoint. ${launchOutput}`)), 15_000);
+        const finish = (error, value) => {
+          clearTimeout(timeout);
+          child.stdout?.off("data", onData);
+          child.stderr?.off("data", onData);
+          child.off("error", onError);
+          child.off("exit", onExit);
+          if (error) reject(error);
+          else resolve(value);
+        };
+        const onData = (chunk) => {
+          launchOutput = `${launchOutput}${chunk}`.slice(-16_384);
+          const match = launchOutput.match(/DevTools listening on (ws:\/\/[^\s]+)/);
+          if (match) finish(null, match[1]);
+        };
+        const onError = (error) => finish(error);
+        const onExit = (code) => finish(new Error(`Packaged desktop exited before CDP was ready (${code}). ${launchOutput}`));
+        child.stdout?.on("data", onData);
+        child.stderr?.on("data", onData);
+        child.once("error", onError);
+        child.once("exit", onExit);
+      });
+      endpointReady = true;
+      browser = await chromium.connectOverCDP(endpoint, {
+        timeout: PRODUCTION_CDP_TIMEOUT_MS
+      });
+      for (let attempt = 0; attempt < 100 && !page; attempt += 1) {
+        page = browser.contexts().flatMap((context) => context.pages())[0];
+        if (!page) await new Promise((resolve) => setTimeout(resolve, 50));
       }
-      await forceStopPackagedChild(child);
-    } catch (error) {
-      cleanupError = error;
-    }
-    if (cleanupError) {
-      throw new AggregateError(
-        [activationError, cleanupError],
-        "Packaged desktop activation failed and its process could not be cleaned up."
-      );
-    }
-    throw activationError;
-  }
-  return {
-    async firstWindow() {
-      return page;
-    },
-    async close() {
-      let pageCloseError;
+      if (!page) throw new Error("Packaged desktop did not create a renderer page.");
+    } catch (activationError) {
+      let cleanupError;
       try {
-        if (!page.isClosed()) {
-          await withDeadline(
-            "Packaged desktop page close",
-            page.close({ runBeforeUnload: true }),
-            PRODUCTION_CLOSE_TIMEOUT_MS
-          );
+        if (browser) {
+          await withDeadline("Failed packaged desktop CDP close", browser.close(), 5_000).catch(() => {});
         }
+        await forceStopPackagedChild(child);
       } catch (error) {
-        // A graceful application shutdown may close CDP before Playwright receives acknowledgement.
-        pageCloseError = error;
+        cleanupError = error;
       }
-      let exited = await waitForExit(child, process.platform === "darwin" ? 500 : 10_000);
-      if (!exited && process.platform === "darwin") {
-        child.kill("SIGTERM");
-        exited = await waitForExit(child, 10_000);
+      if (cleanupError) {
+        throw new AggregateError(
+          [activationError, cleanupError],
+          "Packaged desktop activation failed and its process could not be cleaned up."
+        );
       }
-      await withDeadline(
-        "Packaged desktop CDP close",
-        browser.close(),
-        5_000
-      ).catch(() => {});
-      if (!exited) {
-        child.kill("SIGKILL");
-        await waitForExit(child, 5_000);
-        const detail = pageCloseError instanceof Error ? ` ${pageCloseError.message}` : "";
-        throw new Error(`Packaged desktop did not complete a graceful shutdown.${detail}`);
+
+      if (shouldRetryPackagedCdpActivation({
+        platform: process.platform,
+        attempt: activationAttempt,
+        endpointReady,
+        browserConnected: Boolean(browser),
+        cleanupCompleted: true,
+        error: activationError
+      })) {
+        firstRetryableFailure = { error: activationError, launchOutput };
+        process.stderr.write("Packaged desktop CDP handshake timed out; retrying once with a fresh process.\n");
+        continue;
       }
+
+      if (firstRetryableFailure) {
+        throw new AggregateError(
+          [firstRetryableFailure.error, activationError],
+          `Packaged desktop activation failed after one bounded CDP retry. `
+            + `First output: ${firstRetryableFailure.launchOutput || "(none)"} `
+            + `Final output: ${launchOutput || "(none)"}`
+        );
+      }
+      throw activationError;
     }
-  };
+
+    return {
+      async firstWindow() {
+        return page;
+      },
+      async close() {
+        let pageCloseError;
+        try {
+          if (!page.isClosed()) {
+            await withDeadline(
+              "Packaged desktop page close",
+              page.close({ runBeforeUnload: true }),
+              PRODUCTION_CLOSE_TIMEOUT_MS
+            );
+          }
+        } catch (error) {
+          // A graceful application shutdown may close CDP before Playwright receives acknowledgement.
+          pageCloseError = error;
+        }
+        let exited = await waitForExit(child, process.platform === "darwin" ? 500 : 10_000);
+        if (!exited && process.platform === "darwin") {
+          child.kill("SIGTERM");
+          exited = await waitForExit(child, 10_000);
+        }
+        await withDeadline(
+          "Packaged desktop CDP close",
+          browser.close(),
+          5_000
+        ).catch(() => {});
+        if (!exited) {
+          child.kill("SIGKILL");
+          await waitForExit(child, 5_000);
+          const detail = pageCloseError instanceof Error ? ` ${pageCloseError.message}` : "";
+          throw new Error(`Packaged desktop did not complete a graceful shutdown.${detail}`);
+        }
+      }
+    };
+  }
+
+  throw new Error("Packaged desktop activation exhausted its bounded attempts.");
 }
 
 function launchProductionDesktop(options) {
