@@ -8,6 +8,8 @@
 >
 > 适用入口：`codex-provider`
 
+V1 增量：`sync --fast` 和 `switch <provider-id> --fast` 映射统一 Core 的 `syncMode="fast"`。它们只扫描 rollout 首行，要求所有 Provider 变更可原地更新，并保留根模型与历史模型；`--fast` 不接收值、不支持其他命令，且与 `--model` 互斥。默认完整模式不变，并自动优先采用合格的等长原地更新。摘要增加 `In-place rollout updates`。不支持的快速操作在业务写入前以 `FAST_MODE_UNSUPPORTED` 失败，不自动完整重写。详见 [ADR-0015](../../adr/0015-provider-byte-updates-and-fast-sync.md)。
+
 ## 1. 文档目的
 
 本文冻结 vNext 迁移开始时已经存在的 Node CLI 外部行为，防止提取 Node Core、增加 Electron、重组仓库或迁移到 TypeScript 时无意破坏现有用户和自动化脚本。
@@ -451,7 +453,7 @@ JSON Mode 退出码固定为：
 | --- | --- |
 | `0` | 成功或 noop |
 | `1` | 普通失败，包含已安全回滚的失败 |
-| `2` | 输入无效、Plan 过期或状态漂移 |
+| `2` | 输入无效、快速模式不适用、Plan 过期或状态漂移 |
 | `3` | partial success |
 | `4` | recovery required 或 pending transaction |
 | `5` | operation busy、SQLite busy 或 lock unverifiable |

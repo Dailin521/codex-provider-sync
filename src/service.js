@@ -804,6 +804,7 @@ async function verifyExpectedPlanState({
     configText,
     storage,
     backupDir,
+    rolloutRevisionMode: expectedPlanState.rolloutRevisionMode ?? "content",
     platform
   });
   const reason = revisionMismatch(expectedPlanState.revisions, actual);
@@ -826,11 +827,18 @@ async function runSyncCore({
   sqliteBusyTimeoutMs,
   onProgress,
   model = null,
+  fast = false,
   platform,
   faultInjector,
   signal,
   expectedPlanState
 } = {}, { afterBackup } = {}) {
+  if (typeof fast !== "boolean" || (fast && model !== null)) {
+    throw new CoreError(
+      "INVALID_INPUT",
+      "Fast sync preserves historical models; do not supply a model."
+    );
+  }
   if (!Number.isInteger(keepCount) || keepCount < 1) {
     throw new CoreError(
       "INVALID_INPUT",
@@ -890,9 +898,11 @@ async function runSyncCore({
       encryptedContentCounts,
       userEventThreadIds,
       threadCwdById
-    } = await collectSessionChanges(codexHome, targetProvider, { skipLockedReads: true, targetModel: model });
+    } = await collectSessionChanges(codexHome, targetProvider, { skipLockedReads: true, targetModel: model, fast });
     const cwdStats = await readThreadCwdStats(storage);
-    const encryptedContentWarning = buildEncryptedContentWarning(encryptedContentCounts, targetProvider);
+    const encryptedContentWarning = fast
+      ? "Fast mode: history models, user-event flags and encrypted content were not checked. Metadata alignment does not guarantee continuation with another provider."
+      : buildEncryptedContentWarning(encryptedContentCounts, targetProvider);
     emitProgress(onProgress, {
       stage: "scan_rollout_files",
       status: "complete",
@@ -932,7 +942,8 @@ async function runSyncCore({
       targetProvider,
       sessionChanges: writableChanges,
       configPath,
-      configBackupText
+      configBackupText,
+      fast
     });
     backupDurationMs = Date.now() - backupStartedAt;
     emitProgress(onProgress, {
@@ -1141,6 +1152,16 @@ async function runSyncCore({
         backupDir,
         backupDurationMs,
         changedSessionFiles: applyResult.appliedChanges,
+        inPlaceSessionFiles: applyResult.inPlaceChanges ?? 0,
+        rewrittenSessionFiles: Math.max(0, applyResult.appliedChanges - (applyResult.inPlaceChanges ?? 0)),
+        ...(fast ? { scanScope: "metadata", unchecked: ["historyModels", "userEventFlags", "encryptedContent"] } : {}),
+        providerSync: {
+          mode: fast ? "fast" : "full",
+          rolloutScanScope: fast ? "metadata" : "full",
+          inPlaceSessionFiles: applyResult.inPlaceChanges ?? 0,
+          rewrittenSessionFiles: Math.max(0, applyResult.appliedChanges - (applyResult.inPlaceChanges ?? 0)),
+          unchecked: fast ? ["historyModels", "userEventFlags", "encryptedContent"] : []
+        },
         skippedLockedRolloutFiles,
         sqliteRowsUpdated: sqliteResult.updatedRows,
         sqliteProviderRowsUpdated: sqliteResult.providerRowsUpdated,
@@ -1190,7 +1211,9 @@ async function runSyncCore({
         restoreFailures.push(`transaction journal read: ${journalError.message}`);
       }
       const startedRolloutTargets = journalSnapshot
-        ? getStartedJournalTargets(journalSnapshot, "rollout")
+        ? (journalSnapshot.invalidTail || journalSnapshot.events.length === 0
+          ? writableChanges.map((change) => change.path)
+          : getStartedJournalTargets(journalSnapshot, "rollout"))
         : (sessionRestoreNeeded
           ? appliedSessionChanges.map((change) => change.path)
           : writableChanges.map((change) => change.path));
@@ -1352,6 +1375,7 @@ async function runSwitchCore({
   provider,
   model,
   keepRootModel = false,
+  fast = false,
   keepCount = DEFAULT_BACKUP_RETENTION_COUNT,
   onProgress,
   platform,
@@ -1359,6 +1383,13 @@ async function runSwitchCore({
   signal,
   expectedPlanState
 }) {
+  if (typeof fast !== "boolean" || (fast && model !== undefined && model !== null)) {
+    throw new CoreError(
+      "INVALID_INPUT",
+      "Fast switch preserves root and historical models; fast mode and an explicit model cannot be combined."
+    );
+  }
+  if (fast) keepRootModel = true;
   if (!provider) {
     throw new CoreError(
       "INVALID_INPUT",
@@ -1398,7 +1429,8 @@ async function runSwitchCore({
       configBackupText: originalConfigText,
       keepCount,
       onProgress,
-      model: modelForThreads,
+      model: fast ? null : modelForThreads,
+      fast,
       faultInjector,
       signal,
       expectedPlanState,
@@ -1679,6 +1711,21 @@ function sqliteRowsToChange(sqliteCounts, targetProvider, sqliteRepairStats) {
   return count;
 }
 
+function normalizeSyncMode(options = {}) {
+  const mode = options.syncMode ?? (options.fast === true ? "fast" : "full");
+  if (!new Set(["full", "fast"]).has(mode)) {
+    throw new CoreError("INVALID_INPUT", "syncMode must be full or fast.");
+  }
+  if (options.fast !== undefined && typeof options.fast !== "boolean") {
+    throw new CoreError("INVALID_INPUT", "fast must be boolean when provided.");
+  }
+  if (options.fast !== undefined && options.syncMode !== undefined
+      && options.fast !== (mode === "fast")) {
+    throw new CoreError("INVALID_INPUT", "fast and syncMode describe conflicting modes.");
+  }
+  return mode;
+}
+
 async function preparePlanContext(options, operation, { backupDir = null } = {}) {
   const codexHome = options.storage?.codexHome ?? normalizeCodexHome(options.codexHome);
   if (operationCoordinator.isActive(codexHome, options.platform)) {
@@ -1705,6 +1752,7 @@ async function preparePlanContext(options, operation, { backupDir = null } = {})
     configText,
     profileId: profile.id,
     profileRevision: profile.suppliedRevision,
+    rolloutScanMode: options.rolloutScanMode ?? "full",
     platform: options.platform
   });
   // Capture the executable revision after all read-only status queries have
@@ -1716,6 +1764,7 @@ async function preparePlanContext(options, operation, { backupDir = null } = {})
     configText,
     storage,
     backupDir,
+    rolloutRevisionMode: options.rolloutScanMode === "metadata" ? "metadata" : "content",
     platform: options.platform
   });
   operationCoordinator.cacheStatus(codexHome, status, options.platform);
@@ -1723,6 +1772,8 @@ async function preparePlanContext(options, operation, { backupDir = null } = {})
 }
 
 async function issueSyncLikePlan(operation, options, switchIntent = null) {
+  const syncMode = normalizeSyncMode(options);
+  const fast = syncMode === "fast";
   const keepCount = options.keepCount ?? DEFAULT_BACKUP_RETENTION_COUNT;
   if (!Number.isInteger(keepCount) || keepCount < 1) {
     throw new CoreError(
@@ -1730,7 +1781,10 @@ async function issueSyncLikePlan(operation, options, switchIntent = null) {
       `Invalid automatic keep count: ${keepCount}. Expected an integer greater than or equal to 1.`
     );
   }
-  const context = await preparePlanContext(options, operation);
+  const context = await preparePlanContext({
+    ...options,
+    rolloutScanMode: fast ? "metadata" : "full"
+  }, operation);
   if (!context.storage.stateDbLocation && isConfiguredSqliteHome(context.storage)) {
     throw missingConfiguredStateDbError(context.storage);
   }
@@ -1744,9 +1798,16 @@ async function issueSyncLikePlan(operation, options, switchIntent = null) {
       && (typeof targetModel !== "string" || !targetModel)) {
     throw new CoreError("INVALID_INPUT", "The target model must be a non-empty string or null.");
   }
+  if (fast && targetModel !== null) {
+    throw new CoreError(
+      "INVALID_INPUT",
+      "Fast mode preserves historical models and cannot include a model rewrite."
+    );
+  }
   const scan = await collectSessionChanges(context.codexHome, targetProvider, {
     skipLockedReads: true,
-    targetModel
+    targetModel,
+    fast
   });
   const { lockedChanges } = await splitLockedSessionChanges(scan.changes);
   const lockedCount = new Set([
@@ -1757,12 +1818,18 @@ async function issueSyncLikePlan(operation, options, switchIntent = null) {
   if (!context.status.projectThreadVisibilityAvailable) {
     warnings.push("Project visibility diagnostics are unavailable; the write operation will still validate and protect the global state with backup-first recovery.");
   }
-  const encryptedWarning = buildEncryptedContentWarning(scan.encryptedContentCounts, targetProvider);
+  const encryptedWarning = fast
+    ? "Fast mode checks rollout metadata only; historical models, user-event flags and encrypted content are not inspected."
+    : buildEncryptedContentWarning(scan.encryptedContentCounts, targetProvider);
   if (encryptedWarning) warnings.push(encryptedWarning);
   if (lockedCount > 0) {
     warnings.push(`${lockedCount} rollout file(s) are currently locked and may produce a partial result.`);
   }
   if (switchIntent?.modelSync.warning) warnings.push(switchIntent.modelSync.warning);
+
+  const inPlaceEligibleSessionFiles = scan.changes
+    .filter((change) => Boolean(change.inPlaceMutation)).length;
+  const rewriteRequiredSessionFiles = scan.changes.length - inPlaceEligibleSessionFiles;
 
   const summary = {
     profile: { id: context.profile.id, revision: context.profile.revision },
@@ -1774,6 +1841,15 @@ async function issueSyncLikePlan(operation, options, switchIntent = null) {
       provider: targetProvider,
       model: targetModel,
       ...(switchIntent ? { modelMode: switchIntent.modelMode } : {})
+    },
+    providerSync: {
+      mode: syncMode,
+      rolloutScanScope: fast ? "metadata" : "full",
+      providerWritePolicy: fast ? "require-in-place" : "prefer-in-place",
+      historicalModelSync: fast ? "preserved" : "enabled",
+      unchecked: fast ? ["historyModels", "userEventFlags", "encryptedContent"] : [],
+      inPlaceEligibleSessionFiles,
+      rewriteRequiredSessionFiles
     },
     impact: {
       rolloutFilesToChange: scan.changes.length,
@@ -1796,6 +1872,7 @@ async function issueSyncLikePlan(operation, options, switchIntent = null) {
         model: options.model,
         keepRootModel: Boolean(options.keepRootModel),
         keepCount,
+        fast,
         onProgress: options.onProgress,
         platform: options.platform,
         faultInjector: options.faultInjector,
@@ -1806,6 +1883,7 @@ async function issueSyncLikePlan(operation, options, switchIntent = null) {
         ...(context.sqliteHome ? { sqliteHome: context.sqliteHome } : {}),
         provider: targetProvider,
         keepCount,
+        fast,
         sqliteBusyTimeoutMs: options.sqliteBusyTimeoutMs,
         onProgress: options.onProgress,
         model: targetModel,
@@ -1821,13 +1899,15 @@ async function issueSyncLikePlan(operation, options, switchIntent = null) {
     expectedPlanState: {
       profile: context.profile,
       profileResolver: options.profileResolver,
-      revisions: context.revisions
+      revisions: context.revisions,
+      rolloutRevisionMode: fast ? "metadata" : "content"
     },
     statusOptions: {
       codexHome: context.codexHome,
       ...(context.sqliteHome ? { sqliteHome: context.sqliteHome } : {}),
       profileId: context.profile.id,
       profileRevision: context.profile.suppliedRevision,
+      ...(fast ? { rolloutScanMode: "metadata" } : {}),
       platform: options.platform
     }
   });
@@ -1851,14 +1931,22 @@ export async function prepareSwitch(options = {}) {
   if (options.expectedConfigText !== undefined && configText !== options.expectedConfigText) {
     throw new CoreError("PLAN_STALE", "config.toml changed after the operation was confirmed. Refresh and retry.");
   }
-  const intent = buildSwitchIntent(configText, options.provider, options.model, Boolean(options.keepRootModel));
-  return issueSyncLikePlan("switch", options, {
+  const syncMode = normalizeSyncMode(options);
+  if (syncMode === "fast" && options.model !== undefined && options.model !== null) {
+    throw new CoreError(
+      "INVALID_INPUT",
+      "Fast switch preserves root and historical models; an explicit model cannot be combined with fast mode."
+    );
+  }
+  const keepRootModel = syncMode === "fast" ? true : Boolean(options.keepRootModel);
+  const intent = buildSwitchIntent(configText, options.provider, options.model, keepRootModel);
+  return issueSyncLikePlan("switch", { ...options, syncMode, keepRootModel }, {
     provider: options.provider,
-    modelForThreads: intent.modelForThreads,
+    modelForThreads: syncMode === "fast" ? null : intent.modelForThreads,
     modelSync: intent.modelSync,
     modelMode: options.model !== undefined && options.model !== null
       ? "explicit"
-      : (options.keepRootModel ? "keep-root-model" : "provider-default")
+      : (keepRootModel ? "keep-root-model" : "provider-default")
   });
 }
 
@@ -2000,6 +2088,7 @@ function operationResult(operation, operationId, result, sourceBackup = null) {
           path: backupDir
         }
       : null,
+    ...(result?.providerSync ? { providerSync: result.providerSync } : {}),
     warnings: operationWarnings(result),
     result
   };

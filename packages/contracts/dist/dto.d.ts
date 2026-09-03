@@ -12,8 +12,11 @@ export interface ProfileSelector {
 export interface GetStatusInput {
     profile: ProfileSelector;
 }
+export type ProviderSyncMode = "full" | "fast";
+export type ProviderSyncUnchecked = "historyModels" | "userEventFlags" | "encryptedContent";
 export interface PrepareSyncInput extends GetStatusInput {
     keepCount?: number;
+    syncMode?: ProviderSyncMode;
 }
 export type SwitchModelMode = "provider-default" | "keep-root-model" | "explicit";
 export interface PrepareSwitchInput extends GetStatusInput {
@@ -21,6 +24,7 @@ export interface PrepareSwitchInput extends GetStatusInput {
     modelMode: SwitchModelMode;
     model?: string;
     keepCount?: number;
+    syncMode?: ProviderSyncMode;
 }
 export interface ApplyPlanInput {
     schemaVersion: ContractSchemaVersion;
@@ -108,6 +112,15 @@ export interface PlanSummary {
     backupRevision?: string;
     target: JsonObject;
     impact: JsonObject;
+    providerSync?: {
+        mode: ProviderSyncMode;
+        rolloutScanScope: "full" | "metadata";
+        providerWritePolicy: "prefer-in-place" | "require-in-place";
+        historicalModelSync: "enabled" | "preserved";
+        unchecked: ProviderSyncUnchecked[];
+        inPlaceEligibleSessionFiles: number;
+        rewriteRequiredSessionFiles: number;
+    };
     warnings: string[];
     requiresConfirmation: boolean;
 }
@@ -128,6 +141,13 @@ export interface OperationResult<Result extends JsonValue = JsonObject> {
     backup: {
         backupId: string;
     } | null;
+    providerSync?: {
+        mode: ProviderSyncMode;
+        rolloutScanScope: "full" | "metadata";
+        inPlaceSessionFiles: number;
+        rewrittenSessionFiles: number;
+        unchecked: ProviderSyncUnchecked[];
+    };
     warnings: string[];
     result: Result;
 }

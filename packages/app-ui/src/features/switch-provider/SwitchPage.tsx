@@ -24,13 +24,21 @@ export function SwitchPage({ disabled, providers, prepare }: {
       provider: providers[0] ?? "openai",
       modelMode: "provider-default",
       model: "",
-      keepCount: 5
+      keepCount: 5,
+      syncMode: "full"
     }
   });
   const modelMode = form.watch("modelMode");
+  const syncMode = form.watch("syncMode");
   useEffect(() => {
     if (modelMode !== "explicit") form.setValue("model", "");
   }, [form, modelMode]);
+  useEffect(() => {
+    if (syncMode === "fast") {
+      form.setValue("modelMode", "keep-root-model", { shouldValidate: true });
+      form.setValue("model", "", { shouldValidate: true });
+    }
+  }, [form, syncMode]);
   return (
     <Fragment>
       <PageHeading title={t("switchPage.title")} subtitle={t("switchPage.subtitle")} />
@@ -40,8 +48,15 @@ export function SwitchPage({ disabled, providers, prepare }: {
             <Input list="configured-providers" {...form.register("provider")} />
           </Field>
           <datalist id="configured-providers">{providers.map((provider) => <option key={provider} value={provider} />)}</datalist>
-          <Field label={t("switchPage.modelMode")}>
-            <select className="min-h-10 rounded-lg border border-[var(--border)] bg-[var(--input)] px-3" {...form.register("modelMode")}>
+          <Field label={t("sync.mode")}>
+            <select className="min-h-10 rounded-lg border border-[var(--border)] bg-[var(--input)] px-3" {...form.register("syncMode")}>
+              <option value="full">{t("sync.fullMode")}</option>
+              <option value="fast">{t("sync.fastMode")}</option>
+            </select>
+          </Field>
+          {syncMode === "fast" ? <p className="rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] p-3 text-sm text-[var(--muted)]">{t("sync.fastHint")}</p> : null}
+          <Field error={form.formState.errors.modelMode ? t("validation.model") : undefined} label={t("switchPage.modelMode")}>
+            <select className="min-h-10 rounded-lg border border-[var(--border)] bg-[var(--input)] px-3 disabled:cursor-not-allowed disabled:opacity-60" disabled={syncMode === "fast"} {...form.register("modelMode")}>
               <option value="provider-default">{t("switchPage.providerDefault")}</option>
               <option value="keep-root-model">{t("switchPage.keepModel")}</option>
               <option value="explicit">{t("switchPage.explicitModel")}</option>

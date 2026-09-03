@@ -286,6 +286,60 @@ test("hidden Electron test build forces the native fallback through Status, Sync
   }
 });
 
+test("hidden Electron fast mode plans and applies an in-place Provider-only switch", async () => {
+  test.setTimeout(90_000);
+  const fixture = await createDesktopSyncSwitchFixture();
+  let electronApp;
+  try {
+    electronApp = await launchDesktop(fixture);
+    const page = await electronApp.firstWindow();
+    await expect(page.getByText("openai", { exact: true }).first()).toBeVisible();
+
+    const fullPrepare = page.getByRole("button", { name: "Sync" });
+    await fullPrepare.click();
+    const prepareSync = page.getByRole("button", { name: "Prepare sync" });
+    await prepareSync.click();
+    await confirmPlan(page, prepareSync);
+
+    const beforeState = await fixture.inspect();
+    const beforeBytes = await fs.readFile(fixture.rolloutPath);
+    const beforeStat = await fs.stat(fixture.rolloutPath, { bigint: true });
+    const bodyOffset = beforeBytes.indexOf(10) + 1;
+
+    await page.getByRole("button", { name: "Switch Provider" }).click();
+    await page.getByLabel("Provider ID").fill("prov_a");
+    await page.getByLabel("Sync mode").selectOption("fast");
+    await expect(page.getByLabel("Model handling")).toHaveValue("keep-root-model");
+    await expect(page.getByLabel("Model handling")).toBeDisabled();
+    await page.getByRole("button", { name: "Prepare switch" }).click();
+
+    const plan = page.getByRole("dialog", { name: "Review plan" });
+    await expect(plan.getByText("Provider sync strategy")).toBeVisible();
+    await expect(plan.getByText("Fast Provider-only sync")).toBeVisible();
+    await expect(plan.getByText("Require in-place")).toBeVisible();
+    await plan.getByRole("button", { name: "Confirm and apply" }).click();
+    await expect(page.getByText("Operation completed.", { exact: true })).toBeVisible();
+
+    const result = page.getByRole("dialog", { name: "Operation result" });
+    await expect(result.getByText("Fast Provider-only sync")).toBeVisible();
+    await expect(result.getByText("In-place rollout updates")).toBeVisible();
+    const afterState = await fixture.inspect();
+    const afterBytes = await fs.readFile(fixture.rolloutPath);
+    const afterStat = await fs.stat(fixture.rolloutPath, { bigint: true });
+    expect(afterState.configText).toMatch(/^model_provider = "prov_a"/m);
+    expect(afterState.rollout.model_provider).toBe("prov_a");
+    expect(afterState.turnContext.model).toBe(beforeState.turnContext.model);
+    expect(afterState.sqlite.model).toBe(beforeState.sqlite.model);
+    expect(afterState.sqlite.provider).toBe("prov_a");
+    expect(afterStat.size).toBe(beforeStat.size);
+    expect(afterStat.ino).toBe(beforeStat.ino);
+    expect(afterBytes.subarray(bodyOffset)).toEqual(beforeBytes.subarray(bodyOffset));
+  } finally {
+    await electronApp?.close();
+    await fixture.close();
+  }
+});
+
 test("Electron rejects a stale confirmed plan before backup or mutation", async () => {
   const fixture = await createDesktopSyncSwitchFixture();
   let electronApp;

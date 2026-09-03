@@ -8,6 +8,9 @@
 
 - 有限 CLI 命令新增 opt-in `--json`，stdout 固定为一个 schema v1 终态对象；帮助、输入失败、成功、partial、recovery、busy 和取消共享同一顶层结构。
 - JSON Mode 固化 `0/1/2/3/4/5/130` 退出码矩阵，并使用 Canonical Core Error Code。
+- 普通同步在 Provider JSON 字面量等长且无需模型重写时自动原地更新，不满足条件时继续使用完整文件重写。
+- 统一 Core 新增 `syncMode: "fast"`；CLI 以 `--fast` 映射，共享 Web/Electron 界面可直接选择。快速模式只扫描 rollout 首行、保留模型，并在不能原地更新时于写入前返回 `FAST_MODE_UNSUPPORTED`。
+- 完整模式把加密标记、用户事件与历史模型采集合并为一次正文流扫描；结果区分原地更新与完整重写数量。
 
 ### 兼容性
 

@@ -3,20 +3,25 @@ import { z } from "zod";
 export const keepCountSchema = z.number().int().min(1).max(1000);
 
 export const syncSchema = z.object({
-  keepCount: keepCountSchema
+  keepCount: keepCountSchema,
+  syncMode: z.enum(["full", "fast"])
 });
 
 export const switchSchema = z.object({
   provider: z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9._-]+$/),
   modelMode: z.enum(["provider-default", "keep-root-model", "explicit"]),
   model: z.string().trim().max(500).optional(),
-  keepCount: keepCountSchema
+  keepCount: keepCountSchema,
+  syncMode: z.enum(["full", "fast"])
 }).superRefine((value, context) => {
   if (value.modelMode === "explicit" && !value.model) {
     context.addIssue({ code: "custom", path: ["model"], message: "model-required" });
   }
   if (value.modelMode !== "explicit" && value.model) {
     context.addIssue({ code: "custom", path: ["model"], message: "model-not-accepted" });
+  }
+  if (value.syncMode === "fast" && value.modelMode !== "keep-root-model") {
+    context.addIssue({ code: "custom", path: ["modelMode"], message: "fast-keeps-model" });
   }
 });
 

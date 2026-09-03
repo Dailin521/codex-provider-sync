@@ -13,6 +13,7 @@ const STALE_CODES = new Set([
   "PLAN_EXPIRED",
   "PLAN_STALE",
   "STALE_STATE",
+  "FAST_MODE_UNSUPPORTED",
   "PROFILE_CHANGED",
   "STORAGE_CHANGED"
 ]);
@@ -41,6 +42,12 @@ const SAFE_REASONS = new Set([
 ]);
 const SQLITE_HOME_SOURCES = new Set(["cli", "config", "env", "default"]);
 const OPERATION_KINDS = new Set(["sync", "switch", "restore", "prune-backups", "watch"]);
+const FAST_MODE_REASONS = new Set([
+  "session-meta-invalid",
+  "session-meta-too-large",
+  "provider-location-ambiguous",
+  "provider-length-mismatch"
+]);
 const PENDING_STATES = new Set([
   "prepared",
   "applying",
@@ -75,6 +82,7 @@ const CLI_ERROR_MESSAGES = Object.freeze({
   PLAN_STALE: "The prepared operation is stale. Prepare it again.",
   PLAN_EXPIRED: "The prepared operation expired. Prepare it again.",
   STALE_STATE: "The protected state changed. Prepare the operation again.",
+  FAST_MODE_UNSUPPORTED: "Fast mode cannot be used for this operation. Use full sync.",
   CODEX_HOME_NOT_FOUND: "The selected Codex Home was not found.",
   STATE_DB_NOT_FOUND: "The selected state database was not found.",
   SQLITE_UNSUPPORTED_PATH: "The selected SQLite path is not supported by this runtime.",
@@ -243,6 +251,8 @@ function sanitizeSyncResult(value) {
   for (const key of [
     "backupDurationMs",
     "changedSessionFiles",
+    "inPlaceSessionFiles",
+    "rewrittenSessionFiles",
     "sqliteRowsUpdated",
     "sqliteProviderRowsUpdated",
     "sqliteUserEventRowsUpdated",
@@ -251,6 +261,13 @@ function sanitizeSyncResult(value) {
     "savedWorkspaceRootCount"
   ]) {
     put(result, key, safeNumber(value[key], { integer: true, minimum: 0 }));
+  }
+  put(result, "scanScope", new Set(["metadata", "full"]).has(value.scanScope)
+    ? value.scanScope
+    : undefined);
+  if (Array.isArray(value.unchecked)) {
+    const allowedUnchecked = new Set(["historyModels", "userEventFlags", "encryptedContent"]);
+    result.unchecked = value.unchecked.filter((entry) => allowedUnchecked.has(entry));
   }
   put(result, "sqlitePresent", safeBoolean(value.sqlitePresent));
   put(result, "skippedLockedRolloutFiles", sanitizeStringArray(value.skippedLockedRolloutFiles));
@@ -540,6 +557,9 @@ function normalizePublicDetails(details) {
     if (code !== undefined && code <= 0xffff) normalized[key] = code;
   }
   if (OPERATION_KINDS.has(details.operationKind)) normalized.operationKind = details.operationKind;
+  if (FAST_MODE_REASONS.has(details.fastModeReason)) {
+    normalized.fastModeReason = details.fastModeReason;
+  }
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 

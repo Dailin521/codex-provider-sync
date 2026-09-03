@@ -11,6 +11,13 @@ function displayPlanValue(key: string, value: unknown, t: (key: string, options?
   if (key === "modelMode" && typeof value === "string") {
     return t(`plan.modelModes.${value}`, { defaultValue: value });
   }
+  if (["mode", "rolloutScanScope", "providerWritePolicy", "historicalModelSync"].includes(key)
+      && typeof value === "string") {
+    return t(`plan.syncModes.${value}`, { defaultValue: value });
+  }
+  if (key === "unchecked" && Array.isArray(value)) {
+    return value.length > 0 ? value.join(", ") : t("common.none");
+  }
   if (Array.isArray(value)) return t("plan.items", { count: value.length });
   return String(value);
 }
@@ -60,6 +67,15 @@ export function PlanReview({
     ["configFilesToChange", t("plan.fields.configFiles")],
     ["lockedRolloutFiles", t("plan.fields.lockedRollouts")]
   ].filter(([key]) => key in plan.impact) : [];
+  const providerSyncRows = plan?.providerSync ? [
+    ["mode", t("plan.fields.syncMode")],
+    ["rolloutScanScope", t("plan.fields.rolloutScanScope")],
+    ["providerWritePolicy", t("plan.fields.providerWritePolicy")],
+    ["historicalModelSync", t("plan.fields.historicalModelSync")],
+    ["inPlaceEligibleSessionFiles", t("plan.fields.inPlaceEligible")],
+    ["rewriteRequiredSessionFiles", t("plan.fields.rewriteRequired")],
+    ["unchecked", t("plan.fields.unchecked")]
+  ] : [];
   return (
     <Dialog
       closeDisabled={applying}
@@ -81,6 +97,7 @@ export function PlanReview({
             <h3 className="mb-2 text-sm font-semibold">{t("plan.impact")}</h3>
             <dl>{impactRows.map(([key, label]) => <KeyValue key={key} label={label} value={displayPlanValue(key, plan.impact[key], t)} />)}</dl>
           </Card>
+          {plan.providerSync ? <Card><h3 className="mb-2 text-sm font-semibold">{t("plan.providerSync")}</h3><dl>{providerSyncRows.map(([key, label]) => <KeyValue key={key} label={label} value={displayPlanValue(key, plan.providerSync?.[key as keyof typeof plan.providerSync], t)} />)}</dl></Card> : null}
           {plan.impact.backupExpected === true ? <div className="rounded-[var(--radius-control)] border border-[var(--success)] bg-[var(--success-soft)] p-4 text-sm font-medium text-[var(--success)]">{t("plan.backupExpected")}</div> : null}
           {plan.warnings.length ? <div className="rounded-lg border border-[var(--warning)] bg-[var(--warning-soft)] p-4"><h3 className="font-semibold">{t("common.warnings")}</h3><ul className="mt-2 list-disc space-y-1 pl-5 text-sm">{plan.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul></div> : null}
           {applying ? <Card aria-live="polite" role="status"><h3 className="text-sm font-semibold">{t("plan.progress")}</h3><div className="mt-2 font-mono text-xs text-[var(--muted)]">{operationId ?? t("plan.starting")}</div>{progress ? <div className="mt-3 grid gap-2"><div className="text-sm">{t(`plan.stages.${progress.stage}`, { defaultValue: progress.stage })} · {t(`plan.statuses.${progress.status}`, { defaultValue: progress.status })}{progress.count === undefined ? "" : ` · ${progress.count}`}</div>{progress.progress === undefined ? null : <progress aria-label={t("plan.progress")} className="w-full" max={1} value={progress.progress} />}</div> : null}{cancelling ? <p className="mt-3 text-sm text-[var(--warning)]">{t("plan.cancelPending")}</p> : null}</Card> : null}
@@ -88,7 +105,7 @@ export function PlanReview({
           <p className="text-sm text-[var(--muted)]">{t("plan.exactApply")}</p>
           <details className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--surface)] p-3 text-sm">
             <summary className="cursor-pointer font-medium">{t("plan.technicalDetails")}</summary>
-            <pre className="mt-3 max-h-52 overflow-auto whitespace-pre-wrap break-words text-xs text-[var(--muted)]">{JSON.stringify({ target: plan.target, impact: plan.impact }, null, 2)}</pre>
+            <pre className="mt-3 max-h-52 overflow-auto whitespace-pre-wrap break-words text-xs text-[var(--muted)]">{JSON.stringify({ target: plan.target, impact: plan.impact, providerSync: plan.providerSync }, null, 2)}</pre>
           </details>
         </div>
       ) : null}

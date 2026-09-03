@@ -342,7 +342,17 @@ test("host operation controls stay off the method surface and project pathless p
     });
     const plan = await facade.prepareSync({
       profile: { profileId: "default", profileRevision: "r1" },
-      keepCount: 1
+      keepCount: 1,
+      syncMode: "fast"
+    });
+    assert.deepEqual(plan.providerSync, {
+      mode: "fast",
+      rolloutScanScope: "metadata",
+      providerWritePolicy: "require-in-place",
+      historicalModelSync: "preserved",
+      unchecked: ["historyModels", "userEventFlags", "encryptedContent"],
+      inPlaceEligibleSessionFiles: 1,
+      rewriteRequiredSessionFiles: 0
     });
     const started = [];
     const progress = [];
@@ -357,6 +367,13 @@ test("host operation controls stay off the method surface and project pathless p
       }
     );
     assert.equal(result.outcome, "completed");
+    assert.deepEqual(result.providerSync, {
+      mode: "fast",
+      rolloutScanScope: "metadata",
+      inPlaceSessionFiles: 1,
+      rewrittenSessionFiles: 0,
+      unchecked: ["historyModels", "userEventFlags", "encryptedContent"]
+    });
     assert.equal(started.length, 1);
     assert.equal(started[0].operationId, result.operationId);
     assert.ok(progress.length > 0);

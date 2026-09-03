@@ -60,6 +60,9 @@ export type CoreOperationEventEnvelope = CoreOperationStartedEnvelope | CoreProg
 const METHOD_SET = new Set<string>(CORE_METHODS);
 const ERROR_CODE_SET = new Set<string>(CORE_ERROR_CODES);
 const SEVERITY_SET = new Set<string>(["info", "warning", "error", "fatal"]);
+const PROVIDER_SYNC_MODES = new Set<string>(["full", "fast"]);
+const PROVIDER_SYNC_UNCHECKED = ["historyModels", "userEventFlags", "encryptedContent"] as const;
+const PROVIDER_SYNC_UNCHECKED_SET = new Set<string>(PROVIDER_SYNC_UNCHECKED);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -146,18 +149,21 @@ export function assertCoreMethodInput<M extends CoreMethodName>(
       assertProfileInput(value, []);
       return;
     case "prepareSync":
-      assertProfileInput(value, ["keepCount"]);
+      assertProfileInput(value, ["keepCount", "syncMode"]);
       if (value.keepCount !== undefined
-          && (!Number.isSafeInteger(value.keepCount) || Number(value.keepCount) < 1)) {
+          && (!Number.isSafeInteger(value.keepCount) || Number(value.keepCount) < 1)
+          || (value.syncMode !== undefined && !PROVIDER_SYNC_MODES.has(String(value.syncMode)))) {
         throw new ContractValidationError("INVALID_INPUT", "Invalid Sync retention count.");
       }
       return;
     case "prepareSwitch":
-      assertProfileInput(value, ["provider", "modelMode", "model", "keepCount"]);
+      assertProfileInput(value, ["provider", "modelMode", "model", "keepCount", "syncMode"]);
       if (!isNonEmptyString(value.provider)
           || !["provider-default", "keep-root-model", "explicit"].includes(String(value.modelMode))
           || (value.modelMode === "explicit" && !isNonEmptyString(value.model))
           || (value.modelMode !== "explicit" && value.model !== undefined)
+          || (value.syncMode !== undefined && !PROVIDER_SYNC_MODES.has(String(value.syncMode)))
+          || (value.syncMode === "fast" && value.modelMode !== "keep-root-model")
           || (value.keepCount !== undefined
             && (!Number.isSafeInteger(value.keepCount) || Number(value.keepCount) < 1))) {
         throw new ContractValidationError("INVALID_INPUT", "Invalid Switch Provider input.");
@@ -325,6 +331,63 @@ function requireStringArray(value: unknown, label: string): asserts value is str
 
 function isNonNegativeInteger(value: unknown): boolean {
   return Number.isSafeInteger(value) && Number(value) >= 0;
+}
+
+function hasCanonicalUnchecked(value: unknown, fast: boolean): boolean {
+  if (!Array.isArray(value)
+      || value.some((entry) => typeof entry !== "string" || !PROVIDER_SYNC_UNCHECKED_SET.has(entry))) {
+    return false;
+  }
+  const actual = [...new Set(value)].sort();
+  const expected = fast ? [...PROVIDER_SYNC_UNCHECKED].sort() : [];
+  return actual.length === expected.length
+    && actual.every((entry, index) => entry === expected[index]);
+}
+
+function assertProviderSyncPlanDetails(value: unknown): void {
+  const details = isRecord(value) ? value : null;
+  const fast = details?.mode === "fast";
+  if (!details
+      || !exactObjectKeys(details, [
+        "mode",
+        "rolloutScanScope",
+        "providerWritePolicy",
+        "historicalModelSync",
+        "unchecked",
+        "inPlaceEligibleSessionFiles",
+        "rewriteRequiredSessionFiles"
+      ])
+      || !PROVIDER_SYNC_MODES.has(String(details.mode))
+      || details.rolloutScanScope !== (fast ? "metadata" : "full")
+      || details.providerWritePolicy !== (fast ? "require-in-place" : "prefer-in-place")
+      || details.historicalModelSync !== (fast ? "preserved" : "enabled")
+      || !hasCanonicalUnchecked(details.unchecked, fast)
+      || !isNonNegativeInteger(details.inPlaceEligibleSessionFiles)
+      || !isNonNegativeInteger(details.rewriteRequiredSessionFiles)
+      || (fast && details.rewriteRequiredSessionFiles !== 0)) {
+    throw new ContractValidationError("INVALID_INPUT", "Invalid Provider Sync plan details.");
+  }
+}
+
+function assertProviderSyncResultDetails(value: unknown): void {
+  const details = isRecord(value) ? value : null;
+  const fast = details?.mode === "fast";
+  if (!details
+      || !exactObjectKeys(details, [
+        "mode",
+        "rolloutScanScope",
+        "inPlaceSessionFiles",
+        "rewrittenSessionFiles",
+        "unchecked"
+      ])
+      || !PROVIDER_SYNC_MODES.has(String(details.mode))
+      || details.rolloutScanScope !== (fast ? "metadata" : "full")
+      || !hasCanonicalUnchecked(details.unchecked, fast)
+      || !isNonNegativeInteger(details.inPlaceSessionFiles)
+      || !isNonNegativeInteger(details.rewrittenSessionFiles)
+      || (fast && details.rewrittenSessionFiles !== 0)) {
+    throw new ContractValidationError("INVALID_INPUT", "Invalid Provider Sync result details.");
+  }
 }
 
 function isNullableString(value: unknown): boolean {
@@ -580,11 +643,13 @@ export function assertCoreMethodOutput<M extends CoreMethodName>(
           || !isJsonValue(plan.target)
           || !isRecord(plan.impact)
           || !isJsonValue(plan.impact)
+          || (plan.providerSync !== undefined && !isRecord(plan.providerSync))
           || !Array.isArray(plan.warnings)
           || plan.warnings.some((entry) => typeof entry !== "string")
           || typeof plan.requiresConfirmation !== "boolean") {
         throw new ContractValidationError("INVALID_INPUT", "Invalid PlanSummary.");
       }
+      if (plan.providerSync !== undefined) assertProviderSyncPlanDetails(plan.providerSync);
       return;
     }
     case "applySync":
@@ -595,9 +660,11 @@ export function assertCoreMethodOutput<M extends CoreMethodName>(
           || !["sync", "switch", "restore"].includes(String(result.operation))
           || !["completed", "partial", "failed_rolled_back", "recovery_required", "cancelled", "stale"].includes(String(result.outcome))
           || !(result.backup === null
-            || (isRecord(result.backup) && isNonEmptyString(result.backup.backupId)))) {
+            || (isRecord(result.backup) && isNonEmptyString(result.backup.backupId)))
+          || (result.providerSync !== undefined && !isRecord(result.providerSync))) {
         throw new ContractValidationError("INVALID_INPUT", "Invalid OperationResult.");
       }
+      if (result.providerSync !== undefined) assertProviderSyncResultDetails(result.providerSync);
       requireStringArray(result.warnings, "OperationResult warnings");
       if (!("result" in result) || !isJsonValue(result.result)) {
         throw new ContractValidationError("INVALID_INPUT", "OperationResult result is required.");

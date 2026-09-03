@@ -78,6 +78,10 @@ export const resources = {
       sync: {
         title: "Sync current Provider",
         subtitle: "Use the selected profile's root model_provider and align rollout and SQLite metadata.",
+        mode: "Sync mode",
+        fullMode: "Complete sync (recommended)",
+        fastMode: "Fast Provider-only sync",
+        fastHint: "Reads rollout metadata only and preserves models. Every Provider change must support equal-length in-place replacement.",
         keep: "Backups to keep",
         prepare: "Prepare sync"
       },
@@ -230,6 +234,7 @@ export const resources = {
       },
       plan: {
         title: "Review plan",
+        providerSync: "Provider sync strategy",
         operations: {
           sync: "Sync Provider metadata",
           switch: "Switch Provider",
@@ -241,7 +246,23 @@ export const resources = {
           "keep-root-model": "Keep root model",
           explicit: "Use explicit model"
         },
+        syncModes: {
+          full: "Complete sync",
+          fast: "Fast Provider-only sync",
+          metadata: "Metadata only",
+          "prefer-in-place": "Prefer in-place; rewrite when needed",
+          "require-in-place": "Require in-place",
+          enabled: "Enabled",
+          preserved: "Preserved"
+        },
         fields: {
+          syncMode: "Mode",
+          rolloutScanScope: "Rollout scan",
+          providerWritePolicy: "Provider write policy",
+          historicalModelSync: "Historical model sync",
+          unchecked: "Checks intentionally skipped",
+          inPlaceEligible: "In-place eligible rollouts",
+          rewriteRequired: "Rollouts requiring rewrite",
           modelMode: "Model handling",
           restoreConfig: "Restore config.toml",
           restoreDatabase: "Restore State DB",
@@ -295,6 +316,8 @@ export const resources = {
         skippedRollouts: "Skipped locked rollout files",
         resolveBeforeClose: "Resolve the pending recovery before closing this result.",
         fields: {
+          inPlaceSessionFiles: "In-place rollout updates",
+          rewrittenSessionFiles: "Fully rewritten rollouts",
           targetProvider: "Target Provider",
           targetModel: "Target model",
           modelSource: "Model source",
@@ -425,6 +448,10 @@ export const resources = {
       sync: {
         title: "同步当前 Provider",
         subtitle: "读取当前配置的根 model_provider，并对齐 rollout 与 SQLite 元数据。",
+        mode: "同步模式",
+        fullMode: "完整同步（推荐）",
+        fastMode: "快速仅 Provider 同步",
+        fastHint: "只读取 rollout 首行元数据并保留模型；所有 Provider 变更都必须满足等长原地替换。",
         keep: "保留备份数量",
         prepare: "生成同步计划"
       },
@@ -577,6 +604,7 @@ export const resources = {
       },
       plan: {
         title: "审核计划",
+        providerSync: "Provider 同步策略",
         operations: {
           sync: "同步 Provider 元数据",
           switch: "切换 Provider",
@@ -588,7 +616,23 @@ export const resources = {
           "keep-root-model": "保留根模型",
           explicit: "使用显式模型"
         },
+        syncModes: {
+          full: "完整同步",
+          fast: "快速仅 Provider 同步",
+          metadata: "只读元数据",
+          "prefer-in-place": "优先原地写，必要时完整重写",
+          "require-in-place": "必须原地写",
+          enabled: "启用",
+          preserved: "保持不变"
+        },
         fields: {
+          syncMode: "模式",
+          rolloutScanScope: "rollout 扫描范围",
+          providerWritePolicy: "Provider 写入策略",
+          historicalModelSync: "历史模型同步",
+          unchecked: "主动跳过的检查",
+          inPlaceEligible: "可原地更新的 rollout",
+          rewriteRequired: "需要完整重写的 rollout",
           modelMode: "模型处理方式",
           restoreConfig: "恢复 config.toml",
           restoreDatabase: "恢复 State DB",
@@ -642,6 +686,8 @@ export const resources = {
         skippedRollouts: "跳过的锁定 rollout 文件",
         resolveBeforeClose: "请先完成待处理的恢复，再关闭此结果。",
         fields: {
+          inPlaceSessionFiles: "原地更新的 rollout",
+          rewrittenSessionFiles: "完整重写的 rollout",
           targetProvider: "目标 Provider",
           targetModel: "目标模型",
           modelSource: "模型来源",

@@ -897,6 +897,10 @@ export function createWebUiServer({
         if (pathname === "/api/sync/prepare") {
           const profile = capturePrepareProfile(body, response);
           if (!profile) return;
+          const syncMode = body.syncMode ?? "full";
+          if (!["full", "fast"].includes(syncMode)) {
+            throw new CoreError("INVALID_INPUT", "syncMode must be full or fast.");
+          }
           const configText = await api.readConfigText(path.join(profile.codexHome, "config.toml"));
           const plan = await api.prepareSync({
             codexHome: profile.codexHome,
@@ -904,7 +908,8 @@ export function createWebUiServer({
             profile: { id: profile.id, revision: profile.revision },
             profileResolver: resolveCurrentProfile,
             provider: requireProvider(body.provider),
-            model: api.readRootModelFromConfigText(configText),
+            model: syncMode === "fast" ? null : api.readRootModelFromConfigText(configText),
+            syncMode,
             keepCount: requireKeepCount(body.keepCount),
             platform
           });
@@ -921,6 +926,10 @@ export function createWebUiServer({
           const profile = capturePrepareProfile(body, response);
           if (!profile) return;
           const modelMode = body.modelMode ?? (body.keepRootModel ? "keep-root-model" : (body.model ? "explicit" : "provider-default"));
+          const syncMode = body.syncMode ?? "full";
+          if (!["full", "fast"].includes(syncMode)) {
+            throw new CoreError("INVALID_INPUT", "syncMode must be full or fast.");
+          }
           if (!["provider-default", "keep-root-model", "explicit"].includes(modelMode)) {
             throw new CoreError("INVALID_INPUT", "modelMode must be provider-default, keep-root-model, or explicit.");
           }
@@ -930,6 +939,9 @@ export function createWebUiServer({
           if (modelMode !== "explicit" && body.model !== undefined && body.model !== null && body.model !== "") {
             throw new CoreError("INVALID_INPUT", "model is only accepted when modelMode is explicit.");
           }
+          if (syncMode === "fast" && modelMode !== "keep-root-model") {
+            throw new CoreError("INVALID_INPUT", "Fast switch requires keep-root-model.");
+          }
           const plan = await api.prepareSwitch({
             codexHome: profile.codexHome,
             ...(profile.sqliteHome ? { sqliteHome: profile.sqliteHome } : {}),
@@ -938,6 +950,7 @@ export function createWebUiServer({
             provider: requireProvider(body.provider),
             model,
             keepRootModel: modelMode === "keep-root-model",
+            syncMode,
             keepCount: requireKeepCount(body.keepCount),
             platform
           });

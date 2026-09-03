@@ -74,6 +74,51 @@ test("HttpCoreClient validates response correlation and sends one envelope", asy
   });
 });
 
+test("HttpCoreClient forwards fast Provider sync mode and validates its plan details", async () => {
+  let captured;
+  const client = new HttpCoreClient({
+    baseUrl: "http://127.0.0.1:31337/",
+    requestIdFactory: () => "http-fast-plan",
+    fetch: async (_url, init) => {
+      captured = JSON.parse(String(init.body));
+      return new Response(JSON.stringify({
+        protocolVersion: 1,
+        requestId: "http-fast-plan",
+        ok: true,
+        result: {
+          schemaVersion: 1,
+          planId: "a".repeat(32),
+          operation: "sync",
+          createdAt: "2026-09-03T00:00:00.000Z",
+          expiresAt: "2026-09-03T00:10:00.000Z",
+          profile: { id: "default", revision: "r1" },
+          storageRevision: "storage-r1",
+          configRevision: "config-r1",
+          rolloutRevision: "rollout-r1",
+          stateDbRevision: "state-r1",
+          target: { provider: "prov_a", model: null },
+          impact: { rolloutFilesToChange: 1, sqliteRowsToChange: 1, backupExpected: true },
+          warnings: [],
+          requiresConfirmation: true,
+          providerSync: {
+            mode: "fast",
+            rolloutScanScope: "metadata",
+            providerWritePolicy: "require-in-place",
+            historicalModelSync: "preserved",
+            unchecked: ["historyModels", "userEventFlags", "encryptedContent"],
+            inPlaceEligibleSessionFiles: 1,
+            rewriteRequiredSessionFiles: 0
+          }
+        }
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+  });
+
+  const plan = await client.prepareSync({ ...profile, keepCount: 5, syncMode: "fast" });
+  assert.equal(plan.providerSync?.mode, "fast");
+  assert.deepEqual(captured.payload, { ...profile, keepCount: 5, syncMode: "fast" });
+});
+
 test("HttpCoreClient streams lifecycle events and cancels an apply by request correlation", async () => {
   const operationId = "11111111-1111-4111-8111-111111111111";
   const cancellations = [];

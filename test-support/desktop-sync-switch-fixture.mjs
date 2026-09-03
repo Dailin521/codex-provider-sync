@@ -204,6 +204,9 @@ export async function createDesktopSyncSwitchFixture() {
       "[model_providers.relay]",
       'model = "relay-model"',
       'base_url = "https://relay.invalid"',
+      "",
+      "[model_providers.prov_a]",
+      'base_url = "https://prov-a.invalid"',
       ""
     ].join("\n"),
     "utf8"

@@ -68,6 +68,31 @@ test("product inputs cannot carry paths or arbitrary apply/watch fields", () => 
   }));
 });
 
+test("Provider sync mode is shared by Sync and Switch contracts", () => {
+  const profile = { profileId: "default", profileRevision: "r1" };
+  assert.doesNotThrow(() => assertCoreMethodInput("prepareSync", {
+    profile,
+    keepCount: 5,
+    syncMode: "fast"
+  }));
+  assert.doesNotThrow(() => assertCoreMethodInput("prepareSwitch", {
+    profile,
+    provider: "prov_a",
+    modelMode: "keep-root-model",
+    syncMode: "fast"
+  }));
+  assert.throws(() => assertCoreMethodInput("prepareSync", {
+    profile,
+    syncMode: "turbo"
+  }), ContractValidationError);
+  assert.throws(() => assertCoreMethodInput("prepareSwitch", {
+    profile,
+    provider: "prov_a",
+    modelMode: "provider-default",
+    syncMode: "fast"
+  }), ContractValidationError);
+});
+
 test("protocol mismatch fails before request business validation", () => {
   assert.throws(
     () => assertCoreRequestEnvelope({
@@ -122,6 +147,12 @@ test("public errors use fixed messages and allowlisted details", () => {
   assert.throws(() => assertCoreErrorDto({ ...busy, message: "private path" }));
   assert.throws(() => assertCoreErrorDto({ ...busy, suggestedAction: "token=secret" }));
   assert.throws(() => assertCoreErrorDto({ ...busy, details: { busyScope: "state-db", path: "private" } }));
+
+  const unsupported = createPublicCoreErrorDto("FAST_MODE_UNSUPPORTED", {
+    details: { fastModeReason: "provider-length-mismatch", path: "C:/private" }
+  });
+  assert.deepEqual(unsupported.details, { fastModeReason: "provider-length-mismatch" });
+  assert.doesNotThrow(() => assertCoreErrorDto(unsupported));
 });
 
 test("method output guards reject structurally invalid successes", () => {
@@ -197,6 +228,62 @@ test("method output guards reject structurally invalid successes", () => {
     schemaVersion: 1,
     watches: []
   }));
+});
+
+test("Provider sync plan and result details preserve fast semantics", () => {
+  const providerSyncPlan = {
+    mode: "fast",
+    rolloutScanScope: "metadata",
+    providerWritePolicy: "require-in-place",
+    historicalModelSync: "preserved",
+    unchecked: ["historyModels", "userEventFlags", "encryptedContent"],
+    inPlaceEligibleSessionFiles: 2,
+    rewriteRequiredSessionFiles: 0
+  };
+  const plan = {
+    schemaVersion: 1,
+    planId: "opaque-plan",
+    operation: "sync",
+    createdAt: "2026-09-03T00:00:00.000Z",
+    expiresAt: "2026-09-03T00:10:00.000Z",
+    profile: { id: "default", revision: "r1" },
+    storageRevision: "storage",
+    configRevision: "config",
+    rolloutRevision: "rollout",
+    stateDbRevision: "state-db",
+    target: { provider: "prov_a", model: null },
+    impact: { rolloutFilesToChange: 2 },
+    providerSync: providerSyncPlan,
+    warnings: [],
+    requiresConfirmation: true
+  };
+  assert.doesNotThrow(() => assertCoreMethodOutput("prepareSync", plan));
+  assert.throws(() => assertCoreMethodOutput("prepareSync", {
+    ...plan,
+    providerSync: { ...providerSyncPlan, rewriteRequiredSessionFiles: 1 }
+  }), ContractValidationError);
+
+  const result = {
+    schemaVersion: 1,
+    operationId: "operation-1",
+    operation: "sync",
+    outcome: "completed",
+    backup: { backupId: "backup-1" },
+    providerSync: {
+      mode: "fast",
+      rolloutScanScope: "metadata",
+      inPlaceSessionFiles: 2,
+      rewrittenSessionFiles: 0,
+      unchecked: ["historyModels", "userEventFlags", "encryptedContent"]
+    },
+    warnings: [],
+    result: { changedSessionFiles: 2 }
+  };
+  assert.doesNotThrow(() => assertCoreMethodOutput("applySync", result));
+  assert.throws(() => assertCoreMethodOutput("applySync", {
+    ...result,
+    providerSync: { ...result.providerSync, rewrittenSessionFiles: 1 }
+  }), ContractValidationError);
 });
 
 test("DiagnosticsSnapshot is a recursive pathless allowlist", () => {

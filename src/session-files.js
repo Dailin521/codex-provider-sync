@@ -4,7 +4,7 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 
 import { SESSION_DIRS } from "./constants.js";
 import { syncDirectory } from "./atomic-file.js";
@@ -13,6 +13,7 @@ import { CoreError } from "./core-error.js";
 const execFileAsync = promisify(execFile);
 const ROLLOUT_SCAN_CHUNK_BYTES = 1024 * 1024;
 const STATUS_SESSION_META_MAX_BYTES = 1024 * 1024;
+const FAST_SESSION_META_MAX_BYTES = 1024 * 1024;
 
 class RolloutMetadataLimitError extends Error {
   constructor() {
@@ -49,17 +50,29 @@ function wrapRolloutFileBusyError(error, filePath, action) {
 }
 
 async function getFileSnapshot(filePath) {
-  const stat = await fsp.stat(filePath);
+  const stat = await fsp.stat(filePath, { bigint: true });
   return {
-    size: stat.size,
-    mtimeMs: stat.mtimeMs,
-    mode: stat.mode
+    size: Number(stat.size),
+    mtimeMs: Number(stat.mtimeNs) / 1e6,
+    mode: Number(stat.mode),
+    nlink: Number(stat.nlink),
+    dev: String(stat.dev),
+    ino: String(stat.ino)
   };
 }
 
 function snapshotMatches(change, snapshot) {
-  return change.originalSize === snapshot.size
-    && change.originalMtimeMs === snapshot.mtimeMs;
+  if (change.originalSize !== snapshot.size
+      || change.originalMtimeMs !== snapshot.mtimeMs) {
+    return false;
+  }
+  if (change.originalDev !== undefined && String(change.originalDev) !== String(snapshot.dev)) {
+    return false;
+  }
+  if (change.originalIno !== undefined && String(change.originalIno) !== String(snapshot.ino)) {
+    return false;
+  }
+  return true;
 }
 
 function emptyEncryptedContentCounts() {
@@ -71,60 +84,6 @@ function emptyEncryptedContentCounts() {
 
 function incrementPlainCount(counts, directory, provider) {
   counts[directory][provider] = (counts[directory][provider] ?? 0) + 1;
-}
-
-function streamContainsText(filePath, text, startOffset) {
-  const needle = Buffer.from(text);
-  const safeStartOffset = Math.max(0, startOffset ?? 0);
-
-  return new Promise((resolve, reject) => {
-    let previous = Buffer.alloc(0);
-    let settled = false;
-    const stream = fs.createReadStream(filePath, {
-      start: safeStartOffset,
-      highWaterMark: ROLLOUT_SCAN_CHUNK_BYTES
-    });
-
-    function settle(value, error) {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      if (error) {
-        reject(wrapRolloutFileBusyError(error, filePath, "scan"));
-        return;
-      }
-      resolve(value);
-    }
-
-    stream.on("data", (chunk) => {
-      const buffer = previous.length ? Buffer.concat([previous, chunk]) : chunk;
-      if (buffer.indexOf(needle) !== -1) {
-        settle(true);
-        stream.destroy();
-        return;
-      }
-
-      const keepBytes = Math.max(0, needle.length - 1);
-      previous = keepBytes > 0
-        ? buffer.subarray(Math.max(0, buffer.length - keepBytes))
-        : Buffer.alloc(0);
-    });
-    stream.on("end", () => settle(false));
-    stream.on("error", (error) => {
-      if (settled) {
-        return;
-      }
-      settle(false, error);
-    });
-  });
-}
-
-async function fileHasEncryptedContent(filePath, firstLine, startOffset) {
-  if (firstLine.includes("encrypted_content")) {
-    return true;
-  }
-  return streamContainsText(filePath, "encrypted_content", startOffset);
 }
 
 function recordHasUserEvent(record) {
@@ -173,47 +132,6 @@ function toDesktopWorkspacePath(value) {
   }
 
   return value;
-}
-
-async function fileHasUserEvent(filePath, firstLine, startOffset) {
-  try {
-    if (recordHasUserEvent(JSON.parse(firstLine))) {
-      return true;
-    }
-  } catch {
-    // Keep scanning the rest of the rollout below.
-  }
-
-  const stream = fs.createReadStream(filePath, {
-    encoding: "utf8",
-    start: Math.max(0, startOffset ?? 0),
-    highWaterMark: ROLLOUT_SCAN_CHUNK_BYTES
-  });
-  const lines = readline.createInterface({
-    input: stream,
-    crlfDelay: Infinity
-  });
-
-  try {
-    for await (const line of lines) {
-      if (!line) {
-        continue;
-      }
-      try {
-        if (recordHasUserEvent(JSON.parse(line))) {
-          return true;
-        }
-      } catch {
-        // Ignore malformed non-metadata lines; provider sync only needs positive evidence.
-      }
-    }
-    return false;
-  } catch (error) {
-    throw wrapRolloutFileBusyError(error, filePath, "scan");
-  } finally {
-    lines.close();
-    stream.destroy();
-  }
 }
 
 async function listJsonlFiles(rootDir) {
@@ -309,22 +227,25 @@ function parseSessionMetaRecord(firstLine) {
 // payload, and round-tripping those through `JSON.parse` -> `JSON.stringify`
 // would silently mangle embedded escape sequences. Anchoring on
 // `"type":"turn_context"` keeps message and tool payloads out of the
-// backup manifest; only model strings and line indexes are retained.
+// backup manifest; only model strings and line indexes are retained. The same
+// streaming pass also supplies the body-dependent diagnostics, so complete
+// mode reads each rollout body once rather than three times.
 const ROLLOUT_TURNCONTEXT_TYPE_RE = /"type"\s*:\s*"turn_context"/;
 
-async function readTurnContextModelSnapshot(
+async function scanRolloutBody(
   rolloutPath,
-  { firstLineOffset, firstLineLength } = {}
+  { firstLine, firstLineLength } = {}
 ) {
-  const headerSkip = Math.max(0, firstLineOffset ?? 0);
   const headerLength = Math.max(0, firstLineLength ?? 0);
   const models = [];
   const originalTurnContextModels = [];
+  let hasEncryptedContent = firstLine.includes("encrypted_content");
+  let hasUserEvent = recordHasUserEvent(JSON.parse(firstLine));
   let lineIndex = 0;
 
   const stream = fs.createReadStream(rolloutPath, {
     encoding: "utf8",
-    start: headerSkip + headerLength,
+    start: headerLength,
     highWaterMark: ROLLOUT_SCAN_CHUNK_BYTES
   });
   const lines = readline.createInterface({
@@ -335,6 +256,11 @@ async function readTurnContextModelSnapshot(
   try {
     for await (const line of lines) {
       lineIndex += 1;
+      hasEncryptedContent ||= line.includes("encrypted_content");
+      if (!hasUserEvent) {
+        try { hasUserEvent = recordHasUserEvent(JSON.parse(line)); }
+        catch { /* Malformed body lines provide no positive user-event evidence. */ }
+      }
       if (!line.includes('"turn_context"')) {
         continue;
       }
@@ -359,7 +285,7 @@ async function readTurnContextModelSnapshot(
         originalModels: lineModels
       });
     }
-    return { models, originalTurnContextModels };
+    return { models, originalTurnContextModels, hasEncryptedContent, hasUserEvent };
   } catch (error) {
     throw wrapRolloutFileBusyError(error, rolloutPath, "read");
   } finally {
@@ -486,8 +412,334 @@ async function restoreOriginalMtime(filePath, mtimeMs) {
   }
 }
 
+const SAFE_IN_PLACE_PROVIDER_ID_RE = /^[A-Za-z0-9._-]+$/;
+const PROVIDER_MUTATION_STRATEGY = "provider_bytes_in_place";
+
+function getInPlaceProviderMutation(change) {
+  if (!change
+      || (change.originalNlink !== undefined && change.originalNlink !== 1)
+      || change.modelRewriteRequired
+      || change.modelOnlyChange
+      || typeof change.originalFirstLine !== "string"
+      || typeof change.originalProvider !== "string"
+      || typeof change.updatedProvider !== "string"
+      || change.originalProvider === change.updatedProvider
+      || !SAFE_IN_PLACE_PROVIDER_ID_RE.test(change.originalProvider)
+      || !SAFE_IN_PLACE_PROVIDER_ID_RE.test(change.updatedProvider)) {
+    return null;
+  }
+
+  const originalLiteral = JSON.stringify(change.originalProvider);
+  const replacementLiteral = JSON.stringify(change.updatedProvider);
+  const originalBytes = Buffer.from(originalLiteral, "utf8");
+  const replacementBytes = Buffer.from(replacementLiteral, "utf8");
+  if (originalBytes.length === 0 || originalBytes.length !== replacementBytes.length) {
+    return null;
+  }
+
+  // Tokenize strings first: a regex on raw field text can match inside a JSON
+  // string or miss an escaped duplicate key. Only one literal provider key and
+  // one payload key anywhere in the header are eligible.
+  const keys = [...change.originalFirstLine.matchAll(/"(?:[^"\\]|\\.)*"/g)]
+    .filter((token) => /^\s*:/.test(change.originalFirstLine.slice(token.index + token[0].length)));
+  const named = (name) => keys.filter((key) => JSON.parse(key[0]) === name);
+  const fields = named("model_provider");
+  if (fields.length !== 1 || named("payload").length !== 1
+      || !fields[0][0].startsWith('"model_provider"')) {
+    return null;
+  }
+  const field = fields[0];
+  const valueOffset = field.index + field[0].length
+    + change.originalFirstLine.slice(field.index + field[0].length).match(/^\s*:\s*/)[0].length;
+  if (!change.originalFirstLine.startsWith(originalLiteral, valueOffset)) {
+    return null;
+  }
+  const nextCharacter = change.originalFirstLine[valueOffset + originalLiteral.length];
+  if (nextCharacter !== undefined && !/[\s,}]/.test(nextCharacter)) {
+    return null;
+  }
+  const original = parseSessionMetaRecord(change.originalFirstLine);
+  const replaced = change.originalFirstLine.slice(0, valueOffset) + replacementLiteral
+    + change.originalFirstLine.slice(valueOffset + originalLiteral.length);
+  if (original?.payload.model_provider !== change.originalProvider
+      || !isDeepStrictEqual(JSON.parse(replaced), JSON.parse(change.updatedFirstLine))) {
+    return null;
+  }
+
+  return {
+    strategy: PROVIDER_MUTATION_STRATEGY,
+    byteOffset: Buffer.byteLength(change.originalFirstLine.slice(0, valueOffset), "utf8"),
+    originalBase64: originalBytes.toString("base64"),
+    replacementBase64: replacementBytes.toString("base64"),
+    originalSize: change.originalSize,
+    originalMtimeMs: change.originalMtimeMs,
+    originalDev: change.originalDev,
+    originalIno: change.originalIno
+  };
+}
+
+function decodeCanonicalBase64(value) {
+  if (typeof value !== "string" || value.length === 0 || value.length % 4 !== 0
+      || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
+    return null;
+  }
+  const decoded = Buffer.from(value, "base64");
+  return decoded.toString("base64") === value ? decoded : null;
+}
+
+export function validateProviderMutationDescriptor(mutation, targetPath, firstLine, separator = "") {
+  if (!mutation || mutation.strategy !== PROVIDER_MUTATION_STRATEGY
+      || !Number.isSafeInteger(mutation.byteOffset) || mutation.byteOffset < 0
+      || !Number.isSafeInteger(mutation.originalSize) || mutation.originalSize < 0
+      || !Number.isFinite(mutation.originalMtimeMs)) {
+    throw new Error(`Invalid provider in-place mutation descriptor for ${targetPath}.`);
+  }
+  const originalBytes = decodeCanonicalBase64(mutation.originalBase64);
+  const replacementBytes = decodeCanonicalBase64(mutation.replacementBase64);
+  if (!originalBytes || !replacementBytes || originalBytes.length === 0
+      || originalBytes.length !== replacementBytes.length
+      || mutation.byteOffset + originalBytes.length > mutation.originalSize
+      || !/^"[A-Za-z0-9._-]+"$/.test(originalBytes.toString("utf8"))
+      || !/^"[A-Za-z0-9._-]+"$/.test(replacementBytes.toString("utf8"))) {
+    throw new Error(`Invalid provider in-place mutation bytes for ${targetPath}.`);
+  }
+  if (typeof firstLine !== "string" || !["", "\n", "\r\n"].includes(separator)
+      || typeof mutation.originalDev !== "string" || !/^\d+$/.test(mutation.originalDev)
+      || typeof mutation.originalIno !== "string" || !/^\d+$/.test(mutation.originalIno)) {
+    throw new Error(`Incomplete provider in-place recovery evidence for ${targetPath}.`);
+  }
+  const header = Buffer.from(firstLine, "utf8");
+  const end = mutation.byteOffset + originalBytes.length;
+  if (!header.subarray(mutation.byteOffset, end).equals(originalBytes)
+      || header.length + Buffer.byteLength(separator) > mutation.originalSize) {
+    throw new Error(`Provider mutation does not match the original header: ${targetPath}`);
+  }
+  const replaced = Buffer.concat([header.subarray(0, mutation.byteOffset), replacementBytes, header.subarray(end)]).toString("utf8");
+  const expected = getInPlaceProviderMutation({
+    originalFirstLine: firstLine,
+    originalProvider: JSON.parse(originalBytes.toString()),
+    updatedProvider: JSON.parse(replacementBytes.toString()),
+    updatedFirstLine: replaced
+  });
+  if (!expected || expected.byteOffset !== mutation.byteOffset) {
+    throw new Error(`Provider mutation targets an ambiguous JSON field: ${targetPath}`);
+  }
+  return { originalBytes, replacementBytes };
+}
+
+async function readBytesFully(handle, length, position) {
+  const buffer = Buffer.alloc(length);
+  let offset = 0;
+  while (offset < buffer.length) {
+    const { bytesRead } = await handle.read(
+      buffer,
+      offset,
+      buffer.length - offset,
+      position + offset
+    );
+    if (bytesRead <= 0) {
+      return null;
+    }
+    offset += bytesRead;
+  }
+  return buffer;
+}
+
+async function defaultInPlaceWrite(handle, buffer, offset, length, position) {
+  return handle.write(buffer, offset, length, position);
+}
+
+async function writeBytesFully(handle, bytes, position, writeImpl) {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const result = await writeImpl(
+      handle,
+      bytes,
+      offset,
+      bytes.length - offset,
+      position + offset
+    );
+    const bytesWritten = typeof result === "number" ? result : result?.bytesWritten;
+    if (!Number.isInteger(bytesWritten) || bytesWritten <= 0
+        || bytesWritten > bytes.length - offset) {
+      throw new Error("Provider in-place write made no valid forward progress.");
+    }
+    offset += bytesWritten;
+  }
+}
+
+async function verifyInPlaceWrite(handle, entry, expectedBytes) {
+  const mutation = entry.mutation ?? entry.inPlaceMutation;
+  const expected = Buffer.from(entry.originalFirstLine + entry.originalSeparator, "utf8");
+  expectedBytes.copy(expected, mutation.byteOffset);
+  const actual = await readBytesFully(handle, expected.length, 0);
+  const stat = await handle.stat();
+  if (!actual?.equals(expected) || stat.size < mutation.originalSize) {
+    throw new Error(`Provider in-place write verification failed: ${entry.path}`);
+  }
+  await assertInPlaceIdentity(handle, entry.path, mutation);
+  return stat;
+}
+
+async function finishInPlaceWrite(handle, entry, expectedBytes, options = {}) {
+  const mutation = entry.mutation ?? entry.inPlaceMutation;
+  await (options.inPlaceSync ?? ((h) => h.sync()))(handle);
+  const stat = await verifyInPlaceWrite(handle, entry, expectedBytes);
+  const grew = stat.size !== mutation.originalSize;
+  if (grew && Math.round(stat.mtimeMs) !== Math.round(mutation.originalMtimeMs)) return;
+  if (!grew) await handle.utimes(stat.atime, mutation.originalMtimeMs / 1000);
+  const after = await verifyInPlaceWrite(handle, entry, expectedBytes);
+  if (after.size !== mutation.originalSize) {
+    // An append raced stat/utimes (possibly in interrupted recovery). Reassert
+    // only the guarded bytes for a kernel write time; never backdate again.
+    await writeBytesFully(handle, expectedBytes, mutation.byteOffset, options.inPlaceWrite ?? defaultInPlaceWrite);
+  }
+  await handle.sync();
+  await verifyInPlaceWrite(handle, entry, expectedBytes);
+}
+
+async function assertInPlaceIdentity(handle, filePath, mutation) {
+  const [opened, current] = await Promise.all([handle.stat({ bigint: true }), fsp.lstat(filePath, { bigint: true })]);
+  if (!current.isFile() || current.isSymbolicLink() || opened.nlink !== 1n
+      || String(opened.dev) !== mutation.originalDev || String(opened.ino) !== mutation.originalIno
+      || opened.dev !== current.dev || opened.ino !== current.ino) {
+    throw new Error(`Rollout identity changed before provider byte access: ${filePath}`);
+  }
+}
+
+function isRecoverableProviderBytes(current, original, replacement) {
+  // Forward short writes and interrupted rollback produce old* new* old* at
+  // the differing positions. This excludes arbitrary edits and disjoint tears.
+  let phase = 0;
+  for (let i = 0; i < current.length; i += 1) {
+    if (original[i] === replacement[i]) {
+      if (current[i] !== original[i]) return false;
+    } else if (current[i] === replacement[i]) {
+      if (phase === 2) return false;
+      phase = 1;
+    } else if (current[i] === original[i]) {
+      if (phase === 1) phase = 2;
+    } else return false;
+  }
+  return true;
+}
+
+async function inspectProviderRecovery(handle, entry) {
+  const mutation = entry.mutation ?? entry.inPlaceMutation;
+  const { originalBytes, replacementBytes } = validateProviderMutationDescriptor(
+    mutation, entry.path, entry.originalFirstLine, entry.originalSeparator);
+  await assertInPlaceIdentity(handle, entry.path, mutation);
+  const stat = await handle.stat();
+  const expected = Buffer.from(entry.originalFirstLine + entry.originalSeparator, "utf8");
+  const header = await readBytesFully(handle, expected.length, 0);
+  if (stat.size < mutation.originalSize || !header) {
+    throw new Error(`Rollout truncated before provider recovery: ${entry.path}`);
+  }
+  const end = mutation.byteOffset + originalBytes.length;
+  const current = header.subarray(mutation.byteOffset, end);
+  if (!header.subarray(0, mutation.byteOffset).equals(expected.subarray(0, mutation.byteOffset))
+      || !header.subarray(end).equals(expected.subarray(end))
+      || !isRecoverableProviderBytes(current, originalBytes, replacementBytes)) {
+    throw new Error(`Unknown rollout bytes during provider recovery: ${entry.path}`);
+  }
+  return { current, originalBytes };
+}
+
+export async function validateProviderByteRestore(entry) {
+  const handle = await fsp.open(entry.path, "r");
+  try { await inspectProviderRecovery(handle, entry); }
+  finally { await handle.close(); }
+}
+
+async function restoreProviderOnHandle(handle, entry, options = {}) {
+  const mutation = entry.mutation ?? entry.inPlaceMutation;
+  const { current, originalBytes } = await inspectProviderRecovery(handle, entry);
+  if (!current.equals(originalBytes)) {
+    await writeBytesFully(handle, originalBytes, mutation.byteOffset, options.inPlaceRestoreWrite ?? defaultInPlaceWrite);
+  }
+  await finishInPlaceWrite(handle, entry, originalBytes, { inPlaceWrite: options.inPlaceRestoreWrite });
+}
+
+async function tryRewriteProviderInPlace(change, options = {}) {
+  const mutation = change.inPlaceMutation;
+  const { replacementBytes } = validateProviderMutationDescriptor(
+    mutation, change.path, change.originalFirstLine, change.originalSeparator);
+  const writeImpl = options.inPlaceWrite ?? defaultInPlaceWrite;
+  let handle;
+  try {
+    const pathStat = await fsp.lstat(change.path);
+    if (pathStat.isSymbolicLink() || !pathStat.isFile()) {
+      return "SKIP_CHANGED";
+    }
+    handle = await fsp.open(change.path, "r+");
+    const identity = await handle.stat({ bigint: true });
+    const snapshot = {
+      size: Number(identity.size),
+      mtimeMs: Number(identity.mtimeNs) / 1e6,
+      dev: String(identity.dev),
+      ino: String(identity.ino)
+    };
+    if (!snapshotMatches(change, snapshot)
+        || mutation.originalSize !== change.originalSize
+        || mutation.originalMtimeMs !== change.originalMtimeMs) {
+      return "SKIP_CHANGED";
+    }
+    const expectedHeader = Buffer.from(change.originalFirstLine + change.originalSeparator, "utf8");
+    const current = await readBytesFully(handle, expectedHeader.length, 0);
+    if (!current?.equals(expectedHeader)) {
+      return "SKIP_CHANGED";
+    }
+    try {
+      await assertInPlaceIdentity(handle, change.path, mutation);
+      if (!snapshotMatches(change, await getFileSnapshot(change.path))) return "SKIP_CHANGED";
+    } catch {
+      return "SKIP_CHANGED";
+    }
+
+    try {
+      await writeBytesFully(handle, replacementBytes, mutation.byteOffset, writeImpl);
+      await finishInPlaceWrite(handle, change, replacementBytes, options);
+    } catch (error) {
+      try {
+        await restoreProviderOnHandle(handle, change, options);
+      } catch (restoreError) {
+        const failure = new AggregateError(
+          [error, restoreError],
+          `Provider in-place write and immediate byte restoration both failed for ${change.path}.`
+        );
+        failure.code = "IN_PLACE_RESTORE_FAILED";
+        throw failure;
+      }
+      throw error;
+    }
+    return "APPLIED_IN_PLACE";
+  } catch (error) {
+    throw wrapRolloutFileBusyError(error, change.path, "rewrite provider bytes in place");
+  } finally {
+    await handle?.close();
+  }
+}
+
+async function restoreProviderBytesInPlace(entry, options = {}) {
+  let handle;
+  try {
+    const pathStat = await fsp.lstat(entry.path);
+    if (pathStat.isSymbolicLink() || !pathStat.isFile()) {
+      throw new Error(`Rollout path changed before in-place recovery: ${entry.path}`);
+    }
+    handle = await fsp.open(entry.path, "r+");
+    await restoreProviderOnHandle(handle, entry, options);
+    return "RESTORED_IN_PLACE";
+  } finally {
+    await handle?.close();
+  }
+}
+
 const WINDOWS_REWRITE_PROTOCOL_VERSION = 1;
 const WINDOWS_REWRITE_READY_TIMEOUT_MS = 15_000;
+const WINDOWS_PROVIDER_BYTES_SOURCE = typeof __CPS_WINDOWS_PROVIDER_BYTES_SOURCE__ === "string"
+  ? __CPS_WINDOWS_PROVIDER_BYTES_SOURCE__
+  : fs.readFileSync(new URL("./windows-provider-bytes.cs", import.meta.url), "utf8");
 
 const WINDOWS_EXCLUSIVE_REWRITE_WORKER_SCRIPT = `
 & {
@@ -496,6 +748,10 @@ const WINDOWS_EXCLUSIVE_REWRITE_WORKER_SCRIPT = `
   $utf8 = [System.Text.UTF8Encoding]::new($false)
   [Console]::InputEncoding = $utf8
   [Console]::OutputEncoding = $utf8
+
+  Add-Type -TypeDefinition @'
+${WINDOWS_PROVIDER_BYTES_SOURCE}
+'@
 
   function Write-ProtocolMessage($value) {
     $json = $value | ConvertTo-Json -Compress -Depth 8
@@ -552,6 +808,16 @@ const WINDOWS_EXCLUSIVE_REWRITE_WORKER_SCRIPT = `
           return "SKIP_BUSY"
         }
         return "SKIP_CHANGED"
+      }
+
+      if ($null -ne $change.inPlaceMutation) {
+        $m = $change.inPlaceMutation
+        $header = $encoding.GetBytes([string]$change.originalFirstLine + [string]$change.originalSeparator)
+        return [ProviderByteFile]::Apply($source, $header,
+          [Convert]::FromBase64String([string]$m.originalBase64),
+          [Convert]::FromBase64String([string]$m.replacementBase64),
+          [int]$m.byteOffset, [long]$m.originalSize, [double]$m.originalMtimeMs,
+          [string]$m.originalDev, [string]$m.originalIno, [bool]$change.restoreProviderBytes)
       }
 
       if ([bool]$change.requireOriginalMatch) {
@@ -799,6 +1065,10 @@ export async function createWindowsExclusiveRewriteWorker(options = {}) {
       if (!change || typeof change.path !== "string" || !path.isAbsolute(change.path)) {
         throw new Error(`Windows rewrite worker requires an absolute rollout path: ${change?.path ?? "(missing)"}`);
       }
+      if (change.inPlaceMutation) {
+        validateProviderMutationDescriptor(change.inPlaceMutation, change.path,
+          change.originalFirstLine, change.originalSeparator);
+      }
 
       const id = nextRequestId;
       nextRequestId += 1;
@@ -816,7 +1086,8 @@ export async function createWindowsExclusiveRewriteWorker(options = {}) {
             || response?.type !== "result"
             || response?.id !== id
             || response?.path !== change.path
-            || !isValidWindowsRewriteResult(response?.result)) {
+            || !isValidWindowsRewriteResult(response?.result)
+            || (change.inPlaceMutation && response.result === "APPLIED")) {
           throw new Error(`Unexpected Windows rewrite worker response for ${change.path}: ${JSON.stringify(response)}`);
         }
         return response.result;
@@ -959,7 +1230,11 @@ async function rewriteFirstLine(filePath, nextFirstLine, separator) {
   }
 }
 
-async function tryRewriteCollectedFirstLine(change) {
+async function tryRewriteCollectedFirstLine(change, options = {}) {
+  if (change.inPlaceMutation?.strategy === PROVIDER_MUTATION_STRATEGY) {
+    return tryRewriteProviderInPlace(change, options);
+  }
+
   const beforeSnapshot = await getFileSnapshot(change.path);
   if (!snapshotMatches(change, beforeSnapshot)) {
     return "SKIP_CHANGED";
@@ -1251,16 +1526,23 @@ export async function collectStatusRolloutMetadata(codexHome, options = {}) {
 export async function collectSessionChanges(codexHome, targetProvider, options = {}) {
   const {
     skipLockedReads = false,
-    targetModel = null
+    targetModel = null,
+    fast = false
   } = options;
+  if (typeof fast !== "boolean" || (fast && targetModel !== null)) {
+    throw new CoreError(
+      "INVALID_INPUT",
+      "Fast mode requires a boolean fast option and no historical model rewrite."
+    );
+  }
   const summaries = [];
   const lockedPaths = [];
   const providerCounts = {
     sessions: new Map(),
     archived_sessions: new Map()
   };
-  const encryptedContentCounts = emptyEncryptedContentCounts();
-  const userEventThreadIds = new Set();
+  const encryptedContentCounts = fast ? null : emptyEncryptedContentCounts();
+  const userEventThreadIds = fast ? null : new Set();
   const threadCwdById = new Map();
 
   for (const dirName of SESSION_DIRS) {
@@ -1273,17 +1555,35 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
     const rolloutPaths = await listJsonlFiles(rootDir);
     for (const rolloutPath of rolloutPaths) {
       let record;
+      let scanStart;
       try {
-        record = await readFirstLineRecord(rolloutPath);
+        scanStart = await getFileSnapshot(rolloutPath);
+        record = await readFirstLineRecord(rolloutPath, {
+          maxBytes: fast ? FAST_SESSION_META_MAX_BYTES : Number.POSITIVE_INFINITY
+        });
       } catch (error) {
         if (skipLockedReads && isRolloutFileBusyError(error)) {
           lockedPaths.push(rolloutPath);
           continue;
         }
+        if (fast && error instanceof RolloutMetadataLimitError) {
+          throw new CoreError(
+            "FAST_MODE_UNSUPPORTED",
+            `Fast mode requires a session metadata header no larger than 1 MiB: ${rolloutPath}`,
+            { details: { fastModeReason: "session-meta-too-large" }, cause: error }
+          );
+        }
         throw error;
       }
       const parsed = parseSessionMetaRecord(record.firstLine);
       if (!parsed) {
+        if (fast) {
+          throw new CoreError(
+            "FAST_MODE_UNSUPPORTED",
+            `Fast mode cannot validate session metadata: ${rolloutPath}`,
+            { details: { fastModeReason: "session-meta-invalid" } }
+          );
+        }
         continue;
       }
       const currentProvider = parsed.payload.model_provider ?? "(missing)";
@@ -1294,11 +1594,16 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
           && parsed.payload.cwd.trim()) {
         threadCwdById.set(parsed.payload.id, toDesktopWorkspacePath(parsed.payload.cwd));
       }
+      let modelSnapshot = { models: [], originalTurnContextModels: [] };
       try {
-        if (await fileHasEncryptedContent(rolloutPath, record.firstLine, record.offset)) {
+        if (!fast) modelSnapshot = await scanRolloutBody(rolloutPath, {
+          firstLine: record.firstLine,
+          firstLineLength: record.offset
+        });
+        if (modelSnapshot.hasEncryptedContent) {
           incrementPlainCount(encryptedContentCounts, dirName, currentProvider);
         }
-        if (parsed.payload.id && await fileHasUserEvent(rolloutPath, record.firstLine, record.offset)) {
+        if (parsed.payload.id && modelSnapshot.hasUserEvent) {
           userEventThreadIds.add(parsed.payload.id);
         }
       } catch (error) {
@@ -1309,13 +1614,6 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
         throw error;
       }
 
-      // Stream all `turn_context` events so the rewrite step can validate the
-      // complete model snapshot and a provider-only backup can later restore
-      // those same metadata fields without retaining any message content.
-      const modelSnapshot = await readTurnContextModelSnapshot(rolloutPath, {
-        firstLineOffset: 0,
-        firstLineLength: record.offset
-      });
       const currentModels = modelSnapshot.models;
       const originalModel = currentModels[0] ?? null;
 
@@ -1333,10 +1631,15 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
 
       if (providerChanged || modelChanged) {
         const snapshot = await getFileSnapshot(rolloutPath);
+        if (snapshot.size !== scanStart.size || snapshot.mtimeMs !== scanStart.mtimeMs
+            || snapshot.dev !== scanStart.dev || snapshot.ino !== scanStart.ino) {
+          lockedPaths.push(rolloutPath);
+          continue;
+        }
         if (providerChanged) {
           parsed.payload.model_provider = targetProvider;
         }
-        summaries.push({
+        const change = {
           path: rolloutPath,
           threadId: parsed.payload.id ?? null,
           directory: dirName,
@@ -1345,6 +1648,9 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
           originalOffset: record.offset,
           originalSize: snapshot.size,
           originalMtimeMs: snapshot.mtimeMs,
+          originalDev: snapshot.dev,
+          originalIno: snapshot.ino,
+          originalNlink: snapshot.nlink,
           originalProvider: currentProvider,
           updatedProvider: targetProvider,
           originalModel,
@@ -1352,7 +1658,21 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
           modelRewriteRequired: modelChanged,
           modelOnlyChange: !providerChanged && modelChanged,
           updatedFirstLine: providerChanged ? JSON.stringify(parsed) : record.firstLine
-        });
+        };
+        change.inPlaceMutation = getInPlaceProviderMutation(change);
+        if (fast && !change.inPlaceMutation) {
+          const originalBytes = Buffer.byteLength(JSON.stringify(change.originalProvider), "utf8");
+          const replacementBytes = Buffer.byteLength(JSON.stringify(change.updatedProvider), "utf8");
+          const fastModeReason = originalBytes !== replacementBytes
+            ? "provider-length-mismatch"
+            : "provider-location-ambiguous";
+          throw new CoreError(
+            "FAST_MODE_UNSUPPORTED",
+            `Fast mode requires an unambiguous equal-length provider byte replacement: ${rolloutPath}. Run full sync explicitly for this file.`,
+            { details: { fastModeReason } }
+          );
+        }
+        summaries.push(change);
       }
     }
   }
@@ -1385,8 +1705,8 @@ export async function captureSessionRestoreEntries(filePaths) {
           `Rollout does not start with a valid session_meta record: ${rolloutPath}`
         );
       }
-      const models = await readTurnContextModelSnapshot(rolloutPath, {
-        firstLineOffset: 0,
+      const models = await scanRolloutBody(rolloutPath, {
+        firstLine: record.firstLine,
         firstLineLength: record.offset
       });
       const after = await getFileSnapshot(rolloutPath);
@@ -1421,7 +1741,10 @@ export async function applySessionChanges(changes, options = {}) {
     onMutation,
     onApplied,
     onSkipped,
-    windowsRewriteWorkerFactory = createWindowsExclusiveRewriteWorker
+    windowsRewriteWorkerFactory = createWindowsExclusiveRewriteWorker,
+    inPlaceWrite,
+    inPlaceRestoreWrite,
+    inPlaceSync
   } = options ?? {};
   const skippedPaths = [];
   const appliedPaths = [];
@@ -1464,7 +1787,7 @@ export async function applySessionChanges(changes, options = {}) {
               await onMutation?.(change, { stage: "model", result: "APPLIED" });
             }
           }
-          await restoreOriginalMtime(change.path, change.originalMtimeMs);
+          if (result !== "APPLIED_IN_PLACE") await restoreOriginalMtime(change.path, change.originalMtimeMs);
           await onApplied?.(change);
         } else {
           skippedPaths.push(change.path);
@@ -1488,7 +1811,11 @@ export async function applySessionChanges(changes, options = {}) {
   } else {
     for (const change of firstLineChanges) {
       await onBeforeApply?.(change);
-      const result = await tryRewriteCollectedFirstLine(change);
+      const result = await tryRewriteCollectedFirstLine(change, {
+        inPlaceWrite,
+        inPlaceRestoreWrite,
+        inPlaceSync
+      });
       if (result === "APPLIED" || result === "APPLIED_IN_PLACE") {
         appliedChanges += 1;
         inPlaceChanges += result === "APPLIED_IN_PLACE" ? 1 : 0;
@@ -1502,7 +1829,7 @@ export async function applySessionChanges(changes, options = {}) {
             await onMutation?.(change, { stage: "model", result: "APPLIED" });
           }
         }
-        await restoreOriginalMtime(change.path, change.originalMtimeMs);
+        if (result !== "APPLIED_IN_PLACE") await restoreOriginalMtime(change.path, change.originalMtimeMs);
         await onApplied?.(change);
       } else {
         skippedPaths.push(change.path);
@@ -1625,17 +1952,38 @@ export async function restoreSessionChanges(manifestEntries, options = {}) {
 
   const restoredPaths = [];
   const failures = [];
+  let windowsWorker = null;
+  async function restoreWindows(change) {
+    windowsWorker ??= await (options.windowsRewriteWorkerFactory ?? createWindowsExclusiveRewriteWorker)();
+    try {
+      return await windowsWorker.rewrite(change, { requireOriginalMatch: false });
+    } catch (error) {
+      await windowsWorker.close().catch(() => {});
+      windowsWorker = null;
+      throw error;
+    }
+  }
   for (const entry of manifestEntries) {
     try {
       await options.onBeforeRestore?.(entry);
-      if (!entry.modelOnlyChange) {
+      if (entry.mutation) {
+        validateProviderMutationDescriptor(entry.mutation, entry.path, entry.originalFirstLine, entry.originalSeparator);
         if (process.platform === "win32") {
-          const [result] = await invokeWindowsExclusiveRewriteBatch([{
+          const result = await restoreWindows({
+            ...entry, inPlaceMutation: entry.mutation, restoreProviderBytes: true
+          });
+          if (result !== "APPLIED_IN_PLACE") throw new Error(`Provider byte recovery failed: ${result}`);
+        } else {
+          await restoreProviderBytesInPlace(entry, options);
+        }
+      } else if (!entry.modelOnlyChange) {
+        if (process.platform === "win32") {
+          const result = await restoreWindows({
             path: entry.path,
             separator: entry.originalSeparator ?? "\n",
             updatedFirstLine: entry.originalFirstLine,
             originalMtimeMs: entry.originalMtimeMs
-          }], { requireOriginalMatch: false });
+          });
           if (result !== "APPLIED") {
             throw new Error(
               `Unable to rewrite rollout file because it is currently in use. Close Codex and the Codex app, then retry. Locked file: ${entry.path}`
@@ -1659,7 +2007,7 @@ export async function restoreSessionChanges(manifestEntries, options = {}) {
           );
         }
       }
-      await restoreOriginalMtime(entry.path, entry.originalMtimeMs);
+      if (!entry.mutation) await restoreOriginalMtime(entry.path, entry.originalMtimeMs);
       restoredPaths.push(entry.path);
       await options.onRestored?.(entry);
     } catch (error) {
@@ -1675,6 +2023,11 @@ export async function restoreSessionChanges(manifestEntries, options = {}) {
         ));
       }
     }
+  }
+
+  if (windowsWorker) {
+    try { await windowsWorker.close(); }
+    catch (error) { failures.push(error); }
   }
 
   if (failures.length > 0) {

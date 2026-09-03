@@ -2594,7 +2594,8 @@ docs/adr/
 ├─ 0011-v1-single-branch-single-final-pr.md
 ├─ 0012-dual-resource-lock-contract.md
 ├─ 0013-restore-v2-recovery-state-machine.md
-└─ 0014-npm-workspace-and-dependency-boundaries.md
+├─ 0014-npm-workspace-and-dependency-boundaries.md
+└─ 0015-provider-byte-updates-and-fast-sync.md
 ```
 
 ADR 一旦 Accepted，不应通过普通重构 PR 静默推翻。

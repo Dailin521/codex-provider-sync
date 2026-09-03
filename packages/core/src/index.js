@@ -365,6 +365,19 @@ function publicPlan(value) {
       .filter((entry) => typeof entry === "string")
       .map((entry) => path.basename(entry));
   }
+  const providerSync = isRecord(value.providerSync)
+    ? {
+        mode: value.providerSync.mode,
+        rolloutScanScope: value.providerSync.rolloutScanScope,
+        providerWritePolicy: value.providerSync.providerWritePolicy,
+        historicalModelSync: value.providerSync.historicalModelSync,
+        unchecked: Array.isArray(value.providerSync.unchecked)
+          ? value.providerSync.unchecked.filter((entry) => typeof entry === "string")
+          : [],
+        inPlaceEligibleSessionFiles: value.providerSync.inPlaceEligibleSessionFiles,
+        rewriteRequiredSessionFiles: value.providerSync.rewriteRequiredSessionFiles
+      }
+    : null;
   return {
     schemaVersion: 1,
     planId: value.planId,
@@ -379,6 +392,7 @@ function publicPlan(value) {
     ...(typeof value.backupRevision === "string" ? { backupRevision: value.backupRevision } : {}),
     target: publicTarget,
     impact: publicImpact,
+    ...(providerSync ? { providerSync } : {}),
     warnings: publicWarnings(value.warnings),
     requiresConfirmation: value.requiresConfirmation === true
   };
@@ -417,6 +431,8 @@ function publicOperationResult(value) {
   for (const key of [
     "backupDurationMs",
     "changedSessionFiles",
+    "inPlaceSessionFiles",
+    "rewrittenSessionFiles",
     "sqliteRowsUpdated",
     "sqliteProviderRowsUpdated",
     "sqliteUserEventRowsUpdated",
@@ -432,12 +448,24 @@ function publicOperationResult(value) {
       .filter((entry) => typeof entry === "string")
       .map((entry) => path.basename(entry));
   }
+  const providerSync = isRecord(value.providerSync)
+    ? {
+        mode: value.providerSync.mode,
+        rolloutScanScope: value.providerSync.rolloutScanScope,
+        inPlaceSessionFiles: value.providerSync.inPlaceSessionFiles,
+        rewrittenSessionFiles: value.providerSync.rewrittenSessionFiles,
+        unchecked: Array.isArray(value.providerSync.unchecked)
+          ? value.providerSync.unchecked.filter((entry) => typeof entry === "string")
+          : []
+      }
+    : null;
   return {
     schemaVersion: 1,
     operationId: value.operationId,
     operation: value.operation,
     outcome: value.outcome,
     backup,
+    ...(providerSync ? { providerSync } : {}),
     warnings: publicWarnings(value.warnings),
     result
   };
@@ -557,6 +585,7 @@ export function createCoreFacade({ resolveProfile }) {
       const plan = await prepareSyncInternal({
         ...rootProfileInput(trusted.profile),
         ...(trusted.input.keepCount === undefined ? {} : { keepCount: trusted.input.keepCount }),
+        ...(trusted.input.syncMode === undefined ? {} : { syncMode: trusted.input.syncMode }),
         profileResolver: currentProfileResolver()
       });
       return publicPlan(withPublicProfile(plan, trusted.profile));
@@ -570,19 +599,28 @@ export function createCoreFacade({ resolveProfile }) {
       const trusted = await trustedInput(input);
       const provider = trusted.input.provider;
       const modelMode = trusted.input.modelMode;
+      const syncMode = trusted.input.syncMode ?? "full";
       if (typeof provider !== "string" || !provider
-          || !["provider-default", "keep-root-model", "explicit"].includes(String(modelMode))) {
+          || !["provider-default", "keep-root-model", "explicit"].includes(String(modelMode))
+          || !["full", "fast"].includes(String(syncMode))) {
         throw new CoreError("INVALID_INPUT", "The Switch Provider input is invalid.");
       }
       if ((modelMode === "explicit" && (typeof trusted.input.model !== "string" || !trusted.input.model))
           || (modelMode !== "explicit" && trusted.input.model !== undefined)) {
         throw new CoreError("INVALID_INPUT", "The selected model mode and model are inconsistent.");
       }
+      if (syncMode === "fast" && modelMode !== "keep-root-model") {
+        throw new CoreError(
+          "INVALID_INPUT",
+          "Fast switch requires keep-root-model because it preserves root and historical models."
+        );
+      }
       const plan = await prepareSwitchInternal({
         ...rootProfileInput(trusted.profile),
         provider,
         ...(modelMode === "explicit" ? { model: trusted.input.model } : {}),
         ...(modelMode === "keep-root-model" ? { keepRootModel: true } : {}),
+        syncMode,
         ...(trusted.input.keepCount === undefined ? {} : { keepCount: trusted.input.keepCount }),
         profileResolver: currentProfileResolver()
       });

@@ -38,6 +38,8 @@ function publicResultEntries(value: OperationResult["result"]): Array<[string, s
   const numbers = new Set([
     "backupDurationMs",
     "changedSessionFiles",
+    "inPlaceSessionFiles",
+    "rewrittenSessionFiles",
     "sqliteRowsUpdated",
     "sqliteProviderRowsUpdated",
     "sqliteUserEventRowsUpdated",
@@ -73,6 +75,7 @@ export function OperationResultDialog({ result, close, closeDisabled = false, re
   const presentation = result ? operationResultPresentation(result.outcome) : null;
   const entries = result ? publicResultEntries(result.result) : [];
   const skipped = result ? skippedRollouts(result.result) : [];
+  const providerSync = result?.providerSync;
   const alert = result?.outcome === "recovery_required";
   return (
     <Dialog
@@ -98,6 +101,7 @@ export function OperationResultDialog({ result, close, closeDisabled = false, re
               {entries.map(([key, value]) => <div key={key}><dt className="text-[var(--muted)]">{t(`operationResult.fields.${key}`, { defaultValue: key })}</dt><dd className="mt-1 break-words">{value}</dd></div>)}
             </dl>
           </Card>
+          {providerSync ? <Card><h3 className="mb-2 text-sm font-semibold">{t("plan.providerSync")}</h3><dl className="grid gap-3 text-sm"><div><dt className="text-[var(--muted)]">{t("plan.fields.syncMode")}</dt><dd className="mt-1">{t(`plan.syncModes.${providerSync.mode}`)}</dd></div><div><dt className="text-[var(--muted)]">{t("plan.fields.rolloutScanScope")}</dt><dd className="mt-1">{t(`plan.syncModes.${providerSync.rolloutScanScope}`)}</dd></div><div><dt className="text-[var(--muted)]">{t("plan.fields.unchecked")}</dt><dd className="mt-1">{providerSync.unchecked.length ? providerSync.unchecked.join(", ") : t("common.none")}</dd></div></dl></Card> : null}
           {result.warnings.length ? <div><h3 className="font-semibold">{t("common.warnings")}</h3><ul className="mt-2 list-disc space-y-1 pl-5 text-sm">{result.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul></div> : null}
           {skipped.length ? <div><h3 className="font-semibold">{t("operationResult.skippedRollouts")}</h3><ul className="mt-2 list-disc space-y-1 pl-5 font-mono text-xs">{skipped.map((file) => <li key={file}>{file}</li>)}</ul></div> : null}
           {closeDisabled ? <p className="text-sm text-[var(--danger)]">{t("operationResult.resolveBeforeClose")}</p> : null}

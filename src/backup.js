@@ -10,7 +10,7 @@ import {
   GLOBAL_STATE_BACKUP_FILE_BASENAME,
   GLOBAL_STATE_FILE_BASENAME
 } from "./constants.js";
-import { restoreSessionChanges } from "./session-files.js";
+import { restoreSessionChanges, validateProviderMutationDescriptor, validateProviderByteRestore } from "./session-files.js";
 import {
   assertSqliteWritable,
   createSqliteOnlineBackup,
@@ -214,6 +214,12 @@ async function validateSessionManifestEntries(entries, codexHome) {
       throw new Error(`Backup session manifest contains a duplicate rollout target: ${entry.path}`);
     }
     seen.add(key);
+    if (entry.mutation) {
+      if (entry.modelOnlyChange) {
+        throw new Error(`Provider byte mutation cannot describe a model-only change: ${entry.path}`);
+      }
+      validateProviderMutationDescriptor(entry.mutation, entry.path, entry.originalFirstLine, entry.originalSeparator);
+    }
     await assertNoLinkedPathSegments(canonicalRoot, canonicalTarget);
     const stat = await fs.stat(canonicalTarget);
     if (!stat.isFile()) {
@@ -328,6 +334,7 @@ export async function createBackup({
   codexHome,
   targetProvider,
   sessionChanges,
+  fast = false,
   configPath,
   configBackupText
 }) {
@@ -380,6 +387,7 @@ export async function createBackup({
     namespace: BACKUP_NAMESPACE,
     codexHome,
     targetProvider,
+    ...(fast ? { scanScope: "metadata" } : {}),
     createdAt: new Date().toISOString(),
     // Keep the full pre-mutation source of truth for the lifetime of the
     // backup. appliedPaths is only a compatibility hint for backups without a
@@ -391,6 +399,9 @@ export async function createBackup({
       originalFirstLine: change.originalFirstLine,
       originalSeparator: change.originalSeparator,
       originalMtimeMs: change.originalMtimeMs,
+      // Optional byte-level undo; the standard v2 fields remain sufficient
+      // for older readers to use their existing full-header restore path.
+      ...(change.inPlaceMutation ? { mutation: change.inPlaceMutation } : {}),
       // Per-line record of the original turn_context.model values
       // so a failed rollback can put the per-turn model back to
       // what it was before the sync. Without this, a restore
@@ -414,6 +425,7 @@ export async function createBackup({
     codexHome,
     sqliteHome: actualSqliteHome,
     targetProvider,
+    ...(fast ? { scanScope: "metadata" } : {}),
     createdAt: sessionManifest.createdAt,
     dbFiles: copiedDbFiles,
     sqliteDbFiles: copiedSqliteDbFiles,
@@ -430,11 +442,8 @@ export async function updateSessionBackupManifest(backupDir, sessionChanges, opt
   const sessionManifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
   const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
 
-  // Promote older manifests to the v2 schema so restoreSessionChanges
-  // can rely on the per-line `originalTurnContextModels` field.
-  if (sessionManifest.version !== 2) {
-    sessionManifest.version = 2;
-  }
+  // Preserve the official v1-to-v2 model-snapshot upgrade.
+  if (sessionManifest.version !== 2) sessionManifest.version = 2;
 
   const filesByPath = new Map(
     (sessionManifest.files ?? []).map((entry) => [pathComparisonKey(entry.path), entry])
@@ -746,6 +755,13 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
       sessionRestoreEntries = validatedEntries
         .filter(({ originalPath }) => selected.has(pathComparisonKey(originalPath)))
         .map(({ entry }) => entry);
+    }
+    // Preflight before rewinding other stores. Rollout-only compensation must
+    // attempt every target, even if another target has conflicting bytes.
+    if (restoreConfig || restoreGlobalState || restoreDatabase) {
+      for (const entry of sessionRestoreEntries) {
+        if (entry.mutation) await validateProviderByteRestore(entry);
+      }
     }
   }
 

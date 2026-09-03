@@ -84,7 +84,14 @@ describe("operation result presentation", () => {
       outcome: "completed",
       backup: null,
       warnings: [],
-      result: {}
+      result: { inPlaceSessionFiles: 1, rewrittenSessionFiles: 0 },
+      providerSync: {
+        mode: "fast",
+        rolloutScanScope: "metadata",
+        inPlaceSessionFiles: 1,
+        rewrittenSessionFiles: 0,
+        unchecked: ["historyModels", "userEventFlags", "encryptedContent"]
+      }
     };
     function Harness() {
       const [current, setCurrent] = useState<OperationResult | null>(result);
@@ -101,6 +108,9 @@ describe("operation result presentation", () => {
     }
     render(createElement(I18nextProvider, { i18n }, createElement(Harness)));
 
+    expect(await screen.findByText("Fast Provider-only sync")).toBeVisible();
+    expect(screen.getByText("Metadata only")).toBeVisible();
+    expect(screen.getByText("historyModels, userEventFlags, encryptedContent")).toBeVisible();
     await user.click((await screen.findAllByRole("button", { name: "Close" })).at(-1)!);
     await waitFor(() => expect(screen.getByRole("button", { name: "Prepare sync" })).toHaveFocus());
   });

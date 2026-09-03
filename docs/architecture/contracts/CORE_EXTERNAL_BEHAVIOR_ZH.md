@@ -10,6 +10,17 @@
 
 ## 1. 文档目的
 
+V1/ADR-0015 已接收的实现增量（尚未公开发布）：
+
+- Core `prepareSync` / `prepareSwitch` 新增 `syncMode="full"|"fast"`，兼容适配器仍接受 `fast=false`。默认保留原检查范围，合并为一次正文扫描。
+- 合格的等长 provider 使用官方 v2 manifest 中的可选 mutation 记录；新代码执行、回滚和崩溃恢复保留同一 inode/file ID，开始写入后不得回退全文重写。
+- 稳定文件保留原 mtime；POSIX 检测并修复 stat/utimes 期间的追加竞争，Windows 使用独占句柄；`updated_at` 和 History 的去重/排序规则不变。
+- `fast=true` 只读首行（上限 1 MiB）及属性，保留根级/历史模型，不检查用户事件与加密内容；保留 provider、首行 cwd、workspace 修复及数据库事务。
+- 快速模式静态不支持项在备份和业务写入前以 `FAST_MODE_UNSUPPORTED` 失败，不隐式全量重写；运行时 busy/changed 沿用 partial 分类。
+- 结果增加 `inPlaceSessionFiles`；快速结果另含 `scanScope="metadata"`、`unchecked=["historyModels","userEventFlags","encryptedContent"]`、`encryptedContentCounts=null` 和未检查警告。
+- metadata/manifest 均保持官方 v2，继续读取 v1/v2；标准恢复字段不变。旧 Node/.NET 可忽略新增记录并按原流程恢复，不代表旧版本自动具备原地恢复能力。
+- 详见 [ADR-0015](../../adr/0015-provider-byte-updates-and-fast-sync.md)。该能力已进入 V1 的 Plan/Revision/Restore v2、共享 CoreClient 与 Web/Electron UI；#90 合入前仍不属于公开稳定版。
+
 本文冻结 vNext 迁移开始时 Node 实现已经提供的外部行为。这里的“外部”不仅指 npm 最终用户，也包括当前 CLI 与 Local Web UI 对 Node service 的真实依赖。
 
 本文解决三个问题：

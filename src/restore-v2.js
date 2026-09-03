@@ -346,6 +346,20 @@ function digestSessionEntry(entry) {
   };
 }
 
+function expectedRestoredSessionEntry(sourceEntry, preRestoreEntry) {
+  const modelSnapshots = new Map(
+    (preRestoreEntry?.originalTurnContextModels ?? []).map((snapshot) => [snapshot.lineIndex, snapshot])
+  );
+  for (const snapshot of sourceEntry.originalTurnContextModels ?? []) {
+    modelSnapshots.set(snapshot.lineIndex, snapshot);
+  }
+  return {
+    ...sourceEntry,
+    originalTurnContextModels: [...modelSnapshots.values()]
+      .sort((left, right) => left.lineIndex - right.lineIndex)
+  };
+}
+
 async function digestRolloutTarget(targetPath) {
   const [entry] = await captureSessionRestoreEntries([targetPath]);
   return digestSessionEntry(entry);
@@ -403,8 +417,10 @@ function sameDigest(left, right) {
     && left.digest === right.digest;
 }
 
-async function expectedPostDigest(target, pre, scratchDir) {
-  if (target.kind === "rollout") return digestSessionEntry(target.sourceEntry);
+async function expectedPostDigest(target, pre, scratchDir, preRestoreEntry = null) {
+  if (target.kind === "rollout") {
+    return digestSessionEntry(expectedRestoredSessionEntry(target.sourceEntry, preRestoreEntry));
+  }
   if (target.kind === "sqlite") return digestSqliteTarget(target.sourcePath, scratchDir);
   if (target.kind === "globalState" && target.sourceAction === "delete") {
     return { present: false, digestKind: "absent", digest: sha256Revision("absent") };
@@ -481,10 +497,12 @@ async function createPreRestoreSnapshot({
       );
       const id = targetId(sourceTarget.kind, sourceTarget.targetPath, platform);
       let pre;
+      let preRestoreEntry = null;
       let snapshotPath = null;
       let snapshotEntryIndex = null;
       if (sourceTarget.kind === "rollout") {
         const [entry] = await captureSessionRestoreEntries([sourceTarget.targetPath]);
+        preRestoreEntry = entry;
         pre = digestSessionEntry(entry);
         snapshotEntryIndex = rolloutEntries.length;
         rolloutEntries.push(entry);
@@ -538,7 +556,7 @@ async function createPreRestoreSnapshot({
       });
       let expectedPost;
       try {
-        expectedPost = await expectedPostDigest(sourceTarget, pre, snapshotDir);
+        expectedPost = await expectedPostDigest(sourceTarget, pre, snapshotDir, preRestoreEntry);
       } catch (error) {
         throw new Error(
           `Restore expected-post digest failed for ${sourceTarget.kind}: ${error instanceof Error ? error.message : String(error)}`,

@@ -23,8 +23,8 @@ const HELP_TEXT = `codex-provider
 
 Usage:
   codex-provider status [--json] [--codex-home PATH] [--sqlite-home PATH]
-  codex-provider sync [--json] [--provider ID] [--keep N] [--codex-home PATH] [--sqlite-home PATH]
-  codex-provider switch <provider-id> [--json] [--model NAME] [--keep-root-model] [--keep N] [--codex-home PATH] [--sqlite-home PATH]
+  codex-provider sync [--json] [--fast] [--provider ID] [--keep N] [--codex-home PATH] [--sqlite-home PATH]
+  codex-provider switch <provider-id> [--json] [--fast | --model NAME] [--keep-root-model] [--keep N] [--codex-home PATH] [--sqlite-home PATH]
   codex-provider watch [--codex-home PATH] [--sqlite-home PATH] [--debounce-ms N] [--once] [--no-state-db]
   codex-provider web [--port N] [--no-open] [--reset-access] [--codex-home PATH] [--sqlite-home PATH]
   codex-provider prune-backups [--json] [--keep N] [--codex-home PATH]
@@ -34,6 +34,9 @@ Usage:
 JSON mode:
   --json               emit one schemaVersion 1 envelope on stdout; progress goes to stderr
                        (not supported by long-running watch or web commands)
+
+sync / switch flags:
+  --fast               read metadata only; require in-place provider updates; preserve models
 
 switch flags:
   --model NAME         override root-level model field with NAME (e.g. "MiniMax-M3")
@@ -74,6 +77,10 @@ function parseArgs(argv) {
     const inlineValue = separatorIndex >= 0 ? value.slice(separatorIndex + 1) : undefined;
     const normalizedName = flagName.slice(2);
     flagCounts[normalizedName] = (flagCounts[normalizedName] ?? 0) + 1;
+    if (normalizedName === "fast" && inlineValue === undefined) {
+      flags.fast = true;
+      continue;
+    }
     if (inlineValue !== undefined) {
       flags[normalizedName] = inlineValue;
       continue;
@@ -102,15 +109,15 @@ const JSON_COMMAND_CONTRACTS = Object.freeze({
     positionalCount: 1
   },
   sync: {
-    flags: ["json", "help", "provider", "keep", "codex-home", "sqlite-home"],
+    flags: ["json", "help", "fast", "provider", "keep", "codex-home", "sqlite-home"],
     valueFlags: ["provider", "keep", "codex-home", "sqlite-home"],
-    booleanFlags: ["json", "help"],
+    booleanFlags: ["json", "help", "fast"],
     positionalCount: 1
   },
   switch: {
-    flags: ["json", "help", "model", "keep-root-model", "keep", "codex-home", "sqlite-home"],
+    flags: ["json", "help", "fast", "model", "keep-root-model", "keep", "codex-home", "sqlite-home"],
     valueFlags: ["model", "keep", "codex-home", "sqlite-home"],
-    booleanFlags: ["json", "help", "keep-root-model"],
+    booleanFlags: ["json", "help", "fast", "keep-root-model"],
     positionalCount: 2
   },
   "prune-backups": {
@@ -207,6 +214,19 @@ function validateJsonCommandArgs(command, parsed) {
   }
 }
 
+function validateFastMode(command, flags) {
+  if (!Object.hasOwn(flags, "fast")) return;
+  if (flags.fast !== true) {
+    throw invalidInputError("--fast is a standalone boolean flag and does not accept a value.");
+  }
+  if (!["sync", "switch"].includes(command)) {
+    throw invalidInputError("--fast is supported only by sync and switch.");
+  }
+  if (flags.model !== undefined) {
+    throw invalidInputError("--fast and --model cannot be combined.");
+  }
+}
+
 function summarizeSync(result, label) {
   const lines = [
     `${label} provider: ${result.targetProvider}`,
@@ -215,6 +235,7 @@ function summarizeSync(result, label) {
     `Backup: ${result.backupDir}`,
     `Backup creation time: ${formatDuration(result.backupDurationMs ?? 0)}`,
     `Updated rollout files: ${result.changedSessionFiles}`,
+    `In-place rollout updates: ${result.inPlaceSessionFiles ?? 0}`,
     `Updated SQLite rows: ${result.sqliteRowsUpdated}${result.sqlitePresent ? "" : " (state_5.sqlite not found)"}`
   ];
   if (result.sqliteUserEventRowsUpdated) {
@@ -478,7 +499,8 @@ async function executeCommand({ positionals, flags }, context) {
       onProgress: createSyncProgressReporter(jsonMode ? stderrLine : stdoutLine, {
         includeBackupPath: !jsonMode
       }),
-      model: rootModel
+      model: flags.fast ? null : rootModel,
+      fast: Boolean(flags.fast)
     });
     if (!jsonMode) stdoutLine(summarizeSync(result, "Synchronized"));
     return result;
@@ -492,6 +514,7 @@ async function executeCommand({ positionals, flags }, context) {
       sqliteHome: flags["sqlite-home"],
       provider,
       model: flags.model,
+      fast: Boolean(flags.fast),
       keepRootModel: Boolean(flags["keep-root-model"]),
       keepCount: parseKeepCount(flags.keep),
       onProgress: createSyncProgressReporter(jsonMode ? stderrLine : stdoutLine, {
@@ -687,6 +710,7 @@ export async function runCli(argv, options = {}) {
     }
 
     assertSupportedNodeVersion();
+    validateFastMode(command, parsed.flags);
     if (jsonMode) validateJsonCommandArgs(command, parsed);
     const result = await executeCommand(parsed, {
       command,

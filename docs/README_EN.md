@@ -113,6 +113,8 @@ codex-provider sync
 
 By default, `switch` also updates the root-level `model` when the target provider section defines one. Use `--keep-root-model` to preserve the current value, or `--model <name>` to set it explicitly.
 
+Normal synchronization now automatically prefers an equal-length in-place Provider update and falls back to the complete mode when lengths differ; Provider IDs do not need a fixed naming length. Use `sync --fast` / `switch <provider-id> --fast` for an explicit Provider-only operation: it reads rollout headers, preserves models, and fails before writes when in-place update is unavailable. The shared Web and Electron UI expose the same Core mode. See [ADR-0015](adr/0015-provider-byte-updates-and-fast-sync.md).
+
 SQLite Home resolution order: `--sqlite-home` → root-level `sqlite_home` in `config.toml` → `CODEX_SQLITE_HOME` → `<Codex Home>/sqlite`. Only the default layout falls back to `<Codex Home>/state_5.sqlite`.
 
 ## Current Architecture

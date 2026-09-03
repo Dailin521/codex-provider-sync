@@ -3448,7 +3448,7 @@ test("applySessionChanges preserves large UTF-8 session metadata", async () => {
   assert.match(rollout, /"large_blob":"数据块数据块/);
 });
 
-test("applySessionChanges atomically replaces equal-length provider IDs", async () => {
+test("applySessionChanges updates equal-length provider IDs without replacing the inode", async () => {
   const { codexHome } = await makeTempCodexHome();
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-in-place.jsonl");
   await writeRollout(sessionPath, "thread-in-place", "openai");
@@ -3463,6 +3463,7 @@ test("applySessionChanges atomically replaces equal-length provider IDs", async 
   await fs.writeFile(sessionPath, original, "utf8");
   const originalTime = new Date("2026-01-02T03:04:05.000Z");
   await fs.utimes(sessionPath, originalTime, originalTime);
+  const before = await fs.stat(sessionPath);
 
   const { changes } = await collectSessionChanges(codexHome, "prov_a");
   const result = await applySessionChanges(changes);
@@ -3470,7 +3471,9 @@ test("applySessionChanges atomically replaces equal-length provider IDs", async 
   const rollout = await fs.readFile(sessionPath, "utf8");
 
   assert.equal(result.appliedChanges, 1);
-  assert.equal(result.inPlaceChanges, 0);
+  assert.equal(result.inPlaceChanges, 1);
+  assert.equal(after.ino, before.ino);
+  assert.equal(after.size, before.size);
   assert.equal(Math.round(after.mtimeMs), originalTime.getTime());
   const firstNewline = rollout.indexOf("\n");
   assert.equal(JSON.parse(rollout.slice(0, firstNewline)).payload.model_provider, "prov_a");

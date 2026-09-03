@@ -10,6 +10,8 @@
 
 ## 1. 目的
 
+V1/ADR-0015 增量（尚未公开发布）：`FAST_MODE_UNSUPPORTED` 表示首行无效/超过快速读取上限，或待修改文件无法采用等长原地策略。它发生在备份和业务 mutation 之前，修正输入或显式选择完整同步后可重试，不要求 recovery。公共 `details.fastModeReason` 仅允许 `session-meta-invalid`、`session-meta-too-large`、`provider-location-ambiguous`、`provider-length-mismatch`。`IN_PLACE_RESTORE_FAILED` 仅作为内部原因；服务层仍以既有 `SYNC_FAILED_ROLLED_BACK` / `RECOVERY_REQUIRED` 表达最终恢复结果。
+
 本文冻结 vNext 的错误分类、兼容映射和演进规则，使调用方依据稳定的 `code` 决策，而不是解析自然语言 `message`、异常类型名或堆栈。
 
 V1 的 Node Public API 已实现 Canonical `CoreError`/DTO，CLI JSON Adapter 与 C5 Web Core envelope 已按 Canonical Code 输出；Web 的非 Core Host transport code 与迁移期 .NET 仍存在不同大小写、命名和结构，这些现状继续列为 Legacy Surface，并由后续 Adapter 渐进收口。
@@ -78,6 +80,7 @@ interface CoreErrorDto {
 | `PLAN_EXPIRED` | Plan 已有明确的过期时间和重新准备动作；它与状态漂移导致的 `STALE_STATE` 不同 | warning | 重新准备 Plan 后是 | 否 |
 | `STALE_STATE` | Apply 加锁后发现 profile/config/rollout/state DB 或 storage revision 与 Plan 不一致 | warning | 重新准备 Plan 后是 | 否 |
 | `LOCK_UNVERIFIABLE` | 无法可靠验证锁所有者、进程启动身份、协议版本或锁目录身份；不能误判为普通 Busy，也不能冒险删除 | error | 消除不确定状态后是 | 否 |
+| `FAST_MODE_UNSUPPORTED` | 当前 rollout 首行或 Provider 长度/位置不满足快速原地更新条件 | error | 改用完整模式后是 | 否 |
 
 `LOCK_UNVERIFIABLE` 必须 fail closed。只有确认存在活跃冲突所有者时才使用 `OPERATION_BUSY`；未来协议、损坏 owner、身份读取失败或 ABA/目录身份不确定均使用 `LOCK_UNVERIFIABLE`。用户提示不得建议盲目删除锁目录。
 
@@ -167,7 +170,7 @@ JSON Mode 的当前映射为：
 | --- | --- |
 | `0` | completed 或 noop |
 | `1` | 其他普通失败，包括 `SYNC_FAILED_ROLLED_BACK` |
-| `2` | `INVALID_INPUT`、`PLAN_EXPIRED`、`PLAN_STALE`、`STALE_STATE` 及迁移期 revision 漂移码 |
+| `2` | `INVALID_INPUT`、`FAST_MODE_UNSUPPORTED`、`PLAN_EXPIRED`、`PLAN_STALE`、`STALE_STATE` 及迁移期 revision 漂移码 |
 | `3` | partial Result |
 | `4` | `RECOVERY_REQUIRED`、`PENDING_TRANSACTION`，或 DTO 标记 `recoveryRequired:true` |
 | `5` | `OPERATION_BUSY`、`SQLITE_BUSY`、`LOCK_UNVERIFIABLE` |

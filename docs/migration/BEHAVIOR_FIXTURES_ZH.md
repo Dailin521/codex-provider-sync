@@ -8,6 +8,8 @@
 >
 > **架构基线：[vNext Electron + Node 单核心架构](../VNEXT_ELECTRON_NODE_ARCHITECTURE_ZH.md)**
 
+V1 性能夹具：`test/in-place-transaction.test.js` 验证等长 Provider 只写目标字节、正文 hash/文件大小/文件身份保持以及故障恢复；`test/fast-sync.test.js` 验证快速范围不读取 rollout 正文、模型保持、前置失败和 v2 格式兼容；`test/windows-rewrite-worker.test.js` 与 `test/windows-provider-bytes.ps1` 验证 Windows worker 和原生独占句柄路径。耗时与吞吐基准只作为手动证据，不作为 CI 数值门禁。
+
 ## 1. 目的与边界
 
 本文冻结需要被共享 Fixture 表达的场景、输入语义和验收结果，用于迁移期间比较 Node 与 .NET，并为 Node 单核心提供长期回归证据。
