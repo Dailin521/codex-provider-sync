@@ -11,7 +11,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --test checks/core-surface.contract.mjs"
+    "test": "node --test checks/*.contract.mjs"
   },
   "engines": {
     "node": ">=24"

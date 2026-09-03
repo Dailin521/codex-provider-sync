@@ -97,6 +97,41 @@ const rootImports = [...coreSource.matchAll(/from\s+["'](\.\.\/\.\.\/\.\.\/src\/
   .map((match) => match[1]);
 assert(rootImports.length === 1 && rootImports[0] === "../../../src/public-api.js", "Core bridge may import only root src/public-api.js.");
 
+const allowedRootCoreImports = new Map([
+  ["src/web-core-adapter.js", new Set([
+    "../packages/core/src/index.js"
+  ])],
+  ["src/service.js", new Set([
+    "../packages/core/src/application/concurrency-guard.js",
+    "../packages/core/src/application/operation-runtime.js",
+    "../packages/core/src/application/plan-apply-guard.js"
+  ])]
+]);
+for (const filePath of await sourceFiles("src")) {
+  const source = await fs.readFile(filePath, "utf8");
+  const relativePath = path.relative(repositoryRoot, filePath).replaceAll("\\", "/");
+  const packageCoreImports = [...source.matchAll(/from\s+["']([^"']*packages\/core\/src\/[^"']+)["']/g)]
+    .map((match) => match[1]);
+  const allowed = allowedRootCoreImports.get(relativePath) ?? new Set();
+  const actual = new Set(packageCoreImports);
+  assert(
+    actual.size === allowed.size
+      && [...actual].every((specifier) => allowed.has(specifier)),
+    `${relativePath} has an unapproved Core implementation import.`
+  );
+}
+
+for (const relativePath of [
+  "packages/core/src/application/concurrency-guard.js",
+  "packages/core/src/application/operation-runtime.js",
+  "packages/core/src/application/plan-apply-guard.js"
+]) {
+  const source = await fs.readFile(path.join(repositoryRoot, relativePath), "utf8");
+  assert(!/(?:\.\.\/)+src\//.test(source), `${relativePath} imports the legacy root.`);
+  assert(!/node:(?:fs|sqlite)/.test(source), `${relativePath} imports storage infrastructure.`);
+  assert(!/backup|journal|session-files|state-db-lock/.test(source), `${relativePath} owns a data-mutation concern.`);
+}
+
 for (const boundary of [
   "packages/contracts/src",
   "packages/core-client/src",

@@ -29,10 +29,11 @@ async function confirmPlan(page) {
   const dialog = page.getByRole("dialog", { name: "Review plan" });
   await expect(dialog).toBeVisible();
   await dialog.getByRole("button", { name: "Confirm and apply" }).click();
-  await expect(page.getByText("Operation completed.", { exact: true })).toBeVisible();
   await expect(dialog).toHaveCount(0);
-  await page.getByRole("dialog", { name: "Operation result" })
-    .getByRole("button", { name: "Close" })
+  const resultDialog = page.getByRole("dialog", { name: "Operation result" });
+  await expect(resultDialog).toBeVisible();
+  await expect(resultDialog.getByRole("heading", { name: "Completed", exact: true })).toBeVisible();
+  await resultDialog.getByRole("button", { name: "Close" })
     .last()
     .click();
 }

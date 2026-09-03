@@ -1,6 +1,10 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 
+import { createConcurrencyGuard } from "../packages/core/src/application/concurrency-guard.js";
+import { createOperationRuntime } from "../packages/core/src/application/operation-runtime.js";
+import { createPlanApplyGuard } from "../packages/core/src/application/plan-apply-guard.js";
+
 import {
   DEFAULT_BACKUP_RETENTION_COUNT,
   DEFAULT_LOCK_NAME,
@@ -88,19 +92,17 @@ import {
 } from "./restore-v2.js";
 
 const planLedger = new PlanLedger();
-
-function issuePreparedPlan(operation, summary, internal) {
-  const plan = planLedger.issue(operation, summary, internal);
-  if (internal.actor === "manual") {
-    operationCoordinator.registerManualIntent(
-      internal.codexHome,
-      plan.planId,
-      plan.expiresAt,
-      internal.platform
-    );
-  }
-  return plan;
-}
+const concurrencyGuard = createConcurrencyGuard({ coordinator: operationCoordinator });
+const planApplyGuard = createPlanApplyGuard({ planLedger, concurrencyGuard });
+const operationRuntime = createOperationRuntime({
+  planApplyGuard,
+  concurrencyGuard,
+  CoreError,
+  getStatus,
+  normalizeCodexHome,
+  toOperationResult: operationResult,
+  emitProgress
+});
 
 function pathComparisonKey(value) {
   const resolved = path.resolve(value);
@@ -1891,7 +1893,7 @@ async function issueSyncLikePlan(operation, options, switchIntent = null) {
         faultInjector: options.faultInjector,
         signal: options.signal
       };
-  return issuePreparedPlan(operation, summary, {
+  return operationRuntime.issuePreparedPlan(operation, summary, {
     codexHome: context.codexHome,
     platform: options.platform,
     actor: options.__actor === "watch" ? "watch" : "manual",
@@ -2031,7 +2033,7 @@ export async function prepareRestore(options = {}) {
     },
     warnings
   };
-  return issuePreparedPlan("restore", summary, {
+  return operationRuntime.issuePreparedPlan("restore", summary, {
     codexHome: context.codexHome,
     platform: options.platform,
     actor: "manual",
@@ -2094,108 +2096,23 @@ function operationResult(operation, operationId, result, sourceBackup = null) {
   };
 }
 
-function composeProgressObservers(primary, secondary) {
-  if (typeof primary !== "function") return secondary;
-  if (typeof secondary !== "function" || primary === secondary) return primary;
-  return (event) => {
-    emitProgress(primary, event);
-    emitProgress(secondary, event);
-  };
-}
-
-function notifyOperationStarted(observer, value) {
-  if (typeof observer !== "function") return;
-  try {
-    const result = observer(value);
-    if (result && typeof result.then === "function") result.catch(() => {});
-  } catch {
-    // Runtime lifecycle observers are non-authoritative, just like progress.
-  }
-}
-
-function attachOperationId(error, operationId) {
-  if (!error || (typeof error !== "object" && typeof error !== "function")) return;
-  if (typeof error.operationId === "string" && error.operationId) return;
-  try {
-    Object.defineProperty(error, "operationId", {
-      configurable: true,
-      enumerable: true,
-      value: operationId,
-      writable: false
-    });
-  } catch {
-    // Error correlation is observational. Preserve the original failure when
-    // a frozen third-party error cannot be annotated.
-  }
-}
-
-async function applyPrepared(input, operation, execute, control = {}) {
-  const entry = planLedger.consume(input, operation);
-  const internal = entry.internal;
-  const active = operationCoordinator.begin(internal.codexHome, operation, {
-    actor: internal.actor,
-    planId: input.planId,
-    platform: internal.platform
-  });
-  notifyOperationStarted(control.onOperationStarted, {
-    operationId: active.operationId,
-    operation
-  });
-  try {
-    const result = await execute({
-      ...internal.executionOptions,
-      ...(control.signal ? { signal: control.signal } : {}),
-      ...(typeof control.faultInjector === "function"
-        ? { faultInjector: control.faultInjector }
-        : {}),
-      onProgress: composeProgressObservers(
-        internal.executionOptions.onProgress,
-        control.onProgress
-      ),
-      expectedPlanState: internal.expectedPlanState
-    });
-    return operationResult(operation, active.operationId, result, internal.sourceBackup);
-  } catch (error) {
-    attachOperationId(error, active.operationId);
-    if (error?.name === "AbortError" && error?.code === "ABORT_ERR") {
-      throw new CoreError(
-        "OPERATION_CANCELLED",
-        "The provider-sync operation was cancelled before commit.",
-        { operationId: active.operationId, cause: error }
-      );
-    }
-    throw error;
-  } finally {
-    operationCoordinator.end(internal.codexHome, active.operationId, internal.platform);
-    try {
-      await getStatus(internal.statusOptions);
-    } catch {
-      // Keep the last complete snapshot. A status refresh is observational and
-      // cannot change the transaction result or replace it with partial state.
-    }
-  }
-}
-
 export async function applySync(input, control) {
-  return applyPrepared(input, "sync", (options) => runSyncCore(options), control);
+  return operationRuntime.applyPrepared(input, "sync", (options) => runSyncCore(options), control);
 }
 
 export async function applySwitch(input, control) {
-  return applyPrepared(input, "switch", (options) => runSwitchCore(options), control);
+  return operationRuntime.applyPrepared(input, "switch", (options) => runSwitchCore(options), control);
 }
 
 export async function applyRestore(input, control) {
-  return applyPrepared(input, "restore", (options) => runRestoreCore(options), control);
+  return operationRuntime.applyPrepared(input, "restore", (options) => runRestoreCore(options), control);
 }
 
 // Internal scheduler hook used by Watch. It exposes completion only for a
 // same-process manual operation; external writers remain event-driven and are
 // never polled or queued behind.
 export function waitForManualOperationEnd({ codexHome, platform } = {}) {
-  return operationCoordinator.waitForManualOperation(
-    normalizeCodexHome(codexHome),
-    platform ?? process.platform
-  );
+  return operationRuntime.waitForManualOperationEnd({ codexHome, platform });
 }
 
 /** @deprecated Compatibility adapter. New transports must use prepareSync/applySync. */
