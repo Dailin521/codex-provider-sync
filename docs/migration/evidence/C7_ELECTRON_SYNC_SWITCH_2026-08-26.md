@@ -1,5 +1,7 @@
 # C7 Electron Sync/Switch 证据（2026-08-26）
 
+> 历史 checkpoint 快照：本文记录 ADR-0016 之前 Electron Sync/Switch 的双锁、普通 journal 与自动补偿行为。当前候选以 ADR-0016 和最新 C2/C3 轻量化证据为准。
+
 状态：候选实现的本地 Windows x64 门禁通过；真实 WSL UNC、C5/C6 required CI、远端 Windows/macOS/Linux C7 CI 与最终 PR 合入未闭合，因此 C7/Phase 4 仍为 Pending。输入 checkpoint 为 `6820858`；C7 输出 commit SHA 在本 checkpoint 提交后及 C10 evidence bundle 中索引。
 
 ## 已实现边界

@@ -844,7 +844,7 @@ async function runSyncCore({
       };
     }
 
-    if (sqliteRowsToWrite > 0) {
+    if (storage.stateDbLocation) {
       await assertSqliteWritable(storage, { busyTimeoutMs: sqliteBusyTimeoutMs });
     }
     throwIfAborted(signal);
@@ -868,6 +868,7 @@ async function runSyncCore({
       durationMs: backupDurationMs,
       backupDir
     });
+    throwIfAborted(signal);
 
     let failedStage = "mutation";
     let applyResult = { appliedChanges: 0, inPlaceChanges: 0, appliedPaths: [], skippedPaths: [] };

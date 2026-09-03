@@ -9,9 +9,7 @@ const ALLOWED_TEST_GATE_POINTS = new Set([
   "before_backup",
   "after_config_mutation_before_applied",
   "after_rollout_mutation_before_applied",
-  "after_sqlite_commit_before_ack",
-  "after_transaction_journal_commit_before_ack",
-  "after_transaction_commit"
+  "after_sqlite_commit_before_ack"
 ]);
 
 function cancelledAtTestGate(): Error & { code: "ABORT_ERR" } {
@@ -38,10 +36,18 @@ function createDesktopTestFaultInjector(signal: AbortSignal):
     if (entered || event.point !== selectedPoint) return;
     entered = true;
     await fs.mkdir(path.dirname(markerPath), { recursive: true });
-    await fs.writeFile(markerPath, `${JSON.stringify({ point: selectedPoint })}\n`, {
-      encoding: "utf8",
-      flag: "wx"
-    });
+    try {
+      await fs.writeFile(markerPath, `${JSON.stringify({ point: selectedPoint })}\n`, {
+        encoding: "utf8",
+        flag: "wx"
+      });
+    } catch (error) {
+      // The marker intentionally survives a Utility Process crash. A restarted
+      // generation must not arm the same deterministic fault again when the
+      // user retries the operation to converge.
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+      throw error;
+    }
     if (!signal.aborted) {
       await new Promise<void>((resolve) => {
         signal.addEventListener("abort", () => resolve(), { once: true });

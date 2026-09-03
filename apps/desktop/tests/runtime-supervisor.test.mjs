@@ -24,7 +24,7 @@ import {
 const profile = { profileId: "default", profileRevision: "profile-r1" };
 const operationId = "11111111-1111-4111-8111-111111111111";
 
-function statusResult({ pending = false, selectedProfile = profile } = {}) {
+function statusResult({ pending = false, legacyPending = false, selectedProfile = profile } = {}) {
   return {
     schemaVersion: 1,
     snapshotAt: "2026-08-26T00:00:00.000Z",
@@ -37,7 +37,7 @@ function statusResult({ pending = false, selectedProfile = profile } = {}) {
     sqliteHomeSource: "default",
     backupSummary: { count: 0, totalBytes: 0 },
     pendingRecovery: pending,
-    pendingTransactions: pending ? [{ operationId: "pending", state: "applying" }] : [],
+    pendingTransactions: pending || legacyPending ? [{ operationId: "pending", state: "applying" }] : [],
     operationInProgress: null,
     rolloutScanComplete: true,
     lockedRolloutFiles: []
@@ -134,6 +134,7 @@ class FakeUtility {
         const response = createCoreSuccessEnvelope(request, statusResult({
           pending: this.behavior.pendingStatus === true
             || this.behavior.pendingProfiles?.includes(request.payload.profile.profileId),
+          legacyPending: this.behavior.legacyPendingStatus === true,
           selectedProfile: this.behavior.wrongStatusProfile
             ? { profileId: "wrong", profileRevision: "wrong" }
             : request.payload.profile
@@ -360,6 +361,19 @@ test("pending recovery blocks cold-start writes but preserves reads", async () =
     children[0].messages.filter((frame) => frame.kind === "request").map((frame) => frame.envelope.method),
     ["getStatus", "listBackups"]
   );
+});
+
+test("legacy ordinary journals remain visible without blocking cold-start writes", async () => {
+  const supervisor = new CoreRuntimeSupervisor({
+    appVersion: "0.5.0",
+    spawnUtility(identity) {
+      return new FakeUtility(identity, { legacyPendingStatus: true });
+    }
+  });
+  const prepared = await supervisor.requestWrite(prepareRequest(), profile);
+  assert.equal(prepared.ok, true);
+  assert.equal(supervisor.snapshot.recoveryBlocked, false);
+  await supervisor.shutdown();
 });
 
 test("Restore and Prune may converge recovery while starting Watch remains blocked", async () => {

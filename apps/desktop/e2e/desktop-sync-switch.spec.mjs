@@ -240,10 +240,10 @@ test("hidden Electron test build forces the native fallback through Status, Sync
     expect(state.configText).toMatch(/^model_provider = "relay"/m);
     expect(state.configText).toMatch(/^model = "explicit-model"/m);
     expect(state.rollout.model_provider).toBe("relay");
-    expect(state.turnContext.model).toBe("explicit-model");
-    expect(state.turnContext.collaboration_mode.settings.model).toBe("explicit-model");
+    expect(state.turnContext.model).toBe("legacy-model");
+    expect(state.turnContext.collaboration_mode.settings.model).toBe("legacy-model");
     expect(state.sqlite.provider).toBe("relay");
-    expect(state.sqlite.model).toBe("explicit-model");
+    expect(state.sqlite.model).toBe("legacy-model");
     expect(state.sqlite.updatedAt).toBe(1787702400);
     expect(state.sqlite.updatedAtMs).toBe(1787702400000);
     expect(state.backupIds).toHaveLength(4);
@@ -274,6 +274,8 @@ test("hidden Electron test build forces the native fallback through Status, Sync
     await expect(page.getByText("Update checks are available only in a packaged build.", { exact: true })).toBeVisible();
 
     await page.getByRole("button", { name: "Diagnostics" }).click();
+    await page.getByRole("button", { name: "Run full scan" }).click();
+    await expect(page.getByText("Detected issues", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Export redacted bundle" }).click();
     await expect(page.getByText("Redacted diagnostics bundle created.", { exact: true })).toBeVisible();
     const diagnostics = await fs.readFile(diagnosticsTarget);
@@ -288,7 +290,7 @@ test("hidden Electron test build forces the native fallback through Status, Sync
   }
 });
 
-test("hidden Electron fast mode plans and applies an in-place Provider-only switch", async () => {
+test("hidden Electron runs diagnostics explicitly and applies a targeted model Repair", async () => {
   test.setTimeout(90_000);
   const fixture = await createDesktopSyncSwitchFixture();
   let electronApp;
@@ -297,45 +299,35 @@ test("hidden Electron fast mode plans and applies an in-place Provider-only swit
     const page = await electronApp.firstWindow();
     await expect(page.getByText("openai", { exact: true }).first()).toBeVisible();
 
-    const fullPrepare = page.getByRole("button", { name: "Sync" });
-    await fullPrepare.click();
-    const prepareSync = page.getByRole("button", { name: "Prepare sync" });
-    await prepareSync.click();
-    await confirmPlan(page, prepareSync);
-
     const beforeState = await fixture.inspect();
     const beforeBytes = await fs.readFile(fixture.rolloutPath);
-    const beforeStat = await fs.stat(fixture.rolloutPath, { bigint: true });
-    const bodyOffset = beforeBytes.indexOf(10) + 1;
 
-    await page.getByRole("button", { name: "Switch Provider" }).click();
-    await page.getByLabel("Provider ID").fill("prov_a");
-    await page.getByLabel("Sync mode").selectOption("fast");
-    await expect(page.getByLabel("Model handling")).toHaveValue("keep-root-model");
-    await expect(page.getByLabel("Model handling")).toBeDisabled();
-    await page.getByRole("button", { name: "Prepare switch" }).click();
+    await page.getByRole("button", { name: "Diagnostics" }).click();
+    await expect(page.getByText("Diagnostics have not been scanned", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Run full scan" }).click();
+    await expect(page.getByText("Detected issues", { exact: true })).toBeVisible();
+    await page.getByLabel("Historical models").check();
+    await page.getByRole("button", { name: "Prepare repair" }).click();
 
     const plan = page.getByRole("dialog", { name: "Review plan" });
-    await expect(plan.getByText("Provider sync strategy")).toBeVisible();
-    await expect(plan.getByText("Fast Provider-only sync")).toBeVisible();
-    await expect(plan.getByText("Require in-place")).toBeVisible();
+    await expect(plan.getByText("Repair metadata", { exact: false })).toBeVisible();
+    await expect(plan.getByText("Historical models", { exact: true })).toBeVisible();
     await plan.getByRole("button", { name: "Confirm and apply" }).click();
     await expect(page.getByText("Operation completed.", { exact: true })).toBeVisible();
 
     const result = page.getByRole("dialog", { name: "Operation result" });
-    await expect(result.getByText("Fast Provider-only sync")).toBeVisible();
-    await expect(result.getByText("In-place rollout updates")).toBeVisible();
+    await expect(result.getByText("Repair targets", { exact: true })).toBeVisible();
+    await expect(result.getByText("models", { exact: true })).toBeVisible();
+    await expect(result.getByText("Model rows updated", { exact: true })).toBeVisible();
     const afterState = await fixture.inspect();
     const afterBytes = await fs.readFile(fixture.rolloutPath);
-    const afterStat = await fs.stat(fixture.rolloutPath, { bigint: true });
-    expect(afterState.configText).toMatch(/^model_provider = "prov_a"/m);
-    expect(afterState.rollout.model_provider).toBe("prov_a");
-    expect(afterState.turnContext.model).toBe(beforeState.turnContext.model);
-    expect(afterState.sqlite.model).toBe(beforeState.sqlite.model);
-    expect(afterState.sqlite.provider).toBe("prov_a");
-    expect(afterStat.size).toBe(beforeStat.size);
-    expect(afterStat.ino).toBe(beforeStat.ino);
-    expect(afterBytes.subarray(bodyOffset)).toEqual(beforeBytes.subarray(bodyOffset));
+    expect(afterState.configText).toBe(beforeState.configText);
+    expect(afterState.rollout.model_provider).toBe(beforeState.rollout.model_provider);
+    expect(afterState.sqlite.provider).toBe(beforeState.sqlite.provider);
+    expect(afterState.turnContext.model).toBe("gpt-5");
+    expect(afterState.sqlite.model).toBe("gpt-5");
+    expect(afterBytes.toString("utf8")).toContain("C7_DESKTOP_BODY_ONLY_MARKER");
+    expect(beforeBytes.toString("utf8")).toContain("C7_DESKTOP_BODY_ONLY_MARKER");
   } finally {
     await electronApp?.close();
     await fixture.close();
@@ -467,7 +459,7 @@ test("Electron reports a locked rollout as partial without rewriting the locked 
     const dialog = await openSyncPlan(page);
     await dialog.getByRole("button", { name: "Confirm and apply" }).click();
     await expect(page.getByText(
-      "Completed with locked rollout files skipped.",
+      "Partially completed. Retry the same operation to converge.",
       { exact: true }
     )).toBeVisible();
     await releaseChild(lockProcess);
@@ -509,9 +501,8 @@ test("Electron Cancel before backup leaves every protected target unchanged", as
   }
 });
 
-test("Electron Cancel after config mutation waits for a durable rollback terminal", async () => {
+test("Electron Cancel after config mutation returns partial and a retry converges", async () => {
   const fixture = await createDesktopSyncSwitchFixture();
-  const baseline = await fixture.snapshotTargets();
   let electronApp;
   try {
     electronApp = await launchDesktop(fixture, {
@@ -524,14 +515,25 @@ test("Electron Cancel after config mutation waits for a durable rollback termina
     await waitForGate(fixture.gateMarkerPath, "after_config_mutation_before_applied");
     expect((await fixture.inspect()).configText).toMatch(/^model_provider = "relay"/m);
     await dialog.getByRole("button", { name: "Cancel operation" }).click();
-    await expect(notificationWithCode(page, "SYNC_FAILED_ROLLED_BACK")).toContainText(
-      "The operation failed and its changes were rolled back."
-    );
+    const partial = page.getByRole("dialog", { name: "Operation result" });
+    await expect(partial.getByText("Partially completed", { exact: true })).toBeVisible();
+    await expect(partial.getByText("Retry recommended", { exact: true })).toBeVisible();
     await expect(dialog).toHaveCount(0);
-    expect((await fixture.snapshotTargets()).hash).toBe(baseline.hash);
-    expect(await fixture.readJournals()).toEqual([
-      expect.objectContaining({ state: "rolledBack", terminal: true, invalidTail: false })
-    ]);
+    let state = await fixture.inspect();
+    expect(state.configText).toMatch(/^model_provider = "relay"/m);
+    expect(state.rollout.model_provider).toBe("legacy-provider");
+    expect(state.sqlite.provider).toBe("legacy-provider");
+    expect(await fixture.readJournals()).toEqual([]);
+
+    const retryPlan = await prepareSyncDirect(page, "retry-after-partial-prepare");
+    expect(retryPlan.ok, JSON.stringify(retryPlan)).toBe(true);
+    const retry = await applySyncDirect(page, retryPlan.result.planId, "retry-after-partial-apply");
+    expect(retry.ok, JSON.stringify(retry)).toBe(true);
+    expect(retry.result.outcome).toBe("completed");
+    state = await fixture.inspect();
+    expect(state.rollout.model_provider).toBe("relay");
+    expect(state.sqlite.provider).toBe("relay");
+    expect(await fixture.readJournals()).toEqual([]);
   } finally {
     await electronApp?.close();
     await fixture.close();
@@ -539,28 +541,13 @@ test("Electron Cancel after config mutation waits for a durable rollback termina
 });
 
 for (const scenario of [
-  { point: "before_backup", operation: "sync", recoveryBlocked: false, journalState: null },
-  { point: "after_config_mutation_before_applied", operation: "switch", recoveryBlocked: true, journalState: "applying" },
-  {
-    point: "after_rollout_mutation_before_applied",
-    operation: "sync",
-    recoveryBlocked: true,
-    journalState: "applying",
-    testTimeoutMs: 90_000
-  },
-  { point: "after_sqlite_commit_before_ack", operation: "sync", recoveryBlocked: true, journalState: "applied" },
-  { point: "after_transaction_journal_commit_before_ack", operation: "sync", recoveryBlocked: false, journalState: "committed" },
-  {
-    point: "after_transaction_commit",
-    operation: "sync",
-    recoveryBlocked: false,
-    journalState: "committed",
-    gateTimeoutMs: 30_000,
-    testTimeoutMs: 90_000
-  }
+  { point: "before_backup", operation: "sync", targetProvider: "openai", mutationExpected: false },
+  { point: "after_config_mutation_before_applied", operation: "switch", targetProvider: "relay", mutationExpected: true },
+  { point: "after_rollout_mutation_before_applied", operation: "sync", targetProvider: "openai", mutationExpected: true },
+  { point: "after_sqlite_commit_before_ack", operation: "sync", targetProvider: "openai", mutationExpected: true }
 ]) {
-  test(`Utility crash matrix: ${scenario.point}`, async () => {
-    if (scenario.testTimeoutMs) test.setTimeout(scenario.testTimeoutMs);
+  test(`Utility crash leaves no ordinary journal and retry converges: ${scenario.point}`, async () => {
+    test.setTimeout(90_000);
     const fixture = await createDesktopSyncSwitchFixture();
     const baseline = await fixture.snapshotProtected();
     let electronApp;
@@ -574,11 +561,7 @@ for (const scenario of [
         ? await openSwitchPlan(page, { provider: "relay", mode: "provider-default" })
         : await openSyncPlan(page);
       await dialog.getByRole("button", { name: "Confirm and apply" }).click();
-      await waitForGate(
-        fixture.gateMarkerPath,
-        scenario.point,
-        scenario.gateTimeoutMs
-      );
+      await waitForGate(fixture.gateMarkerPath, scenario.point);
       const beforeCrash = await electronApp.evaluate(
         () => globalThis.__CPS_DESKTOP_TEST__.runtime()
       );
@@ -598,29 +581,29 @@ for (const scenario of [
         () => globalThis.__CPS_DESKTOP_TEST__.runtime()
       );
       expect(recovered.generation).toBeGreaterThan(beforeCrash.generation);
+      if (!scenario.mutationExpected) {
+        expect((await fixture.snapshotProtected()).hash).toBe(baseline.hash);
+      }
 
       const nextWrite = await prepareSyncDirect(page, `crash-${scenario.point}`);
-      expect(nextWrite.ok, JSON.stringify(nextWrite)).toBe(!scenario.recoveryBlocked);
-      if (scenario.recoveryBlocked) expect(nextWrite.error.code).toBe("PENDING_TRANSACTION");
+      expect(nextWrite.ok, JSON.stringify(nextWrite)).toBe(true);
+      const converged = await applySyncDirect(
+        page,
+        nextWrite.result.planId,
+        `crash-retry-${scenario.point}`
+      );
+      expect(converged.ok, JSON.stringify(converged)).toBe(true);
+      expect(converged.result.outcome).toBe("completed");
       const afterRecoveryProbe = await electronApp.evaluate(
         () => globalThis.__CPS_DESKTOP_TEST__.runtime()
       );
       expect(afterRecoveryProbe.state).toBe("ready");
       expect(afterRecoveryProbe.generation).toBeGreaterThanOrEqual(recovered.generation);
-      expect(afterRecoveryProbe.recoveryBlocked).toBe(scenario.recoveryBlocked);
-      const journals = await fixture.readJournals();
-      if (scenario.journalState === null) {
-        expect(journals).toEqual([]);
-        expect((await fixture.snapshotProtected()).hash).toBe(baseline.hash);
-      } else {
-        expect(journals).toEqual([
-          expect.objectContaining({
-            state: scenario.journalState,
-            terminal: !scenario.recoveryBlocked,
-            invalidTail: false
-          })
-        ]);
-      }
+      expect(afterRecoveryProbe.recoveryBlocked).toBe(false);
+      expect(await fixture.readJournals()).toEqual([]);
+      const finalState = await fixture.inspect();
+      expect(finalState.rollout.model_provider).toBe(scenario.targetProvider);
+      expect(finalState.sqlite.provider).toBe(scenario.targetProvider);
     } finally {
       await electronApp?.close();
       await fixture.close();

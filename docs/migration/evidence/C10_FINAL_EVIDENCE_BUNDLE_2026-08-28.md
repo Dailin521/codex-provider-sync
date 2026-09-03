@@ -1,5 +1,7 @@
 # C10 最终候选证据快照（2026-08-28）
 
+> 历史 source-head 快照：本文绑定 `c63a403`，其中普通 Sync/Switch 的 State-DB lock/journal 证据已由 ADR-0016 取代，不可用来证明当前 V1 source head 的轻量写合同。
+
 状态：`c63a403688b6d148afa65fba9e1461c7ebcd3331` checkpoint 的本地门禁、四目标原生候选、required CI、aggregate、C10 脱敏 bundle 和 source `1.0.0` 已闭合，CI 结论为 `ci-verified-not-release`。Draft PR #90 仍为 Open/Draft、未合入 `main`；真实 WSL UNC、真实 Beta、合入后 `main` 复验、签名、公证、生产更新升级和独立发布授权未闭合。因此 Phase 6/C10 仍为 Pending，不构成 Beta、Stable、公开替代或发布声明。
 
 本文是 `c63a403` 的静态候选证据快照，不追踪后续 source head；PR #90 的最新 source-head C10 证据只以最新成功 `c10-evidence-bundle` artifact 为准。这样可避免为记录新 SHA 再产生新 commit、进而再次改变被证明的 SHA。[2026-08-27 证据](C10_FINAL_EVIDENCE_BUNDLE_2026-08-27.md) 同样只保留当时本地 Windows checkpoint 的历史事实。

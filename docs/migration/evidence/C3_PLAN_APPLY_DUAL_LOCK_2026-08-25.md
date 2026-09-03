@@ -1,5 +1,7 @@
 # C3 Plan/Apply、双层锁与协调状态证据（2026-08-25）
 
+> 历史 checkpoint 快照：本文记录 ADR-0016 之前的实现与当时门禁，不代表当前普通写合同。当前 Sync/Switch/Repair 只持有 Codex Home 锁，不创建普通 transaction journal，也不自动全量回滚。
+
 状态：本地门禁通过，等待远端 CI。输入 checkpoint 为 `13163f5`；C3 最终 commit SHA 在本 checkpoint 提交后及 C10 evidence bundle 中索引。
 
 ## 已实现边界

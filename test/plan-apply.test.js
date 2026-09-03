@@ -78,7 +78,7 @@ async function backupCount(codexHome) {
 test("prepareSync returns schema v1 summary and applySync consumes it exactly once", async () => {
   const value = await makeFixture();
   try {
-    const plan = await prepareSync({ codexHome: value.codexHome, provider: "openai", model: "gpt-5" });
+    const plan = await prepareSync({ codexHome: value.codexHome });
     assert.equal(plan.schemaVersion, 1);
     assert.equal(plan.operation, "sync");
     assert.equal(plan.requiresConfirmation, true);
@@ -165,7 +165,82 @@ test("Apply publishes one operation id, projects progress, and cancels before ba
   }
 });
 
-test("Apply cancellation after rollout mutation preserves rolled-back failure semantics", async () => {
+test("Apply can cancel after backup completes but before the first mutation", async () => {
+  const value = await makeFixture();
+  const controller = new AbortController();
+  const configBefore = await fs.readFile(path.join(value.codexHome, "config.toml"));
+  const rolloutBefore = await fs.readFile(value.rolloutPath);
+  try {
+    const plan = await prepareSync({ codexHome: value.codexHome });
+    await assert.rejects(
+      applySync(
+        { schemaVersion: 1, planId: plan.planId },
+        {
+          onProgress(progress) {
+            if (progress.stage === "create_backup" && progress.status === "complete") {
+              controller.abort();
+            }
+          },
+          signal: controller.signal
+        }
+      ),
+      (error) => error?.code === "OPERATION_CANCELLED"
+    );
+    assert.equal(await backupCount(value.codexHome), 1);
+    assert.deepEqual(await fs.readFile(path.join(value.codexHome, "config.toml")), configBefore);
+    assert.deepEqual(await fs.readFile(value.rolloutPath), rolloutBefore);
+    const database = await openDatabase(value.stateDbPath, { readOnly: true });
+    try {
+      assert.equal(
+        database.prepare("SELECT model_provider FROM threads WHERE id = ?").get("thread-a").model_provider,
+        "custom"
+      );
+    } finally {
+      database.close();
+    }
+  } finally {
+    await fs.rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("SQLite busy preflight runs before backup even when only rollout bytes need mutation", async () => {
+  const value = await makeFixture();
+  const rolloutBefore = await fs.readFile(value.rolloutPath);
+  let writer;
+  try {
+    const database = await openDatabase(value.stateDbPath);
+    try {
+      database.prepare("UPDATE threads SET model_provider = ? WHERE id = ?").run("openai", "thread-a");
+    } finally {
+      database.close();
+    }
+
+    const plan = await prepareSync({ codexHome: value.codexHome });
+    assert.equal(plan.impact.rolloutFilesToChange, 1);
+    assert.equal(plan.impact.sqliteRowsToChange, 0);
+    writer = await openDatabase(value.stateDbPath);
+    writer.exec("BEGIN IMMEDIATE");
+
+    await assert.rejects(
+      applySync({ schemaVersion: 1, planId: plan.planId }),
+      (error) => error?.code === "SQLITE_BUSY"
+    );
+    assert.equal(await backupCount(value.codexHome), 0);
+    assert.deepEqual(await fs.readFile(value.rolloutPath), rolloutBefore);
+  } finally {
+    if (writer) {
+      try {
+        writer.exec("ROLLBACK");
+      } catch {
+        // The test is already complete if SQLite closed the transaction.
+      }
+      writer.close();
+    }
+    await fs.rm(value.root, { recursive: true, force: true });
+  }
+});
+
+test("Apply ignores cancellation after the first mutation and completes the convergent write", async () => {
   const value = await makeFixture();
   const controller = new AbortController();
   const rolloutBefore = await fs.readFile(value.rolloutPath);
@@ -177,23 +252,21 @@ test("Apply cancellation after rollout mutation preserves rolled-back failure se
         if (point === "after_rollout_mutation_before_applied") controller.abort();
       }
     });
-    await assert.rejects(
-      applySync(
-        { schemaVersion: 1, planId: plan.planId },
-        {
-          signal: controller.signal,
-          onOperationStarted(value) { startedOperationId = value.operationId; }
-        }
-      ),
-      (error) => error?.code === "SYNC_FAILED_ROLLED_BACK"
-        && error?.operationId === startedOperationId
+    const applied = await applySync(
+      { schemaVersion: 1, planId: plan.planId },
+      {
+        signal: controller.signal,
+        onOperationStarted(value) { startedOperationId = value.operationId; }
+      }
     );
-    assert.deepEqual(await fs.readFile(value.rolloutPath), rolloutBefore);
+    assert.equal(applied.operationId, startedOperationId);
+    assert.equal(applied.outcome, "completed");
+    assert.notDeepEqual(await fs.readFile(value.rolloutPath), rolloutBefore);
     const database = await openDatabase(value.stateDbPath, { readOnly: true });
     try {
       assert.equal(
         database.prepare("SELECT model_provider FROM threads WHERE id = ?").get("thread-a").model_provider,
-        "custom"
+        "openai"
       );
     } finally {
       database.close();
@@ -326,7 +399,7 @@ test("two concurrent Apply calls for one plan start exactly one operation", asyn
   }
 });
 
-test("different Codex Homes sharing one State DB contend before the losing backup", async () => {
+test("different Codex Homes sharing one State DB rely on native SQLite transactions", async () => {
   const value = await makeFixture();
   const secondHome = path.join(value.root, "second-codex-home");
   const secondRollout = path.join(secondHome, "sessions", "2026", "08", "25", "rollout-b.jsonl");
@@ -354,9 +427,6 @@ test("different Codex Homes sharing one State DB contend before the losing backu
         model_provider: "custom"
       }
     })}\n`, "utf8");
-    const secondConfigBefore = await fs.readFile(path.join(secondHome, "config.toml"));
-    const secondRolloutBefore = await fs.readFile(secondRollout);
-
     const firstPlan = await prepareSync({
       codexHome: value.codexHome,
       faultInjector: async ({ point }) => {
@@ -370,16 +440,14 @@ test("different Codex Homes sharing one State DB contend before the losing backu
     await enteredPromise;
 
     const secondPlan = await prepareSync({ codexHome: secondHome });
-    await assert.rejects(
-      applySync({ schemaVersion: 1, planId: secondPlan.planId }),
-      (error) => error?.code === "OPERATION_BUSY" && error?.details?.busyScope === "state-db"
-    );
-    assert.equal(await backupCount(secondHome), 0);
-    assert.deepEqual(await fs.readFile(path.join(secondHome, "config.toml")), secondConfigBefore);
-    assert.deepEqual(await fs.readFile(secondRollout), secondRolloutBefore);
+    const secondApplied = await applySync({ schemaVersion: 1, planId: secondPlan.planId });
+    assert.equal(secondApplied.outcome, "completed");
+    assert.equal(await backupCount(secondHome), 1);
+    assert.match(await fs.readFile(secondRollout, "utf8"), /"model_provider":"openai"/);
 
     release();
-    await firstApply;
+    const firstApplied = await firstApply;
+    assert.equal(firstApplied.outcome, "completed");
   } finally {
     release?.();
     await fs.rm(value.root, { recursive: true, force: true });
@@ -465,7 +533,7 @@ test("Switch re-resolves the authoritative State DB under the Home lock", async 
 test("prepareRestore/applyRestore binds a managed backup and rejects backup drift before mutation", async () => {
   const value = await makeFixture();
   try {
-    const syncPlan = await prepareSync({ codexHome: value.codexHome, provider: "openai" });
+    const syncPlan = await prepareSync({ codexHome: value.codexHome });
     await applySync({ schemaVersion: 1, planId: syncPlan.planId });
     const inventory = await listBackups(value.codexHome);
     const backup = inventory.backups[0];

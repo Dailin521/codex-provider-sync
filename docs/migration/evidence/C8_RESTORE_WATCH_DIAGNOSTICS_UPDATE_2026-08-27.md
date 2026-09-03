@@ -1,5 +1,7 @@
 # C8 Restore / Watch / Diagnostics / Update 证据（2026-08-27）
 
+> 历史 checkpoint 快照：本文的普通 Watch 双层锁描述记录 ADR-0016 之前的实现。当前 Watch 每次写入重新执行轻量 ProviderSync，只持有 Codex Home 锁；Restore 仍独立保留恢复 journal。
+
 状态：候选实现的本地 Windows x64 门禁通过；C7 及其前置 C5/C6 的 required CI、真实 WSL UNC、远端 Windows/macOS/Linux C8 CI 与最终 PR 合入均未闭合。因此 C8/Phase 5 仍为 Pending，不构成发布、稳定版或 .NET 替代声明。输入 checkpoint 为 `1ec27a5`；C8 输出 commit SHA 在本 checkpoint 提交后及 C10 evidence bundle 中索引。
 
 ## 已实现边界

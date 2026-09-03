@@ -472,7 +472,6 @@ export class CoreRuntimeSupervisor {
     this.#recoveryByProfile.set(
       key,
       status.pendingRecovery === true
-        || (Array.isArray(status.pendingTransactions) && status.pendingTransactions.length > 0)
     );
   }
 

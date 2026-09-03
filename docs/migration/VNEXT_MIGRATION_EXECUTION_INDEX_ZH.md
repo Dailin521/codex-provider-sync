@@ -71,12 +71,12 @@
 
 - 新增 `src/public-api.js`，CLI/Web 不再导入 Core 内部实现；
 - 展示逻辑与业务结果分离，现有用户可见语义不变；
-- 最终 PR 合入前，C1～C3 的 checkpoint 门槛必须全部通过：Public API/结构化错误、CLI `--json`、Prepare/Apply 与双层锁分别落地；
-- CLI `--json` 是 opt-in 加法；默认 Human Mode、命令语义和 v0.5 兼容行为保持不变；
+- 最终 PR 合入前，ADR-0016 的 C1～C3 checkpoint 必须全部通过：职责/端口拆分、ProviderSync/Diagnostics/Repair、轻量普通写分别落地；
+- CLI `--json` 继续保持；V1 未发布的 `--fast`、Sync Provider override 改由固定 ProviderSync 和显式 Repair 替代；
 - 原 Node 测试全绿，新增 Public API Contract Test；
 - 真实 Node↔.NET 对同一 Codex Home 的 protocol v2 操作锁争用通过：恰有一个写者，败方无副作用；
 - 锁不确定状态 fail closed，并能区分 `OPERATION_BUSY` 与 `LOCK_UNVERIFIABLE`；
-- 两个 Codex Home 共享同一 SQLite Home 的并发风险已验证并形成明确锁合同。若尚未安全，阶段 1 不得宣称跨入口写入安全，后续 Electron 写能力继续阻断。
+- 两个 Codex Home 共享同一 SQLite Home 时由 SQLite 原生事务裁决；测试必须证明 busy/成功结果可重试收敛且没有并行破坏。
 
 ### 阶段 2：Contracts 与 Core Client
 
@@ -114,9 +114,9 @@
 - Prepare/Confirm/Apply、Revision、Expiry、Single-use 与 Plan Stale 完整实现；
 - Electron 与 CLI 调用同一 Node Core，不解析 CLI 文本；
 - SQLite Busy、locked/changing rollout、Cancel、Partial Result 和 Backup-first 通过 Fault Injection；
-- `shared-sqlite-home-contention` 已证明不会出现并行数据库写者；
+- `shared-sqlite-home-contention` 已证明 SQLite 原生事务会串行化或返回可重试 busy；
 - `wsl-unc-unchanged-hash` 通过，阻断操作不创建 Backup、不改变任何目标；
-- Journal Crash Matrix 覆盖 mutation/commit/ack 关键窗口；
+- 普通写 mutation 前故障零写入，mutation 后故障返回带 UndoBackup 的 partial，重复执行可收敛；
 - 一次 Sync/Switch 后可由受管 Backup 恢复到原状态。
 
 ### 阶段 5：Restore / Watch / 完整功能
@@ -161,9 +161,9 @@
 | Checkpoint | 内容 | 依赖 | 最终合入前必须保留的证据 | V1 状态 |
 | --- | --- | --- | --- | --- |
 | C0 | 治理、基线与依赖安全 | 阶段 0 | ADR-0011～0013、合同导航、基线测试、Vite 审计告警清零 | In Progress（V1） |
-| C1 | Core Public API 与结构化错误 | C0 | CLI/Web 仅走 Public API；Canonical/Legacy Adapter；错误合同测试 | In Progress（V1，本地门禁通过） |
-| C2 | CLI `--json` | C1 | stdout 单一 JSON、stderr 日志、JSON Exit Code 与 Schema 合同 | In Progress（V1，本地门禁通过） |
-| C3 | Prepare/Apply、协调器与双层锁 | C1、C2 | Revision/Plan/Apply、Node/.NET 双层资源锁、真实争锁证据 | In Progress（V1，本地门禁通过） |
+| C1 | Node Core 职责、Runtime 与 Storage 端口 | C0 | CoreFacade 唯一入口；用例不反调 Facade；兼容入口和 DTO 不变 | In Progress（V1，checkpoint commit `c76c551`；等待最终门禁） |
+| C2 | ProviderSync 收窄、Diagnostics 与 Repair | C1 | 首行 Provider-only、Diagnostics 只读、Repair target 隔离；CLI/Web/Electron 同一合同 | In Progress（V1，checkpoint commit `3f1aa5c`；本地门禁通过，等待远端 CI 与最终合入） |
+| C3 | Home lock、SQLite transaction、UndoBackup 与 partial/retry | C1、C2 | noop 无备份、mutation 前零写、mutation 后 partial/retry、Restore 独立 recovery | In Progress（V1，本地门禁通过；C3 SHA 由包含当前证据的 checkpoint commit 固定，等待远端 CI 与最终合入） |
 | C4 | Workspace、Core、Contracts、CoreClient | C1～C3（Phase 1 全部门槛已验证） | 不搬高风险算法；根 npm CLI tarball/Node 16 兼容 | In Progress（V1，本地门禁通过） |
 | C5 | 共享 React UI 与 Web | C4 | AppShell/Features/HttpCoreClient；Web 安全与功能等价；阶段 2 门槛 | In Progress（V1 候选实现；`c63a403` checkpoint 的 required CI 已验证，后续 source head 以 PR 最新成功证据为准；等待最终合入） |
 | C6 | Electron 安全骨架、Utility Runtime、只读能力 | C5（需 Phase 2 全部门槛闭合；受保护分支状态未满足） | 安全窗口/IPC、握手、crash recovery、三平台只读 smoke | Pending（`c63a403` checkpoint 的 Windows/macOS/Linux Electron 候选门禁已验证；后续 head、Phase 状态、真实 WSL 与最终合入未闭合） |
@@ -184,11 +184,11 @@ checkpoint 到阶段的归属固定为：C0 不推进运行 Phase；C1～C3 的�
 | --- | --- | --- |
 | 真实 Node↔.NET 同 Codex Home 争锁 | 阶段 1 | 阻断“迁移期入口共享安全锁合同”的声明 |
 | Busy 与不可验证锁的结构化区分 | 阶段 1/C3 | 阻断自动重试、自动清锁和 Electron 写入 |
-| 不同 Codex Home 共享 SQLite Home 的互斥 | 阶段 4 进入前 | 阻断所有 Electron 写能力 |
+| 不同 Codex Home 共享 SQLite Home 的原生事务竞争与收敛 | 阶段 4 进入前 | 阻断所有 Electron 写能力 |
 | 双向 Backup Round-trip | 阶段 2 建证、阶段 5 全通过 | 阻断 .NET Legacy 替代 |
 | Foreign Pending Restore | 阶段 2 建证、阶段 5 全通过 | 阻断跨入口 Recovery 声明 |
 | Windows WSL UNC 全 Hash 不变 | 阶段 4 | 阻断 Windows Sync/Switch Beta |
-| Journal Crash Matrix | 阶段 4 | 阻断写操作 Beta |
+| 普通写 partial/retry 故障矩阵 | 阶段 4 | 阻断写操作 Beta |
 | Restore Mid-failure | 阶段 5 | 阻断 Restore 正式开放 |
 
 ## 6. 差异登记规则
@@ -219,4 +219,4 @@ Node 与 .NET 在同一 Fixture 上不一致时，PR 必须记录：
 
 `c63a403688b6d148afa65fba9e1461c7ebcd3331` checkpoint 已包含 `origin/main@c7ff85218a07a8e5f14132c582cad1239c52865e`，补齐两个不同 Codex Home 共用一个 State DB 时的真实 Node writer↔.NET writer 双向争锁，并在本地跨运行时矩阵中达到 12/12。Draft PR #90 的 [CI run 33142610556](https://github.com/Dailin521/codex-provider-sync/actions/runs/33142610556) 是该 checkpoint 的历史快照：测试合并 commit `10047581a46f67993c809bb8fb3b58a89fb42d09` 上 26/26 jobs 成功，source manifest 为 `1.0.0`，候选版本为 `1.0.0-rc.204`；它不自动覆盖后续 V1 source head。
 
-V1 候选按 C10 在界面和文档中显示“Electron 新版主桌面端候选 / .NET Legacy fallback”的交接目标；这不表示公开入口已经切换。截至本索引更新时，公开 GitHub Release 仍是 .NET `v0.4.1`，PR 仍为 Draft、未合并，Electron 没有公开下载、签名、公证或生产更新通道。没有与 source commit 绑定的健康 Windows+WSL strict 结果、真实 Beta、受保护 `main` 合入后同 SHA 复验、签名/公证、真实更新升级和独立发布授权时，Phase 1～7 仍保持 Pending/In Progress。`c63a403` 的静态证据见 [C10 最终候选证据快照（2026-08-28）](evidence/C10_FINAL_EVIDENCE_BUNDLE_2026-08-28.md)；PR #90 当前 source head 的 commit-bound 证据只以该 PR 最新成功 `c10-evidence-bundle` artifact 为准，不在静态 Markdown 中重复动态 run、merge ref 或 artifact SHA。C1 证据见 [C1 Public API 与结构化错误证据](evidence/C1_PUBLIC_API_ERRORS_2026-08-25.md)，C2 证据见 [C2 CLI JSON 合同证据](evidence/C2_CLI_JSON_2026-08-25.md)，C3 证据见 [C3 Plan/Apply 与双层锁证据](evidence/C3_PLAN_APPLY_DUAL_LOCK_2026-08-25.md)，C4 证据见 [C4 Workspace、Core 与 CoreClient 证据](evidence/C4_WORKSPACE_CORE_CLIENT_2026-08-25.md)，C5 证据见 [C5 共享 UI、Web 与跨运行时 Fixture 证据](evidence/C5_SHARED_UI_WEB_2026-08-26.md)，C6 证据见 [C6 Electron Read-only Alpha 证据](evidence/C6_ELECTRON_READONLY_2026-08-26.md)，C7 证据见 [C7 Electron Sync/Switch 证据](evidence/C7_ELECTRON_SYNC_SWITCH_2026-08-26.md)，C8 证据见 [C8 Restore / Watch / Diagnostics / Update 证据](evidence/C8_RESTORE_WATCH_DIAGNOSTICS_UPDATE_2026-08-27.md)，C9 证据见 [C9 打包、CI 与发布工程证据](evidence/C9_PACKAGING_CI_RELEASE_ENGINEERING_2026-08-27.md)。
+V1 候选按 C10 在界面和文档中显示“Electron 新版主桌面端候选 / .NET Legacy fallback”的交接目标；这不表示公开入口已经切换。截至本索引更新时，公开 GitHub Release 仍是 .NET `v0.4.1`，PR 仍为 Draft、未合并，Electron 没有公开下载、签名、公证或生产更新通道。没有与 source commit 绑定的健康 Windows+WSL strict 结果、真实 Beta、受保护 `main` 合入后同 SHA 复验、签名/公证、真实更新升级和独立发布授权时，Phase 1～7 仍保持 Pending/In Progress。`c63a403` 的静态证据见 [C10 最终候选证据快照（2026-08-28）](evidence/C10_FINAL_EVIDENCE_BUNDLE_2026-08-28.md)；PR #90 当前 source head 的 commit-bound 证据只以该 PR 最新成功 `c10-evidence-bundle` artifact 为准，不在静态 Markdown 中重复动态 run、merge ref 或 artifact SHA。C1 证据见 [C1 Public API 与结构化错误证据](evidence/C1_PUBLIC_API_ERRORS_2026-08-25.md)，当前 C2 证据见 [C2 ProviderSync、Diagnostics 与 Repair 证据](evidence/C2_PROVIDER_SYNC_DIAGNOSTICS_REPAIR_2026-09-03.md)，当前 C3 证据见 [C3 轻量普通写与重试收敛证据](evidence/C3_LIGHTWEIGHT_WRITES_2026-09-03.md)；旧 [C2 CLI JSON](evidence/C2_CLI_JSON_2026-08-25.md) 与 [C3 Plan/Apply 双层锁](evidence/C3_PLAN_APPLY_DUAL_LOCK_2026-08-25.md) 仅保留其历史 checkpoint 事实。C4 证据见 [C4 Workspace、Core 与 CoreClient 证据](evidence/C4_WORKSPACE_CORE_CLIENT_2026-08-25.md)，C5 证据见 [C5 共享 UI、Web 与跨运行时 Fixture 证据](evidence/C5_SHARED_UI_WEB_2026-08-26.md)，C6 证据见 [C6 Electron Read-only Alpha 证据](evidence/C6_ELECTRON_READONLY_2026-08-26.md)，C7 证据见 [C7 Electron Sync/Switch 证据](evidence/C7_ELECTRON_SYNC_SWITCH_2026-08-26.md)，C8 证据见 [C8 Restore / Watch / Diagnostics / Update 证据](evidence/C8_RESTORE_WATCH_DIAGNOSTICS_UPDATE_2026-08-27.md)，C9 证据见 [C9 打包、CI 与发布工程证据](evidence/C9_PACKAGING_CI_RELEASE_ENGINEERING_2026-08-27.md)。

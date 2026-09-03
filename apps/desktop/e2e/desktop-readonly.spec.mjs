@@ -12,7 +12,7 @@ const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const packagedExecutable = process.env.CPS_DESKTOP_EXECUTABLE;
 const electronExecutable = packagedExecutable || require("electron");
 
-test("secure desktop exposes the C8 surface narrowly and blocks ordinary writes during recovery", async () => {
+test("secure desktop exposes the C8 surface and treats old ordinary journals as diagnostic-only", async () => {
   test.setTimeout(90_000);
   const fixture = await createDesktopReadOnlyFixture();
   const diagnosticsTarget = path.join(fixture.fixtureRoot, "diagnostics.zip");
@@ -153,6 +153,8 @@ test("secure desktop exposes the C8 surface narrowly and blocks ordinary writes 
     await expect(page.getByText(fixture.codexHome)).toHaveCount(0);
 
     await page.getByRole("button", { name: "Diagnostics" }).click();
+    await expect(page.getByText("Diagnostics have not been scanned", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Run full scan" }).click();
     await expect(page.getByText(/runtime/i).first()).toBeVisible();
     await expect(page.locator("body")).not.toContainText(fixture.codexHome);
     await page.getByRole("button", { name: "Export redacted bundle" }).click();
@@ -164,7 +166,7 @@ test("secure desktop exposes the C8 surface narrowly and blocks ordinary writes 
     await page.getByRole("button", { name: "Settings" }).click();
     await expect(page.getByText("Updates", { exact: true })).toBeVisible();
     await expect(page.getByText("Update checks are available only in a packaged build.", { exact: true })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Start watch" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Start watch" })).toBeEnabled();
     const updateStatus = await page.evaluate(() => window.codexProvider.updates.getStatus());
     expect(updateStatus).toEqual({
       schemaVersion: 2,
@@ -191,7 +193,8 @@ test("secure desktop exposes the C8 surface narrowly and blocks ordinary writes 
     }), { profile });
     expect(statusBeforeCrash.ok).toBe(true);
     expect(statusBeforeCrash.result.sqliteCounts.sessions.openai).toBe(1);
-    expect(statusBeforeCrash.result.pendingRecovery).toBe(true);
+    expect(statusBeforeCrash.result.pendingRecovery).toBe(false);
+    expect(statusBeforeCrash.result.pendingTransactions).toHaveLength(1);
     const writeAttempt = await page.evaluate(async ({ profile }) => window.codexProvider.test.requestRaw({
       protocolVersion: 1,
       requestId: "c6-write-denied",
@@ -200,14 +203,21 @@ test("secure desktop exposes the C8 surface narrowly and blocks ordinary writes 
     }), { profile });
     expect(writeAttempt.ok).toBe(false);
     expect(writeAttempt.error.code).toBe("PERMISSION_DENIED");
-    const recoveryBlocked = await page.evaluate(async ({ profile }) => window.codexProvider.core.requestSyncSwitch({
+    const prepared = await page.evaluate(async ({ profile }) => window.codexProvider.core.requestSyncSwitch({
       protocolVersion: 1,
-      requestId: "c7-write-recovery-blocked",
+      requestId: "c7-legacy-journal-prepare",
       method: "prepareSync",
       payload: { profile: { profileId: profile.id, profileRevision: profile.revision }, keepCount: 5 }
     }), { profile });
-    expect(recoveryBlocked.ok).toBe(false);
-    expect(recoveryBlocked.error.code).toBe("PENDING_TRANSACTION");
+    expect(prepared.ok).toBe(true);
+    const applied = await page.evaluate(async ({ planId }) => window.codexProvider.core.requestSyncSwitch({
+      protocolVersion: 1,
+      requestId: "c7-legacy-journal-apply",
+      method: "applySync",
+      payload: { schemaVersion: 1, planId }
+    }), { planId: prepared.result.planId });
+    expect(applied.ok).toBe(true);
+    expect(applied.result.outcome).toBe("completed");
 
     const beforeCrash = await electronApp.evaluate(() => globalThis.__CPS_DESKTOP_TEST__.runtime());
     expect(beforeCrash.state).toBe("ready");
@@ -224,7 +234,7 @@ test("secure desktop exposes the C8 surface narrowly and blocks ordinary writes 
     const restarted = await electronApp.evaluate(() => globalThis.__CPS_DESKTOP_TEST__.runtime());
     expect(restarted.state).toBe("ready");
     expect(restarted.generation).toBe(beforeCrash.generation + 1);
-    expect(restarted.recoveryBlocked).toBe(true);
+    expect(restarted.recoveryBlocked).toBe(false);
 
     const originalUrl = page.url();
     await page.evaluate(() => { globalThis.location.href = "https://example.com/"; });
