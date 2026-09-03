@@ -1383,6 +1383,7 @@ public sealed class BackupService
             GlobalStateFiles = metadata.GlobalStateFiles,
             GlobalStateFilePresent = metadata.GlobalStateFilePresent,
             GlobalStateBackupFilePresent = metadata.GlobalStateBackupFilePresent,
+            UndoTargets = metadata.UndoTargets,
             SizeBytes = sizeBytes,
             FileCount = fileCount
         };

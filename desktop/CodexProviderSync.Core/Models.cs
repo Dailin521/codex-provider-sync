@@ -358,6 +358,8 @@ internal sealed class BackupMetadataFile
     // Additive v2 compatibility for Node C3 reduced UndoBackups. Null means
     // a legacy full backup, so older metadata retains its original restore
     // semantics.
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public UndoTargetsMetadata? UndoTargets { get; init; }
     public long? SizeBytes { get; init; }
     public int? FileCount { get; init; }

@@ -38,6 +38,7 @@ public sealed class BackupParityTests
         Assert.False(metadataRoot.GetProperty("globalStateBackupFilePresent").GetBoolean());
         Assert.True(metadataRoot.GetProperty("sizeBytes").GetInt64() > 0);
         Assert.True(metadataRoot.GetProperty("fileCount").GetInt32() > 0);
+        Assert.False(metadataRoot.TryGetProperty("undoTargets", out _));
         Assert.Equal(
             Directory.EnumerateFiles(backupDir, "*", SearchOption.AllDirectories)
                 .Sum(static path => new FileInfo(path).Length),
@@ -261,6 +262,7 @@ public sealed class BackupParityTests
         await fixture.WriteRolloutAsync(rolloutPath, "thread-node-reduced", "openai");
 
         BackupService backups = new(new SessionRolloutService(), new SqliteStateService());
+        await backups.RefreshMetadataInventoryAsync(backupDir);
         await backups.RestoreBackupAsync(backupDir, fixture.CodexHome, new RestoreBackupOptions());
 
         Assert.Equal(originalFirstLine, (await File.ReadAllLinesAsync(rolloutPath))[0]);

@@ -256,10 +256,20 @@ test("hidden Electron test build forces the native fallback through Status, Sync
 
     await page.getByRole("button", { name: "Backups / Restore" }).click();
     await page.getByRole("button", { name: new RegExp(syncBackupId) }).click();
+    const beforeRestore = await fixture.snapshotTargets();
     const prepareRestore = page.getByRole("button", { name: "Prepare restore" });
     await prepareRestore.click();
     await confirmPlan(page, prepareRestore);
-    expect((await fixture.snapshotTargets()).hash).toBe(baseline.hash);
+    const restored = await fixture.snapshotTargets();
+    // The selected backup came from Sync, so it intentionally captured only
+    // rollout and SQLite mutations. Restore must not rewind the config later
+    // changed by explicit Switch operations.
+    expect(restored.config).toBe(beforeRestore.config);
+    expect(restored.globalState).toBe(baseline.globalState);
+    expect(restored.globalStateBackup).toBe(baseline.globalStateBackup);
+    expect(restored.sessions).toEqual(baseline.sessions);
+    expect(restored.archivedSessions).toEqual(baseline.archivedSessions);
+    expect(restored.sqlite).toEqual(baseline.sqlite);
 
     await page.getByLabel("Keep newest backups").fill("2");
     await page.getByRole("button", { name: "Prune older backups" }).click();

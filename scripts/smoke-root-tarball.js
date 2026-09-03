@@ -416,12 +416,18 @@ try {
         || !path.isAbsolute(backupDir)) {
       throw new Error("Installed CLI JSON sync did not create an auditable managed backup.");
     }
-    await fs.access(path.join(backupDir, "metadata.json"));
+    const backupMetadata = JSON.parse(await fs.readFile(path.join(backupDir, "metadata.json"), "utf8"));
+    if (backupMetadata.undoTargets?.config?.captured !== false
+        || backupMetadata.undoTargets?.rollout?.captured !== true
+        || backupMetadata.undoTargets?.sqlite?.captured !== true) {
+      throw new Error("Installed CLI sync did not scope its UndoBackup to actual mutation targets.");
+    }
     if (databaseProvider() !== "openai" || await rolloutProvider() !== "openai") {
       throw new Error("Installed CLI sync did not align the synthetic rollout and SQLite row.");
     }
 
-    await fs.writeFile(configPath, 'model_provider = "relay"\n');
+    const driftedConfig = 'model_provider = "relay"\n';
+    await fs.writeFile(configPath, driftedConfig);
     await fs.writeFile(rolloutPath, initialRollout.replace("apigather", "relay"));
     if (databaseProvider("relay") !== "relay") {
       throw new Error("Could not create the synthetic pre-Restore drift state.");
@@ -442,10 +448,12 @@ try {
     if (restoreEnvelope.ok !== true || restoreEnvelope.command !== "restore") {
       throw new Error("Installed CLI JSON restore failed for its own managed backup.");
     }
-    if (await fs.readFile(configPath, "utf8") !== initialConfig
+    if (await fs.readFile(configPath, "utf8") !== driftedConfig
         || await fs.readFile(rolloutPath, "utf8") !== initialRollout
         || databaseProvider() !== "apigather") {
-      throw new Error("Installed CLI restore did not recover the original synthetic bytes and SQLite provider.");
+      throw new Error(
+        "Installed CLI restore did not recover captured rollout/SQLite targets while preserving uncaptured config."
+      );
     }
     const restoredStatus = run(process.execPath, [
       npmCliPath,
