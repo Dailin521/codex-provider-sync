@@ -62,6 +62,8 @@ test("Core workspace owns orchestration and root service remains compatibility-o
   const source = await fs.readFile(new URL("../src/index.js", import.meta.url), "utf8");
   const application = await fs.readFile(new URL("../src/application/core-application.js", import.meta.url), "utf8");
   const serviceRuntime = await fs.readFile(new URL("../src/application/service-runtime.js", import.meta.url), "utf8");
+  const statusUseCase = await fs.readFile(new URL("../src/application/status.js", import.meta.url), "utf8");
+  const ordinaryWriteRuntime = await fs.readFile(new URL("../src/application/ordinary-write-runtime.js", import.meta.url), "utf8");
   const storagePorts = await fs.readFile(new URL("../src/infrastructure/node-core-ports.js", import.meta.url), "utf8");
   const rootService = await fs.readFile(new URL("../../../src/service.js", import.meta.url), "utf8");
   const declarations = await fs.readFile(new URL("../src/index.d.ts", import.meta.url), "utf8");
@@ -75,10 +77,13 @@ test("Core workspace owns orchestration and root service remains compatibility-o
   assert.match(source, /application\.prepareSync/);
   assert.match(application, /createProviderSyncUseCase\(\)/);
   assert.doesNotMatch(application, /UseCase\(handlers\)/);
-  assert.match(serviceRuntime, /codexStorage\.config/);
-  assert.match(serviceRuntime, /codexStorage\.sessions/);
-  assert.match(serviceRuntime, /codexStorage\.stateDb/);
-  assert.match(serviceRuntime, /codexStorage\.globalState/);
+  assert.doesNotMatch(serviceRuntime, /codexStorage\.|runSyncCore|runSwitchCore|runRestoreCore/);
+  for (const source of [statusUseCase, ordinaryWriteRuntime]) {
+    assert.match(source, /codexStorage\.config/);
+    assert.match(source, /codexStorage\.sessions/);
+    assert.match(source, /codexStorage\.stateDb/);
+    assert.match(source, /codexStorage\.globalState/);
+  }
   assert.match(storagePorts, /src\/config-file\.js/);
   assert.match(rootService, /packages\/core\/src\/application\/service-runtime\.js/);
   assert.doesNotMatch(rootService, /function\s+runSyncCore/);

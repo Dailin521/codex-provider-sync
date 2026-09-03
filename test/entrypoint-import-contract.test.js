@@ -61,7 +61,8 @@ test("CLI and Web entry points import Core behavior only through the public API"
 
 test("Watch calls the internal ProviderSync service without reversing into CoreFacade", async () => {
   const source = await readRepositoryFile("packages/core/src/application/watch-runtime.js");
-  assert.match(source, /from ["']\.\/service-runtime\.js["']/);
+  assert.match(source, /from ["']\.\/provider-sync\.js["']/);
+  assert.match(source, /prepareWatchProviderSync[\s\S]*?applyWatchProviderSync/);
   assert.doesNotMatch(source, /public-api\.js|createCoreFacade/);
 });
 

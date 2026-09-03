@@ -41,10 +41,15 @@ test("Core application and infrastructure never route through the legacy public 
   }
 });
 
-test("production service runtime consumes the four CodexStorage ports", async () => {
-  const source = await fs.readFile(path.join(coreRoot, "src", "application", "service-runtime.js"), "utf8");
-  for (const port of ["config", "sessions", "stateDb", "globalState"]) {
-    assert.match(source, new RegExp(`codexStorage\\.${port}`));
+test("compatibility runtime is a thin adapter and concrete use cases own their ports", async () => {
+  const compat = await fs.readFile(path.join(coreRoot, "src", "application", "service-runtime.js"), "utf8");
+  assert.doesNotMatch(compat, /codexStorage\.|acquireLock\(|executeRestoreV2\(|collectProviderChanges\(/);
+  for (const [relativePath, ports] of [
+    ["src/application/status.js", ["config", "sessions", "stateDb", "globalState"]],
+    ["src/application/ordinary-write-runtime.js", ["config", "sessions", "stateDb", "globalState"]]
+  ]) {
+    const source = await fs.readFile(path.join(coreRoot, relativePath), "utf8");
+    for (const port of ports) assert.match(source, new RegExp(`codexStorage\\.${port}`), relativePath);
   }
 });
 
@@ -77,10 +82,10 @@ test("Switch and Watch call the internal ProviderSync runtime without reversing 
     const source = await fs.readFile(path.join(coreRoot, relativePath), "utf8");
     assert.doesNotMatch(source, /CoreFacade|createCoreFacade|\.\/index/);
   }
-  const service = await fs.readFile(path.join(coreRoot, "src", "application", "service-runtime.js"), "utf8");
+  const switchUseCase = await fs.readFile(path.join(coreRoot, "src", "application", "provider-switch.js"), "utf8");
   const watch = await fs.readFile(path.join(coreRoot, "src", "application", "watch-runtime.js"), "utf8");
-  assert.match(service, /runSwitchCore[\s\S]*?return runSyncCore\(/);
-  assert.match(watch, /prepareSync[\s\S]*?applySync/);
+  assert.match(switchUseCase, /executeProviderSyncMutation/);
+  assert.match(watch, /prepareWatchProviderSync[\s\S]*?applyWatchProviderSync/);
 });
 
 test("CodexStorage is an immutable composition of four independent ports", () => {

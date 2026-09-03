@@ -652,7 +652,7 @@ codex-provider prune-backups --keep 5
 - CLI 提供的 Local Web UI
 - Windows/macOS 桌面 GUI
 
-CLI 入口是 [`src/cli.js`](../src/cli.js)，Web 服务位于 [`src/web-server.js`](../src/web-server.js)。主要业务编排位于 [`packages/core/src/application/service-runtime.js`](../packages/core/src/application/service-runtime.js)；[`src/service.js`](../src/service.js) 仅保留兼容转发，Electron 通过 CoreFacade 调用。
+CLI 入口是 [`src/cli.js`](../src/cli.js)，Web 服务位于 [`src/web-server.js`](../src/web-server.js)。业务编排按 Status、ProviderSync、ProviderSwitch、Repair、Backups、Restore 等用例分布在 [`packages/core/src/application/`](../packages/core/src/application/)；[`src/service.js`](../src/service.js) 与 [`service-runtime.js`](../packages/core/src/application/service-runtime.js) 仅保留兼容转发，Electron 通过 CoreFacade 调用。
 
 桌面 GUI 不是简单启动 Node CLI，而是在 `desktop/CodexProviderSync.Core` 中用 C# 实现了相同的核心流程，包括：
 

@@ -27,7 +27,7 @@ import {
   path,
   randomUUID
 } from "../infrastructure/node-core-ports.js";
-import { applySync, prepareSync } from "./service-runtime.js";
+import { applyWatchProviderSync, prepareWatchProviderSync } from "./provider-sync.js";
 
 const { readConfigText } = codexStorage.config;
 const { detectStateDb } = codexStorage.stateDb;
@@ -161,10 +161,9 @@ export async function runWatch({
     if (typeof runSyncImpl === "function") {
       return runSyncImpl({ codexHome, sqliteHome: storage.sqliteHome, storage, reason, reasons });
     }
-    const plan = await prepareSync({
+    const plan = await prepareWatchProviderSync({
       codexHome,
       storage,
-      __actor: "watch",
       onProgress: (event) => {
         if (event?.stage && event.status === "start") {
           log(`  · ${event.stage}`);
@@ -174,7 +173,7 @@ export async function runWatch({
     // Yield one event-loop turn after the read-only plan so an already queued
     // user confirmation can declare the manual Apply first.
     await new Promise((resolve) => setImmediate(resolve));
-    return (await applySync({ schemaVersion: 1, planId: plan.planId })).result;
+    return (await applyWatchProviderSync(plan.planId)).result;
   };
 
   const getManualOperationWait = async () => {

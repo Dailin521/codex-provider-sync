@@ -1,6 +1,6 @@
 // @ts-check
 
-import { getStatus } from "./service-runtime.js";
+import { getStatus } from "./status.js";
 
 /** @param {Record<string, Record<string, number>> | null | undefined} distribution */
 function countDistribution(distribution) {
