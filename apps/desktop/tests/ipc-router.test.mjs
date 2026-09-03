@@ -104,6 +104,15 @@ function harness({
             rolloutCounts: { sessions: {}, archived_sessions: {} },
             sqliteCounts: { sessions: {}, archived_sessions: {} }
           },
+          issues: {
+            rootModelAvailable: true,
+            rolloutModelFilesNeedingRepair: 0,
+            sqliteModelRowsNeedingRepair: 0,
+            cwdRowsNeedingRepair: 0,
+            userEventRowsNeedingRepair: 0,
+            workspaceRootsNeedingRepair: 0,
+            encryptedContentFiles: 0
+          },
           safety: {
             pendingRecovery: false,
             pendingTransactions: [],

@@ -13,7 +13,6 @@ const STALE_CODES = new Set([
   "PLAN_EXPIRED",
   "PLAN_STALE",
   "STALE_STATE",
-  "FAST_MODE_UNSUPPORTED",
   "PROFILE_CHANGED",
   "STORAGE_CHANGED"
 ]);
@@ -41,13 +40,7 @@ const SAFE_REASONS = new Set([
   "windows-wsl-unc"
 ]);
 const SQLITE_HOME_SOURCES = new Set(["cli", "config", "env", "default"]);
-const OPERATION_KINDS = new Set(["sync", "switch", "restore", "prune-backups", "watch"]);
-const FAST_MODE_REASONS = new Set([
-  "session-meta-invalid",
-  "session-meta-too-large",
-  "provider-location-ambiguous",
-  "provider-length-mismatch"
-]);
+const OPERATION_KINDS = new Set(["sync", "switch", "repair", "restore", "prune-backups", "watch"]);
 const PENDING_STATES = new Set([
   "prepared",
   "applying",
@@ -82,7 +75,6 @@ const CLI_ERROR_MESSAGES = Object.freeze({
   PLAN_STALE: "The prepared operation is stale. Prepare it again.",
   PLAN_EXPIRED: "The prepared operation expired. Prepare it again.",
   STALE_STATE: "The protected state changed. Prepare the operation again.",
-  FAST_MODE_UNSUPPORTED: "Fast mode cannot be used for this operation. Use full sync.",
   CODEX_HOME_NOT_FOUND: "The selected Codex Home was not found.",
   STATE_DB_NOT_FOUND: "The selected state database was not found.",
   SQLITE_UNSUPPORTED_PATH: "The selected SQLite path is not supported by this runtime.",
@@ -109,8 +101,16 @@ const WARNING_MESSAGES = Object.freeze({
   encryptedContentWarning: "Existing encrypted content may not be usable with the target provider.",
   autoPruneWarning: "Automatic backup cleanup did not complete.",
   backupInventoryWarning: "Backup inventory refresh did not complete.",
-  modelWarning: "The selected provider has no default model; the root model was not changed."
+  modelWarning: "The selected provider has no default model; the root model was not changed.",
+  partialWarning: "The operation made only part of the requested change. Retry it to converge, or restore the backup manually."
 });
+const PARTIAL_FAILURE_STAGES = new Set([
+  "update_config",
+  "rewrite_rollout_files",
+  "repair_workspace_roots",
+  "update_sqlite"
+]);
+const PARTIAL_FAILURE_CODES = new Set([...Object.keys(CLI_ERROR_MESSAGES), "WRITE_FAILED"]);
 
 function assertPlainJsonData(value, seen = new WeakSet(), depth = 0) {
   if (depth > 16) throw new TypeError("CLI JSON data exceeds the maximum nesting depth.");
@@ -256,28 +256,24 @@ function sanitizeSyncResult(value) {
     "sqliteRowsUpdated",
     "sqliteProviderRowsUpdated",
     "sqliteUserEventRowsUpdated",
-    "sqliteCwdRowsUpdated",
-    "updatedWorkspaceRoots",
-    "savedWorkspaceRootCount"
+    "sqliteCwdRowsUpdated"
   ]) {
     put(result, key, safeNumber(value[key], { integer: true, minimum: 0 }));
   }
-  put(result, "scanScope", new Set(["metadata", "full"]).has(value.scanScope)
-    ? value.scanScope
-    : undefined);
-  if (Array.isArray(value.unchecked)) {
-    const allowedUnchecked = new Set(["historyModels", "userEventFlags", "encryptedContent"]);
-    result.unchecked = value.unchecked.filter((entry) => allowedUnchecked.has(entry));
-  }
   put(result, "sqlitePresent", safeBoolean(value.sqlitePresent));
+  put(result, "partial", safeBoolean(value.partial));
+  putNullable(result, "partialReason", value.partialReason, (entry) => (
+    ["locked-session", "mutation-failed"].includes(entry) ? entry : undefined
+  ));
+  putNullable(result, "failedStage", value.failedStage, (entry) => (
+    PARTIAL_FAILURE_STAGES.has(entry) ? entry : undefined
+  ));
+  putNullable(result, "failureCode", value.failureCode, (entry) => (
+    PARTIAL_FAILURE_CODES.has(entry) ? entry : undefined
+  ));
+  put(result, "retryRecommended", safeBoolean(value.retryRecommended));
   put(result, "skippedLockedRolloutFiles", sanitizeStringArray(value.skippedLockedRolloutFiles));
   put(result, "rolloutCountsBefore", sanitizeDistribution(value.rolloutCountsBefore));
-  put(result, "encryptedContentCounts", sanitizeDistribution(value.encryptedContentCounts));
-  if (value.encryptedContentWarning) {
-    result.encryptedContentWarning = WARNING_MESSAGES.encryptedContentWarning;
-  } else if (value.encryptedContentWarning === null) {
-    result.encryptedContentWarning = null;
-  }
   putNullable(result, "autoPruneResult", value.autoPruneResult, sanitizePruneResult);
   if (value.autoPruneWarning) result.autoPruneWarning = WARNING_MESSAGES.autoPruneWarning;
   else if (value.autoPruneWarning === null) result.autoPruneWarning = null;
@@ -287,6 +283,25 @@ function sanitizeSyncResult(value) {
   put(result, "backup", sanitizeBackupInfo(value.backup));
   if (Array.isArray(value.warnings)) {
     result.warnings = value.warnings.length > 0 ? [WARNING_MESSAGES.warnings] : [];
+  }
+  return result;
+}
+
+function sanitizeRepairResult(value) {
+  const result = sanitizeSyncResult(value);
+  if (Array.isArray(value.repairTargets)) {
+    const targets = new Set(["models", "cwd", "userEvent", "workspaceRoots"]);
+    result.repairTargets = value.repairTargets.filter((entry) => targets.has(entry));
+  }
+  putNullable(result, "targetModel", value.targetModel, (entry) => safeString(entry, 512, { allowEmpty: true }));
+  for (const key of [
+    "sqliteModelRowsUpdated",
+    "sqliteUserEventRowsUpdated",
+    "sqliteCwdRowsUpdated",
+    "updatedWorkspaceRoots",
+    "savedWorkspaceRootCount"
+  ]) {
+    put(result, key, safeNumber(value[key], { integer: true, minimum: 0 }));
   }
   return result;
 }
@@ -461,6 +476,61 @@ function sanitizeLauncherResult(value) {
   return result;
 }
 
+function sanitizeDiagnosticsResult(value) {
+  const result = {};
+  put(result, "schemaVersion", safeNumber(value.schemaVersion, { integer: true, minimum: 1 }));
+  put(result, "generatedAt", safeString(value.generatedAt, 64));
+  const runtime = value.runtime && typeof value.runtime === "object" && !Array.isArray(value.runtime)
+    ? value.runtime
+    : {};
+  result.runtime = Object.fromEntries(["node", "platform", "arch"]
+    .map((key) => [key, safeString(runtime[key], 80)])
+    .filter(([, entry]) => entry !== undefined));
+  const storage = value.storage && typeof value.storage === "object" && !Array.isArray(value.storage)
+    ? value.storage
+    : {};
+  result.storage = {
+    sqliteHomeSource: SQLITE_HOME_SOURCES.has(storage.sqliteHomeSource) ? storage.sqliteHomeSource : "default",
+    stateDbFound: storage.stateDbLocation !== null,
+    sqliteSupported: storage.sqliteAccess?.supported !== false
+  };
+  const provider = value.provider && typeof value.provider === "object" && !Array.isArray(value.provider)
+    ? value.provider
+    : {};
+  result.provider = {
+    current: safeString(provider.current, 512) ?? "unknown",
+    implicit: provider.implicit === true,
+    configured: sanitizeStringArray(provider.configured, 512),
+    rolloutCounts: sanitizeDistribution(provider.rolloutCounts),
+    sqliteCounts: provider.sqliteCounts === null
+      ? null
+      : sanitizeDistribution(provider.sqliteCounts, { includeReadState: true })
+  };
+  const sourceIssues = value.issues && typeof value.issues === "object" && !Array.isArray(value.issues)
+    ? value.issues
+    : {};
+  const issues = { rootModelAvailable: sourceIssues.rootModelAvailable === true };
+  for (const key of [
+    "rolloutModelFilesNeedingRepair",
+    "sqliteModelRowsNeedingRepair",
+    "cwdRowsNeedingRepair",
+    "userEventRowsNeedingRepair",
+    "workspaceRootsNeedingRepair",
+    "encryptedContentFiles"
+  ]) put(issues, key, safeNumber(sourceIssues[key], { integer: true, minimum: 0 }));
+  result.issues = issues;
+  const safety = value.safety && typeof value.safety === "object" && !Array.isArray(value.safety)
+    ? value.safety
+    : {};
+  result.safety = {
+    pendingRecovery: safety.pendingRecovery === true,
+    rolloutScanComplete: safety.rolloutScanComplete === true,
+    lockedRolloutCount: safeNumber(safety.lockedRolloutCount, { integer: true, minimum: 0 }) ?? 0,
+    projectThreadVisibilityAvailable: safety.projectThreadVisibilityAvailable === true
+  };
+  return result;
+}
+
 function sanitizeCommandResult(command, value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   if (command === "help") {
@@ -471,6 +541,8 @@ function sanitizeCommandResult(command, value) {
   }
   if (command === "status") return sanitizeStatusResult(value);
   if (command === "sync" || command === "switch") return sanitizeSyncResult(value);
+  if (command === "diagnostics") return sanitizeDiagnosticsResult(value);
+  if (command === "repair") return sanitizeRepairResult(value);
   if (command === "restore") return sanitizeRestoreResult(value);
   if (command === "prune-backups") return sanitizePruneResult(value) ?? {};
   if (command === "install-windows-launcher") return sanitizeLauncherResult(value);
@@ -486,12 +558,14 @@ export function collectCliWarnings(result) {
     result.encryptedContentWarning ? WARNING_MESSAGES.encryptedContentWarning : null,
     result.autoPruneWarning ? WARNING_MESSAGES.autoPruneWarning : null,
     result.backupInventoryWarning ? WARNING_MESSAGES.backupInventoryWarning : null,
-    result.modelSync?.warning ? WARNING_MESSAGES.modelWarning : null
+    result.modelSync?.warning ? WARNING_MESSAGES.modelWarning : null,
+    result.partialWarning ? WARNING_MESSAGES.partialWarning : null
   ]);
 }
 
 export function inferCliSuccessOutcome(result) {
   if (SUCCESS_OUTCOMES.has(result?.outcome)) return result.outcome;
+  if (result?.partial === true) return "partial";
   if (Array.isArray(result?.skippedLockedRolloutFiles)
       && result.skippedLockedRolloutFiles.length > 0) return "partial";
   if (result?.noop === true) return "noop";
@@ -557,9 +631,6 @@ function normalizePublicDetails(details) {
     if (code !== undefined && code <= 0xffff) normalized[key] = code;
   }
   if (OPERATION_KINDS.has(details.operationKind)) normalized.operationKind = details.operationKind;
-  if (FAST_MODE_REASONS.has(details.fastModeReason)) {
-    normalized.fastModeReason = details.fastModeReason;
-  }
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 

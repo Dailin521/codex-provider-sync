@@ -50,12 +50,13 @@ test("all C4 workspaces are private and direct dependency versions are exact", a
   }
 });
 
-test("Core bridge has one explicit transition exception and no deep implementation import", async () => {
+test("Core owns orchestration while root service is a compatibility adapter", async () => {
   const source = await fs.readFile(path.join(repositoryRoot, "packages/core/src/index.js"), "utf8");
-  const imports = [...source.matchAll(/from\s+["'](\.\.\/\.\.\/\.\.\/src\/[^"']+)["']/g)]
-    .map((match) => match[1]);
-  assert.deepEqual(imports, ["../../../src/public-api.js"]);
+  const rootService = await fs.readFile(path.join(repositoryRoot, "src/service.js"), "utf8");
+  assert.doesNotMatch(source, /src\/public-api\.js/);
   assert.doesNotMatch(source, /src\/(service|locking|backup|history|watch)\.js/);
+  assert.match(rootService, /packages\/core\/src\/application\/service-runtime\.js/);
+  assert.doesNotMatch(rootService, /function\s+runSyncCore/);
 });
 
 test("transitional root declarations match runtime exports and mark legacy adapters", async () => {

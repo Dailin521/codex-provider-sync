@@ -13,7 +13,7 @@ import { CoreError } from "./core-error.js";
 const execFileAsync = promisify(execFile);
 const ROLLOUT_SCAN_CHUNK_BYTES = 1024 * 1024;
 const STATUS_SESSION_META_MAX_BYTES = 1024 * 1024;
-const FAST_SESSION_META_MAX_BYTES = 1024 * 1024;
+const PROVIDER_SESSION_META_MAX_BYTES = 1024 * 1024;
 
 class RolloutMetadataLimitError extends Error {
   constructor() {
@@ -234,13 +234,19 @@ const ROLLOUT_TURNCONTEXT_TYPE_RE = /"type"\s*:\s*"turn_context"/;
 
 async function scanRolloutBody(
   rolloutPath,
-  { firstLine, firstLineLength } = {}
+  {
+    firstLine,
+    firstLineLength,
+    includeModels = true,
+    includeUserEvent = true,
+    includeEncryptedContent = true
+  } = {}
 ) {
   const headerLength = Math.max(0, firstLineLength ?? 0);
   const models = [];
   const originalTurnContextModels = [];
-  let hasEncryptedContent = firstLine.includes("encrypted_content");
-  let hasUserEvent = recordHasUserEvent(JSON.parse(firstLine));
+  let hasEncryptedContent = includeEncryptedContent && firstLine.includes("encrypted_content");
+  let hasUserEvent = includeUserEvent && recordHasUserEvent(JSON.parse(firstLine));
   let lineIndex = 0;
 
   const stream = fs.createReadStream(rolloutPath, {
@@ -256,11 +262,12 @@ async function scanRolloutBody(
   try {
     for await (const line of lines) {
       lineIndex += 1;
-      hasEncryptedContent ||= line.includes("encrypted_content");
-      if (!hasUserEvent) {
+      if (includeEncryptedContent) hasEncryptedContent ||= line.includes("encrypted_content");
+      if (includeUserEvent && !hasUserEvent) {
         try { hasUserEvent = recordHasUserEvent(JSON.parse(line)); }
         catch { /* Malformed body lines provide no positive user-event evidence. */ }
       }
+      if (!includeModels) continue;
       if (!line.includes('"turn_context"')) {
         continue;
       }
@@ -1527,12 +1534,17 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
   const {
     skipLockedReads = false,
     targetModel = null,
-    fast = false
+    includeModels = true,
+    includeUserEvent = true,
+    includeEncryptedContent = true,
+    includeCwd = true,
+    maxSessionMetaBytes = Number.POSITIVE_INFINITY,
+    rejectInvalidMetadata = false
   } = options;
-  if (typeof fast !== "boolean" || (fast && targetModel !== null)) {
+  if (targetModel !== null && (!includeModels || typeof targetModel !== "string" || !targetModel)) {
     throw new CoreError(
       "INVALID_INPUT",
-      "Fast mode requires a boolean fast option and no historical model rewrite."
+      "A historical model target requires model scanning and a non-empty model."
     );
   }
   const summaries = [];
@@ -1541,9 +1553,9 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
     sessions: new Map(),
     archived_sessions: new Map()
   };
-  const encryptedContentCounts = fast ? null : emptyEncryptedContentCounts();
-  const userEventThreadIds = fast ? null : new Set();
-  const threadCwdById = new Map();
+  const encryptedContentCounts = includeEncryptedContent ? emptyEncryptedContentCounts() : null;
+  const userEventThreadIds = includeUserEvent ? new Set() : null;
+  const threadCwdById = includeCwd ? new Map() : null;
 
   for (const dirName of SESSION_DIRS) {
     const rootDir = path.join(codexHome, dirName);
@@ -1559,36 +1571,35 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
       try {
         scanStart = await getFileSnapshot(rolloutPath);
         record = await readFirstLineRecord(rolloutPath, {
-          maxBytes: fast ? FAST_SESSION_META_MAX_BYTES : Number.POSITIVE_INFINITY
+          maxBytes: maxSessionMetaBytes
         });
       } catch (error) {
         if (skipLockedReads && isRolloutFileBusyError(error)) {
           lockedPaths.push(rolloutPath);
           continue;
         }
-        if (fast && error instanceof RolloutMetadataLimitError) {
+        if (rejectInvalidMetadata && error instanceof RolloutMetadataLimitError) {
           throw new CoreError(
-            "FAST_MODE_UNSUPPORTED",
-            `Fast mode requires a session metadata header no larger than 1 MiB: ${rolloutPath}`,
-            { details: { fastModeReason: "session-meta-too-large" }, cause: error }
+            "ROLLOUT_CHANGED",
+            `Provider sync requires a session metadata header no larger than 1 MiB: ${rolloutPath}`,
+            { cause: error }
           );
         }
         throw error;
       }
       const parsed = parseSessionMetaRecord(record.firstLine);
       if (!parsed) {
-        if (fast) {
+        if (rejectInvalidMetadata) {
           throw new CoreError(
-            "FAST_MODE_UNSUPPORTED",
-            `Fast mode cannot validate session metadata: ${rolloutPath}`,
-            { details: { fastModeReason: "session-meta-invalid" } }
+            "ROLLOUT_CHANGED",
+            `Provider sync cannot validate session metadata: ${rolloutPath}`
           );
         }
         continue;
       }
       const currentProvider = parsed.payload.model_provider ?? "(missing)";
       providerCounts[dirName].set(currentProvider, (providerCounts[dirName].get(currentProvider) ?? 0) + 1);
-      if (typeof parsed.payload.id === "string"
+      if (includeCwd && typeof parsed.payload.id === "string"
           && parsed.payload.id
           && typeof parsed.payload.cwd === "string"
           && parsed.payload.cwd.trim()) {
@@ -1596,14 +1607,17 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
       }
       let modelSnapshot = { models: [], originalTurnContextModels: [] };
       try {
-        if (!fast) modelSnapshot = await scanRolloutBody(rolloutPath, {
+        if (includeModels || includeUserEvent || includeEncryptedContent) modelSnapshot = await scanRolloutBody(rolloutPath, {
           firstLine: record.firstLine,
-          firstLineLength: record.offset
+          firstLineLength: record.offset,
+          includeModels,
+          includeUserEvent,
+          includeEncryptedContent
         });
-        if (modelSnapshot.hasEncryptedContent) {
+        if (includeEncryptedContent && modelSnapshot.hasEncryptedContent) {
           incrementPlainCount(encryptedContentCounts, dirName, currentProvider);
         }
-        if (parsed.payload.id && modelSnapshot.hasUserEvent) {
+        if (includeUserEvent && parsed.payload.id && modelSnapshot.hasUserEvent) {
           userEventThreadIds.add(parsed.payload.id);
         }
       } catch (error) {
@@ -1660,24 +1674,52 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
           updatedFirstLine: providerChanged ? JSON.stringify(parsed) : record.firstLine
         };
         change.inPlaceMutation = getInPlaceProviderMutation(change);
-        if (fast && !change.inPlaceMutation) {
-          const originalBytes = Buffer.byteLength(JSON.stringify(change.originalProvider), "utf8");
-          const replacementBytes = Buffer.byteLength(JSON.stringify(change.updatedProvider), "utf8");
-          const fastModeReason = originalBytes !== replacementBytes
-            ? "provider-length-mismatch"
-            : "provider-location-ambiguous";
-          throw new CoreError(
-            "FAST_MODE_UNSUPPORTED",
-            `Fast mode requires an unambiguous equal-length provider byte replacement: ${rolloutPath}. Run full sync explicitly for this file.`,
-            { details: { fastModeReason } }
-          );
-        }
         summaries.push(change);
       }
     }
   }
 
   return { changes: summaries, lockedPaths, providerCounts, encryptedContentCounts, userEventThreadIds, threadCwdById };
+}
+
+export async function collectProviderChanges(codexHome, targetProvider, options = {}) {
+  return collectSessionChanges(codexHome, targetProvider, {
+    skipLockedReads: options.skipLockedReads,
+    includeModels: false,
+    includeUserEvent: false,
+    includeEncryptedContent: false,
+    includeCwd: false,
+    maxSessionMetaBytes: PROVIDER_SESSION_META_MAX_BYTES,
+    rejectInvalidMetadata: true
+  });
+}
+
+export async function collectRepairChanges(codexHome, targets, options = {}) {
+  const selected = new Set(targets ?? []);
+  const includeModels = selected.has("models");
+  return collectSessionChanges(codexHome, "__status_only__", {
+    skipLockedReads: options.skipLockedReads,
+    targetModel: includeModels ? options.targetModel : null,
+    includeModels,
+    includeUserEvent: selected.has("userEvent"),
+    includeEncryptedContent: false,
+    includeCwd: selected.has("cwd") || selected.has("workspaceRoots"),
+    maxSessionMetaBytes: PROVIDER_SESSION_META_MAX_BYTES,
+    rejectInvalidMetadata: false
+  });
+}
+
+export async function collectDiagnosticsFacts(codexHome, options = {}) {
+  return collectSessionChanges(codexHome, "__status_only__", {
+    skipLockedReads: options.skipLockedReads,
+    targetModel: options.targetModel ?? null,
+    includeModels: true,
+    includeUserEvent: true,
+    includeEncryptedContent: true,
+    includeCwd: true,
+    maxSessionMetaBytes: Number.POSITIVE_INFINITY,
+    rejectInvalidMetadata: false
+  });
 }
 
 // Capture only the metadata fields that provider-sync is allowed to restore.

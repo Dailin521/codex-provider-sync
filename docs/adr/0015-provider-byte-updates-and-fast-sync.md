@@ -1,9 +1,11 @@
 # ADR-0015: Provider 字节原地更新与统一快速同步模式
 
-- 状态：Accepted
+- 状态：Partially superseded by ADR-0016
 - 日期：2026-09-03
 - 接收来源：[PR #92](https://github.com/Dailin521/codex-provider-sync/pull/92)（head `782a901`，作者 `cccat6`）
 - 适用范围：V1 Node Core、CLI、Local Web UI、Electron Desktop
+
+> 2026-09-03 范围说明：ADR-0016 保留“等长原地更新”和“不等长时正文逐字节保持”的性能决策；显式 full/fast 模式、`syncMode`、`--fast`、`FAST_MODE_UNSUPPORTED`、ProviderSync 全文扫描及相关公开 DTO 已被取代。以下内容保留为当时接收 PR #92 的历史决策记录。
 
 ## 背景
 

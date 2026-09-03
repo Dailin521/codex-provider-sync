@@ -10,7 +10,7 @@ ADR-0008 的默认拓扑是小型、可独立合入的 PR。维护者已明确�
 
 ## Decision
 
-V1 使用本次批准计划中的不可变内部 Checkpoint `C0`～`C10`。旧执行索引中的 PR 2～PR 10 仅作为历史依赖来源，按以下方式并入新 checkpoint：Public API 与结构化错误归入 `C1`，CLI JSON 归入 `C2`，Prepare/Apply 与双层锁归入 `C3`，Workspace/Core/Contracts 归入 `C4`，共享 UI/Web 归入 `C5`，Electron Skeleton、Utility Runtime 和只读能力归入 `C6`，后续依次为 `C7` Sync/Switch、`C8` Restore/Watch/Diagnostics/Update、`C9` 打包/CI、`C10` 最终证据与 Legacy 交接。每个 checkpoint 必须有单独 commit、可重复 CI 证据、变更摘要和明确的上一个回退 commit。
+V1 使用本次批准计划中的不可变内部 Checkpoint `C0`～`C10`。旧执行索引中的 PR 2～PR 10 仅作为历史依赖来源。2026-09-03 的 Node Core 精简在现有链上增加三个可审计 checkpoint：`C1` 负责职责/端口骨架与兼容入口，`C2` 负责收窄 ProviderSync 并建立 Diagnostics/Repair，`C3` 负责 Home lock + SQLite transaction + UndoBackup 的轻量普通写路径。后续 C4～C10 的既有功能和证据保持，不因本次重编号而被视为重新完成。每个新增 checkpoint 必须有单独 commit、可重复证据、变更摘要和明确的上一个回退 commit。
 
 最终 PR 必须保留这些 checkpoint 的线性、可审查历史。分支上的 checkpoint 可以标注“已验证”或“合入后可完成”，但在最终 PR 合入受保护分支前，不得把任一 Phase 标为 Completed、不得宣称 Electron 已替代 .NET，也不得删除 Legacy 实现或停止其关键 CI。
 
@@ -36,7 +36,7 @@ V1 使用本次批准计划中的不可变内部 Checkpoint `C0`～`C10`。旧�
 
 ## Migration and Validation
 
-执行索引记录 `C0`～`C10` 的目标、依赖、证据和回退点。每个 checkpoint 的验证必须更新适用合同和 Fixture；本 ADR 本身不表示任何运行时代码、错误适配、锁协议或 Restore v2 已实现。
+执行索引记录 `C0`～`C10` 的目标、依赖、证据和回退点。每个 checkpoint 的验证必须更新适用合同和 Fixture；ADR-0016 是本次 C1～C3 的行为裁决，本 ADR 只约束提交与合并治理。
 
 ## Related
 

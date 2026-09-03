@@ -1,4 +1,5 @@
 import {
+  applyRepair,
   applyRestore,
   applySwitch,
   applySync
@@ -19,6 +20,8 @@ export function applyPreparedDesktopOperationForTest(
     ? applySync
     : method === "applySwitch"
       ? applySwitch
+      : method === "applyRepair"
+        ? applyRepair
       : applyRestore;
   return apply(input, { ...control, faultInjector });
 }

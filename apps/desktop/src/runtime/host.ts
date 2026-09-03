@@ -22,13 +22,13 @@ export interface DesktopRuntimeDispatchControl {
 }
 
 export type DesktopRuntimeTestApplyInvoker = (
-  method: "applySync" | "applySwitch" | "applyRestore",
+  method: "applySync" | "applySwitch" | "applyRepair" | "applyRestore",
   input: CoreMethodMap["applySync"]["input"],
   control: {
     signal?: AbortSignal;
     onOperationStarted?(value: {
       operationId: string;
-      operation: "sync" | "switch" | "restore";
+      operation: "sync" | "switch" | "repair" | "restore";
     }): void;
     onProgress?(event: ProgressEvent): void;
   }
@@ -62,7 +62,7 @@ export function createDesktopRuntimeHost(
             signal?: AbortSignal;
             onOperationStarted?(value: {
               operationId: string;
-              operation: "sync" | "switch" | "restore";
+              operation: "sync" | "switch" | "repair" | "restore";
             }): void;
             onProgress?(event: ProgressEvent): void;
           }
@@ -93,6 +93,7 @@ export function createDesktopRuntimeHost(
         const result: CoreMethodMap[M]["output"] = testApplyInvoker
           && (request.method === "applySync"
             || request.method === "applySwitch"
+            || request.method === "applyRepair"
             || request.method === "applyRestore")
           ? await testApplyInvoker(
               request.method,

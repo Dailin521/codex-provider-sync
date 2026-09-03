@@ -80,18 +80,11 @@ describe("operation result presentation", () => {
     const result: OperationResult = {
       schemaVersion: 1,
       operationId: "11111111-1111-4111-8111-111111111119",
-      operation: "sync",
+      operation: "repair",
       outcome: "completed",
       backup: null,
       warnings: [],
-      result: { inPlaceSessionFiles: 1, rewrittenSessionFiles: 0 },
-      providerSync: {
-        mode: "fast",
-        rolloutScanScope: "metadata",
-        inPlaceSessionFiles: 1,
-        rewrittenSessionFiles: 0,
-        unchecked: ["historyModels", "userEventFlags", "encryptedContent"]
-      }
+      result: { repairTargets: ["models", "cwd"], sqliteModelRowsUpdated: 1 }
     };
     function Harness() {
       const [current, setCurrent] = useState<OperationResult | null>(result);
@@ -108,9 +101,9 @@ describe("operation result presentation", () => {
     }
     render(createElement(I18nextProvider, { i18n }, createElement(Harness)));
 
-    expect(await screen.findByText("Fast Provider-only sync")).toBeVisible();
-    expect(screen.getByText("Metadata only")).toBeVisible();
-    expect(screen.getByText("historyModels, userEventFlags, encryptedContent")).toBeVisible();
+    expect(await screen.findByText("Repair targets")).toBeVisible();
+    expect(screen.getByText("models, cwd")).toBeVisible();
+    expect(screen.getByText("Model rows updated")).toBeVisible();
     await user.click((await screen.findAllByRole("button", { name: "Close" })).at(-1)!);
     await waitFor(() => expect(screen.getByRole("button", { name: "Prepare sync" })).toHaveFocus());
   });

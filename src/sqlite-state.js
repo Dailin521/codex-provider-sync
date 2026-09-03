@@ -310,7 +310,17 @@ export async function readSqliteRepairStats(storageOrLocation, options = {}) {
 
   let db;
   try {
-    db = await openDatabase(dbPath);
+    db = await openDatabase(dbPath, { readOnly: true });
+    let modelRowsNeedingRepair = 0;
+    if (typeof options.targetModel === "string"
+        && options.targetModel
+        && tableHasColumn(db, "threads", "model")) {
+      modelRowsNeedingRepair = Number(db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM threads
+        WHERE COALESCE(model, '') <> ?
+      `).get(options.targetModel)?.count) || 0;
+    }
     let userEventRowsNeedingRepair = 0;
     if (tableHasColumn(db, "threads", "has_user_event") && options.userEventThreadIds?.size) {
       const stmt = db.prepare("SELECT has_user_event FROM threads WHERE id = ?");
@@ -337,6 +347,7 @@ export async function readSqliteRepairStats(storageOrLocation, options = {}) {
     }
 
     return {
+      modelRowsNeedingRepair,
       userEventRowsNeedingRepair,
       cwdRowsNeedingRepair
     };
@@ -344,6 +355,116 @@ export async function readSqliteRepairStats(storageOrLocation, options = {}) {
     throw wrapSqliteMalformedError(
       wrapSqliteBusyError(error, "read SQLite repair diagnostics"),
       "read SQLite repair diagnostics"
+    );
+  } finally {
+    db?.close();
+  }
+}
+
+const SQLITE_REPAIR_TARGETS = new Set(["models", "cwd", "userEvent"]);
+
+function normalizeSqliteRepairTargets(value) {
+  if (!Array.isArray(value)
+      || value.some((target) => typeof target !== "string" || !SQLITE_REPAIR_TARGETS.has(target))) {
+    throw new CoreError("INVALID_INPUT", "SQLite repair targets are invalid.");
+  }
+  return new Set(value);
+}
+
+export async function applySqliteRepairs(storageOrLocation, afterUpdateOrOptions, maybeOptions) {
+  const afterUpdate = typeof afterUpdateOrOptions === "function" ? afterUpdateOrOptions : null;
+  const options = typeof afterUpdateOrOptions === "function"
+    ? (maybeOptions ?? {})
+    : (afterUpdateOrOptions ?? {});
+  const targets = normalizeSqliteRepairTargets(options.targets ?? []);
+  const targetModel = options.targetModel ?? null;
+  if (targets.has("models") && (typeof targetModel !== "string" || !targetModel)) {
+    throw new CoreError("INVALID_INPUT", "Model repair requires the current root model.");
+  }
+
+  const emptyResult = {
+    updatedRows: 0,
+    providerRowsUpdated: 0,
+    modelRowsUpdated: 0,
+    userEventRowsUpdated: 0,
+    cwdRowsUpdated: 0,
+    databasePresent: false
+  };
+  const dbPath = await existingStateDbPath(storageOrLocation);
+  if (!dbPath) {
+    if (afterUpdate) await afterUpdate(emptyResult);
+    return emptyResult;
+  }
+
+  let db;
+  let transactionOpen = false;
+  try {
+    db = await openDatabase(dbPath);
+    setBusyTimeout(db, options.busyTimeoutMs);
+    configureSqliteWriteDurability(db);
+    db.exec("BEGIN IMMEDIATE");
+    transactionOpen = true;
+
+    let modelRowsUpdated = 0;
+    if (targets.has("models") && tableHasColumn(db, "threads", "model")) {
+      modelRowsUpdated = db.prepare(`
+        UPDATE threads
+        SET model = ?
+        WHERE COALESCE(model, '') <> ?
+      `).run(targetModel, targetModel).changes ?? 0;
+    }
+
+    let userEventRowsUpdated = 0;
+    if (targets.has("userEvent")
+        && tableHasColumn(db, "threads", "has_user_event")
+        && options.userEventThreadIds?.size) {
+      const statement = db.prepare(`
+        UPDATE threads
+        SET has_user_event = 1
+        WHERE id = ? AND COALESCE(has_user_event, 0) <> 1
+      `);
+      for (const threadId of options.userEventThreadIds) {
+        userEventRowsUpdated += statement.run(threadId).changes ?? 0;
+      }
+    }
+
+    let cwdRowsUpdated = 0;
+    if (targets.has("cwd")
+        && tableHasColumn(db, "threads", "cwd")
+        && options.threadCwdById?.size) {
+      const statement = db.prepare(`
+        UPDATE threads
+        SET cwd = ?
+        WHERE id = ? AND COALESCE(cwd, '') <> ?
+      `);
+      for (const [threadId, cwd] of options.threadCwdById) {
+        if (typeof threadId !== "string" || !threadId || typeof cwd !== "string" || !cwd.trim()) continue;
+        cwdRowsUpdated += statement.run(cwd, threadId, cwd).changes ?? 0;
+      }
+    }
+
+    const result = {
+      updatedRows: modelRowsUpdated + userEventRowsUpdated + cwdRowsUpdated,
+      providerRowsUpdated: 0,
+      modelRowsUpdated,
+      userEventRowsUpdated,
+      cwdRowsUpdated,
+      databasePresent: true
+    };
+    if (afterUpdate) await afterUpdate(result);
+    options.onCommitAttempt?.(result);
+    db.exec("COMMIT");
+    transactionOpen = false;
+    await options.afterCommit?.(result);
+    return result;
+  } catch (error) {
+    if (transactionOpen) {
+      try { db.exec("ROLLBACK"); }
+      catch { /* Preserve the original failure. */ }
+    }
+    throw wrapSqliteMalformedError(
+      wrapSqliteBusyError(error, "repair session metadata"),
+      "repair session metadata"
     );
   } finally {
     db?.close();

@@ -193,8 +193,8 @@ flowchart LR
 - SQLite 识别、事务和 Busy 检测；
 - `node:sqlite` 与 `better-sqlite3` 双驱动；
 - 写入前备份；
-- transaction journal；
-- 失败补偿和恢复状态；
+- Restore 专用 transaction journal；
+- Restore 补偿和恢复状态；
 - WSL UNC 安全限制；
 - workspace roots 修复；
 - `encrypted_content` 风险提示；
@@ -1328,6 +1328,8 @@ interface StorageProfile {
 - 日志目录；
 - 生成脱敏诊断包。
 
+Diagnostics 仅在用户主动触发时执行一次完整只读扫描，不后台刷新。ProviderSync 固定为首行 Provider-only；需要修改模型、cwd、user-event 或 workspace roots 时，用户在 Diagnostics 页面显式选择 Repair target 并经 Prepare/Confirm/Apply 执行。加密内容只报告计数，不提供修改。
+
 ---
 
 ## 16. 数据与本地存储
@@ -1439,15 +1441,16 @@ Core Runtime 使用 `OperationCoordinator`：
 
 ### 18.2 跨进程锁
 
-同一 Codex Home 的所有正式入口必须遵守兼容的跨进程锁合同；vNext 对共享 SQLite Home 的双层资源身份、路径、顺序和错误语义由 [ADR-0012](adr/0012-dual-resource-lock-contract.md) 冻结。V1/C3 的 Node 与迁移期 .NET 候选实现已经按 `Codex Home → State DB` 固定顺序落实该合同，但在本 PR 的远端跨运行时门禁和最终合入完成前，不得把候选实现表述为已发布保证：
+同一 Codex Home 的所有正式入口必须遵守 `<CodexHome>/tmp/provider-sync.lock` 跨进程合同。按 [ADR-0016](adr/0016-node-core-responsibility-boundaries-and-lightweight-writes.md)，新 Node Sync/Switch/Repair/Restore 不再获取 State DB resource lock；不同 Home 共用数据库时由 SQLite 原生事务串行化或返回 busy。ADR-0012 只保留为历史决策和旧证据：
 
 ```text
 CLI、Web UI、Electron、旧 GUI 同时运行
         ↓
-跨进程锁保证同一目标不会并行写入
+Home lock 保证同一 Codex Home 不会并行写入
+SQLite transaction 裁决跨 Home 的共享数据库竞争
 ```
 
-V1/C3 已记录并测试 Node 与 .NET 锁的路径、命名、持有周期和冲突语义；最终交付仍必须在同一 tested commit 上通过真实跨进程互斥、共享 SQLite Home 和不可验证锁的 required CI。任何差异都必须先统一合同，不能依赖 UI 层互相避让。
+V1/C3 必须测试 Home lock 的路径、持有周期和冲突语义，以及共享 SQLite Home 的原生事务结果与重复执行收敛。任何入口都不能依赖 UI 层互相避让。
 
 Electron 的 UI 禁用按钮只是体验优化，不能替代 Core Lock。
 
@@ -2383,10 +2386,10 @@ Electron 只开放：
 
 在 ADR-0011 的单最终 PR 例外下，以下 `C0`～`C10` 是 V1 分支内的不可变 checkpoint，不是已经合入的独立 PR。旧 PR 2～PR 10 的依赖与安全意图按 ADR-0011 映射到这些 checkpoint。每个 checkpoint 必须保留 commit、测试证据和回退点；所有 Phase 状态仍以最终合入受保护分支为准。
 
-### C0：V1 交付治理、双层锁与 Restore v2 文档合同
+### C0：V1 交付治理与 Restore v2 文档合同
 
 - 新增 ADR-0011～ADR-0013；
-- 使架构、执行索引、Core/Error/Fixture 合同对单最终 PR、共享 State DB 锁与 Restore v2 目标可互相导航；
+- 使架构、执行索引、Core/Error/Fixture 合同对单最终 PR 与 Restore v2 目标可互相导航；
 - 固化基线测试与依赖审计，并消除现有 Vite 链的 high/moderate 告警；
 - 不把目标合同描述为已经实现。
 
@@ -2398,34 +2401,32 @@ Electron 只开放：
 - 更新 `AGENTS.md` 中的 ADR 入口；
 - 不改运行代码。
 
-### C1：Core Public API 与结构化错误
+### C1：Node Core 职责与端口拆分
 
-- 新增 `src/public-api.js`；
-- CLI 和 Web 改为只从 Public API 导入；
-- 不移动核心模块或改变事务顺序；
-- 统一 Canonical Error Code 与 Legacy Adapter；
-- 保持现有人类提示；
-- 增加 Public API、错误合同和入口隔离测试。
+- `CoreFacade` 作为唯一产品入口，根 `src/public-api.js` 保留为 CLI 兼容转发层；
+- 建立 Status、ProviderSync、ProviderSwitch、Diagnostics、Repair、Backups、Restore、History、Watch、OperationRuntime 的职责边界；
+- 建立 ConfigStore、SessionStore、StateDbStore、GlobalStateStore 四个 CodexStorage 端口；
+- C1 只移动职责，保持 DTO、锁、journal、备份、回滚和外部行为。
 
-### C2：CLI `--json`
+### C2：ProviderSync 收窄、Diagnostics 与 Repair
 
-- Human Mode 保持 v0.5 兼容；
-- JSON Mode stdout 只输出一个版本化 envelope，进度与诊断进入 stderr；
-- 固定 JSON Mode Exit Code 并以真实子进程测试。
+- ProviderSync 固定从 config 读取目标 Provider，只扫描 rollout 首行；
+- 等长 Provider 原地更新，不等长 Provider 流式临时替换，正文 bytes 不变；
+- 删除公开 `sync --provider`、`--fast`、`syncMode` 与 `FAST_MODE_UNSUPPORTED`；
+- 新增手动完整只读 Diagnostics 和显式 `prepareRepair/applyRepair`，贯通 CLI/Web/Electron。
 
-### C3：Prepare / Apply、协调器与双层锁
+### C3：普通写轻量化
 
-- 把 Web Revision 逻辑下沉为 Core Plan/Apply；
-- Sync、Switch、Restore 使用短期、单次、锁内重校验的 planId；
-- Node 与迁移期 .NET 实现 Codex Home → State DB resource 双层锁；
-- Watch 合并事件并让位于人工操作；
-- CLI 内部仍一次完成；
-- 兼容现有命令。
+- Sync、Switch、Repair 继续使用短期、单次、Home lock 内重校验的 planId；
+- 普通写只持 Home lock，SQLite 并发交给原生事务；
+- noop 不备份；实际 mutation 前创建 UndoBackup；普通写不创建 journal 或自动回滚；
+- mutation 后故障返回带 backup/阶段/重试建议的 partial，由重复执行收敛；
+- Restore 独立保留 snapshot、journal、Hash 校验与补偿，但也只持 Home lock；旧普通 journal 只读兼容。
 
 ### C4：Workspace、Contracts 与 Core Client
 
 - npm workspaces；
-- `packages/core`，先包装阶段 1 的 `src/public-api.js`，不改变业务行为；
+- `packages/core` 早期先包装阶段 1 的 `src/public-api.js`；当前业务编排已迁入 Core，根 service/watch/diagnostics 仅保留兼容转发；
 - `packages/contracts`；
 - `packages/core-client`；
 - 根 npm 包继续独立提供 Node 16 CLI，Electron 依赖不进入其 tarball。

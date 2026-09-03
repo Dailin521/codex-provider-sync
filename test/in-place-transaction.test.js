@@ -255,17 +255,15 @@ test("append racing mtime restoration is never backdated, including rollback", p
 });
 
 test("provider-only updates do not make History select an older duplicate", async (t) => {
-  for (const fast of [false, true]) {
-    const f = await fixture(t);
-    const newer = path.join(f.codexHome, "sessions", "rollout-newer.jsonl");
-    await fs.writeFile(newer, f.original.toString().replace("openai", "prov_a"));
-    const date = new Date(f.mtime.getTime() + 10000);
-    await fs.utimes(newer, date, date);
-    assert.equal((await listHistory(f.codexHome)).sessions[0].rolloutPath, newer);
-    await runSync({ codexHome: f.codexHome, fast });
-    assert.equal((await listHistory(f.codexHome)).sessions[0].rolloutPath, newer);
-    assert.equal(Math.round((await fs.stat(f.file)).mtimeMs), f.mtime.getTime());
-  }
+  const f = await fixture(t);
+  const newer = path.join(f.codexHome, "sessions", "rollout-newer.jsonl");
+  await fs.writeFile(newer, f.original.toString().replace("openai", "prov_a"));
+  const date = new Date(f.mtime.getTime() + 10000);
+  await fs.utimes(newer, date, date);
+  assert.equal((await listHistory(f.codexHome)).sessions[0].rolloutPath, newer);
+  await runSync({ codexHome: f.codexHome });
+  assert.equal((await listHistory(f.codexHome)).sessions[0].rolloutPath, newer);
+  assert.equal(Math.round((await fs.stat(f.file)).mtimeMs), f.mtime.getTime());
 });
 
 test("recovery repairs a crash after backdating an append even when bytes are already old", posix, async (t) => {
@@ -341,19 +339,24 @@ test("unknown bytes leave a recoveryRequired journal and block later writes", po
   await assert.rejects(runSync({ codexHome: f.codexHome }), { code: "RECOVERY_REQUIRED" });
 });
 
-test("a conflict on B does not prevent compensation of A", async (t) => {
+test("a post-mutation conflict returns partial and preserves the UndoBackup", async (t) => {
   const f = await fixture(t);
   const second = path.join(f.codexHome, "sessions", "rollout-z.jsonl");
   await fs.writeFile(second, f.original);
-  await assert.rejects(runSync({ codexHome: f.codexHome, faultInjector: async ({ point, path: file }) => {
+  const result = await runSync({ codexHome: f.codexHome, faultInjector: async ({ point, path: file }) => {
     if (point === "after_rollout_mutation_before_applied" && file === second) {
       const text = await fs.readFile(second, "utf8");
       await fs.writeFile(second, text.replace("prov_a", "??????"));
       throw new Error("B conflict");
     }
-  } }), { code: "RECOVERY_REQUIRED" });
-  assert.deepEqual(await fs.readFile(f.file), f.original);
+  } });
+  assert.equal(result.partial, true);
+  assert.equal(result.partialReason, "mutation-failed");
+  assert.equal(result.failedStage, "rewrite_rollout_files");
+  assert.ok(result.backupDir);
+  assert.match(await fs.readFile(f.file, "utf8"), /prov_a/);
   assert.match(await fs.readFile(second, "utf8"), /\?{6}/);
+  assert.deepEqual(await findPendingTransactions(f.codexHome), []);
 });
 
 test("actual process exit at applying/applied boundary recovers in place", posix, async (t) => {

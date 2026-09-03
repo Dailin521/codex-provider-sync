@@ -36,7 +36,6 @@ test("CLI JSON success envelope has the exact schema v1 top-level shape", () => 
   const result = {
     targetProvider: "openai",
     skippedLockedRolloutFiles: ["locked.jsonl"],
-    encryptedContentWarning: "encrypted warning",
     autoPruneWarning: "prune warning"
   };
   const envelope = createCliSuccessEnvelope("sync", result);
@@ -47,13 +46,9 @@ test("CLI JSON success envelope has the exact schema v1 top-level shape", () => 
   assert.equal(envelope.ok, true);
   assert.equal(envelope.outcome, "partial");
   assert.notEqual(envelope.result, result);
-  assert.equal(
-    envelope.result.encryptedContentWarning,
-    "Existing encrypted content may not be usable with the target provider."
-  );
+  assert.equal("encryptedContentWarning" in envelope.result, false);
   assert.equal(envelope.result.autoPruneWarning, "Automatic backup cleanup did not complete.");
   assert.deepEqual(envelope.warnings, [
-    "Existing encrypted content may not be usable with the target provider.",
     "Automatic backup cleanup did not complete."
   ]);
   assert.equal(envelope.error, null);
@@ -73,6 +68,30 @@ test("CLI JSON success outcome and warning inference is deterministic", () => {
     "The selected provider has no default model; the root model was not changed."
   ]);
   assert.equal(cliJsonExitCode(createCliSuccessEnvelope("status", {})), 0);
+});
+
+test("CLI JSON exposes only fixed partial convergence fields and uses exit code 3", () => {
+  const envelope = createCliSuccessEnvelope("sync", {
+    partial: true,
+    partialReason: "mutation-failed",
+    failedStage: "update_sqlite",
+    failureCode: "SQLITE_BUSY",
+    retryRecommended: true,
+    partialWarning: "secret internal exception text"
+  });
+  assert.equal(envelope.outcome, "partial");
+  assert.equal(cliJsonExitCode(envelope), 3);
+  assert.deepEqual(envelope.result, {
+    partial: true,
+    partialReason: "mutation-failed",
+    failedStage: "update_sqlite",
+    failureCode: "SQLITE_BUSY",
+    retryRecommended: true
+  });
+  assert.deepEqual(envelope.warnings, [
+    "The operation made only part of the requested change. Retry it to converge, or restore the backup manually."
+  ]);
+  assert.doesNotMatch(JSON.stringify(envelope), /secret internal/);
 });
 
 test("CLI JSON failure exit codes follow the frozen matrix", () => {

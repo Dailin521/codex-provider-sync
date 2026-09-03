@@ -1,11 +1,11 @@
 export function applyPreparedDesktopOperationForTest(
-  method: "applySync" | "applySwitch" | "applyRestore",
+  method: "applySync" | "applySwitch" | "applyRepair" | "applyRestore",
   input: { schemaVersion: 1; planId: string },
   control: {
     signal?: AbortSignal;
     onOperationStarted?(value: {
       operationId: string;
-      operation: "sync" | "switch" | "restore";
+      operation: "sync" | "switch" | "repair" | "restore";
     }): void;
     onProgress?(event: {
       stage: string;

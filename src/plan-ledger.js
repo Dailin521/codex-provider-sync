@@ -5,7 +5,7 @@ import { CoreError } from "./core-error.js";
 export const PLAN_SCHEMA_VERSION = 1;
 export const DEFAULT_PLAN_TTL_MS = 10 * 60 * 1000;
 
-const OPERATIONS = new Set(["sync", "switch", "restore"]);
+const OPERATIONS = new Set(["sync", "switch", "repair", "restore"]);
 
 function cloneJson(value) {
   return JSON.parse(JSON.stringify(value));

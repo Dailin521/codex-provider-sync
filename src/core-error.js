@@ -5,7 +5,6 @@ const ERROR_DEFINITIONS = Object.freeze({
   PLAN_STALE: { severity: "warning", retryable: true, recoveryRequired: false },
   PLAN_EXPIRED: { severity: "warning", retryable: true, recoveryRequired: false },
   STALE_STATE: { severity: "warning", retryable: true, recoveryRequired: false },
-  FAST_MODE_UNSUPPORTED: { severity: "error", retryable: true, recoveryRequired: false },
   CODEX_HOME_NOT_FOUND: { severity: "error", retryable: true, recoveryRequired: false },
   STATE_DB_NOT_FOUND: { severity: "error", retryable: true, recoveryRequired: false },
   SQLITE_UNSUPPORTED_PATH: { severity: "error", retryable: true, recoveryRequired: false },

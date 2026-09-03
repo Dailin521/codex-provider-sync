@@ -69,7 +69,7 @@ export interface DesktopIpcRegistration {
 
 interface PlanOwnership {
   senderId: number;
-  applyMethod: "applySync" | "applySwitch" | "applyRestore";
+  applyMethod: "applySync" | "applySwitch" | "applyRepair" | "applyRestore";
   profile: ProfileSelector;
   generation: number;
   expiresAt: number;
@@ -152,6 +152,7 @@ function requestProfile(
 ): ProfileSelector | null {
   if (request.method === "applySync"
       || request.method === "applySwitch"
+      || request.method === "applyRepair"
       || request.method === "applyRestore") return null;
   const payload = request.payload as { profile?: ProfileSelector };
   return payload.profile ?? null;
@@ -167,6 +168,8 @@ function validPlanResult(
     ? "sync"
     : request.method === "prepareSwitch"
       ? "switch"
+      : request.method === "prepareRepair"
+        ? "repair"
       : "restore";
   const profile = requestProfile(request);
   const expiresAt = Date.parse(result.expiresAt);
@@ -389,7 +392,9 @@ export function registerDesktopIpc(options: DesktopIpcRouterOptions): DesktopIpc
     inFlightRequestIds.add(request.requestId);
     try {
       pruneExpiredPlans();
-      if (typed.method === "prepareSync" || typed.method === "prepareSwitch") {
+      if (typed.method === "prepareSync"
+          || typed.method === "prepareSwitch"
+          || typed.method === "prepareRepair") {
         const profile = requestProfile(typed);
         if (!profile) return failureEnvelope(request, "INVALID_INPUT");
         const response = await options.supervisor.requestWrite(typed, profile);
@@ -402,7 +407,11 @@ export function registerDesktopIpc(options: DesktopIpcRouterOptions): DesktopIpc
         }
         plans.set(response.result.planId, {
           senderId: event.sender.id,
-          applyMethod: typed.method === "prepareSync" ? "applySync" : "applySwitch",
+          applyMethod: typed.method === "prepareSync"
+            ? "applySync"
+            : typed.method === "prepareSwitch"
+              ? "applySwitch"
+              : "applyRepair",
           profile: {
             profileId: response.result.profile.id,
             profileRevision: response.result.profile.revision

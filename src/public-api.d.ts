@@ -22,13 +22,15 @@ export function prepareSync(options?: Record<string, unknown>): Promise<unknown>
 /** @internal Trusted host control. Never expose this object to HTTP, IPC, or Renderer input. */
 export interface CoreHostOperationControl {
   signal?: AbortSignal;
-  onOperationStarted?(value: { operationId: string; operation: "sync" | "switch" | "restore" }): void | Promise<void>;
+  onOperationStarted?(value: { operationId: string; operation: "sync" | "switch" | "repair" | "restore" }): void | Promise<void>;
   onProgress?(event: Record<string, unknown>): void | Promise<void>;
 }
 
 export function applySync(input: Record<string, unknown>, control?: CoreHostOperationControl): Promise<unknown>;
 export function prepareSwitch(options?: Record<string, unknown>): Promise<unknown>;
 export function applySwitch(input: Record<string, unknown>, control?: CoreHostOperationControl): Promise<unknown>;
+export function prepareRepair(options?: Record<string, unknown>): Promise<unknown>;
+export function applyRepair(input: Record<string, unknown>, control?: CoreHostOperationControl): Promise<unknown>;
 export function prepareRestore(options?: Record<string, unknown>): Promise<unknown>;
 export function applyRestore(input: Record<string, unknown>, control?: CoreHostOperationControl): Promise<unknown>;
 export function pruneBackups(options?: Record<string, unknown>): Promise<unknown>;
@@ -44,6 +46,8 @@ export function getDiagnostics(options?: Record<string, unknown>): Promise<unkno
 export function runSync(options?: Record<string, unknown>): Promise<unknown>;
 /** @deprecated Use prepareSwitch/applySwitch through the trusted Core facade. */
 export function runSwitch(options?: Record<string, unknown>): Promise<unknown>;
+/** @deprecated Use prepareRepair/applyRepair through the trusted Core facade. */
+export function runRepair(options?: Record<string, unknown>): Promise<unknown>;
 /** @deprecated Use prepareRestore/applyRestore through the trusted Core facade. */
 export function runRestore(options?: Record<string, unknown>): Promise<unknown>;
 /** @deprecated Use pruneBackups through the trusted Core facade. */

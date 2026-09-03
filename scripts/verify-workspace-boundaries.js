@@ -93,18 +93,21 @@ for (const workspace of REQUIRED_WORKSPACES) {
 }
 
 const coreSource = await fs.readFile(path.join(repositoryRoot, "packages/core/src/index.js"), "utf8");
-const rootImports = [...coreSource.matchAll(/from\s+["'](\.\.\/\.\.\/\.\.\/src\/[^"']+)["']/g)]
-  .map((match) => match[1]);
-assert(rootImports.length === 1 && rootImports[0] === "../../../src/public-api.js", "Core bridge may import only root src/public-api.js.");
+assert(!/(?:\.\.\/)+src\//.test(coreSource), "CoreFacade must not import the legacy root directly.");
+assert(!coreSource.includes("legacy-public-api-port"), "CoreFacade must not route through a legacy public API port.");
 
 const allowedRootCoreImports = new Map([
   ["src/web-core-adapter.js", new Set([
     "../packages/core/src/index.js"
   ])],
   ["src/service.js", new Set([
-    "../packages/core/src/application/concurrency-guard.js",
-    "../packages/core/src/application/operation-runtime.js",
-    "../packages/core/src/application/plan-apply-guard.js"
+    "../packages/core/src/application/service-runtime.js"
+  ])],
+  ["src/diagnostics.js", new Set([
+    "../packages/core/src/application/diagnostics.js"
+  ])],
+  ["src/watch.js", new Set([
+    "../packages/core/src/application/watch-runtime.js"
   ])]
 ]);
 for (const filePath of await sourceFiles("src")) {

@@ -142,7 +142,7 @@ test("paired production UI keeps history lazy and Apply opaque", async ({ page }
   const planDialog = page.getByRole("dialog", { name: "Review plan" });
   await expect(planDialog).toBeVisible();
   await expect(planDialog.getByText("Rollout files affected")).toBeVisible();
-  await expect(planDialog.getByText("A backup will be created before writes.")).toBeVisible();
+  await expect(planDialog.getByText("A backup will be created before writes.")).toHaveCount(0);
   await expect(planDialog.getByText("Technical details")).toBeVisible();
   await expect(planDialog.locator("details")).not.toHaveAttribute("open", "");
   await page.keyboard.press("Escape");
@@ -266,7 +266,7 @@ test("global partial, recovery, operation and error states are visible", async (
   await page.getByRole("button", { name: "Sync", exact: true }).click();
   await page.getByRole("button", { name: "Prepare sync" }).click();
   await page.getByRole("button", { name: "Confirm and apply" }).click();
-  await expect(page.getByText("Completed with locked rollout files skipped.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Partially completed. Retry the same operation to converge.", { exact: true })).toBeVisible();
 
   recovery = true;
   await page.reload();

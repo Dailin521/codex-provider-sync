@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-08-25
-- Amended: 2026-08-27 (C9 Electron native fallback/release audit and C10 shared-UI test hardening)
+- Amended: 2026-09-03 (Node Core ownership transfer and compatibility-adapter boundary)
 - Scope: vNext C4 workspace baseline, C5 shared UI/Web, C6 Electron, C8 updater, C9 release engineering and C10 evidence hardening dependency boundaries
 
 ## Context
@@ -22,7 +22,7 @@ design-system -----------^
 test-fixtures（仅测试，不进入产品依赖图）
 ```
 
-`packages/core` 在 C4 仅通过一个已审计例外导入根 `src/public-api.js`，不移动或翻译锁、备份、journal、SQLite、rollout 和 service 算法。包本身只导出 `createCoreFacade({resolveProfile})`；可信 Host 解析 profile ID/revision 为路径后，facade 实例才提供 vNext 固定方法，不导出 `runSync/runSwitch/runRestore/runWatch` 兼容适配器或存储辅助函数。Core workspace 保持 ESM JavaScript；C4 的 JSDoc、`checkJs`、`tsc --noEmit` 只覆盖该可信边界 bridge，仍在根 `src/` 的高风险算法继续由既有 JS 与集成测试约束，后续迁入时逐模块加入 checkJs。Contracts、CoreClient、App UI 边界和 Desktop 边界使用 TypeScript。
+`packages/core` 的唯一公开导出仍是 `createCoreFacade({resolveProfile})`；可信 Host 解析 profile ID/revision 为路径后，facade 实例才提供 vNext 固定方法，不导出 `runSync/runSwitch/runRestore/runWatch` 兼容适配器或存储辅助函数。2026-09-03 起，业务编排、Watch 和 Diagnostics 已归属 `packages/core/src/application`，根 `src/service.js`、`src/watch.js`、`src/diagnostics.js` 只作 CLI/Web 兼容转发；Core 不再经过根 `src/public-api.js`。四个 CodexStorage 端口由 `packages/core/src/infrastructure` 组合，具体 Node 存储适配器仍静态引用根存储模块，以保持 Node 16 和 Electron bundler 可分析的 ESM 依赖图。Core workspace 的新边界文件逐文件启用 `@ts-check`；尚待继续拆细的成熟 service/watch runtime 显式保留为受集成测试约束的迁移实现，不能把它们误报为已完成逐函数类型化。Contracts、CoreClient、App UI 与 Desktop 边界使用 TypeScript。
 
 根包不得声明 React、Vite、TypeScript 或 Electron 生产依赖。C5 为 Local Web Host 批准一个窄运行时例外：根 `src/web-core-adapter.js` 可以导入随 tarball 检入的 `packages/contracts/dist` 与 `packages/core/src`，根 `files` allowlist 也只允许这两个 `packages/` 子树。例外不包含 workspace manifest、TypeScript source、CoreClient、App UI、Design System、Fixture、Electron 或 node_modules，且必须由 Node 16 安装态 Web smoke 证明不依赖 workspace symlink。其余 `apps/`、`packages/` 和 workspace build output 继续禁止进入根 tarball。
 
@@ -78,14 +78,14 @@ C8 增加的 `electron-updater` 只能由 `apps/desktop/src/main/updater.ts` 动
 
 ## Consequences
 
-现代应用可逐步迁移到共享包而不同时搬动高风险 Core；根 CLI/Web 仍能独立安装。C4 的 `web/` source ownership 过渡已在 C5 结束：唯一现代 Web source 位于 `apps/web` 与 `packages/app-ui`，根只承载静态 `web/dist` 和经过审计的 Host/Core runtime 闭包。窄 tarball 例外增加了 packlist 与 Node 16 回归责任，任何扩大都必须另行修改本 ADR、边界测试和安装态 smoke。
+现代应用通过共享 Core 运行同一业务实现，根 CLI/Web 仍能独立安装。C4 的 `web/` source ownership 过渡已在 C5 结束：唯一现代 Web source 位于 `apps/web` 与 `packages/app-ui`，根只承载静态 `web/dist`、兼容适配器和经过审计的 Host/Core runtime 闭包。窄 tarball 例外增加了 packlist 与 Node 16 回归责任，任何扩大都必须另行修改本 ADR、边界测试和安装态 smoke。
 
 ## Validation
 
-- Node 24：完整 `npm ci`、TypeScript build、Core checkJs、workspace contract tests、Web production build；
+- Node 24：完整 `npm ci`、TypeScript build、Core 文件级 checkJs、workspace contract tests、Web production build；
 - Node 16.20.2 + npm 8：根 production-only `npm ci` 无 workspace/UI 链接；根 tarball 分别完成无 lifecycle 内容检查与正常 lifecycle 安装，实际 bin help、synthetic SQLite 创建/打开和显式临时 Codex Home `status --json`；
 - packlist：不存在 `apps/`、未批准的 `packages/`、workspace manifest、Electron、Fixture 或 node_modules；只允许 `packages/contracts/dist` 与 `packages/core/src`；
-- import contract：除 `packages/core -> src/public-api.js` 的单一过渡例外外，禁止深度导入；
+- import contract：CoreFacade 不得导入根实现；`packages/core/src/infrastructure/node-core-ports.js` 是 Core 到既有 Node 存储模块的唯一适配面，根侧只允许已登记的 Web host 与 service/watch/diagnostics 兼容转发导入 Core 实现；
 - security：生产树 moderate/high/critical 为零，全树 high/critical 为零。
 - C6：Node 24 production/test 两种 Electron bundle、production bundle test-hook 排除、Windows unpacked production SQLite/Utility smoke、真实 crash/restart/journal preflight E2E；同一 job 在 Windows/macOS/Linux 运行并受唯一 `ci-gate` 约束。
 - C9：Node 24 host-native 四目标 candidate build；Electron ABI fallback probe、最终容器 ASAR/Fuse/敏感内容审计、Status 与 Sync→Restore smoke、SBOM/checksum/manifest，以及四目标 commit/lockfile/tool/policy aggregate；CI 命令固定 `--publish never`。

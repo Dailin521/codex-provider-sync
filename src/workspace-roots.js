@@ -361,28 +361,8 @@ export async function readProjectThreadVisibility(storageOrCodexHome, options = 
   }
 }
 
-export async function syncWorkspaceRoots(storageOrCodexHome, options = {}) {
-  const codexHome = codexHomeFrom(storageOrCodexHome);
-  const filePath = globalStatePath(codexHome);
-  const backupPath = globalStateBackupPath(codexHome);
-
-  let originalText;
-  try {
-    originalText = await fs.readFile(filePath, "utf8");
-  } catch (error) {
-    if (error?.code === "ENOENT") {
-      return {
-        present: false,
-        updated: false,
-        updatedWorkspaceRoots: 0,
-        savedWorkspaceRootCount: 0
-      };
-    }
-    throw error;
-  }
-
+function buildWorkspaceRootRepair(originalText, cwdStats, backupMissing) {
   const state = JSON.parse(originalText);
-  const cwdStats = options.cwdStats ?? await readThreadCwdStats(storageOrCodexHome);
   const existingSavedRoots = toPathArray(state["electron-saved-workspace-roots"]);
   const existingProjectOrder = toPathArray(state["project-order"]);
   const existingActiveRoots = toPathArray(state["active-workspace-roots"]);
@@ -422,6 +402,14 @@ export async function syncWorkspaceRoots(storageOrCodexHome, options = {}) {
   const activeRootsChanged = JSON.stringify(originalActiveValue ?? null) !== JSON.stringify(nextActiveValue ?? null);
   const labelsChanged = JSON.stringify(state["electron-workspace-root-labels"] ?? null) !== JSON.stringify(nextLabels ?? null);
   const openTargetsChanged = JSON.stringify(state["open-in-target-preferences"] ?? null) !== JSON.stringify(nextOpenTargets ?? null);
+  const changedFieldCount = [
+    savedRootsChanged,
+    projectOrderChanged,
+    activeRootsChanged,
+    labelsChanged,
+    openTargetsChanged,
+    backupMissing
+  ].filter(Boolean).length;
 
   state["electron-saved-workspace-roots"] = nextSavedRoots;
   state["project-order"] = nextProjectOrder;
@@ -434,8 +422,83 @@ export async function syncWorkspaceRoots(storageOrCodexHome, options = {}) {
   }
 
   const nextText = `${JSON.stringify(state, null, 2)}\n`;
+  return {
+    nextText,
+    updated: changedFieldCount > 0,
+    workspaceRootsNeedingRepair: changedFieldCount,
+    updatedWorkspaceRoots: countArrayChanges(existingSavedRoots, nextSavedRoots),
+    savedWorkspaceRootCount: nextSavedRoots.length
+  };
+}
+
+export function cwdStatsFromThreadCwdMap(threadCwdById) {
+  const counts = new Map();
+  for (const cwd of threadCwdById?.values?.() ?? []) {
+    const normalizedCwd = normalizeComparablePath(cwd);
+    if (!normalizedCwd) continue;
+    const current = counts.get(normalizedCwd) ?? { cwd, normalizedCwd, count: 0, updatedAtMs: 0 };
+    current.count += 1;
+    counts.set(normalizedCwd, current);
+  }
+  return [...counts.values()].sort((left, right) => (
+    (right.count - left.count) || left.cwd.localeCompare(right.cwd)
+  ));
+}
+
+export async function readWorkspaceRootRepairStats(storageOrCodexHome, options = {}) {
+  const codexHome = codexHomeFrom(storageOrCodexHome);
+  const filePath = globalStatePath(codexHome);
+  const backupPath = globalStateBackupPath(codexHome);
+  let originalText;
+  try {
+    originalText = await fs.readFile(filePath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return {
+        present: false,
+        needsRepair: false,
+        workspaceRootsNeedingRepair: 0,
+        savedWorkspaceRootCount: 0
+      };
+    }
+    throw error;
+  }
+  const cwdStats = options.cwdStats ?? await readThreadCwdStats(storageOrCodexHome);
   const backupMissing = await fs.access(backupPath).then(() => false).catch(() => true);
-  const updated = savedRootsChanged || projectOrderChanged || activeRootsChanged || labelsChanged || openTargetsChanged || backupMissing;
+  const repair = buildWorkspaceRootRepair(originalText, cwdStats, backupMissing);
+  return {
+    present: true,
+    needsRepair: repair.updated,
+    workspaceRootsNeedingRepair: repair.workspaceRootsNeedingRepair,
+    savedWorkspaceRootCount: repair.savedWorkspaceRootCount
+  };
+}
+
+export async function syncWorkspaceRoots(storageOrCodexHome, options = {}) {
+  const codexHome = codexHomeFrom(storageOrCodexHome);
+  const filePath = globalStatePath(codexHome);
+  const backupPath = globalStateBackupPath(codexHome);
+
+  let originalText;
+  try {
+    originalText = await fs.readFile(filePath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return {
+        present: false,
+        updated: false,
+        updatedWorkspaceRoots: 0,
+        workspaceRootsNeedingRepair: 0,
+        savedWorkspaceRootCount: 0
+      };
+    }
+    throw error;
+  }
+
+  const cwdStats = options.cwdStats ?? await readThreadCwdStats(storageOrCodexHome);
+  const backupMissing = await fs.access(backupPath).then(() => false).catch(() => true);
+  const repair = buildWorkspaceRootRepair(originalText, cwdStats, backupMissing);
+  const { nextText, updated } = repair;
   if (updated) {
     await options.onBeforeWrite?.(filePath);
     await writeFileAtomic(filePath, nextText, "utf8");
@@ -448,7 +511,10 @@ export async function syncWorkspaceRoots(storageOrCodexHome, options = {}) {
   return {
     present: true,
     updated,
-    updatedWorkspaceRoots: countArrayChanges(existingSavedRoots, nextSavedRoots),
-    savedWorkspaceRootCount: nextSavedRoots.length
+    workspaceRootsNeedingRepair: repair.workspaceRootsNeedingRepair,
+    updatedWorkspaceRoots: repair.updatedWorkspaceRoots,
+    savedWorkspaceRootCount: repair.savedWorkspaceRootCount
   };
 }
+
+export const applyWorkspaceRootRepair = syncWorkspaceRoots;

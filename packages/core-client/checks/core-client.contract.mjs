@@ -74,21 +74,21 @@ test("HttpCoreClient validates response correlation and sends one envelope", asy
   });
 });
 
-test("HttpCoreClient forwards fast Provider sync mode and validates its plan details", async () => {
+test("HttpCoreClient forwards Repair targets and validates its plan", async () => {
   let captured;
   const client = new HttpCoreClient({
     baseUrl: "http://127.0.0.1:31337/",
-    requestIdFactory: () => "http-fast-plan",
+    requestIdFactory: () => "http-repair-plan",
     fetch: async (_url, init) => {
       captured = JSON.parse(String(init.body));
       return new Response(JSON.stringify({
         protocolVersion: 1,
-        requestId: "http-fast-plan",
+        requestId: "http-repair-plan",
         ok: true,
         result: {
           schemaVersion: 1,
           planId: "a".repeat(32),
-          operation: "sync",
+          operation: "repair",
           createdAt: "2026-09-03T00:00:00.000Z",
           expiresAt: "2026-09-03T00:10:00.000Z",
           profile: { id: "default", revision: "r1" },
@@ -96,27 +96,19 @@ test("HttpCoreClient forwards fast Provider sync mode and validates its plan det
           configRevision: "config-r1",
           rolloutRevision: "rollout-r1",
           stateDbRevision: "state-r1",
-          target: { provider: "prov_a", model: null },
+          target: { targets: ["models", "cwd"] },
           impact: { rolloutFilesToChange: 1, sqliteRowsToChange: 1, backupExpected: true },
           warnings: [],
-          requiresConfirmation: true,
-          providerSync: {
-            mode: "fast",
-            rolloutScanScope: "metadata",
-            providerWritePolicy: "require-in-place",
-            historicalModelSync: "preserved",
-            unchecked: ["historyModels", "userEventFlags", "encryptedContent"],
-            inPlaceEligibleSessionFiles: 1,
-            rewriteRequiredSessionFiles: 0
-          }
+          requiresConfirmation: true
         }
       }), { status: 200, headers: { "Content-Type": "application/json" } });
     }
   });
 
-  const plan = await client.prepareSync({ ...profile, keepCount: 5, syncMode: "fast" });
-  assert.equal(plan.providerSync?.mode, "fast");
-  assert.deepEqual(captured.payload, { ...profile, keepCount: 5, syncMode: "fast" });
+  const plan = await client.prepareRepair({ ...profile, targets: ["models", "cwd"], keepCount: 5 });
+  assert.equal(plan.operation, "repair");
+  assert.deepEqual(plan.target.targets, ["models", "cwd"]);
+  assert.deepEqual(captured.payload, { ...profile, targets: ["models", "cwd"], keepCount: 5 });
 });
 
 test("HttpCoreClient streams lifecycle events and cancels an apply by request correlation", async () => {
@@ -751,7 +743,9 @@ test("DesktopCoreClient routes the exact C8 surface and forwards lifecycle cance
     "prepareSync",
     "applySync",
     "prepareSwitch",
-    "applySwitch"
+    "applySwitch",
+    "prepareRepair",
+    "applyRepair"
   ]);
   assert.deepEqual(DESKTOP_RESTORE_METHODS, ["prepareRestore", "applyRestore"]);
   assert.deepEqual(DESKTOP_MAINTENANCE_METHODS, [

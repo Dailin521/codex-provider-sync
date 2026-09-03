@@ -24,6 +24,7 @@ import {
   type ListHistoryInput,
   type OperationResult,
   type PlanSummary,
+  type PrepareRepairInput,
   type PrepareRestoreInput,
   type PrepareSwitchInput,
   type PrepareSyncInput,
@@ -62,6 +63,8 @@ export interface CoreClient {
   applySync(input: ApplyPlanInput, options?: CoreCallOptions): Promise<OperationResult>;
   prepareSwitch(input: PrepareSwitchInput, options?: CoreCallOptions): Promise<PlanSummary>;
   applySwitch(input: ApplyPlanInput, options?: CoreCallOptions): Promise<OperationResult>;
+  prepareRepair(input: PrepareRepairInput, options?: CoreCallOptions): Promise<PlanSummary>;
+  applyRepair(input: ApplyPlanInput, options?: CoreCallOptions): Promise<OperationResult>;
   listBackups(input: ListBackupsInput, options?: CoreCallOptions): Promise<BackupList>;
   prepareRestore(input: PrepareRestoreInput, options?: CoreCallOptions): Promise<PlanSummary>;
   applyRestore(input: ApplyPlanInput, options?: CoreCallOptions): Promise<OperationResult>;
@@ -157,6 +160,14 @@ export class TransportCoreClient implements CoreClient {
 
   applySwitch(input: ApplyPlanInput, options?: CoreCallOptions): Promise<OperationResult> {
     return this.#invoke("applySwitch", input, options);
+  }
+
+  prepareRepair(input: PrepareRepairInput, options?: CoreCallOptions): Promise<PlanSummary> {
+    return this.#invoke("prepareRepair", input, options);
+  }
+
+  applyRepair(input: ApplyPlanInput, options?: CoreCallOptions): Promise<OperationResult> {
+    return this.#invoke("applyRepair", input, options);
   }
 
   listBackups(input: ListBackupsInput, options?: CoreCallOptions): Promise<BackupList> {

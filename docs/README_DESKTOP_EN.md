@@ -28,7 +28,7 @@ Electron Renderer
 
 `BrowserWindow` keeps context isolation, sandboxing, and web security enabled while Node integration is disabled. A local protocol uses a strict CSP. The Renderer has no Node, file-system, arbitrary-channel, or arbitrary-path access. The Utility Process completes an app/core/protocol handshake before any business call; a crash rejects pending requests and permits at most one restart after checking unfinished journals.
 
-Writes preserve backup-first behavior, the fixed Codex Home → State DB two-lock order, transaction journals, rollback/recovery, and the diagnostic-only WSL UNC boundary. The application does not read or export authentication data and does not modify message bodies, session titles, or `updated_at`.
+Sync, Switch, and Repair use only the Codex Home lock, native SQLite transactions, and an UndoBackup. A failure after mutation is a retryable partial result; ordinary writes do not create journals or auto-roll back. Restore keeps its independent pre-restore snapshot, journal, and compensation state machine. Diagnostics performs a full scan only when the user runs it and never refreshes in the background.
 
 ## Internal acceptance
 

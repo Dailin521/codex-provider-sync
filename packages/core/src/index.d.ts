@@ -13,6 +13,7 @@ import type {
   OperationResult,
   PlanSummary,
   ProgressEvent,
+  PrepareRepairInput,
   PrepareRestoreInput,
   PrepareSwitchInput,
   PrepareSyncInput,
@@ -42,7 +43,7 @@ export interface CoreHostOperationControl {
   signal?: AbortSignal;
   onOperationStarted?(value: {
     operationId: string;
-    operation: "sync" | "switch" | "restore";
+    operation: "sync" | "switch" | "repair" | "restore";
   }): void | Promise<void>;
   onProgress?(event: ProgressEvent): void | Promise<void>;
 }
@@ -53,6 +54,8 @@ export interface CoreFacade {
   applySync(input: ApplyPlanInput, control?: CoreHostOperationControl): Promise<OperationResult>;
   prepareSwitch(input: PrepareSwitchInput): Promise<PlanSummary>;
   applySwitch(input: ApplyPlanInput, control?: CoreHostOperationControl): Promise<OperationResult>;
+  prepareRepair(input: PrepareRepairInput): Promise<PlanSummary>;
+  applyRepair(input: ApplyPlanInput, control?: CoreHostOperationControl): Promise<OperationResult>;
   listBackups(input: ListBackupsInput): Promise<BackupList>;
   prepareRestore(input: PrepareRestoreInput): Promise<PlanSummary>;
   applyRestore(input: ApplyPlanInput, control?: CoreHostOperationControl): Promise<OperationResult>;

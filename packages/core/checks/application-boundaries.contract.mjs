@@ -8,20 +8,79 @@ import { createConcurrencyGuard } from "../src/application/concurrency-guard.js"
 import { createOperationRuntime } from "../src/application/operation-runtime.js";
 import { createPlanApplyGuard } from "../src/application/plan-apply-guard.js";
 import { createCodexStorage } from "../src/infrastructure/codex-storage.js";
+import { createRestoreRecovery } from "../src/infrastructure/restore-recovery.js";
+import { createSqliteTransaction } from "../src/infrastructure/sqlite-transaction.js";
+import { createUndoBackup } from "../src/infrastructure/undo-backup.js";
 
 const coreRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 test("application control modules never import storage or the legacy root", async () => {
-  for (const relativePath of [
-    "src/application/concurrency-guard.js",
-    "src/application/operation-runtime.js",
-    "src/application/plan-apply-guard.js"
-  ]) {
+  const applicationRoot = path.join(coreRoot, "src", "application");
+  const relativePaths = (await fs.readdir(applicationRoot))
+    .filter((name) => name.endsWith(".js"))
+    .map((name) => path.join("src", "application", name));
+  for (const relativePath of relativePaths) {
     const source = await fs.readFile(path.join(coreRoot, relativePath), "utf8");
     assert.doesNotMatch(source, /(?:\.\.\/)+src\//);
     assert.doesNotMatch(source, /node:(?:fs|sqlite)/);
-    assert.doesNotMatch(source, /backup|journal|session-files|state-db-lock/);
+    assert.doesNotMatch(source, /src\/(?:backup|transaction-journal|session-files|state-db-lock)\.js/);
   }
+});
+
+test("Core application and infrastructure never route through the legacy public API", async () => {
+  const sourceFiles = [];
+  for (const folder of ["application", "infrastructure"]) {
+    for (const name of await fs.readdir(path.join(coreRoot, "src", folder))) {
+      if (name.endsWith(".js")) sourceFiles.push(path.join("src", folder, name));
+    }
+  }
+  sourceFiles.push(path.join("src", "index.js"));
+  for (const relativePath of sourceFiles) {
+    const source = await fs.readFile(path.join(coreRoot, relativePath), "utf8");
+    assert.equal(source.includes("src/public-api.js"), false, relativePath);
+  }
+});
+
+test("production service runtime consumes the four CodexStorage ports", async () => {
+  const source = await fs.readFile(path.join(coreRoot, "src", "application", "service-runtime.js"), "utf8");
+  for (const port of ["config", "sessions", "stateDb", "globalState"]) {
+    assert.match(source, new RegExp(`codexStorage\\.${port}`));
+  }
+});
+
+test("CoreFacade delegates into concrete use cases without a handler round-trip", async () => {
+  const facade = await fs.readFile(path.join(coreRoot, "src", "index.js"), "utf8");
+  const application = await fs.readFile(
+    path.join(coreRoot, "src", "application", "core-application.js"),
+    "utf8"
+  );
+  assert.match(facade, /const application = createCoreApplication\(\)/);
+  assert.match(facade, /application\.prepareSync/);
+  assert.doesNotMatch(facade, /application\/service-runtime|application\/watch-runtime/);
+  assert.match(application, /createProviderSyncUseCase\(\)/);
+  assert.doesNotMatch(application, /createCoreApplication\(handlers\)|UseCase\(handlers\)/);
+  for (const relativePath of [
+    "src/application/provider-sync.js",
+    "src/application/provider-switch.js",
+    "src/application/repair.js",
+    "src/application/restore.js",
+    "src/application/status.js",
+    "src/application/watch.js"
+  ]) {
+    const source = await fs.readFile(path.join(coreRoot, relativePath), "utf8");
+    assert.doesNotMatch(source, /handlers\./, relativePath);
+  }
+});
+
+test("Switch and Watch call the internal ProviderSync runtime without reversing into CoreFacade", async () => {
+  for (const relativePath of ["src/application/provider-switch.js", "src/application/watch.js"]) {
+    const source = await fs.readFile(path.join(coreRoot, relativePath), "utf8");
+    assert.doesNotMatch(source, /CoreFacade|createCoreFacade|\.\/index/);
+  }
+  const service = await fs.readFile(path.join(coreRoot, "src", "application", "service-runtime.js"), "utf8");
+  const watch = await fs.readFile(path.join(coreRoot, "src", "application", "watch-runtime.js"), "utf8");
+  assert.match(service, /runSwitchCore[\s\S]*?return runSyncCore\(/);
+  assert.match(watch, /prepareSync[\s\S]*?applySync/);
 });
 
 test("CodexStorage is an immutable composition of four independent ports", () => {
@@ -35,6 +94,36 @@ test("CodexStorage is an immutable composition of four independent ports", () =>
   assert.equal(Object.isFrozen(storage.config), true);
   assert.deepEqual(Object.keys(storage).sort(), ["config", "globalState", "sessions", "stateDb"]);
   assert.throws(() => createCodexStorage({}), /config port is missing/);
+});
+
+test("ordinary SQLite, UndoBackup, and RestoreRecovery infrastructure stay independently injectable", async () => {
+  const calls = [];
+  const sqlite = createSqliteTransaction({
+    updateProvider(...args) { calls.push(["provider", ...args]); },
+    repair(...args) { calls.push(["repair", ...args]); }
+  });
+  const backup = createUndoBackup({
+    capture(...args) { calls.push(["backup", ...args]); },
+    refreshInventory(...args) { calls.push(["refresh", ...args]); }
+  });
+  const restore = createRestoreRecovery({
+    resolveResource(...args) { calls.push(["resource", ...args]); },
+    acknowledge(...args) { calls.push(["ack", ...args]); },
+    execute(...args) { calls.push(["restore", ...args]); }
+  });
+  sqlite.updateProvider("db", "provider");
+  sqlite.repair("db", "targets");
+  backup.capture("snapshot");
+  backup.refreshInventory("snapshot");
+  restore.resolveResource("db");
+  restore.acknowledge("journal");
+  restore.execute("restore");
+  assert.deepEqual(calls.map(([name]) => name), [
+    "provider", "repair", "backup", "refresh", "resource", "ack", "restore"
+  ]);
+  assert.equal(Object.isFrozen(sqlite), true);
+  assert.equal(Object.isFrozen(backup), true);
+  assert.equal(Object.isFrozen(restore), true);
 });
 
 test("OperationRuntime owns Plan consumption and observer-safe operation lifecycle", async () => {
@@ -190,4 +279,3 @@ test("OperationRuntime maps a pre-commit AbortError without losing correlation",
       && error.operationId === "operation-cancelled"
   );
 });
-

@@ -1,14 +1,14 @@
 # CLI 命令兼容合同
 
-> 状态：Accepted（Phase 0 Human 兼容基线；C2 JSON 合同已实现）
+> 状态：Accepted（Phase 0 Human 兼容基线；ADR-0016 C2/C3 增量已实现）
 >
 > 基线版本：`@dailin521/codex-provider-sync` v0.5.0
 >
-> 冻结日期：2026-08-24；C2 增量：2026-08-25
+> 冻结日期：2026-08-24；当前 V1 增量：2026-09-03
 >
 > 适用入口：`codex-provider`
 
-V1 增量：`sync --fast` 和 `switch <provider-id> --fast` 映射统一 Core 的 `syncMode="fast"`。它们只扫描 rollout 首行，要求所有 Provider 变更可原地更新，并保留根模型与历史模型；`--fast` 不接收值、不支持其他命令，且与 `--model` 互斥。默认完整模式不变，并自动优先采用合格的等长原地更新。摘要增加 `In-place rollout updates`。不支持的快速操作在业务写入前以 `FAST_MODE_UNSUPPORTED` 失败，不自动完整重写。详见 [ADR-0015](../../adr/0015-provider-byte-updates-and-fast-sync.md)。
+V1/ADR-0016 增量：Provider Sync 固定为首行 Provider-only 路径，目标只取自 `config.toml` 当前根级 `model_provider`。公开 `sync --provider`、`--fast`、`syncMode` 与 `FAST_MODE_UNSUPPORTED` 已移除。完整扫描改为用户主动执行的只读 `diagnostics`；模型、cwd、user-event 与 workspace roots 只由显式 `repair` 修改。详见 [ADR-0016](../../adr/0016-node-core-responsibility-boundaries-and-lightweight-writes.md)。
 
 ## 1. 文档目的
 
@@ -96,6 +96,8 @@ Windows 下的 `\\wsl.localhost\...` 和 `\\wsl$\...` SQLite Home 仅用于诊�
 | `status` | 检查 Provider、rollout、SQLite、备份与恢复状态 | 否 | 当前存储布局 |
 | `sync` | 将历史元数据同步到目标 Provider | 是 | 当前 Provider；保留 5 份备份 |
 | `switch` | 修改根级 Provider，并同步历史元数据 | 是 | 跟随目标 Provider 的 model；保留 5 份备份 |
+| `diagnostics` | 完整扫描 Provider 之外的元数据问题 | 否 | 只在用户主动执行时扫描一次 |
+| `repair` | 修复显式选择的非 Provider 元数据 | 是 | 至少一个目标；保留 5 份备份 |
 | `watch` | 监听配置和 SQLite 变化并自动同步 | 是 | 750 ms；监听 state DB；持续运行 |
 | `web` | 启动本地 Web UI | Web 操作可写 | 端口 8791；自动打开浏览器 |
 | `prune-backups` | 清理较旧的托管备份 | 是，删除托管备份 | 保留 5 份 |
@@ -119,7 +121,7 @@ codex-provider <command> --help
 
 以下有限命令支持 opt-in `--json`：
 
-- `status`、`sync`、`switch`、`restore`；
+- `status`、`sync`、`switch`、`diagnostics`、`repair`、`restore`；
 - `prune-backups`、`install-windows-launcher`；
 - 全局帮助或命令帮助。
 
@@ -163,14 +165,13 @@ codex-provider status [--codex-home PATH] [--sqlite-home PATH]
 ### 6.1 语法
 
 ```text
-codex-provider sync [--provider ID] [--keep N] [--codex-home PATH] [--sqlite-home PATH]
+codex-provider sync [--keep N] [--codex-home PATH] [--sqlite-home PATH]
 ```
 
 ### 6.2 参数与默认值
 
 | 参数 | 当前含义 | 默认值 |
 | --- | --- | --- |
-| `--provider ID` | 显式指定目标 Provider | 根级 `model_provider`；缺失时 `openai` |
 | `--keep N` | 成功后保留最近 N 份托管备份 | `5` |
 | `--codex-home PATH` | 覆盖 Codex Home | 第 3 节规则 |
 | `--sqlite-home PATH` | 覆盖 SQLite Home | 第 3 节规则 |
@@ -179,15 +180,18 @@ codex-provider sync [--provider ID] [--keep N] [--codex-home PATH] [--sqlite-hom
 
 ### 6.3 当前行为
 
-- CLI 每次执行前读取 `config.toml` 的根级 `model`，并把它传给 Core；
-- 根级 `model` 读取失败时继续同步 Provider，且不要求重写每线程 model；
+- 目标 Provider 始终取自 `config.toml` 根级 `model_provider`，缺失时为 `openai`；
 - `sync` 不修改根级 `model_provider`；
+- 每个 rollout 只读取首行 `session_meta`，不打开或解析聊天正文；
+- Provider JSON 字面量等长时只原地替换相应字节并保留文件身份、大小和正文 Hash；长度不同时流式生成临时文件并原子替换，正文逐字节不变；
+- 不修改历史模型、cwd、user-event、workspace roots 或加密内容；
 - 写入前获取同一 Codex Home 的跨进程锁；
-- 未完成事务存在时阻止新的写操作；
+- 旧 Sync/Switch journal 只作为诊断兼容信息，不阻止新的普通写操作；未解决 Restore journal 仍阻止写入；
 - SQLite 可写检查发生在创建备份和重写 rollout 之前；
-- 每次执行都先创建托管备份，再进行写入；
+- 只有存在实际写入目标时才创建覆盖该集合的 UndoBackup；noop 不创建备份；
 - 锁定的 rollout 可以被跳过，其他可写 rollout 和 SQLite 仍继续处理；
 - 锁定 rollout 导致的是部分成功，而不是事务整体失败；
+- mutation 前失败不产生业务写入；mutation 后失败返回可重试 `partial`、backupId、失败阶段和错误码，不执行普通写路径的自动全量回滚；
 - 成功提交后自动按 `--keep` 清理旧托管备份；
 - 备份 inventory 刷新或自动清理失败，在主事务已提交后降级为 warning。
 
@@ -199,8 +203,8 @@ CLI 使用以下六个编号阶段：
 [1/6] Scanning rollout files...
 [2/6] Checking locked rollout files...
 [3/6] Creating backup...
-[4/6] Updating SQLite...
-[5/6] Rewriting rollout files...
+[4/6] Rewriting rollout files...
+[5/6] Updating SQLite...
 [6/6] Cleaning backups...
 ```
 
@@ -220,11 +224,8 @@ CLI 使用以下六个编号阶段：
 
 以下信息按实际结果出现：
 
-- SQLite user-event 修复数量；
-- SQLite cwd 修复数量；
-- workspace roots 更新数量；
+- 等长原地更新和不等长流式替换数量；
 - 被跳过的锁定 rollout 数量和路径预览；
-- encrypted content 警告；
 - 自动备份清理结果或 warning。
 
 ## 7. `switch`
@@ -240,7 +241,7 @@ codex-provider switch <provider-id> [--model NAME] [--keep-root-model] [--keep N
 | 参数 | 当前含义 | 默认值 |
 | --- | --- | --- |
 | `<provider-id>` | 目标 Provider | 必填 |
-| `--model NAME` | 显式设置根级 model，并同步每线程 model | 未设置 |
+| `--model NAME` | 显式设置根级 model；不修改历史线程模型 | 未设置 |
 | `--keep-root-model` | 保留现有根级 model | `false` |
 | `--keep N` | 成功后保留最近 N 份托管备份 | `5` |
 
@@ -262,25 +263,38 @@ codex-provider switch <provider-id> [--model NAME] [--keep-root-model] [--keep N
 4. 自定义 Provider section 没有 `model` 时，保留根级值并输出 warning；
 5. 切换到内置 `openai` 时，没有 Provider section model 可自动复制，保留根级值。
 
-最终根级 model 也是本次 rollout 与 SQLite 每线程 model 同步所使用的目标 model。根级 model 缺失时不强制新增线程 model。
+以上策略只决定根级 `model`。历史 rollout 与 SQLite model 不随 Switch 修改；如需统一，用户必须显式运行 `repair models`。
 
 ### 7.5 事务边界
 
 - 切换前先创建包含原始 `config.toml` 的备份；
 - 备份成功后才允许修改根级 Provider/model；
-- 配置更新与后续同步处于同一补偿流程；
-- 后续失败时恢复原始配置和已观察到的其他变更；
+- 配置更新和内部 ProviderSync 属于同一个 Operation、Home lock 和 UndoBackup，不创建嵌套 Plan 或重复备份；
+- mutation 后失败返回可重试 `partial`；用户可重复执行以收敛，或显式 Restore 对应 UndoBackup；
 - 成功结果在 `sync` 摘要后输出根级 model 的应用来源、保留原因或 warning。
 
-## 8. `watch`
+## 8. `diagnostics` 与 `repair`
 
 ### 8.1 语法
+
+```text
+codex-provider diagnostics [--json] [--codex-home PATH] [--sqlite-home PATH]
+codex-provider repair <targets> [--json] [--keep N] [--codex-home PATH] [--sqlite-home PATH]
+```
+
+`diagnostics` 每次调用执行一次完整流式只读扫描，报告历史模型、cwd、user-event、workspace roots 和加密内容问题；它不在后台或定时运行，也不修改任何目标。
+
+`repair` 的 `<targets>` 是逗号分隔、不可重复的 `models`、`cwd`、`userEvent`、`workspaceRoots`。至少选择一个目标；`workspaceRoots` 自动包含 `cwd`。`models` 使用 config 当前根模型，根模型缺失时 Prepare 失败。加密内容只诊断，不能作为 Repair 目标。Repair 仅扫描所选目标需要的数据，并在一次 SQLite 事务内提交数据库修改。
+
+## 9. `watch`
+
+### 9.1 语法
 
 ```text
 codex-provider watch [--codex-home PATH] [--sqlite-home PATH] [--debounce-ms N] [--once] [--no-state-db]
 ```
 
-### 8.2 参数与默认值
+### 9.2 参数与默认值
 
 | 参数 | 当前含义 | 默认值 |
 | --- | --- | --- |
@@ -290,13 +304,13 @@ codex-provider watch [--codex-home PATH] [--sqlite-home PATH] [--debounce-ms N] 
 
 `--debounce-ms` 必须是非负整数，允许 `0`。
 
-### 8.3 当前行为
+### 9.3 当前行为
 
 - 启动时要求 Codex Home 与 `config.toml` 已存在；
 - 启动前按物理 Codex Home 建立唯一 Watch scope；重复或并发启动同一 `realpath` Home 不创建第二个 watcher，Windows 比较不区分大小写；物理路径无法可靠解析时 fail closed；
 - 默认监听 `config.toml`、当前活动 `state_5.sqlite` 以及 `-wal`、`-shm` sidecar；
 - 配置变化后重新解析 SQLite Home，并重新绑定 DB watcher；
-- 每次触发同步时重新读取根级 model；
+- 每次触发同步时重新读取 config 当前 Provider，并调用内部 ProviderSync；
 - SQLite busy 是暂态软跳过，等待下一次变化重试；
 - 明确配置的 SQLite Home 暂时缺 DB 时暂停同步，等待配置修复；
 - 连续 5 次非 busy 同步失败后自动停止 watcher；
@@ -304,15 +318,15 @@ codex-provider watch [--codex-home PATH] [--sqlite-home PATH] [--debounce-ms N] 
 - 停止时等待正在执行的同步到达完成状态；
 - `SIGINT`、`SIGTERM`、`--once` 和内部自动停止都走清理流程。
 
-## 9. `web`
+## 10. `web`
 
-### 9.1 语法
+### 10.1 语法
 
 ```text
 codex-provider web [--port N] [--no-open] [--reset-access] [--codex-home PATH] [--sqlite-home PATH]
 ```
 
-### 9.2 参数与默认值
+### 10.2 参数与默认值
 
 | 参数 | 当前含义 | 默认值 |
 | --- | --- | --- |
@@ -322,7 +336,7 @@ codex-provider web [--port N] [--no-open] [--reset-access] [--codex-home PATH] [
 
 端口必须是 `0..65535` 的整数；`0` 表示由操作系统选择可用端口。
 
-### 9.3 当前行为
+### 10.3 当前行为
 
 - 服务只监听 `127.0.0.1`；
 - 默认尝试打开带一次性配对 token 的 URL；
@@ -334,15 +348,15 @@ codex-provider web [--port N] [--no-open] [--reset-access] [--codex-home PATH] [
 - 默认状态文件为 `<Codex Home>/provider-sync-web.json`；
 - 默认运行时描述文件为 `<Codex Home>/provider-sync-web.runtime.json`。
 
-## 10. `prune-backups`
+## 11. `prune-backups`
 
-### 10.1 语法
+### 11.1 语法
 
 ```text
 codex-provider prune-backups [--keep N] [--codex-home PATH]
 ```
 
-### 10.2 当前行为
+### 11.2 当前行为
 
 - `--keep` 默认 `5`，必须是非负整数，允许 `0`；
 - 只处理 `<Codex Home>/backups_state/provider-sync` 中具有本工具 metadata namespace 的托管备份；
@@ -351,15 +365,15 @@ codex-provider prune-backups [--keep N] [--codex-home PATH]
 - 使用同一 Codex Home 的跨进程锁；
 - 输出 backup root、删除数量、剩余数量和释放空间。
 
-## 11. `restore`
+## 12. `restore`
 
-### 11.1 语法
+### 12.1 语法
 
 ```text
 codex-provider restore <backup-dir> [--no-config] [--no-db] [--no-sessions] [--allow-sqlite-home-relocation] [--codex-home PATH] [--sqlite-home PATH]
 ```
 
-### 11.2 默认值
+### 12.2 默认值
 
 | 内容 | 默认是否恢复 | 关闭参数 |
 | --- | --- | --- |
@@ -367,7 +381,7 @@ codex-provider restore <backup-dir> [--no-config] [--no-db] [--no-sessions] [--a
 | SQLite state DB | 是 | `--no-db` |
 | rollout 元数据 | 是 | `--no-sessions` |
 
-### 11.3 当前行为
+### 12.3 当前行为
 
 - 备份路径必填；
 - 使用同一 Codex Home 的 restore 锁；
@@ -379,15 +393,15 @@ codex-provider restore <backup-dir> [--no-config] [--no-db] [--no-sessions] [--a
 - 成功恢复后标记相应 transaction journal 已回滚；
 - 输出备份绝对路径、Codex Home、备份时 Provider，以及可选 inventory warning。
 
-## 12. `install-windows-launcher`
+## 13. `install-windows-launcher`
 
-### 12.1 语法
+### 13.1 语法
 
 ```text
 codex-provider install-windows-launcher [--dir PATH] [--codex-home PATH] [--sqlite-home PATH]
 ```
 
-### 12.2 当前行为
+### 13.2 当前行为
 
 - `--dir` 缺失时使用当前用户 Desktop；
 - 创建 `Codex Provider Sync.cmd`；
@@ -397,9 +411,9 @@ codex-provider install-windows-launcher [--dir PATH] [--codex-home PATH] [--sqli
 - cmd 保留 CLI 退出码；
 - vbs 以消息框显示成功或失败，并限制展示文本长度。
 
-## 13. stdout、stderr 与退出码
+## 14. stdout、stderr 与退出码
 
-### 13.1 Human Mode 兼容合同
+### 14.1 Human Mode 兼容合同
 
 未传入 `--json` 时继续使用 v0.5 人类可读接口，并保持原有 `0/1` 退出行为。
 
@@ -417,7 +431,7 @@ codex-provider install-windows-launcher [--dir PATH] [--codex-home PATH] [--sqli
 
 Human Mode 不采用 JSON 模式的 `2`、`3`、`4`、`5`、`130`；partial 仍为 `0`，其余既有失败仍为 `1`。这一区分防止现有脚本因 opt-in JSON 能力而改变行为。
 
-### 13.2 vNext C2 JSON 合同
+### 14.2 vNext C2 JSON 合同
 
 JSON Mode 的 stdout 必须恰好包含一个 UTF-8 JSON 文档和结尾换行；进度、运行时 warning 与诊断只能进入 stderr。顶层字段始终全部存在、顺序固定，且不得增加未版本化字段：
 
@@ -445,15 +459,15 @@ JSON Mode 的 stdout 必须恰好包含一个 UTF-8 JSON 文档和结尾换行�
 | `warnings` | 字符串数组；没有 warning 时为空数组 |
 | `error` | 失败时为安全的 `CoreErrorDto`，成功时为 `null`；不得包含 stack、cause、凭据、Token 或消息正文 |
 
-所有 Canonical Error Code 在 JSON 中使用固定安全 message；未知异常统一输出稳定的 `INTERNAL_ERROR`，不回显参数值或底层 message。Error details 只允许经审计且枚举/格式受限的 scope、reason、SQLite source/cause 字段；operationId 只接受 UUID，suggestedAction 不直接透传。成功 result 按命令使用字段 allowlist，只保留产品 DTO 中已审计的状态、计数、Provider/model 与路径字段，并移除凭据、Token、secret、stack/cause、prompt 和消息正文；底层 warning message 归一为稳定摘要。JSON 参数解析为严格模式：未知 flag、重复 flag、缺值、多余位置参数、布尔 flag 带值和 `--json=<value>` 均以 `INVALID_INPUT` 失败；第 14 节的宽松行为只为 Human Mode 保留。
+所有 Canonical Error Code 在 JSON 中使用固定安全 message；未知异常统一输出稳定的 `INTERNAL_ERROR`，不回显参数值或底层 message。Error details 只允许经审计且枚举/格式受限的 scope、reason、SQLite source/cause 字段；operationId 只接受 UUID，suggestedAction 不直接透传。成功 result 按命令使用字段 allowlist，只保留产品 DTO 中已审计的状态、计数、Provider/model 与路径字段，并移除凭据、Token、secret、stack/cause、prompt 和消息正文；底层 warning message 归一为稳定摘要。JSON 参数解析为严格模式：未知 flag、重复 flag、缺值、多余位置参数、布尔 flag 带值和 `--json=<value>` 均以 `INVALID_INPUT` 失败；第 15 节的宽松行为只为 Human Mode 保留。
 
 JSON Mode 退出码固定为：
 
 | Exit Code | 含义 |
 | --- | --- |
 | `0` | 成功或 noop |
-| `1` | 普通失败，包含已安全回滚的失败 |
-| `2` | 输入无效、快速模式不适用、Plan 过期或状态漂移 |
+| `1` | 普通失败；旧兼容结果仍可能包含已安全回滚的失败 |
+| `2` | 输入无效、Plan 过期或状态漂移 |
 | `3` | partial success |
 | `4` | recovery required 或 pending transaction |
 | `5` | operation busy、SQLite busy 或 lock unverifiable |
@@ -461,7 +475,7 @@ JSON Mode 退出码固定为：
 
 CLI Exit Code 与 Error Code 是两层合同：多个 Canonical Error Code 可以映射到同一退出码。`--help --json` 返回 `ok:true` 的 schema v1 帮助结果；不存在稳定的 `--version` JSON 合同。
 
-### 13.3 后续变更规则
+### 14.3 后续变更规则
 
 以后新增或重映射退出码前必须：
 
@@ -471,7 +485,7 @@ CLI Exit Code 与 Error Code 是两层合同：多个 Canonical Error Code 可�
 4. 在 CHANGELOG 和发布说明中声明；
 5. 不把 partial、busy 或 recovery 的退出码变化混入无关重构。
 
-## 14. legacy tolerated 行为
+## 15. legacy tolerated 行为
 
 以下行为由当前手写参数解析器接受，但不属于长期稳定命令合同：
 
@@ -493,28 +507,32 @@ CLI Exit Code 与 Error Code 是两层合同：多个 Canonical Error Code 可�
 - 若决定移除被真实用户使用的 tolerated 形式，应给出兼容警告或版本化迁移说明；
 - 安全修复可以拒绝危险或歧义输入，但必须单独说明。
 
-## 15. vNext 目标合同
+## 16. vNext 目标合同
 
-以下内容是 V1 后续目标；其中 C2 已实现的合同是后续阶段必须保持的不变量：
+以下内容是 V1 当前合同与后续阶段必须保持的不变量：
 
 - CLI、Local Web UI 与 Electron Desktop 调用同一个 Core Public API；
 - Desktop 不启动 CLI，也不解析 CLI 人类文本；
 - 保持 C2 已实现的 opt-in JSON schema、stdout/stderr 分工和退出码矩阵；
-- 在 Prepare/Apply 落地后，让 JSON 命令使用相同的 Plan/Result DTO，而不暴露内部适配器；
+- 所有交互写操作使用相同的 Prepare/Apply Plan/Result DTO，而不暴露内部适配器；
 - 使用稳定 Error Code，同时保留现有人类错误提示的核心语义；
-- 支持取消时使用安全取消点，而不是强制中止事务。
+- 仅在首次 mutation 前接受取消；mutation 后通过 partial/retry 收敛。
 
 任何目标行为只有在实现、测试和本文更新后才成为当前合同。
 
-## 16. 最低 Contract Test 清单
+## 17. 最低 Contract Test 清单
 
 Phase 0 之后的 CLI 改造至少必须覆盖：
 
 - 帮助文本可运行且 exit `0`；
 - 未知命令和非法 `--keep` 的 stderr 与 exit `1`；
 - `status` 的顶层输出顺序；
-- `sync` 默认 Provider、默认 keep=5 与六阶段进度；
+- `sync` 默认 Provider、默认 keep=5、六阶段进度、首行读取和两种写入策略；
+- 拒绝公开 `sync --provider`、`--fast` 与 `syncMode`；
 - `switch` 的三种 model 策略与互斥校验；
+- `diagnostics` 完整扫描一次、只读且不后台刷新；
+- `repair` 逐目标隔离、组合目标、`workspaceRoots` 隐含 cwd、缺失根模型和单 SQLite 事务；
+- noop 不创建备份；mutation 前备份失败零写入；mutation 后故障返回 partial 且重复执行可收敛；
 - partial sync 当前仍 exit `0`；
 - recovery/busy/lock 当前仍 exit `1`；
 - restore 三类默认恢复和三个 `--no-*`；
@@ -527,7 +545,7 @@ Phase 0 之后的 CLI 改造至少必须覆盖：
 - `watch --json` 与 `web --json` 在任何长运行副作用前被拒绝；
 - Human Mode 的帮助、进度、partial 和 `0/1` 行为保持既有回归。
 
-## 17. 变更控制
+## 18. 变更控制
 
 修改以下任一内容，必须同时更新本文、Contract Test 和发布说明：
 

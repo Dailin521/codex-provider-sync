@@ -9,6 +9,7 @@ import * as core from "../src/index.js";
 import { toPublicProgress } from "../src/progress.js";
 
 const EXPECTED_METHODS = [
+  "applyRepair",
   "applyRestore",
   "applySwitch",
   "applySync",
@@ -18,6 +19,7 @@ const EXPECTED_METHODS = [
   "getWatchStatus",
   "listBackups",
   "listHistory",
+  "prepareRepair",
   "prepareRestore",
   "prepareSwitch",
   "prepareSync",
@@ -56,17 +58,30 @@ test("Core progress projection enforces the shared DTO numeric ranges", () => {
   assert.equal(toPublicProgress({ stage: "", status: "running" }), null);
 });
 
-test("Core workspace bridge imports only the root public API", async () => {
+test("Core workspace owns orchestration and root service remains compatibility-only", async () => {
   const source = await fs.readFile(new URL("../src/index.js", import.meta.url), "utf8");
+  const application = await fs.readFile(new URL("../src/application/core-application.js", import.meta.url), "utf8");
+  const serviceRuntime = await fs.readFile(new URL("../src/application/service-runtime.js", import.meta.url), "utf8");
+  const storagePorts = await fs.readFile(new URL("../src/infrastructure/node-core-ports.js", import.meta.url), "utf8");
+  const rootService = await fs.readFile(new URL("../../../src/service.js", import.meta.url), "utf8");
   const declarations = await fs.readFile(new URL("../src/index.d.ts", import.meta.url), "utf8");
   const rootDeclarations = await fs.readFile(
     new URL("../../../src/public-api.d.ts", import.meta.url),
     "utf8"
   );
-  const rootImports = [...source.matchAll(/from\s+["'](\.\.\/\.\.\/\.\.\/src\/[^"']+)["']/g)]
-    .map((match) => match[1]);
-  assert.deepEqual(rootImports, ["../../../src/public-api.js"]);
+  assert.doesNotMatch(source, /src\/public-api\.js/);
   assert.doesNotMatch(source, /src\/(service|locking|backup|history|watch)\.js/);
+  assert.doesNotMatch(source, /application\/(service|watch)-runtime\.js/);
+  assert.match(source, /application\.prepareSync/);
+  assert.match(application, /createProviderSyncUseCase\(\)/);
+  assert.doesNotMatch(application, /UseCase\(handlers\)/);
+  assert.match(serviceRuntime, /codexStorage\.config/);
+  assert.match(serviceRuntime, /codexStorage\.sessions/);
+  assert.match(serviceRuntime, /codexStorage\.stateDb/);
+  assert.match(serviceRuntime, /codexStorage\.globalState/);
+  assert.match(storagePorts, /src\/config-file\.js/);
+  assert.match(rootService, /packages\/core\/src\/application\/service-runtime\.js/);
+  assert.doesNotMatch(rootService, /function\s+runSyncCore/);
   assert.doesNotMatch(source, /faultInjector/);
   assert.doesNotMatch(declarations, /faultInjector/);
   assert.doesNotMatch(rootDeclarations, /faultInjector/);
@@ -145,13 +160,7 @@ test("trusted profile selection never falls back to the process default Codex Ho
     assert.equal(history.sessions[0].messageCount, 0);
     assert.equal(history.sessions[0].messageCountKnown, false);
     assert.equal("cwd" in history.sessions[0], false);
-    assert.ok(plan.warnings.includes(
-      "Some encrypted histories may require their original Provider or account for continuation."
-    ));
-    assert.equal(plan.warnings.every((warning) => [
-      "Some encrypted histories may require their original Provider or account for continuation.",
-      "Project visibility diagnostics are unavailable; backup-first protection remains enabled."
-    ].includes(warning)), true);
+    assert.deepEqual(plan.warnings, []);
     assert.doesNotMatch(JSON.stringify(plan), /private-project|synthetic-ciphertext/);
     assert.equal(diagnostics.storage.sqliteHomeSource, "default");
     assert.equal("codexHome" in diagnostics.storage, false);
@@ -163,6 +172,18 @@ test("trusted profile selection never falls back to the process default Codex Ho
     assert.deepEqual(
       Object.keys(diagnostics.provider).sort(),
       ["configured", "current", "implicit", "rolloutCounts", "sqliteCounts"]
+    );
+    assert.deepEqual(
+      Object.keys(diagnostics.issues).sort(),
+      [
+        "cwdRowsNeedingRepair",
+        "encryptedContentFiles",
+        "rolloutModelFilesNeedingRepair",
+        "rootModelAvailable",
+        "sqliteModelRowsNeedingRepair",
+        "userEventRowsNeedingRepair",
+        "workspaceRootsNeedingRepair"
+      ]
     );
     assert.deepEqual(
       Object.keys(diagnostics.safety).sort(),
@@ -191,7 +212,7 @@ test("trusted profile selection never falls back to the process default Codex Ho
   }
 });
 
-test("public Status reads rollout metadata only while write preparation keeps the deep scan", async () => {
+test("public Status and Provider Sync preparation read rollout metadata only", async () => {
   const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "provider-sync-core-status-metadata-"));
   const codexHome = path.join(testRoot, "codex-home");
   const rollout = path.join(codexHome, "sessions", "rollout-large.jsonl");
@@ -245,11 +266,10 @@ test("public Status reads rollout metadata only while write preparation keeps th
     assert.doesNotMatch(JSON.stringify(status), /private body|private-model|C:\\private/);
 
     nodeFs.promises.readFile = originalReadFile;
-    await assert.rejects(
-      facade.prepareSync({ ...input, keepCount: 1 }),
-      /rollout body scan sentinel/
-    );
-    assert.equal(streamBodyReadAttempts, 1);
+    const plan = await facade.prepareSync({ ...input, keepCount: 1 });
+    assert.equal(plan.operation, "sync");
+    assert.equal("providerSync" in plan, false);
+    assert.equal(streamBodyReadAttempts, 0);
   } finally {
     nodeFs.createReadStream = originalCreateReadStream;
     nodeFs.promises.readFile = originalReadFile;
@@ -342,18 +362,10 @@ test("host operation controls stay off the method surface and project pathless p
     });
     const plan = await facade.prepareSync({
       profile: { profileId: "default", profileRevision: "r1" },
-      keepCount: 1,
-      syncMode: "fast"
+      keepCount: 1
     });
-    assert.deepEqual(plan.providerSync, {
-      mode: "fast",
-      rolloutScanScope: "metadata",
-      providerWritePolicy: "require-in-place",
-      historicalModelSync: "preserved",
-      unchecked: ["historyModels", "userEventFlags", "encryptedContent"],
-      inPlaceEligibleSessionFiles: 1,
-      rewriteRequiredSessionFiles: 0
-    });
+    assert.equal(plan.operation, "sync");
+    assert.equal("providerSync" in plan, false);
     const started = [];
     const progress = [];
     const result = await facade.applySync(
@@ -367,13 +379,7 @@ test("host operation controls stay off the method surface and project pathless p
       }
     );
     assert.equal(result.outcome, "completed");
-    assert.deepEqual(result.providerSync, {
-      mode: "fast",
-      rolloutScanScope: "metadata",
-      inPlaceSessionFiles: 1,
-      rewrittenSessionFiles: 0,
-      unchecked: ["historyModels", "userEventFlags", "encryptedContent"]
-    });
+    assert.equal("providerSync" in result, false);
     assert.equal(started.length, 1);
     assert.equal(started[0].operationId, result.operationId);
     assert.ok(progress.length > 0);

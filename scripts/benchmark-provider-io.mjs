@@ -5,7 +5,7 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
-import { runSync } from "../src/service.js";
+import { runSync } from "../src/public-api.js";
 
 // Disposable, bounded-memory benchmark. Never use an existing Codex Home.
 delete process.env.CODEX_SQLITE_HOME;
@@ -32,13 +32,13 @@ async function hashTail(file, offset) {
 
 try {
   const results = [];
-  for (const mode of ["full-equal", "fast-equal", "full-unequal"]) {
+  for (const mode of ["equal-length", "unequal-length"]) {
     const home = path.join(root, mode);
     await fsp.mkdir(path.join(home, "sessions"), { recursive: true });
     await fsp.writeFile(path.join(home, "config.toml"), 'model_provider="prov_a"\n');
     const file = path.join(home, "sessions", "rollout-fixture.jsonl");
     const header = JSON.stringify({ type: "session_meta", payload: {
-      id: "fixture", model_provider: mode === "full-unequal" ? "provider_old" : "openai"
+      id: "fixture", model_provider: mode === "unequal-length" ? "provider_old" : "openai"
     } }) + "\n";
     const h = await fsp.open(file, "w");
     try {
@@ -58,20 +58,20 @@ try {
     const beforeHash = await hashTail(file, Buffer.byteLength(header));
     const before = await counters();
     const start = performance.now();
-    const result = await runSync({ codexHome: home, fast: mode === "fast-equal" });
+    const result = await runSync({ codexHome: home });
     const ms = performance.now() - start;
     const after = await counters();
     const afterStat = await fsp.stat(file, { bigint: true });
-    const headerAfter = header.replace(mode === "full-unequal" ? "provider_old" : "openai", "prov_a");
+    const headerAfter = header.replace(mode === "unequal-length" ? "provider_old" : "openai", "prov_a");
     assert.equal(await hashTail(file, Buffer.byteLength(headerAfter)), beforeHash);
     const check = await fsp.open(file, "r");
     const actualHeader = Buffer.alloc(Buffer.byteLength(headerAfter));
     try { await check.read(actualHeader, 0, actualHeader.length, 0); }
     finally { await check.close(); }
     assert.equal(actualHeader.toString("utf8"), headerAfter);
-    const expectedInPlace = mode === "full-unequal" ? 0 : 1;
+    const expectedInPlace = mode === "unequal-length" ? 0 : 1;
     assert.equal(result.inPlaceSessionFiles, expectedInPlace);
-    assert.equal(result.rewrittenSessionFiles, mode === "full-unequal" ? 1 : 0);
+    assert.equal(result.rewrittenSessionFiles, mode === "unequal-length" ? 1 : 0);
     assert.equal(Number(afterStat.size), Number(beforeStat.size) + Buffer.byteLength(headerAfter) - Buffer.byteLength(header));
     if (expectedInPlace === 1) assert.equal(afterStat.ino, beforeStat.ino);
     const delta = before && Object.fromEntries(["rchar", "wchar", "read_bytes", "write_bytes"].map(k => [k, after[k] - before[k]]));
@@ -80,7 +80,7 @@ try {
       ...(delta ? { processIo: delta } : {}) });
   }
   console.log(JSON.stringify({ platform: process.platform, results,
-    note: "Warm-cache synthetic benchmark. rchar/wchar are logical process I/O, not SSD wear; kernel write_bytes excludes device-internal amplification." }, null, 2));
+    note: "Provider-only Sync benchmark. Equal-length changes are in-place; unequal-length changes stream to an atomic replacement. rchar/wchar are logical process I/O, not SSD wear." }, null, 2));
 } finally {
   await fsp.rm(root, { recursive: true, force: true });
 }

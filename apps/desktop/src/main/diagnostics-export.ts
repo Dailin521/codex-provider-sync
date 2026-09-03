@@ -186,6 +186,7 @@ export class DesktopDiagnosticsExporter {
           schemaVersion: 1,
           generatedAt: snapshot.generatedAt,
           provider: snapshot.provider,
+          issues: snapshot.issues,
           safety: {
             pendingRecovery: snapshot.safety.pendingRecovery,
             operationInProgress: snapshot.safety.operationInProgress,

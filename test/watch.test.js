@@ -745,13 +745,7 @@ test("runWatch attaches when the SQLite WAL sidecar is created later", async () 
   await fs.rm(codexHome, { recursive: true, force: true });
 });
 
-test("runWatch uses the top-level model field, ignoring provider sections", async () => {
-  // Regression guard for owner review: the watcher must read the
-  // root-level `model = "..."` line for the per-turn model sync
-  // and must not pick up a `model = "..."` value that lives
-  // inside a `[model_providers.*]` section — otherwise the
-  // provider-section model would be propagated to every
-  // rollout's turn_context.model.
+test("runWatch invokes ProviderSync without a historical model override", async () => {
   const root = await fs.mkdtemp(path.join(testTempDir, "codex-provider-sync-watch-"));
   const codexHome = path.join(root, ".codex");
   await fs.mkdir(path.join(codexHome, "sqlite"), { recursive: true });
@@ -770,13 +764,13 @@ test("runWatch uses the top-level model field, ignoring provider sections", asyn
   );
   await fs.writeFile(path.join(codexHome, "sqlite", "state_5.sqlite"), "", "utf8");
 
-  let observedModel = null;
+  let observedInput = null;
   const handle = await runWatch({
     codexHome,
     debounceMs: 30,
     includeStateDb: false,
-    onSync: async ({ model }) => {
-      observedModel = model;
+    onSync: async (input) => {
+      observedInput = input;
       return { targetProvider: "foo", changedSessionFiles: 0, sqliteRowsUpdated: 0 };
     }
   });
@@ -795,15 +789,11 @@ test("runWatch uses the top-level model field, ignoring provider sections", asyn
     "utf8"
   );
 
-  // Wait for the debounce + sync.
-  for (let i = 0; i < 50 && observedModel === null; i += 1) {
+  for (let i = 0; i < 50 && observedInput === null; i += 1) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  assert.equal(
-    observedModel,
-    "gpt-5.1",
-    "watcher must read the root-level model; provider-section model must be ignored"
-  );
+  assert.ok(observedInput);
+  assert.equal(Object.hasOwn(observedInput, "model"), false);
 
   await handle.stop();
   await fs.rm(codexHome, { recursive: true, force: true });

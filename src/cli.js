@@ -23,8 +23,10 @@ const HELP_TEXT = `codex-provider
 
 Usage:
   codex-provider status [--json] [--codex-home PATH] [--sqlite-home PATH]
-  codex-provider sync [--json] [--fast] [--provider ID] [--keep N] [--codex-home PATH] [--sqlite-home PATH]
-  codex-provider switch <provider-id> [--json] [--fast | --model NAME] [--keep-root-model] [--keep N] [--codex-home PATH] [--sqlite-home PATH]
+  codex-provider sync [--json] [--keep N] [--codex-home PATH] [--sqlite-home PATH]
+  codex-provider switch <provider-id> [--json] [--model NAME] [--keep-root-model] [--keep N] [--codex-home PATH] [--sqlite-home PATH]
+  codex-provider diagnostics [--json] [--codex-home PATH] [--sqlite-home PATH]
+  codex-provider repair <targets> [--json] [--keep N] [--codex-home PATH] [--sqlite-home PATH]
   codex-provider watch [--codex-home PATH] [--sqlite-home PATH] [--debounce-ms N] [--once] [--no-state-db]
   codex-provider web [--port N] [--no-open] [--reset-access] [--codex-home PATH] [--sqlite-home PATH]
   codex-provider prune-backups [--json] [--keep N] [--codex-home PATH]
@@ -35,12 +37,13 @@ JSON mode:
   --json               emit one schemaVersion 1 envelope on stdout; progress goes to stderr
                        (not supported by long-running watch or web commands)
 
-sync / switch flags:
-  --fast               read metadata only; require in-place provider updates; preserve models
-
 switch flags:
   --model NAME         override root-level model field with NAME (e.g. "MiniMax-M3")
   --keep-root-model    do not touch the root-level model field; only switch model_provider
+
+repair targets:
+  models,cwd,userEvent,workspaceRoots
+                       comma-separated; workspaceRoots automatically includes cwd
 
 watch flags:
   --codex-home PATH    override CODEX_HOME (default: ~/.codex or $CODEX_HOME)
@@ -77,10 +80,6 @@ function parseArgs(argv) {
     const inlineValue = separatorIndex >= 0 ? value.slice(separatorIndex + 1) : undefined;
     const normalizedName = flagName.slice(2);
     flagCounts[normalizedName] = (flagCounts[normalizedName] ?? 0) + 1;
-    if (normalizedName === "fast" && inlineValue === undefined) {
-      flags.fast = true;
-      continue;
-    }
     if (inlineValue !== undefined) {
       flags[normalizedName] = inlineValue;
       continue;
@@ -109,15 +108,27 @@ const JSON_COMMAND_CONTRACTS = Object.freeze({
     positionalCount: 1
   },
   sync: {
-    flags: ["json", "help", "fast", "provider", "keep", "codex-home", "sqlite-home"],
-    valueFlags: ["provider", "keep", "codex-home", "sqlite-home"],
-    booleanFlags: ["json", "help", "fast"],
+    flags: ["json", "help", "keep", "codex-home", "sqlite-home"],
+    valueFlags: ["keep", "codex-home", "sqlite-home"],
+    booleanFlags: ["json", "help"],
     positionalCount: 1
   },
   switch: {
-    flags: ["json", "help", "fast", "model", "keep-root-model", "keep", "codex-home", "sqlite-home"],
+    flags: ["json", "help", "model", "keep-root-model", "keep", "codex-home", "sqlite-home"],
     valueFlags: ["model", "keep", "codex-home", "sqlite-home"],
-    booleanFlags: ["json", "help", "fast", "keep-root-model"],
+    booleanFlags: ["json", "help", "keep-root-model"],
+    positionalCount: 2
+  },
+  diagnostics: {
+    flags: ["json", "help", "codex-home", "sqlite-home"],
+    valueFlags: ["codex-home", "sqlite-home"],
+    booleanFlags: ["json", "help"],
+    positionalCount: 1
+  },
+  repair: {
+    flags: ["json", "help", "keep", "codex-home", "sqlite-home"],
+    valueFlags: ["keep", "codex-home", "sqlite-home"],
+    booleanFlags: ["json", "help"],
     positionalCount: 2
   },
   "prune-backups": {
@@ -214,17 +225,27 @@ function validateJsonCommandArgs(command, parsed) {
   }
 }
 
-function validateFastMode(command, flags) {
-  if (!Object.hasOwn(flags, "fast")) return;
-  if (flags.fast !== true) {
-    throw invalidInputError("--fast is a standalone boolean flag and does not accept a value.");
+function validateRemovedSyncOptions(command, flags) {
+  if (Object.hasOwn(flags, "fast")) {
+    throw invalidInputError("--fast was removed; Sync now always uses the Provider-only optimized path.");
   }
-  if (!["sync", "switch"].includes(command)) {
-    throw invalidInputError("--fast is supported only by sync and switch.");
+  if (command === "sync" && Object.hasOwn(flags, "provider")) {
+    throw invalidInputError("sync --provider was removed; Sync always uses config.toml model_provider.");
   }
-  if (flags.model !== undefined) {
-    throw invalidInputError("--fast and --model cannot be combined.");
+}
+
+function parseRepairTargets(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw invalidInputError("Repair requires comma-separated targets.");
   }
+  const targets = value.split(",").map((target) => target.trim()).filter(Boolean);
+  const allowed = new Set(["models", "cwd", "userEvent", "workspaceRoots"]);
+  if (targets.length === 0
+      || targets.some((target) => !allowed.has(target))
+      || new Set(targets).size !== targets.length) {
+    throw invalidInputError("Repair targets must be unique values from models,cwd,userEvent,workspaceRoots.");
+  }
+  return targets;
 }
 
 function summarizeSync(result, label) {
@@ -267,6 +288,32 @@ function summarizeSync(result, label) {
   return lines.join("\n");
 }
 
+function summarizeDiagnostics(result) {
+  const issues = result.issues ?? {};
+  return [
+    `Current provider: ${result.provider?.current ?? "unknown"}`,
+    `Root model available: ${issues.rootModelAvailable ? "yes" : "no"}`,
+    `Rollout model files needing repair: ${issues.rolloutModelFilesNeedingRepair ?? 0}`,
+    `SQLite model rows needing repair: ${issues.sqliteModelRowsNeedingRepair ?? 0}`,
+    `SQLite cwd rows needing repair: ${issues.cwdRowsNeedingRepair ?? 0}`,
+    `SQLite user-event rows needing repair: ${issues.userEventRowsNeedingRepair ?? 0}`,
+    `Workspace roots needing repair: ${issues.workspaceRootsNeedingRepair ?? 0}`,
+    `Files containing encrypted content: ${issues.encryptedContentFiles ?? 0}`
+  ].join("\n");
+}
+
+function summarizeRepair(result) {
+  return [
+    `Repair targets: ${(result.repairTargets ?? []).join(", ")}`,
+    `Backup: ${result.backupDir}`,
+    `Updated rollout models: ${result.changedSessionFiles ?? 0}`,
+    `Updated SQLite model rows: ${result.sqliteModelRowsUpdated ?? 0}`,
+    `Updated SQLite cwd rows: ${result.sqliteCwdRowsUpdated ?? 0}`,
+    `Updated SQLite user-event rows: ${result.sqliteUserEventRowsUpdated ?? 0}`,
+    `Updated workspace roots: ${result.updatedWorkspaceRoots ?? 0}`
+  ].join("\n");
+}
+
 function summarizePrune(result) {
   return [
     `Backup root: ${result.backupRoot}`,
@@ -295,8 +342,8 @@ const SYNC_PROGRESS_STAGES = [
   ["scan_rollout_files", "Scanning rollout files..."],
   ["check_locked_rollout_files", "Checking locked rollout files..."],
   ["create_backup", "Creating backup..."],
-  ["update_sqlite", "Updating SQLite..."],
   ["rewrite_rollout_files", "Rewriting rollout files..."],
+  ["update_sqlite", "Updating SQLite..."],
   ["clean_backups", "Cleaning backups..."]
 ];
 
@@ -478,29 +525,14 @@ async function executeCommand({ positionals, flags }, context) {
   }
 
   if (command === "sync") {
-    const { runSync, readConfigText, readRootModelFromConfigText } = await loadCoreImpl();
-    const { defaultCodexHome } = await import("./constants.js");
-    const codexHome = path.resolve(
-      flags["codex-home"] ?? environment.CODEX_HOME ?? defaultCodexHome()
-    );
-    const configPath = path.join(codexHome, "config.toml");
-    let rootModel = null;
-    try {
-      const cfg = await readConfigText(configPath);
-      rootModel = readRootModelFromConfigText(cfg);
-    } catch {
-      // Degraded compatibility path: continue without a per-thread model rewrite.
-    }
+    const { runSync } = await loadCoreImpl();
     const result = await runSync({
       codexHome: flags["codex-home"],
       sqliteHome: flags["sqlite-home"],
-      provider: flags.provider,
       keepCount: parseKeepCount(flags.keep),
       onProgress: createSyncProgressReporter(jsonMode ? stderrLine : stdoutLine, {
         includeBackupPath: !jsonMode
-      }),
-      model: flags.fast ? null : rootModel,
-      fast: Boolean(flags.fast)
+      })
     });
     if (!jsonMode) stdoutLine(summarizeSync(result, "Synchronized"));
     return result;
@@ -514,7 +546,6 @@ async function executeCommand({ positionals, flags }, context) {
       sqliteHome: flags["sqlite-home"],
       provider,
       model: flags.model,
-      fast: Boolean(flags.fast),
       keepRootModel: Boolean(flags["keep-root-model"]),
       keepCount: parseKeepCount(flags.keep),
       onProgress: createSyncProgressReporter(jsonMode ? stderrLine : stdoutLine, {
@@ -534,6 +565,31 @@ async function executeCommand({ positionals, flags }, context) {
         }
       }
     }
+    return result;
+  }
+
+  if (command === "diagnostics") {
+    const { getDiagnostics } = await loadCoreImpl();
+    const result = await getDiagnostics({
+      codexHome: flags["codex-home"],
+      sqliteHome: flags["sqlite-home"]
+    });
+    if (!jsonMode) stdoutLine(summarizeDiagnostics(result));
+    return result;
+  }
+
+  if (command === "repair") {
+    const { runRepair } = await loadCoreImpl();
+    const result = await runRepair({
+      codexHome: flags["codex-home"],
+      sqliteHome: flags["sqlite-home"],
+      targets: parseRepairTargets(positionals[1]),
+      keepCount: parseKeepCount(flags.keep),
+      onProgress: createSyncProgressReporter(jsonMode ? stderrLine : stdoutLine, {
+        includeBackupPath: !jsonMode
+      })
+    });
+    if (!jsonMode) stdoutLine(summarizeRepair(result));
     return result;
   }
 
@@ -710,7 +766,7 @@ export async function runCli(argv, options = {}) {
     }
 
     assertSupportedNodeVersion();
-    validateFastMode(command, parsed.flags);
+    validateRemovedSyncOptions(command, parsed.flags);
     if (jsonMode) validateJsonCommandArgs(command, parsed);
     const result = await executeCommand(parsed, {
       command,

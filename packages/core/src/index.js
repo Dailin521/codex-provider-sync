@@ -1,30 +1,13 @@
 // @ts-check
 
-// C4 keeps the proven high-risk implementation in root src/. This factory is
-// the only transitional import allowed to cross that boundary. Product inputs
-// contain a profile selector only; trusted hosts resolve all filesystem paths.
+// CoreFacade is the only product entry point. Business orchestration lives in
+// application/ and storage adapters live in infrastructure/.
 import { createHash } from "node:crypto";
 import path from "node:path";
 
-import {
-  CoreError,
-  applyRestore as applyRestoreInternal,
-  applySwitch as applySwitchInternal,
-  applySync as applySyncInternal,
-  getDiagnostics as getDiagnosticsInternal,
-  getHistorySession as getHistorySessionInternal,
-  getStatus as getStatusInternal,
-  getWatchStatus as getWatchStatusInternal,
-  listBackups as listBackupsInternal,
-  listHistory as listHistoryInternal,
-  prepareRestore as prepareRestoreInternal,
-  prepareSwitch as prepareSwitchInternal,
-  prepareSync as prepareSyncInternal,
-  pruneBackups as pruneBackupsInternal,
-  startWatch as startWatchInternal,
-  stopWatch as stopWatchInternal
-} from "../../../src/public-api.js";
+import { createCoreApplication } from "./application/core-application.js";
 import { toPublicProgress } from "./progress.js";
+import { CoreError } from "./infrastructure/node-core-ports.js";
 
 /** @typedef {{profileId: string, profileRevision?: string}} ProfileSelector */
 /** @typedef {{id: string, revision: string, codexHome: string, sqliteHome?: string}} ResolvedProfile */
@@ -33,7 +16,7 @@ import { toPublicProgress } from "./progress.js";
 /** @typedef {{stage: string, status: string, progress?: number, count?: number}} PublicProgress */
 /** @typedef {{
  * signal?: AbortSignal,
- * onOperationStarted?: (value: {operationId: string, operation: "sync" | "switch" | "restore"}) => void | Promise<void>,
+ * onOperationStarted?: (value: {operationId: string, operation: "sync" | "switch" | "repair" | "restore"}) => void | Promise<void>,
  * onProgress?: (event: PublicProgress) => void | Promise<void>
  * }} CoreHostOperationControl */
 /** @typedef {{
@@ -42,6 +25,8 @@ import { toPublicProgress } from "./progress.js";
  * applySync: (input: JsonRecord, control?: CoreHostOperationControl) => Promise<unknown>,
  * prepareSwitch: (input: JsonRecord) => Promise<unknown>,
  * applySwitch: (input: JsonRecord, control?: CoreHostOperationControl) => Promise<unknown>,
+ * prepareRepair: (input: JsonRecord) => Promise<unknown>,
+ * applyRepair: (input: JsonRecord, control?: CoreHostOperationControl) => Promise<unknown>,
  * listBackups: (input: JsonRecord) => Promise<unknown>,
  * prepareRestore: (input: JsonRecord) => Promise<unknown>,
  * applyRestore: (input: JsonRecord, control?: CoreHostOperationControl) => Promise<unknown>,
@@ -148,6 +133,8 @@ function publicWarnings(value) {
       projected = "Project visibility diagnostics are unavailable; backup-first protection remains enabled.";
     } else if (warning === "SQLite Home relocation is explicit; config.toml will not be restored.") {
       projected = "SQLite Home relocation is confirmed; config.toml will not be restored.";
+    } else if (warning.startsWith("The operation stopped during ")) {
+      projected = "The operation made only part of the requested change. Retry it to converge, or restore the managed backup.";
     } else {
       projected = "The operation produced an additional warning.";
     }
@@ -226,7 +213,7 @@ function diagnosticOperationState(value) {
     result.operationId = value.operationId;
   }
   if (typeof value.operation === "string"
-      && ["sync", "switch", "restore", "prune", "watch", "unknown"].includes(value.operation)) {
+      && ["sync", "switch", "repair", "restore", "prune", "watch", "unknown"].includes(value.operation)) {
     result.operation = value.operation;
   }
   if (typeof value.actor === "string"
@@ -315,7 +302,8 @@ function publicStatus(value) {
       count: Number.isSafeInteger(backupSummary.count) ? backupSummary.count : 0,
       totalBytes: Number.isSafeInteger(backupSummary.totalBytes) ? backupSummary.totalBytes : 0
     },
-    pendingRecovery: pending.length > 0 || value.pendingRecovery === true,
+    pendingRecovery: pending.some((transaction) => transaction.operationKind === "restore")
+      || value.pendingRecovery === true,
     pendingTransactions: pending,
     operationInProgress: operation,
     rolloutScanComplete: value.rolloutScanComplete === true && locked.length === 0,
@@ -344,7 +332,7 @@ function publicPlan(value) {
   if (!isRecord(value)) return value;
   const target = isRecord(value.target) ? value.target : {};
   const impact = isRecord(value.impact) ? value.impact : {};
-  /** @type {Record<string, string | boolean | null>} */
+  /** @type {Record<string, unknown>} */
   const publicTarget = {};
   for (const key of ["provider", "model", "modelMode", "backupId"]) {
     const candidate = target[key];
@@ -352,6 +340,12 @@ function publicPlan(value) {
   }
   for (const key of ["restoreConfig", "restoreDatabase", "restoreSessions", "allowSqliteHomeRelocation"]) {
     if (typeof target[key] === "boolean") publicTarget[key] = target[key];
+  }
+  if (Array.isArray(target.targets)) {
+    publicTarget.targets = target.targets.filter((entry) => (
+      typeof entry === "string"
+      && ["models", "cwd", "userEvent", "workspaceRoots"].includes(entry)
+    ));
   }
   /** @type {Record<string, unknown>} */
   const publicImpact = {};
@@ -365,19 +359,6 @@ function publicPlan(value) {
       .filter((entry) => typeof entry === "string")
       .map((entry) => path.basename(entry));
   }
-  const providerSync = isRecord(value.providerSync)
-    ? {
-        mode: value.providerSync.mode,
-        rolloutScanScope: value.providerSync.rolloutScanScope,
-        providerWritePolicy: value.providerSync.providerWritePolicy,
-        historicalModelSync: value.providerSync.historicalModelSync,
-        unchecked: Array.isArray(value.providerSync.unchecked)
-          ? value.providerSync.unchecked.filter((entry) => typeof entry === "string")
-          : [],
-        inPlaceEligibleSessionFiles: value.providerSync.inPlaceEligibleSessionFiles,
-        rewriteRequiredSessionFiles: value.providerSync.rewriteRequiredSessionFiles
-      }
-    : null;
   return {
     schemaVersion: 1,
     planId: value.planId,
@@ -392,7 +373,6 @@ function publicPlan(value) {
     ...(typeof value.backupRevision === "string" ? { backupRevision: value.backupRevision } : {}),
     target: publicTarget,
     impact: publicImpact,
-    ...(providerSync ? { providerSync } : {}),
     warnings: publicWarnings(value.warnings),
     requiresConfirmation: value.requiresConfirmation === true
   };
@@ -411,6 +391,9 @@ function publicOperationResult(value) {
     "targetProvider",
     "targetModel",
     "modelSource",
+    "partialReason",
+    "failedStage",
+    "failureCode",
     "restoreOperationId",
     "preRestoreSnapshotId",
     "restoreJournalState"
@@ -424,6 +407,9 @@ function publicOperationResult(value) {
   if (typeof source.commitAcknowledgementRecovered === "boolean") {
     result.commitAcknowledgementRecovered = source.commitAcknowledgementRecovered;
   }
+  for (const key of ["noop", "retryRecommended"]) {
+    if (typeof source[key] === "boolean") result[key] = source[key];
+  }
   if (Array.isArray(source.resolvedOperationIds)) {
     result.resolvedOperationCount = source.resolvedOperationIds
       .filter((entry) => typeof entry === "string" && entry.length > 0).length;
@@ -435,6 +421,7 @@ function publicOperationResult(value) {
     "rewrittenSessionFiles",
     "sqliteRowsUpdated",
     "sqliteProviderRowsUpdated",
+    "sqliteModelRowsUpdated",
     "sqliteUserEventRowsUpdated",
     "sqliteCwdRowsUpdated",
     "updatedWorkspaceRoots",
@@ -448,24 +435,18 @@ function publicOperationResult(value) {
       .filter((entry) => typeof entry === "string")
       .map((entry) => path.basename(entry));
   }
-  const providerSync = isRecord(value.providerSync)
-    ? {
-        mode: value.providerSync.mode,
-        rolloutScanScope: value.providerSync.rolloutScanScope,
-        inPlaceSessionFiles: value.providerSync.inPlaceSessionFiles,
-        rewrittenSessionFiles: value.providerSync.rewrittenSessionFiles,
-        unchecked: Array.isArray(value.providerSync.unchecked)
-          ? value.providerSync.unchecked.filter((entry) => typeof entry === "string")
-          : []
-      }
-    : null;
+  if (Array.isArray(source.repairTargets)) {
+    result.repairTargets = source.repairTargets.filter((entry) => (
+      typeof entry === "string"
+      && ["models", "cwd", "userEvent", "workspaceRoots"].includes(entry)
+    ));
+  }
   return {
     schemaVersion: 1,
     operationId: value.operationId,
     operation: value.operation,
     outcome: value.outcome,
     backup,
-    ...(providerSync ? { providerSync } : {}),
     warnings: publicWarnings(value.warnings),
     result
   };
@@ -520,6 +501,7 @@ export function createCoreFacade({ resolveProfile }) {
   if (typeof resolveProfile !== "function") {
     throw new TypeError("createCoreFacade requires a trusted resolveProfile function.");
   }
+  const application = createCoreApplication();
 
   /** @param {ProfileSelector} selector */
   async function resolveTrusted(selector) {
@@ -566,11 +548,11 @@ export function createCoreFacade({ resolveProfile }) {
   }
 
   /** @type {CoreFacade} */
-  const facade = {
+  const handlers = {
     async getStatus(input) {
       const trusted = await trustedInput(input);
       return publicStatus(withPublicProfile(
-        await getStatusInternal({
+        await application.getStatus({
           ...rootProfileInput(trusted.profile),
           // Trusted host-only optimization. This option is intentionally not
           // represented in the public CoreClient/HTTP/IPC input schemas.
@@ -582,45 +564,35 @@ export function createCoreFacade({ resolveProfile }) {
 
     async prepareSync(input) {
       const trusted = await trustedInput(input);
-      const plan = await prepareSyncInternal({
+      const plan = await application.prepareSync({
         ...rootProfileInput(trusted.profile),
         ...(trusted.input.keepCount === undefined ? {} : { keepCount: trusted.input.keepCount }),
-        ...(trusted.input.syncMode === undefined ? {} : { syncMode: trusted.input.syncMode }),
         profileResolver: currentProfileResolver()
       });
       return publicPlan(withPublicProfile(plan, trusted.profile));
     },
 
     async applySync(input, control) {
-      return publicOperationResult(await applySyncInternal(input, trustedOperationControl(control)));
+      return publicOperationResult(await application.applySync(input, trustedOperationControl(control)));
     },
 
     async prepareSwitch(input) {
       const trusted = await trustedInput(input);
       const provider = trusted.input.provider;
       const modelMode = trusted.input.modelMode;
-      const syncMode = trusted.input.syncMode ?? "full";
       if (typeof provider !== "string" || !provider
-          || !["provider-default", "keep-root-model", "explicit"].includes(String(modelMode))
-          || !["full", "fast"].includes(String(syncMode))) {
+          || !["provider-default", "keep-root-model", "explicit"].includes(String(modelMode))) {
         throw new CoreError("INVALID_INPUT", "The Switch Provider input is invalid.");
       }
       if ((modelMode === "explicit" && (typeof trusted.input.model !== "string" || !trusted.input.model))
           || (modelMode !== "explicit" && trusted.input.model !== undefined)) {
         throw new CoreError("INVALID_INPUT", "The selected model mode and model are inconsistent.");
       }
-      if (syncMode === "fast" && modelMode !== "keep-root-model") {
-        throw new CoreError(
-          "INVALID_INPUT",
-          "Fast switch requires keep-root-model because it preserves root and historical models."
-        );
-      }
-      const plan = await prepareSwitchInternal({
+      const plan = await application.prepareSwitch({
         ...rootProfileInput(trusted.profile),
         provider,
         ...(modelMode === "explicit" ? { model: trusted.input.model } : {}),
         ...(modelMode === "keep-root-model" ? { keepRootModel: true } : {}),
-        syncMode,
         ...(trusted.input.keepCount === undefined ? {} : { keepCount: trusted.input.keepCount }),
         profileResolver: currentProfileResolver()
       });
@@ -628,20 +600,49 @@ export function createCoreFacade({ resolveProfile }) {
     },
 
     async applySwitch(input, control) {
-      return publicOperationResult(await applySwitchInternal(input, trustedOperationControl(control)));
+      return publicOperationResult(await application.applySwitch(input, trustedOperationControl(control)));
+    },
+
+    async prepareRepair(input) {
+      const trusted = await trustedInput(input);
+      const targets = trusted.input.targets;
+      if (!Array.isArray(targets)
+          || targets.length < 1
+          || targets.length > 4
+          || targets.some((target) => typeof target !== "string"
+            || !["models", "cwd", "userEvent", "workspaceRoots"].includes(target))
+          || new Set(targets).size !== targets.length) {
+        throw new CoreError("INVALID_INPUT", "The Repair targets are invalid.");
+      }
+      const plan = await application.prepareRepair({
+        ...rootProfileInput(trusted.profile),
+        targets,
+        ...(trusted.input.keepCount === undefined ? {} : { keepCount: trusted.input.keepCount }),
+        profileResolver: currentProfileResolver()
+      });
+      return publicPlan(withPublicProfile(plan, trusted.profile));
+    },
+
+    async applyRepair(input, control) {
+      return publicOperationResult(await application.applyRepair(input, trustedOperationControl(control)));
     },
 
     async listBackups(input) {
       const trusted = await trustedInput(input);
-      const inventoryValue = await listBackupsInternal(trusted.profile.codexHome);
-      const inventory = isRecord(inventoryValue) ? inventoryValue : {};
+      const inventoryValue = await application.listBackups(trusted.profile.codexHome);
+      const inventory = /** @type {Record<string, unknown>} */ (
+        isRecord(inventoryValue) ? inventoryValue : {}
+      );
       const backups = Array.isArray(inventory.backups) ? inventory.backups : [];
       return {
-        backups: backups.filter(isRecord).map((backup) => ({
-          backupId: backup.id,
-          sizeBytes: backup.sizeBytes,
-          metadata: publicBackupMetadata(backup.metadata)
-        }))
+        backups: backups.filter(isRecord).map((backupValue) => {
+          const backup = /** @type {Record<string, unknown>} */ (backupValue);
+          return {
+            backupId: backup.id,
+            sizeBytes: backup.sizeBytes,
+            metadata: publicBackupMetadata(backup.metadata)
+          };
+        })
       };
     },
 
@@ -687,7 +688,7 @@ export function createCoreFacade({ resolveProfile }) {
           };
         };
       }
-      const plan = await prepareRestoreInternal({
+      const plan = await application.prepareRestore({
         ...rootProfileInput(executionProfile),
         backupId: trusted.input.backupId,
         restoreConfig: trusted.input.restoreConfig,
@@ -702,12 +703,12 @@ export function createCoreFacade({ resolveProfile }) {
     },
 
     async applyRestore(input, control) {
-      return publicOperationResult(await applyRestoreInternal(input, trustedOperationControl(control)));
+      return publicOperationResult(await application.applyRestore(input, trustedOperationControl(control)));
     },
 
     async pruneBackups(input) {
       const trusted = await trustedInput(input);
-      const result = await pruneBackupsInternal({
+      const result = await application.pruneBackups({
         codexHome: trusted.profile.codexHome,
         keepCount: trusted.input.keepCount
       });
@@ -718,7 +719,7 @@ export function createCoreFacade({ resolveProfile }) {
     async listHistory(input) {
       const trusted = await trustedInput(input);
       const { profile: _profile, ...options } = trusted.input;
-      const resultValue = await listHistoryInternal(trusted.profile.codexHome, options);
+      const resultValue = await application.listHistory(trusted.profile.codexHome, options);
       if (!isRecord(resultValue)) return resultValue;
       return {
         ...resultValue,
@@ -731,7 +732,7 @@ export function createCoreFacade({ resolveProfile }) {
       if (typeof trusted.input.sessionId !== "string" || !trusted.input.sessionId) {
         throw new CoreError("INVALID_INPUT", "sessionId is required.");
       }
-      const resultValue = await getHistorySessionInternal(
+      const resultValue = await application.getHistorySession(
         trusted.profile.codexHome,
         trusted.input.sessionId,
         trusted.input.messageLimit === undefined
@@ -744,7 +745,7 @@ export function createCoreFacade({ resolveProfile }) {
 
     async startWatch(input) {
       const trusted = await trustedInput(input);
-      return startWatchInternal({
+      return application.startWatch({
         ...rootProfileInput(trusted.profile),
         ...(trusted.input.includeStateDb === undefined ? {} : { includeStateDb: trusted.input.includeStateDb }),
         ...(trusted.input.debounceMs === undefined ? {} : { debounceMs: trusted.input.debounceMs }),
@@ -753,23 +754,27 @@ export function createCoreFacade({ resolveProfile }) {
     },
 
     async stopWatch(input) {
-      return stopWatchInternal(input);
+      return application.stopWatch(input);
     },
 
     async getWatchStatus(input = {}) {
-      return input.watchId
-        ? getWatchStatusInternal({ watchId: input.watchId })
-        : getWatchStatusInternal();
+      if (input.watchId !== undefined && typeof input.watchId !== "string") {
+        throw new CoreError("INVALID_INPUT", "watchId must be a string.");
+      }
+      return typeof input.watchId === "string"
+        ? application.getWatchStatus({ watchId: input.watchId })
+        : application.getWatchStatus();
     },
 
     async getDiagnostics(input) {
       const trusted = await trustedInput(input);
-      const value = await getDiagnosticsInternal(rootProfileInput(trusted.profile));
+      const value = await application.getDiagnostics(rootProfileInput(trusted.profile));
       if (!isRecord(value)) return value;
-      const runtime = isRecord(value.runtime) ? value.runtime : {};
-      const storage = isRecord(value.storage) ? value.storage : {};
-      const provider = isRecord(value.provider) ? value.provider : {};
-      const safety = isRecord(value.safety) ? value.safety : {};
+      const runtime = /** @type {Record<string, unknown>} */ (isRecord(value.runtime) ? value.runtime : {});
+      const storage = /** @type {Record<string, unknown>} */ (isRecord(value.storage) ? value.storage : {});
+      const provider = /** @type {Record<string, unknown>} */ (isRecord(value.provider) ? value.provider : {});
+      const issues = /** @type {Record<string, unknown>} */ (isRecord(value.issues) ? value.issues : {});
+      const safety = /** @type {Record<string, unknown>} */ (isRecord(value.safety) ? value.safety : {});
       const sqliteHomeSource = typeof storage.sqliteHomeSource === "string"
         && ["cli", "config", "env", "default"].includes(storage.sqliteHomeSource)
         ? storage.sqliteHomeSource
@@ -813,6 +818,21 @@ export function createCoreFacade({ resolveProfile }) {
           rolloutCounts: diagnosticDistribution(provider.rolloutCounts),
           sqliteCounts
         },
+        issues: {
+          rootModelAvailable: issues.rootModelAvailable === true,
+          rolloutModelFilesNeedingRepair: Number.isSafeInteger(issues.rolloutModelFilesNeedingRepair)
+            && Number(issues.rolloutModelFilesNeedingRepair) >= 0 ? issues.rolloutModelFilesNeedingRepair : 0,
+          sqliteModelRowsNeedingRepair: Number.isSafeInteger(issues.sqliteModelRowsNeedingRepair)
+            && Number(issues.sqliteModelRowsNeedingRepair) >= 0 ? issues.sqliteModelRowsNeedingRepair : 0,
+          cwdRowsNeedingRepair: Number.isSafeInteger(issues.cwdRowsNeedingRepair)
+            && Number(issues.cwdRowsNeedingRepair) >= 0 ? issues.cwdRowsNeedingRepair : 0,
+          userEventRowsNeedingRepair: Number.isSafeInteger(issues.userEventRowsNeedingRepair)
+            && Number(issues.userEventRowsNeedingRepair) >= 0 ? issues.userEventRowsNeedingRepair : 0,
+          workspaceRootsNeedingRepair: Number.isSafeInteger(issues.workspaceRootsNeedingRepair)
+            && Number(issues.workspaceRootsNeedingRepair) >= 0 ? issues.workspaceRootsNeedingRepair : 0,
+          encryptedContentFiles: Number.isSafeInteger(issues.encryptedContentFiles)
+            && Number(issues.encryptedContentFiles) >= 0 ? issues.encryptedContentFiles : 0
+        },
         safety: {
           ...(typeof safety.storageRevision === "string"
             && /^[A-Za-z0-9_-]{1,256}$/.test(safety.storageRevision)
@@ -820,7 +840,9 @@ export function createCoreFacade({ resolveProfile }) {
             : {}),
           pendingRecovery: safety.pendingRecovery === true,
           pendingTransactions: Array.isArray(safety.pendingTransactions)
-            ? safety.pendingTransactions.filter(isRecord).slice(0, 256).map((transaction) => ({
+            ? safety.pendingTransactions.filter(isRecord).slice(0, 256).map((transactionValue) => {
+              const transaction = /** @type {Record<string, unknown>} */ (transactionValue);
+              return ({
                 operationId: typeof transaction.operationId === "string"
                   && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(transaction.operationId)
                   ? transaction.operationId
@@ -835,7 +857,8 @@ export function createCoreFacade({ resolveProfile }) {
                   : "unknown",
                 sourceBackupId: diagnosticIdentifier(transaction.sourceBackupId),
                 preRestoreSnapshotId: diagnosticIdentifier(transaction.preRestoreSnapshotId)
-              }))
+              });
+            })
             : [],
           operationInProgress: diagnosticOperationState(safety.operationInProgress),
           rolloutScanComplete: safety.rolloutScanComplete === true,
@@ -849,5 +872,5 @@ export function createCoreFacade({ resolveProfile }) {
     }
   };
 
-  return Object.freeze(facade);
+  return Object.freeze(handlers);
 }

@@ -7,6 +7,7 @@ import * as publicApi from "../src/public-api.js";
 const EXPECTED_EXPORTS = [
   "CORE_ERROR_CODES",
   "CoreError",
+  "applyRepair",
   "applyRestore",
   "applySwitch",
   "applySync",
@@ -18,6 +19,7 @@ const EXPECTED_EXPORTS = [
   "getWatchStatus",
   "listBackups",
   "listHistory",
+  "prepareRepair",
   "prepareRestore",
   "prepareSwitch",
   "prepareSync",
@@ -26,6 +28,7 @@ const EXPECTED_EXPORTS = [
   "readRootModelFromConfigText",
   "resolveStorageLayout",
   "runPruneBackups",
+  "runRepair",
   "runRestore",
   "runSwitch",
   "runSync",

@@ -71,6 +71,7 @@ export interface HostUpdateStatus {
 export interface AppUiCapabilities {
   sync: boolean;
   switchProvider: boolean;
+  repair: boolean;
   restore: boolean;
   pruneBackups: boolean;
   watch: boolean;
@@ -84,6 +85,7 @@ export interface AppUiCapabilities {
 export const FULL_APP_UI_CAPABILITIES: Readonly<AppUiCapabilities> = Object.freeze({
   sync: true,
   switchProvider: true,
+  repair: true,
   restore: true,
   pruneBackups: true,
   watch: true,
@@ -97,6 +99,7 @@ export const FULL_APP_UI_CAPABILITIES: Readonly<AppUiCapabilities> = Object.free
 export const READ_ONLY_APP_UI_CAPABILITIES: Readonly<AppUiCapabilities> = Object.freeze({
   sync: false,
   switchProvider: false,
+  repair: false,
   restore: false,
   pruneBackups: false,
   watch: false,
@@ -110,6 +113,7 @@ export const READ_ONLY_APP_UI_CAPABILITIES: Readonly<AppUiCapabilities> = Object
 export const SYNC_SWITCH_APP_UI_CAPABILITIES: Readonly<AppUiCapabilities> = Object.freeze({
   sync: true,
   switchProvider: true,
+  repair: true,
   restore: false,
   pruneBackups: false,
   watch: false,
@@ -123,6 +127,7 @@ export const SYNC_SWITCH_APP_UI_CAPABILITIES: Readonly<AppUiCapabilities> = Obje
 export const DESKTOP_C8_APP_UI_CAPABILITIES: Readonly<AppUiCapabilities> = Object.freeze({
   sync: true,
   switchProvider: true,
+  repair: true,
   restore: true,
   pruneBackups: true,
   watch: true,

@@ -94,7 +94,10 @@ function profileKey(profile: ProfileSelector): string {
 }
 
 function isApplyMethod(method: DesktopRuntimeMethod): boolean {
-  return method === "applySync" || method === "applySwitch" || method === "applyRestore";
+  return method === "applySync"
+    || method === "applySwitch"
+    || method === "applyRepair"
+    || method === "applyRestore";
 }
 
 export class CoreRuntimeSupervisor {
@@ -599,6 +602,8 @@ export class CoreRuntimeSupervisor {
         ? "sync"
         : pending.request.method === "applySwitch"
           ? "switch"
+          : pending.request.method === "applyRepair"
+            ? "repair"
           : "restore";
       if (frame.envelope.operation !== expectedOperation) {
         throw new Error("Runtime operation kind mismatch.");

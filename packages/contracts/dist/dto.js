@@ -6,6 +6,8 @@ export const CORE_METHODS = [
     "applySync",
     "prepareSwitch",
     "applySwitch",
+    "prepareRepair",
+    "applyRepair",
     "listBackups",
     "prepareRestore",
     "applyRestore",

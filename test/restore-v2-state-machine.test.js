@@ -702,7 +702,7 @@ test("a completed resolver without per-target evidence cannot hide a pending Res
   assert.equal((await getStatus({ codexHome: fixture.codexHome })).pendingRecovery, true);
   await assert.rejects(
     () => runSwitch({ codexHome: fixture.codexHome, provider: "openai" }),
-    (error) => error?.code === "RECOVERY_REQUIRED"
+    (error) => error?.code === "PENDING_TRANSACTION"
   );
 });
 

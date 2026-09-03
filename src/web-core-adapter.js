@@ -109,6 +109,8 @@ export async function dispatchWebCoreRequest(coreFacade, value, control = {}) {
     ? "sync"
     : request.method === "applySwitch"
       ? "switch"
+      : request.method === "applyRepair"
+        ? "repair"
       : request.method === "applyRestore"
         ? "restore"
         : null;

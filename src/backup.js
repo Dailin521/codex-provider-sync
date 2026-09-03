@@ -334,7 +334,6 @@ export async function createBackup({
   codexHome,
   targetProvider,
   sessionChanges,
-  fast = false,
   configPath,
   configBackupText
 }) {
@@ -387,7 +386,6 @@ export async function createBackup({
     namespace: BACKUP_NAMESPACE,
     codexHome,
     targetProvider,
-    ...(fast ? { scanScope: "metadata" } : {}),
     createdAt: new Date().toISOString(),
     // Keep the full pre-mutation source of truth for the lifetime of the
     // backup. appliedPaths is only a compatibility hint for backups without a
@@ -425,7 +423,6 @@ export async function createBackup({
     codexHome,
     sqliteHome: actualSqliteHome,
     targetProvider,
-    ...(fast ? { scanScope: "metadata" } : {}),
     createdAt: sessionManifest.createdAt,
     dbFiles: copiedDbFiles,
     sqliteDbFiles: copiedSqliteDbFiles,

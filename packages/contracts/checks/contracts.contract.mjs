@@ -26,6 +26,8 @@ test("contract exposes the complete stable CoreClient method set", () => {
     "applySync",
     "prepareSwitch",
     "applySwitch",
+    "prepareRepair",
+    "applyRepair",
     "listBackups",
     "prepareRestore",
     "applyRestore",
@@ -68,29 +70,29 @@ test("product inputs cannot carry paths or arbitrary apply/watch fields", () => 
   }));
 });
 
-test("Provider sync mode is shared by Sync and Switch contracts", () => {
+test("Provider sync inputs are narrow and Repair targets are exact", () => {
   const profile = { profileId: "default", profileRevision: "r1" };
   assert.doesNotThrow(() => assertCoreMethodInput("prepareSync", {
     profile,
-    keepCount: 5,
-    syncMode: "fast"
+    keepCount: 5
   }));
   assert.doesNotThrow(() => assertCoreMethodInput("prepareSwitch", {
     profile,
     provider: "prov_a",
-    modelMode: "keep-root-model",
-    syncMode: "fast"
+    modelMode: "keep-root-model"
   }));
   assert.throws(() => assertCoreMethodInput("prepareSync", {
     profile,
-    syncMode: "turbo"
+    provider: "prov_a"
   }), ContractValidationError);
-  assert.throws(() => assertCoreMethodInput("prepareSwitch", {
+  assert.doesNotThrow(() => assertCoreMethodInput("prepareRepair", {
     profile,
-    provider: "prov_a",
-    modelMode: "provider-default",
-    syncMode: "fast"
-  }), ContractValidationError);
+    targets: ["models", "workspaceRoots"],
+    keepCount: 5
+  }));
+  for (const targets of [[], ["models", "models"], ["unknown"], [{}]]) {
+    assert.throws(() => assertCoreMethodInput("prepareRepair", { profile, targets }), ContractValidationError);
+  }
 });
 
 test("protocol mismatch fails before request business validation", () => {
@@ -148,11 +150,6 @@ test("public errors use fixed messages and allowlisted details", () => {
   assert.throws(() => assertCoreErrorDto({ ...busy, suggestedAction: "token=secret" }));
   assert.throws(() => assertCoreErrorDto({ ...busy, details: { busyScope: "state-db", path: "private" } }));
 
-  const unsupported = createPublicCoreErrorDto("FAST_MODE_UNSUPPORTED", {
-    details: { fastModeReason: "provider-length-mismatch", path: "C:/private" }
-  });
-  assert.deepEqual(unsupported.details, { fastModeReason: "provider-length-mismatch" });
-  assert.doesNotThrow(() => assertCoreErrorDto(unsupported));
 });
 
 test("method output guards reject structurally invalid successes", () => {
@@ -230,20 +227,11 @@ test("method output guards reject structurally invalid successes", () => {
   }));
 });
 
-test("Provider sync plan and result details preserve fast semantics", () => {
-  const providerSyncPlan = {
-    mode: "fast",
-    rolloutScanScope: "metadata",
-    providerWritePolicy: "require-in-place",
-    historicalModelSync: "preserved",
-    unchecked: ["historyModels", "userEventFlags", "encryptedContent"],
-    inPlaceEligibleSessionFiles: 2,
-    rewriteRequiredSessionFiles: 0
-  };
+test("Repair plan and result are operation-bound and reject removed strategy details", () => {
   const plan = {
     schemaVersion: 1,
     planId: "opaque-plan",
-    operation: "sync",
+    operation: "repair",
     createdAt: "2026-09-03T00:00:00.000Z",
     expiresAt: "2026-09-03T00:10:00.000Z",
     profile: { id: "default", revision: "r1" },
@@ -251,38 +239,32 @@ test("Provider sync plan and result details preserve fast semantics", () => {
     configRevision: "config",
     rolloutRevision: "rollout",
     stateDbRevision: "state-db",
-    target: { provider: "prov_a", model: null },
+    target: { targets: ["models", "cwd"], model: "gpt-5" },
     impact: { rolloutFilesToChange: 2 },
-    providerSync: providerSyncPlan,
     warnings: [],
     requiresConfirmation: true
   };
-  assert.doesNotThrow(() => assertCoreMethodOutput("prepareSync", plan));
-  assert.throws(() => assertCoreMethodOutput("prepareSync", {
+  assert.doesNotThrow(() => assertCoreMethodOutput("prepareRepair", plan));
+  assert.throws(() => assertCoreMethodOutput("prepareSync", plan), ContractValidationError);
+  assert.throws(() => assertCoreMethodOutput("prepareRepair", {
     ...plan,
-    providerSync: { ...providerSyncPlan, rewriteRequiredSessionFiles: 1 }
+    providerSync: { mode: "fast" }
   }), ContractValidationError);
 
   const result = {
     schemaVersion: 1,
     operationId: "operation-1",
-    operation: "sync",
+    operation: "repair",
     outcome: "completed",
     backup: { backupId: "backup-1" },
-    providerSync: {
-      mode: "fast",
-      rolloutScanScope: "metadata",
-      inPlaceSessionFiles: 2,
-      rewrittenSessionFiles: 0,
-      unchecked: ["historyModels", "userEventFlags", "encryptedContent"]
-    },
     warnings: [],
-    result: { changedSessionFiles: 2 }
+    result: { repairTargets: ["models", "cwd"], changedSessionFiles: 2 }
   };
-  assert.doesNotThrow(() => assertCoreMethodOutput("applySync", result));
-  assert.throws(() => assertCoreMethodOutput("applySync", {
+  assert.doesNotThrow(() => assertCoreMethodOutput("applyRepair", result));
+  assert.throws(() => assertCoreMethodOutput("applySwitch", result), ContractValidationError);
+  assert.throws(() => assertCoreMethodOutput("applyRepair", {
     ...result,
-    providerSync: { ...result.providerSync, rewrittenSessionFiles: 1 }
+    providerSync: { mode: "fast" }
   }), ContractValidationError);
 });
 
@@ -298,6 +280,15 @@ test("DiagnosticsSnapshot is a recursive pathless allowlist", () => {
       configured: ["openai", "relay-v2"],
       rolloutCounts: { sessions: { openai: 2 }, archived_sessions: {} },
       sqliteCounts: { sessions: { openai: 2 }, archived_sessions: {}, unreadable: true }
+    },
+    issues: {
+      rootModelAvailable: true,
+      rolloutModelFilesNeedingRepair: 1,
+      sqliteModelRowsNeedingRepair: 1,
+      cwdRowsNeedingRepair: 1,
+      userEventRowsNeedingRepair: 1,
+      workspaceRootsNeedingRepair: 1,
+      encryptedContentFiles: 1
     },
     safety: {
       storageRevision: "revision_1",

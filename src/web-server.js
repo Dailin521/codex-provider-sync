@@ -7,10 +7,12 @@ import { fileURLToPath } from "node:url";
 
 import { defaultCodexHome } from "./constants.js";
 import {
+  applyRepair,
   applyRestore,
   applySwitch,
   applySync,
   CoreError,
+  prepareRepair,
   prepareRestore,
   prepareSwitch,
   prepareSync,
@@ -37,7 +39,7 @@ const DEVICE_SECRET_BYTES = 32;
 const STATE_FILENAME = "provider-sync-web.json";
 const RUNTIME_FILENAME = "provider-sync-web.runtime.json";
 const CORE_STREAM_CONTENT_TYPE = "application/x-ndjson";
-const CORE_APPLY_METHODS = new Set(["applySync", "applySwitch", "applyRestore"]);
+const CORE_APPLY_METHODS = new Set(["applySync", "applySwitch", "applyRepair", "applyRestore"]);
 const WEB_ROOT = fileURLToPath(new URL("../web/dist/", import.meta.url));
 const MIME_TYPES = new Map([
   [".css", "text/css; charset=utf-8"],
@@ -478,9 +480,11 @@ export function createWebUiServer({
 } = {}) {
   const api = {
     applyRestore: services.applyRestore ?? applyRestore,
+    applyRepair: services.applyRepair ?? applyRepair,
     applySwitch: services.applySwitch ?? applySwitch,
     applySync: services.applySync ?? applySync,
     prepareRestore: services.prepareRestore ?? prepareRestore,
+    prepareRepair: services.prepareRepair ?? prepareRepair,
     prepareSwitch: services.prepareSwitch ?? prepareSwitch,
     prepareSync: services.prepareSync ?? prepareSync,
     runPruneBackups: services.runPruneBackups ?? runPruneBackups,
@@ -894,22 +898,25 @@ export function createWebUiServer({
           return;
         }
 
+        if (pathname === "/api/diagnostics") {
+          const input = legacyCoreReadInput(body, []);
+          const diagnostics = await callLegacyCoreRead("getDiagnostics", input, response);
+          if (!diagnostics) return;
+          sendJson(response, 200, { diagnostics });
+          return;
+        }
+
         if (pathname === "/api/sync/prepare") {
           const profile = capturePrepareProfile(body, response);
           if (!profile) return;
-          const syncMode = body.syncMode ?? "full";
-          if (!["full", "fast"].includes(syncMode)) {
-            throw new CoreError("INVALID_INPUT", "syncMode must be full or fast.");
+          if (body.provider !== undefined || body.syncMode !== undefined || body.fast !== undefined) {
+            throw new CoreError("INVALID_INPUT", "Sync always uses the current config.toml Provider.");
           }
-          const configText = await api.readConfigText(path.join(profile.codexHome, "config.toml"));
           const plan = await api.prepareSync({
             codexHome: profile.codexHome,
             ...(profile.sqliteHome ? { sqliteHome: profile.sqliteHome } : {}),
             profile: { id: profile.id, revision: profile.revision },
             profileResolver: resolveCurrentProfile,
-            provider: requireProvider(body.provider),
-            model: syncMode === "fast" ? null : api.readRootModelFromConfigText(configText),
-            syncMode,
             keepCount: requireKeepCount(body.keepCount),
             platform
           });
@@ -926,9 +933,8 @@ export function createWebUiServer({
           const profile = capturePrepareProfile(body, response);
           if (!profile) return;
           const modelMode = body.modelMode ?? (body.keepRootModel ? "keep-root-model" : (body.model ? "explicit" : "provider-default"));
-          const syncMode = body.syncMode ?? "full";
-          if (!["full", "fast"].includes(syncMode)) {
-            throw new CoreError("INVALID_INPUT", "syncMode must be full or fast.");
+          if (body.syncMode !== undefined || body.fast !== undefined) {
+            throw new CoreError("INVALID_INPUT", "Switch no longer accepts a sync mode.");
           }
           if (!["provider-default", "keep-root-model", "explicit"].includes(modelMode)) {
             throw new CoreError("INVALID_INPUT", "modelMode must be provider-default, keep-root-model, or explicit.");
@@ -939,9 +945,6 @@ export function createWebUiServer({
           if (modelMode !== "explicit" && body.model !== undefined && body.model !== null && body.model !== "") {
             throw new CoreError("INVALID_INPUT", "model is only accepted when modelMode is explicit.");
           }
-          if (syncMode === "fast" && modelMode !== "keep-root-model") {
-            throw new CoreError("INVALID_INPUT", "Fast switch requires keep-root-model.");
-          }
           const plan = await api.prepareSwitch({
             codexHome: profile.codexHome,
             ...(profile.sqliteHome ? { sqliteHome: profile.sqliteHome } : {}),
@@ -950,7 +953,6 @@ export function createWebUiServer({
             provider: requireProvider(body.provider),
             model,
             keepRootModel: modelMode === "keep-root-model",
-            syncMode,
             keepCount: requireKeepCount(body.keepCount),
             platform
           });
@@ -960,6 +962,28 @@ export function createWebUiServer({
 
         if (pathname === "/api/switch/apply") {
           await withOperation("switch", response, () => api.applySwitch(requirePlanApply(body)));
+          return;
+        }
+
+        if (pathname === "/api/repair/prepare") {
+          const profile = capturePrepareProfile(body, response);
+          if (!profile) return;
+          const targets = Array.isArray(body.targets) ? body.targets : [];
+          const plan = await api.prepareRepair({
+            codexHome: profile.codexHome,
+            ...(profile.sqliteHome ? { sqliteHome: profile.sqliteHome } : {}),
+            profile: { id: profile.id, revision: profile.revision },
+            profileResolver: resolveCurrentProfile,
+            targets,
+            keepCount: requireKeepCount(body.keepCount),
+            platform
+          });
+          sendJson(response, 200, { plan });
+          return;
+        }
+
+        if (pathname === "/api/repair/apply") {
+          await withOperation("repair", response, () => api.applyRepair(requirePlanApply(body)));
           return;
         }
 

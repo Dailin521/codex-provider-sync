@@ -1,6 +1,6 @@
 # vNext 行为兼容 Fixture 清单
 
-> **状态：Accepted（阶段 0 语义清单；C2 动态 CLI Fixture、C4 安全 Runner/Schema、C5 首批跨运行时静态 Corpus、C7/C8 Electron 动态 Fixture 与 C9 候选产物 Fixture 已实现）**
+> **状态：Accepted（阶段 0 语义清单；ADR-0016 C2/C3 轻量写 Fixture 已加入）**
 >
 > **日期：2026-08-24**
 >
@@ -8,7 +8,7 @@
 >
 > **架构基线：[vNext Electron + Node 单核心架构](../VNEXT_ELECTRON_NODE_ARCHITECTURE_ZH.md)**
 
-V1 性能夹具：`test/in-place-transaction.test.js` 验证等长 Provider 只写目标字节、正文 hash/文件大小/文件身份保持以及故障恢复；`test/fast-sync.test.js` 验证快速范围不读取 rollout 正文、模型保持、前置失败和 v2 格式兼容；`test/windows-rewrite-worker.test.js` 与 `test/windows-provider-bytes.ps1` 验证 Windows worker 和原生独占句柄路径。耗时与吞吐基准只作为手动证据，不作为 CI 数值门禁。
+V1 性能夹具：`test/provider-sync-lite.test.js` 验证 Provider Sync 不读取 rollout 正文、32 MiB 等长更新保持正文 Hash/文件大小/文件身份、不等长流式替换保持正文 bytes，以及 Diagnostics/Repair/C3 partial 收敛；`test/in-place-transaction.test.js` 与 Windows worker 测试继续验证低层原地更新兼容。耗时与吞吐基准只作参考，不作为 CI 数值门禁。
 
 ## 1. 目的与边界
 
@@ -47,13 +47,19 @@ Fixture 不是用户数据样本，严禁从真实 `~/.codex`、认证文件或�
 | `default-openai` | 根级显式 `model_provider="openai"`，rollout/SQLite 已对齐 | Status 为 aligned；重复 Sync 幂等；无需改动的字段与 mtime 保持不变 |
 | `implicit-openai` | 根级没有 `model_provider` | 当前 Provider 回退为 `openai` 并标记 implicit；Sync 不凭空写入无关配置 |
 | `custom-provider` | 配置声明自定义 Provider，历史来自其他 Provider | Switch/Sync 只更新允许的 Provider 元数据；Switch 选择未声明的 Provider 时为 `INVALID_INPUT` |
-| `explicit-sync-provider` | `sync --provider ID` 显式给出未在 config 声明的 Provider | v0.5 当前允许直接以该 ID 同步；Public API 提取不得无意增加 Switch 式校验。未来若要收紧，必须独立评估 CLI 兼容性与 SemVer |
+| `explicit-sync-provider` | V1 调用 `sync --provider ID` 或给 Prepare 注入 Provider | ADR-0016 当前返回 `INVALID_INPUT` 且零写入；v0.5 宽松行为只作 Legacy 兼容记录 |
 | `mixed-provider` | sessions、archived_sessions 与 SQLite 中存在多个 Provider | Status 分布完整；Sync 统一目标字段但不要求两类 inventory 数量相等 |
 | `archived-sessions` | 只含或混合归档 rollout/SQLite rows | active/archived 作用域保持正确，Restore 能逐字节还原 |
-| `root-model` | 根级 model、Provider section model 与 turn_context model 不同 | Follow/Keep/Explicit 三种 Switch 语义清晰；非目标字段和换行符不变 |
-| `encrypted-content` | rollout 含来自原 Provider 的 `encrypted_content` | 只同步可见性元数据；保留加密内容字节并返回明确 warning |
+| `root-model` | 根级 model、Provider section model 与 turn_context model 不同 | Follow/Keep/Explicit 三种 Switch 只更新根 config；历史 model 仅由显式 `repair models` 修改 |
+| `encrypted-content` | rollout 含来自原 Provider 的 `encrypted_content` | Sync 不读取正文且保持字节；Diagnostics 只报告计数，不修改或导出内容 |
 | `large-rollout` | 超大 rollout、超过 64 KiB 的行、Unicode 与特殊 model 字符 | 流式处理且目标字段正确；未修改字节、CRLF 与原 mtime 按合同保持 |
-| `status-metadata-boundary` | 大 rollout 首行含 `session_meta`，正文设置禁止读取 sentinel | Web/Electron Facade Status 仅以首行和 stat 完整统计 Provider 并成功；CLI/Prepare 仍触发正文扫描，元数据 revision 在文件 size/mtime/ctime 漂移时变化 |
+| `status-metadata-boundary` | 大 rollout 首行含 `session_meta`，正文设置禁止读取 sentinel | Status 与 Provider Sync 仅以首行和 stat 完成；只有显式 Diagnostics/Repair 扫描所需正文 |
+| `provider-sync-header-only` | rollout 正文设置禁止读取 sentinel | Sync/Switch 成功且正文流未打开；只修改首行 Provider |
+| `provider-sync-equal-length-identity` | 32 MiB rollout，Provider JSON 字面量等长 | 只写 Provider bytes；文件 ID、大小和正文 Hash 不变 |
+| `provider-sync-unequal-length-body-bytes` | 新旧 Provider 长度不同 | 流式临时文件 + 原子替换；首行之外正文逐字节一致 |
+| `diagnostics-read-only-full-scan` | model/cwd/user-event/encrypted 问题并存 | 用户主动运行一次完整扫描；所有目标 Hash 不变，不产生后台刷新 |
+| `repair-target-isolation` | 四类 Repair 问题并存 | 每次只修改显式 target；组合 target 共用一次 SQLite 事务 |
+| `workspace-roots-implies-cwd` | 仅选择 workspaceRoots | Prepare target 自动包含 cwd，二者在同一 UndoBackup/Operation 中应用 |
 | `malformed-rollout` | 截断、无效 JSONL、文件扫描期间消失等 | 不读取越界、不覆盖无法证明安全的内容；按操作返回 skip/error 并保留原字节 |
 
 ## 4. SQLite 与存储布局
@@ -76,17 +82,20 @@ Fixture 不是用户数据样本，严禁从真实 `~/.codex`、认证文件或�
 | `active-rollout-changing` | 扫描后、应用前改变目标 | 变化文件被跳过或 Plan 失效；不覆盖 Codex 新写入；Prepare/Apply 返回 `STALE_STATE`（`details.reason=rollout`），旧直连入口可保留 `ROLLOUT_CHANGED` |
 | `sqlite-busy` | 真实 SQLite 写锁 | 在 rollout mutation 和 Backup 前阻断，返回 `SQLITE_BUSY`，全部原始 Hash 不变 |
 | `node-dotnet-lock-contention` | 启动真实 Node 与 .NET 进程争用同一 `<CodexHome>/tmp/provider-sync.lock` | 恰有一个写者获得 protocol v2 锁；另一方为 `OPERATION_BUSY`；败方不创建 Backup、不改任何目标 |
-| `shared-sqlite-home-contention` | 两个不同 Codex Home 指向同一 SQLite Home，并发写 | 不能因 Codex Home 锁不同而同时写同一 DB；阶段 1 必须验证/裁决共享资源锁，在通过前不得开放 Electron 写能力 |
-| `dual-resource-lock-order` | 两个 Codex Home 与一个 SQLite Home 由 Node/.NET 交叉并发写 | 两层 lock 路径和顺序一致；不死锁；恰有一个 SQLite writer；败方无 Backup、Journal 或业务 mutation |
-| `sqlite-resource-lock-unverifiable` | State DB resource lock 的 owner、协议、物理路径 identity 或 ABA 状态不可验证 | fail closed，返回 `LOCK_UNVERIFIABLE` 且范围为 state-db；不得自动删除或降级为 Busy |
-| `restore-missing-state-db-parent` | Metadata v1/v2 Restore 指向缺失 DB，且其物理父目录也不存在 | Node/.NET 都在任何 Backup、Journal、config/rollout/DB mutation 前返回 `LOCK_UNVERIFIABLE(state-db)`；不得用 Home lock 代替资源锁 |
+| `shared-sqlite-home-contention` | 两个不同 Codex Home 指向同一 SQLite Home，并发写 | SQLite 原生事务串行化或返回 `SQLITE_BUSY`；重复执行最终收敛，不产生数据库并行破坏 |
+| `dual-resource-lock-order` | 历史 V1 双锁 Fixture | Legacy evidence only；不再作为当前 Node 普通写门禁 |
+| `sqlite-resource-lock-unverifiable` | 历史 State DB resource lock Fixture | Legacy evidence only；新普通写不创建或获取 State DB resource lock |
+| `restore-missing-state-db-parent` | Metadata v1/v2 Restore 指向缺失 DB，且其物理父目录也不存在 | Restore 通过 Home lock、目标边界和 RestoreRecovery 校验 fail closed；不得在无法证明目标时创建 snapshot 或 mutation |
 | `lock-unverifiable` | future protocol、损坏 owner、进程启动身份不可读、ABA/目录身份变化 | fail closed，返回 `LOCK_UNVERIFIABLE`；不得误报普通 Busy，不得自动删除不可证明归属的锁 |
-| `external-write-status-snapshot` | 真实第二进程持有 Home→State 双锁，或另一 Home 只持共享 State DB 锁，并在锁内改变 config/SQLite | Core 与 Local Web 不扫描中间态；有缓存时逐字段保留最后完整 snapshot 并附 operation，无缓存时 `rolloutScanComplete:false`；不可验证锁不得显示 aligned/healthy |
+| `external-write-status-snapshot` | 真实第二进程持有 Home lock 并在锁内改变 config/SQLite | Core 与 Local Web 不扫描中间态；有缓存时保留最后完整 snapshot 并附 operation，无缓存时 `rolloutScanComplete:false` |
 | `plan-ledger-replay-expiry` | Plan 过期、重放、跨 operation、重启失效、篡改 apply payload | 只允许当前进程内 10 分钟单次消费；失效返回 `PLAN_EXPIRED`，附加字段返回 `INVALID_INPUT`，均无 Backup/Journal/mutation |
 | `plan-ledger-abandoned-expiry` | Prepare 后调用方离开且没有 consume/waiter；同一 Home 有多个不同 expiry 的人工 intent | 单一最早到期 timer 自治清理并 rearm，不阻止进程退出；Watch 在最后 intent 到期后只恢复一次，不产生每 waiter timer |
 | `watch-manual-priority` | 单一文件事件触发 Watch，但人工 Apply 已持有本进程协调器；等待期间继续产生重复事件 | Watch 不并发、不计失败；保留并合并 reasons，人工 operation completion 后恰运行一次 follow-up；stop 后 callback 不再 Apply |
 | `watch-physical-scope-dedupe-and-bounded-history` | 同一物理 Codex Home 通过重复、并发或路径别名启动 Watch，并在自动/手工停止后重启 | 只创建一个活动 watcher、返回同一 watchId 且首个 options 生效；停止释放 scope，旧 watch 仍可查询/幂等 stop；最多保留 64 个 stopped 记录 |
-| `pending-journal` | Managed Backup 中存在未终结 Journal | Status 可读并暴露恢复证据；Sync/Switch 被 `PENDING_TRANSACTION`/`RECOVERY_REQUIRED` 阻断。Prune 仍可作为 recovery-safe maintenance 执行，但必须保护所有 Pending Journal 引用的备份 |
+| `pending-journal` | Managed Backup 中存在未终结 Journal | Restore journal 阻断新普通写；旧 Sync/Switch journal 只由 Diagnostics 报告、不阻断，但 Prune 仍保护关联备份 |
+| `normal-write-no-journal` | Sync/Switch/Repair 有实际写入 | 只创建 UndoBackup，不创建普通 transaction journal 或 State DB lock |
+| `backup-failure-zero-write` | UndoBackup 在 mutation 前失败 | 返回 `BACKUP_FAILED`；config/rollout/SQLite/global state 全部不变 |
+| `mutation-failure-partial-retry` | 在 config、rollout 或 SQLite mutation 后注入失败 | 返回 partial、backupId、failedStage/failureCode/retryRecommended；重复相同操作最终收敛 |
 | `foreign-pending-restore` | Node 创建 Pending Journal/Backup 后由 .NET Restore，及反方向 | 两个方向都只按受管清单恢复，清除 Pending 前必须落入合法 terminal；差异需显式裁决 |
 | `restore-mid-failure` | Restore 在某一目标已替换后注入失败 | 不能报告成功；必须完整补偿，或保留可操作证据并返回 `RECOVERY_REQUIRED`，不得留下无 Journal 的半恢复状态 |
 | `restore-v2-pre-snapshot-failure` | Restore v2 的恢复前 snapshot 在任何目标 mutation 前失败 | `BACKUP_FAILED` 或更具体失败；不创建 restore mutation，source backup 与原始目标 Hash 不变 |
@@ -103,12 +112,12 @@ Fixture 不是用户数据样本，严禁从真实 `~/.codex`、认证文件或�
 | `bidirectional-backup-roundtrip` | Node Backup→.NET Restore；.NET Backup→Node Restore | 两个方向恢复到等价语义状态；正文和不应变化字段逐字节一致；Metadata v1/v2 兼容边界明确 |
 | `historical-tag-produced-backup-restore` | 从冻结 commit 的 `v0.2.9`/`v0.4.1` tag 源构建历史 .NET Core，真实产生 synthetic metadata v1/v2 backup，再由当前 Node Restore | config/rollout/SQLite 恢复；tag commit、metadata/tree Hash 与 synthetic-only 声明进入 CI artifact。证据等级仅为 repository-tag-source，不等于 hosted formal Release binary 或真实用户数据 |
 | `historical-formal-release-backup-restore` | 下载固定 release/tag/asset ID、size 和 SHA-256 的 hosted `v0.4.1` Automation ZIP；同时核对 GitHub Release API、独立 `.sha256`、`checksums.txt`、archive entry set 与 executable Hash 后，才在隔离 synthetic Home 执行 Plan/Apply | 历史正式托管二进制真实生成 metadata v2 managed backup；当前 Node Restore 逐字节恢复 config/rollout，并恢复 SQLite Provider；随机 `auth.json` canary 不进入 backup 或脱敏 artifact。证据必须绑定同一 CI run/tested commit，并明确该历史二进制与 tag 未签名，因此不能替代真实 Beta、代码签名或生产升级验证 |
-| `journal-crash-matrix` | 在 prepared/applying/applied/commit/rollback 及 ack 窗口真实终止进程 | durable terminal 优先；非 terminal 阻断后续写；不得对 committed 状态补回滚事件；显式 Restore 可收敛 |
-| `rollback-recovery-required` | mutation 后使自动 rollback 的一个或多个目标失败 | 原始错误与所有 rollback error 均保留；Backup、completed/uncompleted targets 和 `RECOVERY_REQUIRED` 可用于人工恢复 |
+| `journal-crash-matrix` | 历史普通写 crash matrix | Legacy evidence only；新普通写由 partial/retry 取代，Restore v2 crash matrix 继续是现行门禁 |
+| `rollback-recovery-required` | 历史普通写自动回滚失败 | Legacy compatibility only；新普通写保留 UndoBackup 并返回 partial |
 
 真实跨运行时测试不能用 Mock 代替进程争锁。Node 与 .NET 必须在同一临时目标上运行，并以文件/SQLite 最终效果作为独立证据。
 
-V1/C3 的 executable mapping：Plan/revision 见 `test/plan-ledger.test.js`、`test/operation-revision.test.js`、`test/plan-apply.test.js`；Node 锁与外部 Status 见 `test/state-db-lock.test.js`、`test/status-coordination.test.js`；Watch 见 `test/watch.test.js`；Web transport 见 `test/web-server.test.js`；.NET 与跨运行时锁见 `StateDbLockResourceTests`、`DualResourceLockIntegrationTests`、`CrossRuntimeStateDbLockTests`、`LockServiceTests`。`shared-sqlite-home-contention` 与 `dual-resource-lock-order` 另由 `test-support/cross-runtime-fixtures.mjs`、`test-support/cross-runtime-writer-host.mjs` 和 `.NET FixtureHost` 启动两个方向的真实 Sync writer，winner 在 `before_backup` 持有 Home→State DB 双锁，loser 必须以 `OPERATION_BUSY(state-db)` 且零 Backup/Journal/mutation 退出。C5 的双向 backup/foreign pending executable mapping 为 `test-support/cross-runtime-fixtures.mjs`、`test-support/cross-runtime-node-crash-host.mjs`、`.NET FixtureHost` 与既有 `.NET CrashHost`；完整命令与结果记录在 `evidence/C5_SHARED_UI_WEB_2026-08-26.md`。
+ADR-0016 C2/C3 executable mapping：Provider-only/32 MiB/Diagnostics/Repair/no-journal/partial-retry 见 `test/provider-sync-lite.test.js`；Plan/revision/cancel/shared SQLite 见 `test/plan-apply.test.js`；Home lock 与外部 Status 见 `test/status-coordination.test.js`；Watch 见 `test/watch.test.js`；Web/CLI/Contracts/Desktop 分别见相应 contract 与 E2E。旧双层锁、普通 journal 与 Node↔.NET State DB resource lock 测试仅作为历史证据，不证明当前 Node 写路径。
 
 C7 的 executable mapping 为 `test-support/desktop-sync-switch-fixture.mjs`、`apps/desktop/e2e/desktop-sync-switch.spec.mjs`、`apps/desktop/tests/ipc-router.test.mjs`、`runtime-supervisor.test.mjs` 与 `test/plan-apply.test.js`。它使用临时 Home、真实 SQLite、Windows `FileShare.None`、受控 test-build Utility 终止和完整目标 Hash/语义快照；生产 Core host control 不包含故障注入能力。`scripts/test-wsl-unc-safety.sh` 以 `CPS_REQUIRE_REAL_WSL=1` 提供严格真实 WSL 门；没有与 source commit 绑定的健康 Windows+WSL 结果时仍是 Pending，不能用 synthetic UNC 或代码开关冒充实证。详见 `evidence/C7_ELECTRON_SYNC_SWITCH_2026-08-26.md`。
 

@@ -32,7 +32,7 @@ export interface CoreOperationStartedEnvelope {
     requestId: string;
     operationId: string;
     event: "operation-started";
-    operation: "sync" | "switch" | "restore";
+    operation: "sync" | "switch" | "repair" | "restore";
 }
 export type CoreOperationEventEnvelope = CoreOperationStartedEnvelope | CoreProgressEnvelope;
 export declare class ContractValidationError extends Error {

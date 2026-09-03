@@ -1,8 +1,8 @@
 # vNext Error Code 合同
 
-> **状态：Accepted（阶段 0 合同；V1 C1 Core DTO、C2 CLI Adapter、C4 CoreClient 与 C5 Web envelope 公共净化已实施）**
+> **状态：Accepted（阶段 0 合同；ADR-0016 C2/C3 轻量写增量已实施）**
 >
-> **日期：2026-08-24；实现增量：2026-08-26**
+> **日期：2026-08-24；当前实现增量：2026-09-03**
 >
 > **适用范围：Node Core、CLI、Local Web UI、Electron 与迁移期 .NET 适配层**
 >
@@ -10,7 +10,7 @@
 
 ## 1. 目的
 
-V1/ADR-0015 增量（尚未公开发布）：`FAST_MODE_UNSUPPORTED` 表示首行无效/超过快速读取上限，或待修改文件无法采用等长原地策略。它发生在备份和业务 mutation 之前，修正输入或显式选择完整同步后可重试，不要求 recovery。公共 `details.fastModeReason` 仅允许 `session-meta-invalid`、`session-meta-too-large`、`provider-location-ambiguous`、`provider-length-mismatch`。`IN_PLACE_RESTORE_FAILED` 仅作为内部原因；服务层仍以既有 `SYNC_FAILED_ROLLED_BACK` / `RECOVERY_REQUIRED` 表达最终恢复结果。
+V1/ADR-0016 增量（尚未公开发布）：`FAST_MODE_UNSUPPORTED` 与 `fastModeReason` 已随公开 Fast 模式删除。新的 Provider Sync 自动在等长原地更新与不等长流式替换之间选择；普通 Sync/Switch/Repair 不再产生 `SYNC_FAILED_ROLLED_BACK` 或普通写 `RECOVERY_REQUIRED`，mutation 后失败以结构化 partial Result 表达。旧码继续可读，仅用于 v0.5 backup/journal 兼容；Restore 仍可产生 `RECOVERY_REQUIRED`。
 
 本文冻结 vNext 的错误分类、兼容映射和演进规则，使调用方依据稳定的 `code` 决策，而不是解析自然语言 `message`、异常类型名或堆栈。
 
@@ -42,6 +42,8 @@ interface CoreErrorDto {
 - 一个失败只选择一个最能指导恢复动作的顶层 Canonical Code；底层 OS/SQLite Code 可放入安全的 `details.causeCode`。
 - Partial Result 可以携带 warning 级错误码，但不能把未完成写入伪装成完整成功。
 
+普通写的 partial 使用固定安全字段：`partialReason=locked-session|mutation-failed`；mutation 后失败还携带枚举化 `failedStage`、`failureCode` 与 `retryRecommended=true`，并在顶层返回可用于手动 Restore 的受管 `backupId`。这些字段不得包含路径或底层异常文本。
+
 ## 3. Canonical vNext CoreErrorCode
 
 ### 3.1 正式集合
@@ -59,14 +61,14 @@ interface CoreErrorDto {
 | `SQLITE_UNREADABLE` | SQLite 损坏、格式不受支持或无法可靠读取 | error | 修复或恢复数据库后是 | 否 |
 | `ROLLOUT_LOCKED` | rollout 被活动进程锁定；可形成 Partial Result | warning | 活动会话结束后是 | 否 |
 | `ROLLOUT_CHANGED` | rollout 在扫描与应用之间变化，当前写入被跳过或 Plan 失效 | warning | 重新扫描后是 | 否 |
-| `PENDING_TRANSACTION` | 发现未终结 Transaction Journal，普通写操作必须停止 | error | 完成显式恢复后是 | 是 |
+| `PENDING_TRANSACTION` | 发现未终结 Restore Journal，新普通写必须停止；旧普通 journal 只诊断 | error | 完成显式恢复后是 | 是 |
 | `BACKUP_FAILED` | 备份未完成；mutation boundary 尚未跨越 | error | 修复空间或权限后是 | 否 |
-| `SYNC_FAILED_ROLLED_BACK` | 同步失败，但所有已观察变更已完整回滚 | error | 修复原始原因后是 | 否 |
-| `RECOVERY_REQUIRED` | 自动回滚不完整或状态无法证明一致，必须人工恢复 | error | 完成显式恢复后是 | 是 |
+| `SYNC_FAILED_ROLLED_BACK` | v0.5/旧普通写兼容：同步失败且自动回滚完成 | error | 修复原始原因后是 | 否 |
+| `RECOVERY_REQUIRED` | Restore 补偿不完整或状态无法证明一致；旧普通 journal 兼容读取 | error | 完成显式恢复后是 | 是 |
 | `RESTORE_VALIDATION_FAILED` | 备份、清单、目标边界或 relocation 校验失败 | error | 修复选择或备份后是 | 否 |
 | `PERMISSION_DENIED` | 文件、目录、锁或数据库权限不足 | error | 修复权限后是 | 否 |
 | `OPERATION_BUSY` | 已证明存在活跃的冲突操作或同一目标写者 | warning | 活跃操作结束后是 | 否 |
-| `OPERATION_CANCELLED` | 用户、Signal 或上层请求取消操作 | info | 是 | 仅在另有 Journal 证据时是 |
+| `OPERATION_CANCELLED` | 用户在首次 mutation 前取消普通操作，或 Restore 在安全点取消 | info | 是 | 仅 Restore 另有 Journal 证据时是 |
 | `CORE_RUNTIME_CRASHED` | Electron Core Runtime 非正常退出 | fatal | Runtime 可重启时是 | 由 Journal 检查决定 |
 | `PROTOCOL_VERSION_MISMATCH` | 调用方与 Core/IPC Schema 不兼容 | error | 升级兼容组件后是 | 否 |
 | `INTERNAL_ERROR` | 未被更具体类别覆盖的内部错误 | fatal | 默认否 | 由 Journal 检查决定 |
@@ -80,11 +82,10 @@ interface CoreErrorDto {
 | `PLAN_EXPIRED` | Plan 已有明确的过期时间和重新准备动作；它与状态漂移导致的 `STALE_STATE` 不同 | warning | 重新准备 Plan 后是 | 否 |
 | `STALE_STATE` | Apply 加锁后发现 profile/config/rollout/state DB 或 storage revision 与 Plan 不一致 | warning | 重新准备 Plan 后是 | 否 |
 | `LOCK_UNVERIFIABLE` | 无法可靠验证锁所有者、进程启动身份、协议版本或锁目录身份；不能误判为普通 Busy，也不能冒险删除 | error | 消除不确定状态后是 | 否 |
-| `FAST_MODE_UNSUPPORTED` | 当前 rollout 首行或 Provider 长度/位置不满足快速原地更新条件 | error | 改用完整模式后是 | 否 |
 
 `LOCK_UNVERIFIABLE` 必须 fail closed。只有确认存在活跃冲突所有者时才使用 `OPERATION_BUSY`；未来协议、损坏 owner、身份读取失败或 ABA/目录身份不确定均使用 `LOCK_UNVERIFIABLE`。用户提示不得建议盲目删除锁目录。
 
-V1/C3 的双层资源锁已要求 `OPERATION_BUSY.details.busyScope` 为 `codex-home` 或 `state-db`，`LOCK_UNVERIFIABLE.details.lockScope` 标示同一范围；SQLite 引擎在资源锁已获得后仍 busy 时继续使用 `SQLITE_BUSY`。Lock owner protocol v2 可带 `scope/resourceKey`，旧 Home-lock owner 仍按兼容读取规则处理。
+V1/C3 的普通写只使用 Codex Home lock，因此新结果的 `OPERATION_BUSY.details.busyScope` 与 `LOCK_UNVERIFIABLE.details.lockScope` 为 `codex-home`。共享数据库竞争由 SQLite 原生事务返回 `SQLITE_BUSY`。旧 `state-db` scope 与 protocol v2 `scope/resourceKey` 只作既有锁/证据兼容读取。
 
 vNext Prepare/Apply 对任何加锁后 revision 漂移只发出 `STALE_STATE`，并可用安全的 `details.reason=profile|config|storage|rollout|state-db` 说明维度。`PLAN_STALE`、`PROFILE_CHANGED` 与 `STORAGE_CHANGED` 在旧 Web/适配器完成迁移前仍可读取，但不得成为新 CoreClient/IPC 的稳定写操作结果。
 
@@ -100,7 +101,7 @@ ADR-0013 的 Restore v2 实现后，非 terminal restore operation journal 使�
 | `SYNC_FAILED_ROLLED_BACK` | `SyncTransactionError` | 已与 Canonical 同名 |
 | `ABORT_ERR` | Node 取消路径 | Node 习惯码，不作为 vNext Canonical Code |
 | Node/OS `ENOENT`、`EACCES`、`EPERM` 等 | 普通 `Error` 或系统调用 | 只能作为底层 cause；当前大量错误还没有稳定业务码 |
-| `OPERATION_BUSY` / `LOCK_UNVERIFIABLE` | Node `locking.js`、State DB resource lock | V1/C3 已按“已证明 Busy”或“不可验证”结构化，并携带 scope；禁止解析 message |
+| `OPERATION_BUSY` / `LOCK_UNVERIFIABLE` | Node Home lock；旧 State DB resource lock 兼容读取 | 新普通写只发出 `codex-home` scope；禁止解析 message |
 
 当前 CLI 只把错误 `message` 写入 stderr 并以 `1` 退出。本文不把当前人类提示提升为机器协议。
 
@@ -135,8 +136,8 @@ ADR-0013 的 Restore v2 实现后，非 terminal restore operation journal 使�
 | `RECOVERY_REQUIRED`、`recovery_required` | `RECOVERY_REQUIRED` | 保留备份路径、operationId 与恢复要求 |
 | `SYNC_FAILED_ROLLED_BACK`、`sync_failed_rolled_back` | `SYNC_FAILED_ROLLED_BACK` | `recoveryRequired=false`，保留 rollback status |
 | `ABORT_ERR`、`cancelled` | `OPERATION_CANCELLED` | 映射前检查 Journal；不能仅凭取消认定无需恢复 |
-| `TARGET_BUSY`、`target_busy`、`operation_busy` | `OPERATION_BUSY` | 仅适用于已证明存在活跃竞争者；vNext 用 `details.busyScope=codex-home|state-db` 区分资源范围 |
-| 锁 owner/协议/进程身份无法验证，未来协议或目录身份不确定 | `LOCK_UNVERIFIABLE` | 必须 fail closed；vNext 用 `details.lockScope=codex-home|state-db`；不得降级为 Busy 或自动清锁 |
+| `TARGET_BUSY`、`target_busy`、`operation_busy` | `OPERATION_BUSY` | 仅适用于已证明存在活跃竞争者；新普通写使用 `details.busyScope=codex-home` |
+| 锁 owner/协议/进程身份无法验证，未来协议或目录身份不确定 | `LOCK_UNVERIFIABLE` | 必须 fail closed；新普通写使用 `details.lockScope=codex-home`；不得降级为 Busy 或自动清锁 |
 | `plan_stale`、`PLAN_STALE` | `STALE_STATE` | Prepare/Apply 调用方必须丢弃旧 Plan；旧直连 Web 入口迁移前可保留原码 |
 | `plan_expired` | `PLAN_EXPIRED` | 调用方必须重新生成 Plan |
 | `PROFILE_CHANGED` | `STALE_STATE` | Prepare/Apply 使用 `details.reason=profile`；旧直连 Web 入口迁移前可保留原码 |
@@ -170,7 +171,7 @@ JSON Mode 的当前映射为：
 | --- | --- |
 | `0` | completed 或 noop |
 | `1` | 其他普通失败，包括 `SYNC_FAILED_ROLLED_BACK` |
-| `2` | `INVALID_INPUT`、`FAST_MODE_UNSUPPORTED`、`PLAN_EXPIRED`、`PLAN_STALE`、`STALE_STATE` 及迁移期 revision 漂移码 |
+| `2` | `INVALID_INPUT`、`PLAN_EXPIRED`、`PLAN_STALE`、`STALE_STATE` 及迁移期 revision 漂移码 |
 | `3` | partial Result |
 | `4` | `RECOVERY_REQUIRED`、`PENDING_TRANSACTION`，或 DTO 标记 `recoveryRequired:true` |
 | `5` | `OPERATION_BUSY`、`SQLITE_BUSY`、`LOCK_UNVERIFIABLE` |

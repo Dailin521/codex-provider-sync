@@ -59,10 +59,10 @@ test("CLI and Web entry points import Core behavior only through the public API"
   }
 });
 
-test("watch lazy-loads sync through the public API", async () => {
-  const source = await readRepositoryFile("src/watch.js");
-  assert.match(source, /import\(["']\.\/public-api\.js["']\)/);
-  assert.doesNotMatch(source, /import\(["']\.\/service\.js["']\)/);
+test("Watch calls the internal ProviderSync service without reversing into CoreFacade", async () => {
+  const source = await readRepositoryFile("packages/core/src/application/watch-runtime.js");
+  assert.match(source, /from ["']\.\/service-runtime\.js["']/);
+  assert.doesNotMatch(source, /public-api\.js|createCoreFacade/);
 });
 
 test("present and future desktop entry points do not deep-import Core internals", async () => {

@@ -108,12 +108,16 @@ codex-provider sync
 | `codex-provider status` | Inspect provider, rollout, and SQLite state |
 | `codex-provider sync` | Synchronize to the current provider |
 | `codex-provider switch <provider-id>` | Switch provider, then synchronize |
+| `codex-provider diagnostics` | Run one explicit full read-only diagnostic scan |
+| `codex-provider repair <targets>` | Explicitly repair models, cwd, user-event, or workspace roots |
 | `codex-provider restore <backup-dir>` | Restore a backup |
 | `codex-provider watch` | Watch configuration and SQLite changes |
 
 By default, `switch` also updates the root-level `model` when the target provider section defines one. Use `--keep-root-model` to preserve the current value, or `--model <name>` to set it explicitly.
 
-Normal synchronization now automatically prefers an equal-length in-place Provider update and falls back to the complete mode when lengths differ; Provider IDs do not need a fixed naming length. Use `sync --fast` / `switch <provider-id> --fast` for an explicit Provider-only operation: it reads rollout headers, preserves models, and fails before writes when in-place update is unavailable. The shared Web and Electron UI expose the same Core mode. See [ADR-0015](adr/0015-provider-byte-updates-and-fast-sync.md).
+`sync` always uses the current root `model_provider` in `config.toml` and reads only each rollout header. Equal-length Provider values are updated in place; unequal-length values use a streamed temporary file and atomic replacement while preserving the conversation body byte for byte. Sync never changes models, cwd, user-event flags, workspace roots, or encrypted content.
+
+A full scan occurs only when the user explicitly runs `diagnostics`, and it is read-only. Use `repair` to explicitly select `models`, `cwd`, `userEvent`, or `workspaceRoots`; selecting `workspaceRoots` also includes `cwd`. The shared Web and Electron UI expose the same Diagnostics and Repair capabilities. See [ADR-0016](adr/0016-node-core-responsibility-boundaries-and-lightweight-writes.md).
 
 SQLite Home resolution order: `--sqlite-home` → root-level `sqlite_home` in `config.toml` → `CODEX_SQLITE_HOME` → `<Codex Home>/sqlite`. Only the default layout falls back to `<Codex Home>/state_5.sqlite`.
 

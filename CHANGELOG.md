@@ -8,13 +8,14 @@
 
 - 有限 CLI 命令新增 opt-in `--json`，stdout 固定为一个 schema v1 终态对象；帮助、输入失败、成功、partial、recovery、busy 和取消共享同一顶层结构。
 - JSON Mode 固化 `0/1/2/3/4/5/130` 退出码矩阵，并使用 Canonical Core Error Code。
-- 普通同步在 Provider JSON 字面量等长且无需模型重写时自动原地更新，不满足条件时继续使用完整文件重写。
-- 统一 Core 新增 `syncMode: "fast"`；CLI 以 `--fast` 映射，共享 Web/Electron 界面可直接选择。快速模式只扫描 rollout 首行、保留模型，并在不能原地更新时于写入前返回 `FAST_MODE_UNSUPPORTED`。
-- 完整模式把加密标记、用户事件与历史模型采集合并为一次正文流扫描；结果区分原地更新与完整重写数量。
+- Provider Sync 收窄为固定的首行路径：目标始终来自 `config.toml` 当前 Provider；等长值原地更新，不等长值流式生成临时文件并原子替换，聊天正文逐字节保持不变。
+- 新增用户主动触发、完整且只读的 `diagnostics`，以及显式目标化的 `repair`；Web 与 Electron 使用同一 Core 语义。
+- 普通 Sync/Switch/Repair 使用 Codex Home 锁、SQLite 原生事务和覆盖实际目标的 UndoBackup；mutation 后故障返回带备份、失败阶段和重试建议的 `partial`，由重复执行收敛。
 
 ### 兼容性
 
 - 未传入 `--json` 时继续使用既有 Human 输出和 `0/1` 行为；partial sync 在 Human Mode 仍为成功退出。
+- V1 尚未发布的 `sync --provider`、`--fast`、`syncMode` 与 `FAST_MODE_UNSUPPORTED` 已移除；Sync 始终跟随 config Provider，非 Provider 元数据改由 Repair 显式处理。
 - `watch` 与 `web` 暂不提供单文档 JSON 模式，并在创建长运行资源前返回结构化 `INVALID_INPUT`；未来流式机器接口需要独立协议。
 - npm tarball 或 Windows npm shim 使用短路径、长路径或符号链接形式启动 CLI 时，会对入口两侧做物理路径规范化，避免已安装的 `codex-provider` 被误判为模块导入而静默退出。
 

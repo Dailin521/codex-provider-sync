@@ -745,7 +745,7 @@ test("Web Prepare/Apply keeps trusted profile paths server-side and Apply accept
     const prepared = await api(
       handle,
       "/api/sync/prepare",
-      { profileId: "default", provider: "openai", keepCount: 5 },
+      { profileId: "default", keepCount: 5 },
       credential
     );
     assert.equal(prepared.status, 200);
@@ -753,7 +753,7 @@ test("Web Prepare/Apply keeps trusted profile paths server-side and Apply accept
     assert.equal(prepareCalls.length, 1);
     assert.equal(prepareCalls[0].codexHome, path.resolve(handle.root));
     assert.equal(prepareCalls[0].profile.id, "default");
-    assert.equal(prepareCalls[0].model, "gpt-5");
+    assert.equal("model" in prepareCalls[0], false);
     assert.equal(typeof prepareCalls[0].profileResolver, "function");
 
     const rejected = await api(
@@ -1528,7 +1528,7 @@ test("Web UI restore requires an explicit SQLite Home for relocation and rejects
   );
   try {
     const { credential } = await wslHandle.pair();
-    const rejected = await api(wslHandle, "/api/sync/prepare", { profileId: "default", provider: "openai", keepCount: 5 }, credential);
+    const rejected = await api(wslHandle, "/api/sync/prepare", { profileId: "default", keepCount: 5 }, credential);
     assert.equal(rejected.status, 400);
     assert.match(rejected.payload.error, /Windows cannot safely access SQLite through the WSL UNC path/);
     assert.equal(rejected.payload.coreError.code, "SQLITE_UNSUPPORTED_PATH");

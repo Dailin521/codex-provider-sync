@@ -12,7 +12,7 @@
 - History：仅在用户明确打开后加载列表，详情延迟读取；消息正文不进入日志、缓存、诊断包或全量导出。
 - Profiles：当前桌面 Host 只公开受管 Profile 标识和 revision，不让 Renderer 提交任意路径。
 - Diagnostics、Settings：Main 选择诊断目标并签发可信 token；主题支持 system/light/dark，语言支持 `zh-CN` 和 `en`。
-- Watch 与 Update：Watch 每次 Apply 都重新获取双层锁并让位于人工操作；更新只由 Main 管理，写操作、Watch 或未解决 journal 存在时禁止安装。
+- Watch 与 Update：Watch 每次 Apply 都重新获取 Home lock 并让位于人工操作；更新只由 Main 管理，写操作、Watch 或未解决 Restore journal 存在时禁止安装。
 
 ## 安全数据流
 
@@ -28,7 +28,7 @@ Electron Renderer
 
 `BrowserWindow` 固定启用 context isolation、sandbox 和 web security，并关闭 Node integration；本地协议使用严格 CSP。Renderer 不能访问 Node、文件系统、任意 IPC channel 或任意路径。Utility Process 在任何业务调用前完成 app/core/protocol handshake；崩溃会拒绝 pending 请求，并在检查未完成 journal 后最多自动重启一次。
 
-写操作保持 backup-first、Codex Home → State DB 固定顺序双层锁、事务 journal、回滚/恢复和 WSL UNC 仅诊断边界。应用不读取或输出认证数据，也不修改消息正文、会话标题或 `updated_at`。
+Sync/Switch/Repair 只使用 Codex Home lock、SQLite 原生事务和 UndoBackup；mutation 后故障显示可重试 partial，不创建普通 journal 或自动回滚。Restore 独立保留恢复前快照、journal 与补偿；WSL UNC 仍仅用于诊断。Diagnostics 只在用户打开页面并手动运行时完整扫描，不后台刷新。
 
 ## 内部验收
 

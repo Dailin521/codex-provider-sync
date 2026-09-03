@@ -5,7 +5,6 @@ export const CORE_ERROR_CODES = [
     "PLAN_STALE",
     "PLAN_EXPIRED",
     "STALE_STATE",
-    "FAST_MODE_UNSUPPORTED",
     "CODEX_HOME_NOT_FOUND",
     "STATE_DB_NOT_FOUND",
     "SQLITE_UNSUPPORTED_PATH",
@@ -33,7 +32,6 @@ export const PUBLIC_CORE_ERROR_MESSAGES = Object.freeze({
     PLAN_STALE: "The prepared operation is stale. Prepare it again.",
     PLAN_EXPIRED: "The prepared operation expired. Prepare it again.",
     STALE_STATE: "The protected state changed. Prepare the operation again.",
-    FAST_MODE_UNSUPPORTED: "Fast mode cannot be used for this operation. Use full sync.",
     CODEX_HOME_NOT_FOUND: "The selected Codex Home was not found.",
     STATE_DB_NOT_FOUND: "The selected state database was not found.",
     SQLITE_UNSUPPORTED_PATH: "The selected SQLite path is not supported by this runtime.",
@@ -88,13 +86,7 @@ const SAFE_CAUSE_CODES = new Set([
     "ERR_SQLITE_ERROR"
 ]);
 const SQLITE_HOME_SOURCES = new Set(["cli", "config", "env", "default"]);
-const OPERATION_KINDS = new Set(["sync", "switch", "restore", "prune-backups", "watch"]);
-const FAST_MODE_REASONS = new Set([
-    "session-meta-invalid",
-    "session-meta-too-large",
-    "provider-location-ambiguous",
-    "provider-length-mismatch"
-]);
+const OPERATION_KINDS = new Set(["sync", "switch", "repair", "restore", "prune-backups", "watch"]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CORE_ERROR_CODE_SET = new Set(CORE_ERROR_CODES);
 function objectRecord(value) {
@@ -135,7 +127,6 @@ function sanitizeDetails(value) {
     const missing = ownValue(source, "missing");
     const sqliteHomeSource = ownValue(source, "sqliteHomeSource");
     const operationKind = ownValue(source, "operationKind");
-    const fastModeReason = ownValue(source, "fastModeReason");
     if (LOCK_SCOPES.has(String(busyScope)))
         details.busyScope = String(busyScope);
     if (LOCK_SCOPES.has(String(lockScope)))
@@ -157,9 +148,6 @@ function sanitizeDetails(value) {
     }
     if (OPERATION_KINDS.has(String(operationKind)))
         details.operationKind = String(operationKind);
-    if (FAST_MODE_REASONS.has(String(fastModeReason))) {
-        details.fastModeReason = String(fastModeReason);
-    }
     return Object.keys(details).length > 0 ? details : undefined;
 }
 export function createPublicCoreErrorDto(code, options = {}) {

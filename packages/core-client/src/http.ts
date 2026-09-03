@@ -76,6 +76,7 @@ export class HttpCoreTransport implements CoreTransport {
     }
     const isApply = envelope.method === "applySync"
       || envelope.method === "applySwitch"
+      || envelope.method === "applyRepair"
       || envelope.method === "applyRestore";
     if (options.signal?.aborted) {
       if (isApply) {
@@ -185,11 +186,14 @@ export class HttpCoreTransport implements CoreTransport {
     if (!response.body) throw new CoreTransportError("Core HTTP stream has no body.", response.status);
     const isApply = request.method === "applySync"
       || request.method === "applySwitch"
+      || request.method === "applyRepair"
       || request.method === "applyRestore";
     const expectedOperation = request.method === "applySync"
       ? "sync"
       : request.method === "applySwitch"
         ? "switch"
+        : request.method === "applyRepair"
+          ? "repair"
         : request.method === "applyRestore"
           ? "restore"
           : null;

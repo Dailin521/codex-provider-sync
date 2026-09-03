@@ -203,7 +203,7 @@ function asLastComplete(status) {
   return value;
 }
 
-test("Core and Web Status preserve the last complete snapshot under external Home and shared State DB locks", async () => {
+test("Core and Web Status block on the Home lock and ignore legacy State DB resource locks", async () => {
   const fixture = await makeFixture();
   const web = await startRealWeb(fixture.codexHome, path.join(fixture.root, "web"));
   let releaseHolder = null;
@@ -250,12 +250,12 @@ test("Core and Web Status preserve the last complete snapshot under external Hom
     });
     const stateBlockedCore = await readCoreStatus();
     const stateBlockedWeb = (await web.status()).payload.status;
-    assert.equal(stateBlockedCore.operationInProgress.busyScope, "state-db");
-    assert.equal(stateBlockedCore.statusReadBlocked.reason, "state-db-lock");
-    assert.deepEqual(asLastComplete(stateBlockedCore), asLastComplete(stateBaselineCore));
-    assert.equal(stateBlockedWeb.alignment.aligned, false);
-    assert.equal(stateBlockedWeb.operationInProgress.busyScope, "state-db");
-    assert.deepEqual(asLastComplete(stateBlockedWeb), asLastComplete(stateBaselineCore));
+    assert.equal(stateBlockedCore.operationInProgress, null);
+    assert.equal(stateBlockedCore.statusReadBlocked, undefined);
+    assert.equal(stateBlockedCore.sqliteCounts.sessions.external, 1);
+    assert.equal(stateBlockedWeb.operationInProgress, null);
+    assert.equal(stateBlockedWeb.sqliteCounts.sessions.external, 1);
+    assert.notDeepEqual(asLastComplete(stateBlockedCore), asLastComplete(stateBaselineCore));
     await releaseHolder();
     releaseHolder = null;
     const refreshed = await readCoreStatus();

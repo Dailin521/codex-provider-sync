@@ -5,7 +5,7 @@ export const CORE_PROTOCOL_VERSION = 1 as const;
 
 export type ContractSchemaVersion = typeof CONTRACT_SCHEMA_VERSION;
 export type CoreProtocolVersion = typeof CORE_PROTOCOL_VERSION;
-export type OperationKind = "sync" | "switch" | "restore" | "prune" | "watch";
+export type OperationKind = "sync" | "switch" | "repair" | "restore" | "prune" | "watch";
 export type OperationOutcome =
   | "completed"
   | "partial"
@@ -23,12 +23,8 @@ export interface GetStatusInput {
   profile: ProfileSelector;
 }
 
-export type ProviderSyncMode = "full" | "fast";
-export type ProviderSyncUnchecked = "historyModels" | "userEventFlags" | "encryptedContent";
-
 export interface PrepareSyncInput extends GetStatusInput {
   keepCount?: number;
-  syncMode?: ProviderSyncMode;
 }
 
 export type SwitchModelMode = "provider-default" | "keep-root-model" | "explicit";
@@ -38,7 +34,13 @@ export interface PrepareSwitchInput extends GetStatusInput {
   modelMode: SwitchModelMode;
   model?: string;
   keepCount?: number;
-  syncMode?: ProviderSyncMode;
+}
+
+export type RepairTarget = "models" | "cwd" | "userEvent" | "workspaceRoots";
+
+export interface PrepareRepairInput extends GetStatusInput {
+  targets: RepairTarget[];
+  keepCount?: number;
 }
 
 export interface ApplyPlanInput {
@@ -123,7 +125,7 @@ export interface StatusSnapshot {
 export interface PlanSummary {
   schemaVersion: ContractSchemaVersion;
   planId: string;
-  operation: "sync" | "switch" | "restore";
+  operation: "sync" | "switch" | "repair" | "restore";
   createdAt: string;
   expiresAt: string;
   profile: {
@@ -137,15 +139,6 @@ export interface PlanSummary {
   backupRevision?: string;
   target: JsonObject;
   impact: JsonObject;
-  providerSync?: {
-    mode: ProviderSyncMode;
-    rolloutScanScope: "full" | "metadata";
-    providerWritePolicy: "prefer-in-place" | "require-in-place";
-    historicalModelSync: "enabled" | "preserved";
-    unchecked: ProviderSyncUnchecked[];
-    inPlaceEligibleSessionFiles: number;
-    rewriteRequiredSessionFiles: number;
-  };
   warnings: string[];
   requiresConfirmation: boolean;
 }
@@ -164,16 +157,9 @@ export interface BackupList {
 export interface OperationResult<Result extends JsonValue = JsonObject> {
   schemaVersion: ContractSchemaVersion;
   operationId: string;
-  operation: "sync" | "switch" | "restore";
+  operation: "sync" | "switch" | "repair" | "restore";
   outcome: OperationOutcome;
   backup: { backupId: string } | null;
-  providerSync?: {
-    mode: ProviderSyncMode;
-    rolloutScanScope: "full" | "metadata";
-    inPlaceSessionFiles: number;
-    rewrittenSessionFiles: number;
-    unchecked: ProviderSyncUnchecked[];
-  };
   warnings: string[];
   result: Result;
 }
@@ -288,7 +274,7 @@ export interface DiagnosticsPendingTransaction {
 
 export interface DiagnosticsOperationState {
   operationId?: string;
-  operation?: "sync" | "switch" | "restore" | "prune" | "watch" | "unknown";
+  operation?: "sync" | "switch" | "repair" | "restore" | "prune" | "watch" | "unknown";
   actor?: "manual" | "watch" | "external";
   startedAt?: string;
   busyScope?: "codex-home" | "state-db";
@@ -306,12 +292,23 @@ export interface DiagnosticsSafety {
   projectThreadVisibilityAvailable: boolean;
 }
 
+export interface DiagnosticsIssues {
+  rootModelAvailable: boolean;
+  rolloutModelFilesNeedingRepair: number;
+  sqliteModelRowsNeedingRepair: number;
+  cwdRowsNeedingRepair: number;
+  userEventRowsNeedingRepair: number;
+  workspaceRootsNeedingRepair: number;
+  encryptedContentFiles: number;
+}
+
 export interface DiagnosticsSnapshot {
   schemaVersion: ContractSchemaVersion;
   generatedAt: string;
   runtime: DiagnosticsRuntime;
   storage: DiagnosticsStorage;
   provider: DiagnosticsProvider;
+  issues: DiagnosticsIssues;
   safety: DiagnosticsSafety;
 }
 
@@ -328,6 +325,8 @@ export const CORE_METHODS = [
   "applySync",
   "prepareSwitch",
   "applySwitch",
+  "prepareRepair",
+  "applyRepair",
   "listBackups",
   "prepareRestore",
   "applyRestore",
@@ -348,6 +347,8 @@ export interface CoreMethodMap {
   applySync: { input: ApplyPlanInput; output: OperationResult };
   prepareSwitch: { input: PrepareSwitchInput; output: PlanSummary };
   applySwitch: { input: ApplyPlanInput; output: OperationResult };
+  prepareRepair: { input: PrepareRepairInput; output: PlanSummary };
+  applyRepair: { input: ApplyPlanInput; output: OperationResult };
   listBackups: { input: ListBackupsInput; output: BackupList };
   prepareRestore: { input: PrepareRestoreInput; output: PlanSummary };
   applyRestore: { input: ApplyPlanInput; output: OperationResult };

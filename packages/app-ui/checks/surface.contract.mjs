@@ -34,6 +34,7 @@ test("shared UI exposes explicit read-only, C7, and C8 capability profiles", asy
   assert.deepEqual(READ_ONLY_APP_UI_CAPABILITIES, {
     sync: false,
     switchProvider: false,
+    repair: false,
     restore: false,
     pruneBackups: false,
     watch: false,
@@ -48,6 +49,7 @@ test("shared UI exposes explicit read-only, C7, and C8 capability profiles", asy
   assert.deepEqual(SYNC_SWITCH_APP_UI_CAPABILITIES, {
     sync: true,
     switchProvider: true,
+    repair: true,
     restore: false,
     pruneBackups: false,
     watch: false,
@@ -61,6 +63,7 @@ test("shared UI exposes explicit read-only, C7, and C8 capability profiles", asy
   assert.deepEqual(DESKTOP_C8_APP_UI_CAPABILITIES, {
     sync: true,
     switchProvider: true,
+    repair: true,
     restore: true,
     pruneBackups: true,
     watch: true,
@@ -99,10 +102,9 @@ test("shared UI exposes explicit read-only, C7, and C8 capability profiles", asy
 
 test("shared UI translations and write forms keep one strict schema", () => {
   assert.equal(resourcesHaveMatchingKeys(), true);
-  assert.equal(switchSchema.safeParse({ provider: "relay", modelMode: "explicit", model: "gpt", keepCount: 5, syncMode: "full" }).success, true);
-  assert.equal(switchSchema.safeParse({ provider: "relay", modelMode: "keep-root-model", keepCount: 5, syncMode: "fast" }).success, true);
+  assert.equal(switchSchema.safeParse({ provider: "relay", modelMode: "explicit", model: "gpt", keepCount: 5 }).success, true);
+  assert.equal(switchSchema.safeParse({ provider: "relay", modelMode: "keep-root-model", keepCount: 5 }).success, true);
   assert.equal(switchSchema.safeParse({ provider: "relay", modelMode: "provider-default", keepCount: 5, syncMode: "fast" }).success, false);
-  assert.equal(switchSchema.safeParse({ provider: "relay", modelMode: "explicit", model: "gpt", keepCount: 5, syncMode: "fast" }).success, false);
   assert.equal(syncSchema.safeParse({ keepCount: 0 }).success, false);
   assert.equal(switchSchema.safeParse({ provider: "relay", modelMode: "provider-default", keepCount: 0 }).success, false);
   assert.equal(switchSchema.safeParse({ provider: "relay", modelMode: "explicit", model: "", keepCount: 5 }).success, false);

@@ -1,5 +1,10 @@
 // @ts-check
 
+import { createConfigStore } from "./config-store.js";
+import { createGlobalStateStore } from "./global-state-store.js";
+import { createSessionStore } from "./session-store.js";
+import { createStateDbStore } from "./state-db-store.js";
+
 /** @typedef {Record<string, Function>} StoragePort */
 /**
  * @typedef {{
@@ -28,10 +33,9 @@ export function createCodexStorage(ports) {
     }
   }
   return Object.freeze({
-    config: Object.freeze({ ...ports.config }),
-    sessions: Object.freeze({ ...ports.sessions }),
-    stateDb: Object.freeze({ ...ports.stateDb }),
-    globalState: Object.freeze({ ...ports.globalState })
+    config: createConfigStore(ports.config),
+    sessions: createSessionStore(ports.sessions),
+    stateDb: createStateDbStore(ports.stateDb),
+    globalState: createGlobalStateStore(ports.globalState)
   });
 }
-

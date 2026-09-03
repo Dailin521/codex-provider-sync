@@ -27,7 +27,9 @@ export const DESKTOP_SYNC_SWITCH_METHODS = Object.freeze([
   "prepareSync",
   "applySync",
   "prepareSwitch",
-  "applySwitch"
+  "applySwitch",
+  "prepareRepair",
+  "applyRepair"
 ] as const satisfies readonly CoreMethodName[]);
 
 export type DesktopSyncSwitchMethod = typeof DESKTOP_SYNC_SWITCH_METHODS[number];
@@ -183,6 +185,7 @@ class DesktopCoreTransport implements CoreTransport {
     };
     const isApply = envelope.method === "applySync"
       || envelope.method === "applySwitch"
+      || envelope.method === "applyRepair"
       || envelope.method === "applyRestore";
     if (!isApply) {
       const request = requestManaged();

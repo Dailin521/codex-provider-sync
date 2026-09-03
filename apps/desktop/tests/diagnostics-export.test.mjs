@@ -35,6 +35,15 @@ function diagnosticsSnapshot() {
       rolloutCounts: { sessions: { openai: 1 }, archived_sessions: {} },
       sqliteCounts: { sessions: { openai: 1 }, archived_sessions: {} }
     },
+    issues: {
+      rootModelAvailable: true,
+      rolloutModelFilesNeedingRepair: 0,
+      sqliteModelRowsNeedingRepair: 0,
+      cwdRowsNeedingRepair: 0,
+      userEventRowsNeedingRepair: 0,
+      workspaceRootsNeedingRepair: 0,
+      encryptedContentFiles: 0
+    },
     safety: {
       storageRevision: "safe-revision",
       pendingRecovery: false,

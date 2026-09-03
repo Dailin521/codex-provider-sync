@@ -3,9 +3,8 @@ import { CORE_ERROR_CODES, isCanonicalPublicCoreErrorDto } from "./errors.js";
 const METHOD_SET = new Set(CORE_METHODS);
 const ERROR_CODE_SET = new Set(CORE_ERROR_CODES);
 const SEVERITY_SET = new Set(["info", "warning", "error", "fatal"]);
-const PROVIDER_SYNC_MODES = new Set(["full", "fast"]);
-const PROVIDER_SYNC_UNCHECKED = ["historyModels", "userEventFlags", "encryptedContent"];
-const PROVIDER_SYNC_UNCHECKED_SET = new Set(PROVIDER_SYNC_UNCHECKED);
+const REPAIR_TARGETS = ["models", "cwd", "userEvent", "workspaceRoots"];
+const REPAIR_TARGET_SET = new Set(REPAIR_TARGETS);
 function isRecord(value) {
     return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -58,6 +57,7 @@ export function assertCoreMethodInput(method, value) {
     switch (method) {
         case "applySync":
         case "applySwitch":
+        case "applyRepair":
         case "applyRestore":
             assertApplyPlanInput(value);
             return;
@@ -67,26 +67,36 @@ export function assertCoreMethodInput(method, value) {
             assertProfileInput(value, []);
             return;
         case "prepareSync":
-            assertProfileInput(value, ["keepCount", "syncMode"]);
+            assertProfileInput(value, ["keepCount"]);
             if (value.keepCount !== undefined
-                && (!Number.isSafeInteger(value.keepCount) || Number(value.keepCount) < 1)
-                || (value.syncMode !== undefined && !PROVIDER_SYNC_MODES.has(String(value.syncMode)))) {
+                && (!Number.isSafeInteger(value.keepCount) || Number(value.keepCount) < 1)) {
                 throw new ContractValidationError("INVALID_INPUT", "Invalid Sync retention count.");
             }
             return;
         case "prepareSwitch":
-            assertProfileInput(value, ["provider", "modelMode", "model", "keepCount", "syncMode"]);
+            assertProfileInput(value, ["provider", "modelMode", "model", "keepCount"]);
             if (!isNonEmptyString(value.provider)
                 || !["provider-default", "keep-root-model", "explicit"].includes(String(value.modelMode))
                 || (value.modelMode === "explicit" && !isNonEmptyString(value.model))
                 || (value.modelMode !== "explicit" && value.model !== undefined)
-                || (value.syncMode !== undefined && !PROVIDER_SYNC_MODES.has(String(value.syncMode)))
-                || (value.syncMode === "fast" && value.modelMode !== "keep-root-model")
                 || (value.keepCount !== undefined
                     && (!Number.isSafeInteger(value.keepCount) || Number(value.keepCount) < 1))) {
                 throw new ContractValidationError("INVALID_INPUT", "Invalid Switch Provider input.");
             }
             return;
+        case "prepareRepair": {
+            assertProfileInput(value, ["targets", "keepCount"]);
+            const targets = Array.isArray(value.targets) ? value.targets : [];
+            if (targets.length < 1
+                || targets.length > REPAIR_TARGETS.length
+                || targets.some((target) => typeof target !== "string" || !REPAIR_TARGET_SET.has(target))
+                || new Set(targets).size !== targets.length
+                || (value.keepCount !== undefined
+                    && (!Number.isSafeInteger(value.keepCount) || Number(value.keepCount) < 1))) {
+                throw new ContractValidationError("INVALID_INPUT", "Invalid Repair input.");
+            }
+            return;
+        }
         case "prepareRestore":
             assertProfileInput(value, [
                 "backupId",
@@ -238,60 +248,6 @@ function requireStringArray(value, label) {
 function isNonNegativeInteger(value) {
     return Number.isSafeInteger(value) && Number(value) >= 0;
 }
-function hasCanonicalUnchecked(value, fast) {
-    if (!Array.isArray(value)
-        || value.some((entry) => typeof entry !== "string" || !PROVIDER_SYNC_UNCHECKED_SET.has(entry))) {
-        return false;
-    }
-    const actual = [...new Set(value)].sort();
-    const expected = fast ? [...PROVIDER_SYNC_UNCHECKED].sort() : [];
-    return actual.length === expected.length
-        && actual.every((entry, index) => entry === expected[index]);
-}
-function assertProviderSyncPlanDetails(value) {
-    const details = isRecord(value) ? value : null;
-    const fast = details?.mode === "fast";
-    if (!details
-        || !exactObjectKeys(details, [
-            "mode",
-            "rolloutScanScope",
-            "providerWritePolicy",
-            "historicalModelSync",
-            "unchecked",
-            "inPlaceEligibleSessionFiles",
-            "rewriteRequiredSessionFiles"
-        ])
-        || !PROVIDER_SYNC_MODES.has(String(details.mode))
-        || details.rolloutScanScope !== (fast ? "metadata" : "full")
-        || details.providerWritePolicy !== (fast ? "require-in-place" : "prefer-in-place")
-        || details.historicalModelSync !== (fast ? "preserved" : "enabled")
-        || !hasCanonicalUnchecked(details.unchecked, fast)
-        || !isNonNegativeInteger(details.inPlaceEligibleSessionFiles)
-        || !isNonNegativeInteger(details.rewriteRequiredSessionFiles)
-        || (fast && details.rewriteRequiredSessionFiles !== 0)) {
-        throw new ContractValidationError("INVALID_INPUT", "Invalid Provider Sync plan details.");
-    }
-}
-function assertProviderSyncResultDetails(value) {
-    const details = isRecord(value) ? value : null;
-    const fast = details?.mode === "fast";
-    if (!details
-        || !exactObjectKeys(details, [
-            "mode",
-            "rolloutScanScope",
-            "inPlaceSessionFiles",
-            "rewrittenSessionFiles",
-            "unchecked"
-        ])
-        || !PROVIDER_SYNC_MODES.has(String(details.mode))
-        || details.rolloutScanScope !== (fast ? "metadata" : "full")
-        || !hasCanonicalUnchecked(details.unchecked, fast)
-        || !isNonNegativeInteger(details.inPlaceSessionFiles)
-        || !isNonNegativeInteger(details.rewrittenSessionFiles)
-        || (fast && details.rewrittenSessionFiles !== 0)) {
-        throw new ContractValidationError("INVALID_INPUT", "Invalid Provider Sync result details.");
-    }
-}
 function isNullableString(value) {
     return value === null || typeof value === "string";
 }
@@ -380,7 +336,7 @@ function isDiagnosticOperationState(value) {
     }
     return (value.operationId === undefined || isUuid(value.operationId))
         && (value.operation === undefined
-            || ["sync", "switch", "restore", "prune", "watch", "unknown"].includes(String(value.operation)))
+            || ["sync", "switch", "repair", "restore", "prune", "watch", "unknown"].includes(String(value.operation)))
         && (value.actor === undefined || ["manual", "watch", "external"].includes(String(value.actor)))
         && (value.startedAt === undefined
             || (isNonEmptyString(value.startedAt) && value.startedAt.length <= 64))
@@ -395,6 +351,7 @@ function assertDiagnosticsSnapshot(value) {
     const runtime = isRecord(diagnostics.runtime) ? diagnostics.runtime : null;
     const storage = isRecord(diagnostics.storage) ? diagnostics.storage : null;
     const provider = isRecord(diagnostics.provider) ? diagnostics.provider : null;
+    const issues = isRecord(diagnostics.issues) ? diagnostics.issues : null;
     const safety = isRecord(diagnostics.safety) ? diagnostics.safety : null;
     const valid = exactObjectKeys(diagnostics, [
         "schemaVersion",
@@ -402,6 +359,7 @@ function assertDiagnosticsSnapshot(value) {
         "runtime",
         "storage",
         "provider",
+        "issues",
         "safety"
     ])
         && isNonEmptyString(diagnostics.generatedAt)
@@ -426,6 +384,18 @@ function assertDiagnosticsSnapshot(value) {
         && isDiagnosticDistribution(provider.rolloutCounts)
         && (provider.sqliteCounts === null
             || isDiagnosticDistribution(provider.sqliteCounts, true))
+        && issues !== null
+        && Object.keys(issues).sort().join(",")
+            === "cwdRowsNeedingRepair,encryptedContentFiles,rolloutModelFilesNeedingRepair,rootModelAvailable,sqliteModelRowsNeedingRepair,userEventRowsNeedingRepair,workspaceRootsNeedingRepair"
+        && typeof issues.rootModelAvailable === "boolean"
+        && [
+            issues.rolloutModelFilesNeedingRepair,
+            issues.sqliteModelRowsNeedingRepair,
+            issues.cwdRowsNeedingRepair,
+            issues.userEventRowsNeedingRepair,
+            issues.workspaceRootsNeedingRepair,
+            issues.encryptedContentFiles
+        ].every(isNonNegativeInteger)
         && safety !== null
         && exactObjectKeys(safety, [
             "storageRevision",
@@ -514,10 +484,36 @@ export function assertCoreMethodOutput(method, value) {
         }
         case "prepareSync":
         case "prepareSwitch":
+        case "prepareRepair":
         case "prepareRestore": {
             const plan = requireSchemaObject(value, "PlanSummary");
-            if (!isNonEmptyString(plan.planId)
-                || !["sync", "switch", "restore"].includes(String(plan.operation))
+            const expectedOperation = method === "prepareSync"
+                ? "sync"
+                : method === "prepareSwitch"
+                    ? "switch"
+                    : method === "prepareRepair"
+                        ? "repair"
+                        : "restore";
+            const allowedKeys = [
+                "schemaVersion",
+                "planId",
+                "operation",
+                "createdAt",
+                "expiresAt",
+                "profile",
+                "storageRevision",
+                "configRevision",
+                "rolloutRevision",
+                "stateDbRevision",
+                "target",
+                "impact",
+                "warnings",
+                "requiresConfirmation",
+                ...(plan.backupRevision === undefined ? [] : ["backupRevision"])
+            ];
+            if (!exactObjectKeys(plan, allowedKeys)
+                || !isNonEmptyString(plan.planId)
+                || plan.operation !== expectedOperation
                 || !isNonEmptyString(plan.createdAt)
                 || !isNonEmptyString(plan.expiresAt)
                 || !isRecord(plan.profile)
@@ -532,30 +528,41 @@ export function assertCoreMethodOutput(method, value) {
                 || !isJsonValue(plan.target)
                 || !isRecord(plan.impact)
                 || !isJsonValue(plan.impact)
-                || (plan.providerSync !== undefined && !isRecord(plan.providerSync))
                 || !Array.isArray(plan.warnings)
                 || plan.warnings.some((entry) => typeof entry !== "string")
                 || typeof plan.requiresConfirmation !== "boolean") {
                 throw new ContractValidationError("INVALID_INPUT", "Invalid PlanSummary.");
             }
-            if (plan.providerSync !== undefined)
-                assertProviderSyncPlanDetails(plan.providerSync);
             return;
         }
         case "applySync":
         case "applySwitch":
+        case "applyRepair":
         case "applyRestore": {
             const result = requireSchemaObject(value, "OperationResult");
-            if (!isNonEmptyString(result.operationId)
-                || !["sync", "switch", "restore"].includes(String(result.operation))
+            const expectedOperation = method === "applySync"
+                ? "sync"
+                : method === "applySwitch"
+                    ? "switch"
+                    : method === "applyRepair"
+                        ? "repair"
+                        : "restore";
+            if (!exactObjectKeys(result, [
+                "schemaVersion",
+                "operationId",
+                "operation",
+                "outcome",
+                "backup",
+                "warnings",
+                "result"
+            ])
+                || !isNonEmptyString(result.operationId)
+                || result.operation !== expectedOperation
                 || !["completed", "partial", "failed_rolled_back", "recovery_required", "cancelled", "stale"].includes(String(result.outcome))
                 || !(result.backup === null
-                    || (isRecord(result.backup) && isNonEmptyString(result.backup.backupId)))
-                || (result.providerSync !== undefined && !isRecord(result.providerSync))) {
+                    || (isRecord(result.backup) && isNonEmptyString(result.backup.backupId)))) {
                 throw new ContractValidationError("INVALID_INPUT", "Invalid OperationResult.");
             }
-            if (result.providerSync !== undefined)
-                assertProviderSyncResultDetails(result.providerSync);
             requireStringArray(result.warnings, "OperationResult warnings");
             if (!("result" in result) || !isJsonValue(result.result)) {
                 throw new ContractValidationError("INVALID_INPUT", "OperationResult result is required.");
@@ -679,7 +686,7 @@ export function assertCoreOperationStartedEnvelope(value, expectedRequestId, exp
         || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.operationId)
         || (expectedOperationId !== undefined && value.operationId !== expectedOperationId)
         || value.event !== "operation-started"
-        || !["sync", "switch", "restore"].includes(String(value.operation))) {
+        || !["sync", "switch", "repair", "restore"].includes(String(value.operation))) {
         throw new ContractValidationError("INVALID_INPUT", "Invalid operation-started envelope.");
     }
 }

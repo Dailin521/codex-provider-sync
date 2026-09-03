@@ -106,6 +106,8 @@ codex-provider sync
 | `codex-provider status` | 检查 Provider、rollout 和 SQLite 状态 |
 | `codex-provider sync` | 同步到当前 Provider |
 | `codex-provider switch <provider-id>` | 切换 Provider 后同步 |
+| `codex-provider diagnostics` | 手动执行一次完整只读诊断 |
+| `codex-provider repair <targets>` | 显式修复模型、cwd、user-event 或 workspace roots |
 | `codex-provider restore <backup-dir>` | 恢复备份 |
 | `codex-provider watch` | 监听配置和 SQLite 变化 |
 
@@ -117,11 +119,15 @@ codex-provider sync
 codex-provider status --json
 codex-provider sync --json
 codex-provider switch openai --json
+codex-provider diagnostics --json
+codex-provider repair models,cwd --json
 ```
 
 `watch` 和 `web` 是长运行命令，当前不支持单文档 JSON Mode；传入 `--json` 会在启动 watcher/server 前返回结构化输入错误。完整合同见 [CLI 命令兼容合同](docs/architecture/contracts/CLI_CONTRACT_ZH.md)。
 
-普通同步会自动优先采用等长 Provider 原地更新；Provider 长度不同时照常走完整模式，不要求修改 Provider 命名。明确只需要同步 Provider 时，可使用 `sync --fast` / `switch <provider-id> --fast`：它只读取 rollout 首行并保留根模型和历史模型；若某个待改文件不能原地更新，会在任何业务写入前提示改用完整同步，不会偷偷回退。Web 与新版 Electron 桌面端通过共享 Core 提供相同的模式选择。详见 [ADR-0015](docs/adr/0015-provider-byte-updates-and-fast-sync.md)。
+`sync` 始终以 `config.toml` 当前根级 `model_provider` 为目标，并且只读取 rollout 首行。Provider 等长时原地替换字节；长度不同时流式生成临时文件并原子替换，聊天正文逐字节保持不变。模型、cwd、user-event、workspace roots 和加密内容不会被 Sync 修改。
+
+完整扫描只在用户主动执行 `diagnostics` 时发生，而且全程只读。需要修改非 Provider 元数据时，使用 `repair` 显式选择 `models`、`cwd`、`userEvent`、`workspaceRoots`；选择 `workspaceRoots` 会自动包含 `cwd`。Web 与新版 Electron 桌面端提供相同的 Diagnostics/Repair 能力。详见 [ADR-0016](docs/adr/0016-node-core-responsibility-boundaries-and-lightweight-writes.md)。
 
 SQLite Home 解析顺序：`--sqlite-home` → `config.toml` 根级 `sqlite_home` → `CODEX_SQLITE_HOME` → `<Codex Home>/sqlite`。只有默认布局会回退到 `<Codex Home>/state_5.sqlite`。
 

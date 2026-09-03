@@ -1,4 +1,4 @@
-import type { OperationResult, PlanSummary, ProgressEvent, SwitchModelMode } from "@codex-provider-sync/contracts";
+import type { OperationResult, PlanSummary, ProgressEvent, RepairTarget, SwitchModelMode } from "@codex-provider-sync/contracts";
 import { CoreClientError } from "@codex-provider-sync/core-client";
 import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, ArchiveRestore, Database, FileClock, FolderCog, Gauge, History, RotateCcw, Settings, ShieldAlert, Workflow } from "lucide-react";
@@ -140,7 +140,7 @@ export function AppContent({ props }: { props: AppUiProps }) {
   const diagnosticsQuery = useQuery({
     queryKey: ["diagnostics", profile?.id, profile?.revision],
     queryFn: ({ signal }) => props.core.getDiagnostics({ profile: profileSelector(profile) }, { signal }),
-    enabled: Boolean(profile && route === "diagnostics")
+    enabled: false
   });
   const refreshAfterWrite = useCallback(async ({ refreshStatus = true } = {}) => {
     const refreshes = [
@@ -214,6 +214,7 @@ export function AppContent({ props }: { props: AppUiProps }) {
       try {
         if (summary.operation === "sync") return await props.core.applySync(input, options);
         if (summary.operation === "switch") return await props.core.applySwitch(input, options);
+        if (summary.operation === "repair") return await props.core.applyRepair(input, options);
         return await props.core.applyRestore(input, options);
       } finally {
         if (applyController.current === controller) applyController.current = null;
@@ -305,9 +306,9 @@ export function AppContent({ props }: { props: AppUiProps }) {
     : route === "overview"
       ? <OverviewPage loading={statusQuery.isFetching} refresh={() => void statusQuery.refetch()} status={status} />
       : route === "sync" && capabilities.sync
-        ? <SyncPage disabled={writeDisabled} prepare={(values, trigger) => prepare(() => props.core.prepareSync({ profile: profileSelector(profile), keepCount: values.keepCount, syncMode: values.syncMode }), trigger)} />
+        ? <SyncPage disabled={writeDisabled} prepare={(values, trigger) => prepare(() => props.core.prepareSync({ profile: profileSelector(profile), keepCount: values.keepCount }), trigger)} />
         : route === "switch-provider" && capabilities.switchProvider
-          ? <SwitchPage disabled={writeDisabled} prepare={(values, trigger) => prepare(() => props.core.prepareSwitch({ profile: profileSelector(profile), provider: values.provider, modelMode: values.modelMode as SwitchModelMode, ...(values.modelMode === "explicit" ? { model: values.model } : {}), keepCount: values.keepCount, syncMode: values.syncMode }), trigger)} providers={configuredProviders} />
+          ? <SwitchPage disabled={writeDisabled} prepare={(values, trigger) => prepare(() => props.core.prepareSwitch({ profile: profileSelector(profile), provider: values.provider, modelMode: values.modelMode as SwitchModelMode, ...(values.modelMode === "explicit" ? { model: values.model } : {}), keepCount: values.keepCount }), trigger)} providers={configuredProviders} />
           : route === "backups-restore"
             ? <BackupsRestorePage backups={backupsQuery.data?.backups ?? []} canPrune={capabilities.pruneBackups} canRestore={capabilities.restore} disabled={recoveryWriteDisabled || pruneMutation.isPending} loading={backupsQuery.isPending} prepare={(values, trigger) => prepare(() => props.core.prepareRestore({ profile: profileSelector(profile), backupId: values.backupId, restoreConfig: values.restoreConfig, restoreDatabase: values.restoreDatabase, restoreSessions: values.restoreSessions, ...(values.allowSqliteHomeRelocation ? { allowSqliteHomeRelocation: true, relocationTargetProfileId: values.relocationTargetProfileId } : {}) }), trigger)} profile={profile} profiles={profiles} prune={(keepCount) => pruneMutation.mutate(keepCount)} />
             : route === "history"
@@ -315,7 +316,11 @@ export function AppContent({ props }: { props: AppUiProps }) {
               : route === "profiles"
                 ? <ProfilesPage canManage={capabilities.manageProfiles} host={props.host} profiles={profiles} refresh={() => profilesQuery.refetch()} revealPaths={capabilities.revealProfilePaths} surface={props.surface} />
                 : route === "diagnostics"
-                  ? <DiagnosticsPage canExport={capabilities.exportDiagnostics && Boolean(props.host.exportDiagnostics)} diagnostics={diagnosticsQuery.data} exportBundle={() => exportDiagnostics.mutate()} exporting={exportDiagnostics.isPending} loading={diagnosticsQuery.isFetching} refresh={() => void diagnosticsQuery.refetch()} />
+                  ? <DiagnosticsPage canExport={capabilities.exportDiagnostics && Boolean(props.host.exportDiagnostics)} canRepair={capabilities.repair} diagnostics={diagnosticsQuery.data} exportBundle={() => exportDiagnostics.mutate()} exporting={exportDiagnostics.isPending} loading={diagnosticsQuery.isFetching} prepareRepair={(values, trigger) => {
+                      const targets = (["models", "cwd", "userEvent", "workspaceRoots"] as const)
+                        .filter((target) => values[target]) as RepairTarget[];
+                      return prepare(() => props.core.prepareRepair({ profile: profileSelector(profile), targets, keepCount: values.keepCount }), trigger);
+                    }} refresh={() => void diagnosticsQuery.refetch()} repairDisabled={writeDisabled} />
                   : route === "settings"
                     ? <SettingsPage capabilities={capabilities} profile={profile} props={props} recoveryBlocked={status?.pendingRecovery === true} writeBlocked={!statusReady || externalWriteActive || mutationCount > 0} />
                     : <OverviewPage loading={statusQuery.isFetching} refresh={() => void statusQuery.refetch()} status={status} />;
@@ -338,7 +343,7 @@ export function AppContent({ props }: { props: AppUiProps }) {
           {page}
         </main>
       </div>
-      {capabilities.sync || capabilities.switchProvider || capabilities.restore ? <PlanReview apply={() => {
+      {capabilities.sync || capabilities.switchProvider || capabilities.repair || capabilities.restore ? <PlanReview apply={() => {
         if (!plan || applySubmissionPending.current || applyMutation.isPending) return;
         applySubmissionPending.current = true;
         applyMutation.mutate(plan, {

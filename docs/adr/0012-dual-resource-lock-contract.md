@@ -1,8 +1,10 @@
 # vNext/ADR-0012：Codex Home 与 State DB 的双层资源锁合同
 
-- Status: Accepted
+- Status: Superseded for current Node writes by ADR-0016
 - Date: 2026-08-25
-- Scope: vNext lock contract; implemented by the V1/C3 checkpoint, not yet released or merged
+- Scope: historical V1 dual-lock decision and v0.5 compatibility evidence
+
+> 2026-09-03 范围说明：ADR-0016 已取代本 ADR 对新 Node Sync/Switch/Repair/Restore 的要求。当前这些路径只使用 Codex Home lock，SQLite 竞争由原生事务裁决；旧 lock owner、resourceKey 与跨运行时 fixture 仍按历史证据读取，不得再用本文宣称当前 Node 普通写采用 State DB resource lock。
 
 ## Context
 
