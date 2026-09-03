@@ -25,6 +25,7 @@ import {
 } from "../../../../src/config-file.js";
 import {
   createBackup,
+  getBackupUndoTargets,
   getBackupRecoveryCoverage,
   getBackupSummary,
   listBackups,
@@ -147,6 +148,7 @@ export {
   defaultBackupRoot,
   CoreError,
   createBackup,
+  getBackupUndoTargets,
   getBackupRecoveryCoverage,
   getBackupSummary,
   listBackups,

@@ -32,6 +32,57 @@ import { findRestoreJournals } from "./restore-journal.js";
 import { syncDirectory, writeFileAtomic } from "./atomic-file.js";
 
 const SESSION_CANONICAL_TARGET = Symbol("codex-provider-sync.session-canonical-target");
+const UNDO_TARGET_KINDS = Object.freeze(["config", "globalState", "sqlite", "rollout"]);
+
+function defaultUndoTargetKinds() {
+  return Object.fromEntries(UNDO_TARGET_KINDS.map((kind) => [kind, true]));
+}
+
+// A missing `undoTargets` is deliberate legacy compatibility: v1/v2 backups
+// created before C3 contained every store and must retain their existing
+// Restore behaviour. A present declaration is authoritative so a reduced
+// UndoBackup never causes Restore to infer a destructive action from an
+// absent source file.
+function normalizeUndoTargetKinds(targetKinds) {
+  if (targetKinds === undefined) return defaultUndoTargetKinds();
+  if (!targetKinds || typeof targetKinds !== "object" || Array.isArray(targetKinds)) {
+    throw new TypeError("Backup targetKinds must be an object when supplied.");
+  }
+  const normalized = {};
+  for (const kind of UNDO_TARGET_KINDS) {
+    if (typeof targetKinds[kind] !== "boolean") {
+      throw new TypeError(`Backup targetKinds.${kind} must be a boolean.`);
+    }
+    normalized[kind] = targetKinds[kind];
+  }
+  return normalized;
+}
+
+function readUndoTargets(metadata) {
+  if (metadata?.undoTargets === undefined) {
+    return {
+      legacy: true,
+      config: { captured: true },
+      globalState: { captured: true },
+      sqlite: { captured: true },
+      rollout: { captured: true }
+    };
+  }
+  const value = metadata.undoTargets;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Backup metadata contains an invalid undoTargets declaration.");
+  }
+  const result = { legacy: false };
+  for (const kind of UNDO_TARGET_KINDS) {
+    const target = value[kind];
+    if (!target || typeof target !== "object" || Array.isArray(target)
+        || typeof target.captured !== "boolean") {
+      throw new Error(`Backup metadata contains an invalid undo target: ${kind}.`);
+    }
+    result[kind] = { ...target };
+  }
+  return result;
+}
 
 function timestampSlug(date = new Date()) {
   return date.toISOString().replaceAll(":", "").replaceAll("-", "").replace(".", "");
@@ -335,11 +386,13 @@ export async function createBackup({
   targetProvider,
   sessionChanges,
   configPath,
-  configBackupText
+  configBackupText,
+  targetKinds
 }) {
   const effectiveStorage = storage ?? resolveStorageLayout({ codexHome, env: {} });
   assertSqliteAccessSupported(effectiveStorage, "create a backup");
   codexHome = effectiveStorage.codexHome;
+  const capturedTargets = normalizeUndoTargetKinds(targetKinds);
   const backupRoot = defaultBackupRoot(codexHome);
   const backupDir = path.join(backupRoot, timestampSlug());
   const dbDir = path.join(backupDir, "db");
@@ -347,11 +400,13 @@ export async function createBackup({
 
   const copiedDbFiles = [];
   const copiedSqliteDbFiles = [];
-  const stateDb = Object.hasOwn(effectiveStorage, "stateDbLocation")
-    ? effectiveStorage.stateDbLocation
-    : await detectStateDb(effectiveStorage);
+  const stateDb = capturedTargets.sqlite
+    ? (Object.hasOwn(effectiveStorage, "stateDbLocation")
+      ? effectiveStorage.stateDbLocation
+      : await detectStateDb(effectiveStorage))
+    : null;
   const actualSqliteHome = stateDb ? path.dirname(stateDb.path) : effectiveStorage.sqliteHome;
-  if (stateDb) {
+  if (capturedTargets.sqlite && stateDb) {
     const sqliteRelativePath = DB_FILE_BASENAME;
     const sqliteBackupPath = path.join(dbDir, "sqlite-home", sqliteRelativePath);
     const sqliteBackup = await createSqliteOnlineBackup(stateDb, sqliteBackupPath);
@@ -370,16 +425,20 @@ export async function createBackup({
     }
   }
 
-  if (configBackupText !== undefined) {
+  let configPresent = false;
+  if (capturedTargets.config && configBackupText !== undefined) {
     const configBackupPath = path.join(backupDir, "config.toml");
     await writeFileAtomic(configBackupPath, configBackupText, "utf8");
     const configStat = await fs.stat(configPath);
     await fs.chmod(configBackupPath, configStat.mode);
     await syncFile(configBackupPath);
-  } else {
-    await copyIfPresent(configPath, path.join(backupDir, "config.toml"));
+    configPresent = true;
+  } else if (capturedTargets.config) {
+    configPresent = await copyIfPresent(configPath, path.join(backupDir, "config.toml"));
   }
-  const globalStateFiles = await backupGlobalStateFiles(codexHome, backupDir);
+  const globalStateFiles = capturedTargets.globalState
+    ? await backupGlobalStateFiles(codexHome, backupDir)
+    : null;
 
   const sessionManifest = {
     version: 2,
@@ -392,7 +451,7 @@ export async function createBackup({
     // transaction journal; journal `applying`/`applied` events decide which
     // entries a transactional restore must compensate.
     appliedPaths: null,
-    files: sessionChanges.map((change) => ({
+    files: (capturedTargets.rollout ? sessionChanges : []).map((change) => ({
       path: change.path,
       originalFirstLine: change.originalFirstLine,
       originalSeparator: change.originalSeparator,
@@ -426,8 +485,23 @@ export async function createBackup({
     createdAt: sessionManifest.createdAt,
     dbFiles: copiedDbFiles,
     sqliteDbFiles: copiedSqliteDbFiles,
-    globalStateFiles,
-    changedSessionFiles: sessionChanges.length
+    ...(globalStateFiles ? { globalStateFiles } : {}),
+    changedSessionFiles: capturedTargets.rollout ? sessionChanges.length : 0,
+    // Keep v2 so existing readers continue recognizing the backup. This
+    // additive declaration distinguishes an intentionally omitted target
+    // from a captured target whose original file did not exist.
+    undoTargets: {
+      config: { captured: capturedTargets.config, ...(capturedTargets.config ? { present: configPresent } : {}) },
+      globalState: { captured: capturedTargets.globalState },
+      sqlite: {
+        captured: capturedTargets.sqlite,
+        ...(capturedTargets.sqlite ? { present: Boolean(stateDb) } : {})
+      },
+      rollout: {
+        captured: capturedTargets.rollout,
+        ...(capturedTargets.rollout ? { entryCount: sessionChanges.length } : {})
+      }
+    }
   });
 
   return backupDir;
@@ -626,6 +700,24 @@ async function readValidatedBackupMetadata(backupDir, codexHome) {
   return metadata;
 }
 
+// Public to the Restore use case, but intentionally derived only from managed
+// metadata. Callers cannot manufacture this capability set through an apply
+// payload.
+export async function getBackupUndoTargets(backupDir, storageOrCodexHome) {
+  const storage = typeof storageOrCodexHome === "string"
+    ? resolveStorageLayout({ codexHome: storageOrCodexHome, env: {} })
+    : storageOrCodexHome;
+  const metadata = await readValidatedBackupMetadata(backupDir, storage.codexHome);
+  const targets = readUndoTargets(metadata);
+  return {
+    legacy: targets.legacy,
+    config: targets.config.captured === true,
+    globalState: targets.globalState.captured === true,
+    sqlite: targets.sqlite.captured === true,
+    rollout: targets.rollout.captured === true
+  };
+}
+
 async function backupFileExists(filePath) {
   try {
     await fs.access(filePath);
@@ -644,6 +736,7 @@ export async function getBackupRecoveryCoverage(backupDir, storageOrCodexHome) {
     : storageOrCodexHome;
   const codexHome = storage.codexHome;
   const metadata = await readValidatedBackupMetadata(backupDir, codexHome);
+  const undoTargets = readUndoTargets(metadata);
   const databaseFiles = metadata.version >= 2
     ? metadata.sqliteDbFiles
     : metadata.dbFiles;
@@ -657,22 +750,25 @@ export async function getBackupRecoveryCoverage(backupDir, storageOrCodexHome) {
     }
   }
 
-  const sessionManifestPath = path.join(backupDir, "session-meta-backup.json");
-  const sessionManifest = JSON.parse(await fs.readFile(sessionManifestPath, "utf8"));
-  if (sessionManifest.namespace !== BACKUP_NAMESPACE || ![1, 2].includes(sessionManifest.version)) {
-    throw new Error(`Unsupported session backup manifest in ${sessionManifestPath}.`);
+  let sessionManifest = { files: [] };
+  if (undoTargets.rollout.captured) {
+    const sessionManifestPath = path.join(backupDir, "session-meta-backup.json");
+    sessionManifest = JSON.parse(await fs.readFile(sessionManifestPath, "utf8"));
+    if (sessionManifest.namespace !== BACKUP_NAMESPACE || ![1, 2].includes(sessionManifest.version)) {
+      throw new Error(`Unsupported session backup manifest in ${sessionManifestPath}.`);
+    }
+    if (typeof sessionManifest.codexHome !== "string"
+        || !await storagePathsEqualPhysical(sessionManifest.codexHome, codexHome)) {
+      throw new Error(`Session backup was created for ${sessionManifest.codexHome}, not ${codexHome}.`);
+    }
+    if (!Array.isArray(sessionManifest.files)) {
+      throw new Error(`Session backup manifest has an invalid files collection: ${sessionManifestPath}`);
+    }
+    await validateSessionManifestEntries(sessionManifest.files, codexHome);
   }
-  if (typeof sessionManifest.codexHome !== "string"
-      || !await storagePathsEqualPhysical(sessionManifest.codexHome, codexHome)) {
-    throw new Error(`Session backup was created for ${sessionManifest.codexHome}, not ${codexHome}.`);
-  }
-  if (!Array.isArray(sessionManifest.files)) {
-    throw new Error(`Session backup manifest has an invalid files collection: ${sessionManifestPath}`);
-  }
-  await validateSessionManifestEntries(sessionManifest.files, codexHome);
 
   let globalState = false;
-  if (metadata.version >= 2) {
+  if (undoTargets.globalState.captured && metadata.version >= 2) {
     if (!metadata.globalStateFiles
         || typeof metadata.globalStateFiles !== "object"
         || Array.isArray(metadata.globalStateFiles)) {
@@ -695,10 +791,11 @@ export async function getBackupRecoveryCoverage(backupDir, storageOrCodexHome) {
   }
 
   return {
-    config: await backupFileExists(path.join(backupDir, "config.toml")),
+    config: undoTargets.config.captured && await backupFileExists(path.join(backupDir, "config.toml")),
     globalState,
-    database: databaseFiles.some((fileName) => path.basename(fileName) === DB_FILE_BASENAME),
-    sessions: sessionManifest.files.length > 0
+    database: undoTargets.sqlite.captured
+      && databaseFiles.some((fileName) => path.basename(fileName) === DB_FILE_BASENAME),
+    sessions: undoTargets.rollout.captured && sessionManifest.files.length > 0
   };
 }
 
@@ -722,10 +819,25 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
   assertSqliteAccessSupported(storage, "restore");
   const codexHome = storage.codexHome;
   const metadata = await readValidatedBackupMetadata(backupDir, codexHome);
+  const undoTargets = readUndoTargets(metadata);
+  const effectiveRestore = {
+    config: restoreConfig && undoTargets.config.captured,
+    globalState: restoreGlobalState && undoTargets.globalState.captured,
+    database: restoreDatabase && undoTargets.sqlite.captured,
+    sessions: restoreSessions && undoTargets.rollout.captured
+  };
+  const skippedNotCapturedTargetKinds = [];
+  if (restoreConfig && !undoTargets.config.captured) skippedNotCapturedTargetKinds.push("config");
+  if (restoreGlobalState && !undoTargets.globalState.captured) skippedNotCapturedTargetKinds.push("globalState");
+  if (restoreDatabase && !undoTargets.sqlite.captured) skippedNotCapturedTargetKinds.push("sqlite");
+  if (restoreSessions && !undoTargets.rollout.captured) skippedNotCapturedTargetKinds.push("rollout");
+  const restoreWarnings = skippedNotCapturedTargetKinds.map(
+    (kind) => `Restore skipped ${kind}: the selected backup did not capture this target.`
+  );
 
   let sessionManifest = null;
   let sessionRestoreEntries = [];
-  if (restoreSessions) {
+  if (effectiveRestore.sessions) {
     const sessionManifestPath = path.join(backupDir, "session-meta-backup.json");
     sessionManifest = JSON.parse(await fs.readFile(sessionManifestPath, "utf8"));
     if (sessionManifest.namespace !== BACKUP_NAMESPACE || ![1, 2].includes(sessionManifest.version)) {
@@ -755,7 +867,7 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
     }
     // Preflight before rewinding other stores. Rollout-only compensation must
     // attempt every target, even if another target has conflicting bytes.
-    if (restoreConfig || restoreGlobalState || restoreDatabase) {
+    if (effectiveRestore.config || effectiveRestore.globalState || effectiveRestore.database) {
       for (const entry of sessionRestoreEntries) {
         if (entry.mutation) await validateProviderByteRestore(entry);
       }
@@ -765,7 +877,7 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
   let stateDb = null;
   let targetSqliteHome = null;
   let databaseRestorePlan = null;
-  if (restoreDatabase) {
+  if (effectiveRestore.database) {
     stateDb = Object.hasOwn(storage, "stateDbLocation")
       ? storage.stateDbLocation
       : await detectStateDb(storage);
@@ -824,9 +936,9 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
 
   const configBackupPath = path.join(backupDir, "config.toml");
   const configTargetPath = path.join(codexHome, "config.toml");
-  const configSourcePresent = restoreConfig && await backupFileExists(configBackupPath);
+  const configSourcePresent = effectiveRestore.config && await backupFileExists(configBackupPath);
   const globalStateTargets = [];
-  if (restoreGlobalState) {
+  if (effectiveRestore.globalState) {
     const selectedTargets = globalStateTargetPaths
       ? new Set(globalStateTargetPaths.map(pathComparisonKey))
       : null;
@@ -884,11 +996,13 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
       backupDir: path.resolve(backupDir),
       codexHome,
       targetSqliteHome,
-      targets
+      targets,
+      skippedNotCapturedTargetKinds,
+      restoreWarnings
     };
   }
 
-  if (restoreConfig) {
+  if (effectiveRestore.config) {
     if (configSourcePresent) {
       const target = targets.find((item) => item.kind === "config");
       await onBeforeTarget?.(target);
@@ -896,7 +1010,7 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
       await onAfterTarget?.(target);
     }
   }
-  if (restoreGlobalState) {
+  if (effectiveRestore.globalState) {
     await restoreGlobalStateFilesFromBackup(backupDir, codexHome, {
       targetPaths: globalStateTargetPaths,
       onBeforeTarget,
@@ -914,7 +1028,7 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
     await onAfterTarget?.(target);
   }
 
-  if (restoreSessions) {
+  if (effectiveRestore.sessions) {
     await restoreSessionChanges(sessionRestoreEntries, {
       onBeforeRestore: async (entry) => {
         await onBeforeSessionRestore?.(entry);
@@ -942,7 +1056,9 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
     });
   }
 
-  return metadata;
+  return restoreWarnings.length > 0
+    ? { ...metadata, skippedNotCapturedTargetKinds, restoreWarnings }
+    : metadata;
 }
 
 export async function prepareRestoreBackup(backupDir, storageOrCodexHome, options = {}) {

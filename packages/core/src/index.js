@@ -133,6 +133,8 @@ function publicWarnings(value) {
       projected = "Project visibility diagnostics are unavailable; backup-first protection remains enabled.";
     } else if (warning === "SQLite Home relocation is explicit; config.toml will not be restored.") {
       projected = "SQLite Home relocation is confirmed; config.toml will not be restored.";
+    } else if (/^Restore skipped (config|globalState|sqlite|rollout): the selected backup did not capture this target\.$/.test(warning)) {
+      projected = warning;
     } else if (warning.startsWith("The operation stopped during ")) {
       projected = "The operation made only part of the requested change. Retry it to converge, or restore the managed backup.";
     } else {
@@ -460,7 +462,7 @@ function publicOperationResult(value) {
 /** @param {unknown} value */
 function publicBackupMetadata(value) {
   const metadata = isRecord(value) ? value : {};
-  /** @type {Record<string, string | number>} */
+  /** @type {Record<string, unknown>} */
   const result = {};
   for (const key of ["version", "namespace", "targetProvider", "createdAt"] ) {
     const candidate = metadata[key];
@@ -470,6 +472,20 @@ function publicBackupMetadata(value) {
   for (const key of ["changedSessionFiles", "fileCount"] ) {
     const candidate = metadata[key];
     if (Number.isSafeInteger(candidate) && Number(candidate) >= 0) result[key] = Number(candidate);
+  }
+  const undoTargets = isRecord(metadata.undoTargets) ? metadata.undoTargets : null;
+  if (undoTargets) {
+    /** @type {Record<string, boolean>} */
+    const capturedTargetKinds = {};
+    for (const kind of ["config", "globalState", "sqlite", "rollout"]) {
+      const target = undoTargets[kind];
+      if (isRecord(target) && typeof target.captured === "boolean") {
+        capturedTargetKinds[kind] = target.captured;
+      }
+    }
+    if (Object.keys(capturedTargetKinds).length === 4) {
+      result.capturedTargetKinds = capturedTargetKinds;
+    }
   }
   return result;
 }

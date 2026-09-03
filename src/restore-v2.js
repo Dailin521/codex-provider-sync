@@ -1022,6 +1022,7 @@ export async function executeRestoreV2({
   storage,
   sourceBackup,
   restoreConfig,
+  restoreGlobalState = restoreConfig,
   restoreDatabase,
   restoreSessions,
   allowSqliteHomeRelocation,
@@ -1048,6 +1049,7 @@ export async function executeRestoreV2({
   throwIfAborted(signal);
   const sourcePlan = await prepareRestoreBackup(sourceBackup.backupDir, storage, {
     restoreConfig,
+    restoreGlobalState,
     restoreDatabase,
     restoreSessions,
     allowSqliteHomeRelocation
@@ -1136,6 +1138,7 @@ export async function executeRestoreV2({
     });
     applyResult = await restoreBackup(sourceBackup.backupDir, storage, {
       restoreConfig,
+      restoreGlobalState,
       restoreDatabase,
       restoreSessions,
       allowSqliteHomeRelocation,

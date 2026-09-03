@@ -181,13 +181,18 @@ public sealed class BackupService
             throw new InvalidOperationException($"Backup was created for {metadata.CodexHome}, not {codexHome}.");
         }
 
-        if (options.RestoreConfig)
+        bool restoreConfig = options.RestoreConfig && IsUndoTargetCaptured(metadata, "config");
+        bool restoreGlobalState = options.RestoreConfig && IsUndoTargetCaptured(metadata, "globalState");
+        bool restoreDatabase = options.RestoreDatabase && IsUndoTargetCaptured(metadata, "sqlite");
+        bool restoreSessions = options.RestoreSessions && IsUndoTargetCaptured(metadata, "rollout");
+
+        if (restoreGlobalState)
         {
             ValidateGlobalStatePresenceMetadata(metadata);
         }
 
         SessionBackupManifest? sessionManifest = null;
-        if (options.RestoreSessions)
+        if (restoreSessions)
         {
             sessionManifest = JsonSerializer.Deserialize<SessionBackupManifest>(
                 await File.ReadAllTextAsync(Path.Combine(normalizedBackupDir, "session-meta-backup.json")),
@@ -201,7 +206,7 @@ public sealed class BackupService
         }
 
         (string SourcePath, string TargetPath)? databaseRestorePlan = null;
-        if (options.RestoreDatabase)
+        if (restoreDatabase)
         {
             StateDbLocation? stateDb = storage.StateDbLocation ?? _sqliteStateService.DetectStateDb(storage);
             if (stateDb is null && storage.HasConfiguredSqliteHome)
@@ -274,23 +279,26 @@ public sealed class BackupService
             }
         }
 
-        if (options.RestoreConfig)
+        if (restoreConfig)
         {
             await CopyIfPresentAsync(
                 Path.Combine(normalizedBackupDir, "config.toml"),
                 Path.Combine(codexHome, "config.toml"),
                 overwrite: true);
+        }
+        if (restoreGlobalState)
+        {
             await RestoreGlobalStateFilesAsync(normalizedBackupDir, codexHome);
         }
 
-        if (options.RestoreDatabase && databaseRestorePlan is { } restorePlan)
+        if (restoreDatabase && databaseRestorePlan is { } restorePlan)
         {
             await _sqliteStateService.RestoreSqliteOnlineBackupAsync(
                 restorePlan.SourcePath,
                 restorePlan.TargetPath);
         }
 
-        if (options.RestoreSessions && sessionManifest is not null)
+        if (restoreSessions && sessionManifest is not null)
         {
             await _sessionRolloutService.RestoreSessionChangesAsync(sessionManifest.Files);
         }
@@ -329,10 +337,14 @@ public sealed class BackupService
             throw new InvalidOperationException($"Backup was created for {metadata.CodexHome}, not {codexHome}.");
         }
 
+        bool restoreConfig = options.RestoreConfig && IsUndoTargetCaptured(metadata, "config");
+        bool restoreGlobalState = options.RestoreConfig && IsUndoTargetCaptured(metadata, "globalState");
+        bool restoreDatabase = options.RestoreDatabase && IsUndoTargetCaptured(metadata, "sqlite");
+        bool restoreSessions = options.RestoreSessions && IsUndoTargetCaptured(metadata, "rollout");
+
         List<RestoreBackupTarget> targets = [];
-        if (options.RestoreConfig)
+        if (restoreConfig)
         {
-            ValidateGlobalStatePresenceMetadata(metadata);
             string configSource = Path.Combine(normalizedBackupDir, "config.toml");
             if (File.Exists(configSource))
             {
@@ -342,6 +354,10 @@ public sealed class BackupService
                     configSource,
                     "copy"));
             }
+        }
+        if (restoreGlobalState)
+        {
+            ValidateGlobalStatePresenceMetadata(metadata);
             foreach (string fileName in new[]
             {
                 AppConstants.GlobalStateFileBasename,
@@ -368,7 +384,7 @@ public sealed class BackupService
 
         string? targetSqliteHome = null;
         string? stateDbTargetPath = null;
-        if (options.RestoreDatabase)
+        if (restoreDatabase)
         {
             StateDbLocation? stateDb = storage.StateDbLocation ?? _sqliteStateService.DetectStateDb(storage);
             if (stateDb is null && storage.HasConfiguredSqliteHome)
@@ -437,7 +453,7 @@ public sealed class BackupService
         }
 
         SessionBackupManifest? sessionManifest = null;
-        if (options.RestoreSessions)
+        if (restoreSessions)
         {
             string sessionManifestPath = Path.Combine(normalizedBackupDir, "session-meta-backup.json");
             sessionManifest = JsonSerializer.Deserialize<SessionBackupManifest>(
@@ -556,7 +572,10 @@ public sealed class BackupService
             throw new InvalidOperationException(
                 $"Backup was created for {metadata.CodexHome}, not {storage.CodexHome}.");
         }
-
+        if (!IsUndoTargetCaptured(metadata, "sqlite"))
+        {
+            throw new InvalidOperationException("Backup does not capture state_5.sqlite for Restore.");
+        }
         StateDbLocation? stateDb = storage.StateDbLocation ?? _sqliteStateService.DetectStateDb(storage);
         if (stateDb is null && storage.HasConfiguredSqliteHome)
         {
@@ -596,6 +615,23 @@ public sealed class BackupService
             : RestoreDbTargetPath(storage.CodexHome, mainFiles[0]);
     }
 
+    internal async Task<bool> HasCapturedUndoTargetAsync(
+        string backupDir,
+        string targetKind,
+        CancellationToken cancellationToken = default)
+    {
+        string metadataPath = Path.Combine(Path.GetFullPath(backupDir), "metadata.json");
+        BackupMetadataFile metadata = JsonSerializer.Deserialize<BackupMetadataFile>(
+            await File.ReadAllTextAsync(metadataPath, cancellationToken),
+            JsonOptions()) ?? throw new InvalidOperationException($"Backup metadata is invalid: {backupDir}");
+        if (!string.Equals(metadata.Namespace, AppConstants.BackupNamespace, StringComparison.Ordinal)
+            || metadata.Version is not (1 or 2))
+        {
+            throw new InvalidOperationException($"Unsupported backup metadata in {metadataPath}.");
+        }
+        return IsUndoTargetCaptured(metadata, targetKind);
+    }
+
     public async Task UpdateSessionBackupManifestAsync(string backupDir, IReadOnlyList<SessionChange> sessionChanges)
     {
         string normalizedBackupDir = Path.GetFullPath(backupDir);
@@ -632,6 +668,7 @@ public sealed class BackupService
             GlobalStateFiles = metadata.GlobalStateFiles,
             GlobalStateFilePresent = metadata.GlobalStateFilePresent,
             GlobalStateBackupFilePresent = metadata.GlobalStateBackupFilePresent,
+            UndoTargets = metadata.UndoTargets,
             SizeBytes = metadata.SizeBytes,
             FileCount = metadata.FileCount
         };
@@ -670,21 +707,23 @@ public sealed class BackupService
             throw new InvalidOperationException($"Backup metadata is not valid for recovery: {backupDir}");
         }
 
-        bool database = (metadata.Version >= 2 ? metadata.SqliteDbFiles : metadata.DbFiles)
+        bool database = IsUndoTargetCaptured(metadata, "sqlite")
+            && (metadata.Version >= 2 ? metadata.SqliteDbFiles : metadata.DbFiles)
             .Any(static fileName => Path.GetFileName(fileName) == AppConstants.DbFileBasename);
         bool sessions = false;
         string sessionManifestPath = Path.Combine(normalizedBackupDir, "session-meta-backup.json");
-        if (File.Exists(sessionManifestPath))
+        if (IsUndoTargetCaptured(metadata, "rollout") && File.Exists(sessionManifestPath))
         {
             sessions = (await ReadSessionBackupEntriesAsync(normalizedBackupDir, codexHome)).Count > 0;
         }
-        bool? globalStatePresent = ResolveGlobalStatePresence(
-            metadata,
-            AppConstants.GlobalStateFileBasename);
-        bool? globalStateBackupPresent = ResolveGlobalStatePresence(
-            metadata,
-            AppConstants.GlobalStateBackupFileBasename);
-        bool config = File.Exists(Path.Combine(normalizedBackupDir, "config.toml"))
+        bool? globalStatePresent = IsUndoTargetCaptured(metadata, "globalState")
+            ? ResolveGlobalStatePresence(metadata, AppConstants.GlobalStateFileBasename)
+            : false;
+        bool? globalStateBackupPresent = IsUndoTargetCaptured(metadata, "globalState")
+            ? ResolveGlobalStatePresence(metadata, AppConstants.GlobalStateBackupFileBasename)
+            : false;
+        bool config = (IsUndoTargetCaptured(metadata, "config")
+            && File.Exists(Path.Combine(normalizedBackupDir, "config.toml")))
             || globalStatePresent == true
             || globalStateBackupPresent == true;
         return new BackupRecoveryCoverage(config, database, sessions);
@@ -1195,6 +1234,27 @@ public sealed class BackupService
     {
         _ = ResolveGlobalStatePresence(metadata, AppConstants.GlobalStateFileBasename);
         _ = ResolveGlobalStatePresence(metadata, AppConstants.GlobalStateBackupFileBasename);
+    }
+
+    private static bool IsUndoTargetCaptured(BackupMetadataFile metadata, string kind)
+    {
+        if (metadata.UndoTargets is null)
+        {
+            // v1/v2 metadata without the additive declaration is a legacy
+            // full backup. Keep its existing restore behaviour unchanged.
+            return true;
+        }
+
+        UndoTargetMetadata? target = kind switch
+        {
+            "config" => metadata.UndoTargets.Config,
+            "globalState" => metadata.UndoTargets.GlobalState,
+            "sqlite" => metadata.UndoTargets.Sqlite,
+            "rollout" => metadata.UndoTargets.Rollout,
+            _ => throw new InvalidOperationException($"Unsupported UndoBackup target kind: {kind}")
+        };
+        return target?.Captured
+            ?? throw new InvalidOperationException($"Backup undoTargets is missing required target {kind}.");
     }
 
     private static string? SafeRelativePath(string root, string target)

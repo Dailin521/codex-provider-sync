@@ -355,8 +355,29 @@ internal sealed class BackupMetadataFile
     public Dictionary<string, bool>? GlobalStateFiles { get; init; }
     public bool? GlobalStateFilePresent { get; init; }
     public bool? GlobalStateBackupFilePresent { get; init; }
+    // Additive v2 compatibility for Node C3 reduced UndoBackups. Null means
+    // a legacy full backup, so older metadata retains its original restore
+    // semantics.
+    public UndoTargetsMetadata? UndoTargets { get; init; }
     public long? SizeBytes { get; init; }
     public int? FileCount { get; init; }
+}
+
+internal sealed class UndoTargetsMetadata
+{
+    public UndoTargetMetadata? Config { get; init; }
+    public UndoTargetMetadata? GlobalState { get; init; }
+    public UndoTargetMetadata? Sqlite { get; init; }
+    public UndoTargetMetadata? Rollout { get; init; }
+}
+
+internal sealed class UndoTargetMetadata
+{
+    // Null distinguishes an explicit false from a missing JSON field. Reduced
+    // UndoBackup declarations must fail closed when incomplete.
+    public bool? Captured { get; init; }
+    public bool? Present { get; init; }
+    public int? EntryCount { get; init; }
 }
 
 internal sealed class SessionBackupManifest

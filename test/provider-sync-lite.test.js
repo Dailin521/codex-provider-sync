@@ -14,6 +14,7 @@ import {
   getStatus,
   prepareSync,
   runRepair,
+  runRestore,
   runSwitch,
   runSync
 } from "../src/service.js";
@@ -290,6 +291,93 @@ test("ordinary Sync creates an UndoBackup but no transaction journal or State DB
     fs.access(path.join(path.dirname(value.dbPath), ".codex-provider-sync", "locks")),
     { code: "ENOENT" }
   );
+});
+
+test("Provider Sync UndoBackup captures only the SQLite and rollout targets it can mutate", async () => {
+  const value = await fixture({ rolloutProvider: "prov_a", configProvider: "openai" });
+  await fs.writeFile(path.join(value.home, ".codex-global-state.json"), "before\n");
+  const synced = await runSync({ codexHome: value.home });
+  const metadata = JSON.parse(await fs.readFile(path.join(synced.backupDir, "metadata.json"), "utf8"));
+  assert.deepEqual(metadata.undoTargets, {
+    config: { captured: false },
+    globalState: { captured: false },
+    sqlite: { captured: true, present: true },
+    rollout: { captured: true, entryCount: 1 }
+  });
+  await assert.rejects(fs.access(path.join(synced.backupDir, "config.toml")), { code: "ENOENT" });
+  await assert.rejects(fs.access(path.join(synced.backupDir, ".codex-global-state.json")), { code: "ENOENT" });
+
+  await fs.writeFile(path.join(value.home, "config.toml"), 'model_provider = "provider_long"\n');
+  await fs.writeFile(path.join(value.home, ".codex-global-state.json"), "after\n");
+
+  const restored = await runRestore({ codexHome: value.home, backupDir: synced.backupDir });
+  assert.deepEqual(restored.skippedNotCapturedTargetKinds, ["config", "globalState"]);
+  assert.equal(await fs.readFile(path.join(value.home, "config.toml"), "utf8"), 'model_provider = "provider_long"\n');
+  assert.equal(await fs.readFile(path.join(value.home, ".codex-global-state.json"), "utf8"), "after\n");
+  assert.equal((await row(value)).model_provider, "prov_a");
+  assert.match(await fs.readFile(value.file, "utf8"), /"model_provider":"prov_a"/);
+});
+
+test("UndoBackup targetKinds follow the actual SQLite, config, and global-state mutation sets", async () => {
+  const sqliteOnly = await fixture({ rolloutProvider: "openai", configProvider: "openai" });
+  const sqlite = await openDatabase(sqliteOnly.dbPath);
+  sqlite.prepare("UPDATE threads SET model_provider = 'prov_a' WHERE id = 'test'").run();
+  sqlite.close();
+  const sqliteResult = await runSync({ codexHome: sqliteOnly.home });
+  const sqliteMetadata = JSON.parse(await fs.readFile(path.join(sqliteResult.backupDir, "metadata.json"), "utf8"));
+  assert.deepEqual(sqliteMetadata.undoTargets, {
+    config: { captured: false },
+    globalState: { captured: false },
+    sqlite: { captured: true, present: true },
+    rollout: { captured: false }
+  });
+
+  const switchOnly = await fixture({ rolloutProvider: "prov_a", configProvider: "openai" });
+  const switched = await runSwitch({ codexHome: switchOnly.home, provider: "prov_a", keepRootModel: true });
+  const switchMetadata = JSON.parse(await fs.readFile(path.join(switched.backupDir, "metadata.json"), "utf8"));
+  assert.deepEqual(switchMetadata.undoTargets, {
+    config: { captured: true, present: true },
+    globalState: { captured: false },
+    sqlite: { captured: false },
+    rollout: { captured: false }
+  });
+
+  const workspaceOnly = await fixture();
+  const workspaceDb = await openDatabase(workspaceOnly.dbPath);
+  workspaceDb.prepare("UPDATE threads SET cwd = ? WHERE id = 'test'").run(workspaceOnly.cwd);
+  workspaceDb.close();
+  await fs.writeFile(path.join(workspaceOnly.home, ".codex-global-state.json"), `${JSON.stringify({
+    "electron-saved-workspace-roots": ["/old"],
+    "project-order": ["/old"],
+    "active-workspace-roots": ["/old"]
+  })}\n`);
+  const repaired = await runRepair({ codexHome: workspaceOnly.home, targets: ["workspaceRoots"] });
+  const repairMetadata = JSON.parse(await fs.readFile(path.join(repaired.backupDir, "metadata.json"), "utf8"));
+  assert.deepEqual(repairMetadata.undoTargets, {
+    config: { captured: false },
+    globalState: { captured: true },
+    sqlite: { captured: false },
+    rollout: { captured: false }
+  });
+});
+
+test("reduced UndoBackup metadata fails closed when a target declaration is incomplete", async () => {
+  for (const mutate of [
+    (metadata) => { delete metadata.undoTargets.globalState; },
+    (metadata) => { metadata.undoTargets.config.captured = "false"; }
+  ]) {
+    const value = await fixture({ rolloutProvider: "prov_a", configProvider: "openai" });
+    const synced = await runSync({ codexHome: value.home });
+    const metadataPath = path.join(synced.backupDir, "metadata.json");
+    const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
+    mutate(metadata);
+    await fs.writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
+
+    await assert.rejects(
+      () => runRestore({ codexHome: value.home, backupDir: synced.backupDir }),
+      /invalid undo target/
+    );
+  }
 });
 
 test("legacy ordinary journal is diagnostic-only and does not block a new Sync", async () => {

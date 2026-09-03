@@ -212,6 +212,15 @@ export async function executeOrdinaryWrite({
     await faultInjector?.({ point: "before_backup" });
     emitProgress(onProgress, { stage: "create_backup", status: "start", writableCount: writableChanges.length });
     throwIfAborted(signal);
+    // UndoBackup covers only stores this operation can actually mutate. The
+    // flags are computed after the locked-session and SQLite/workspace
+    // preflight, so an unused store is neither read nor later restored.
+    const targetKinds = {
+      config: configMutationExpected,
+      globalState: workspaceMutationExpected,
+      sqlite: sqliteRowsToWrite > 0,
+      rollout: writableChanges.length > 0
+    };
     const backupStartedAt = Date.now();
     backupDir = await undoBackup.capture({
       storage,
@@ -220,6 +229,7 @@ export async function executeOrdinaryWrite({
       sessionChanges: writableChanges,
       configPath,
       configBackupText,
+      targetKinds,
       faultInjector
     });
     backupDurationMs = Date.now() - backupStartedAt;

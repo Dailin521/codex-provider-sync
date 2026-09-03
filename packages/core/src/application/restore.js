@@ -7,6 +7,7 @@ import {
   captureBackupRevision,
   captureStableRestoreSource,
   codexStorage,
+  getBackupUndoTargets,
   findPendingTransactions,
   getBackupRecoveryCoverage,
   getStartedJournalTargets,
@@ -71,12 +72,28 @@ export async function executeRestore({
     }
     const storage = await prepareStorage({ codexHome, sqliteHome, configText, storage: providedStorage, platform });
     assertSqliteAccessSupported(storage, "restore");
-    if (restoreDatabase && !storage.stateDbLocation && isConfiguredSqliteHome(storage)) {
-      throw missingConfiguredStateDbError(storage);
-    }
     const sourceBackup = await captureStableRestoreSource(backupDir, { platform });
     const normalizedBackupDir = sourceBackup.backupDir;
-    if (restoreDatabase) {
+    const undoTargets = await getBackupUndoTargets(normalizedBackupDir, storage);
+    const effectiveRestore = {
+      config: restoreConfig && undoTargets.config,
+      globalState: restoreConfig && undoTargets.globalState,
+      database: restoreDatabase && undoTargets.sqlite,
+      sessions: restoreSessions && undoTargets.rollout
+    };
+    const skippedNotCapturedTargetKinds = [
+      ...(restoreConfig && !undoTargets.config ? ["config"] : []),
+      ...(restoreConfig && !undoTargets.globalState ? ["globalState"] : []),
+      ...(restoreDatabase && !undoTargets.sqlite ? ["sqlite"] : []),
+      ...(restoreSessions && !undoTargets.rollout ? ["rollout"] : [])
+    ];
+    const restoreWarnings = skippedNotCapturedTargetKinds.map(
+      (kind) => `Restore skipped ${kind}: the selected backup did not capture this target.`
+    );
+    if (effectiveRestore.database && !storage.stateDbLocation && isConfiguredSqliteHome(storage)) {
+      throw missingConfiguredStateDbError(storage);
+    }
+    if (effectiveRestore.database) {
       const stateDbTargetPath = await resolveRestoreStateDbTargetPath(normalizedBackupDir, storage);
       stateDbResource = await restoreRecovery.resolveResource(stateDbTargetPath, { platform });
     }
@@ -89,9 +106,10 @@ export async function executeRestore({
       backupDir: normalizedBackupDir
     });
     const requestedKinds = [
-      ...(restoreConfig ? ["config", "globalState"] : []),
-      ...(restoreDatabase ? ["sqlite"] : []),
-      ...(restoreSessions ? ["rollout"] : [])
+      ...(effectiveRestore.config ? ["config"] : []),
+      ...(effectiveRestore.globalState ? ["globalState"] : []),
+      ...(effectiveRestore.database ? ["sqlite"] : []),
+      ...(effectiveRestore.sessions ? ["rollout"] : [])
     ];
     const pending = await findPendingTransactions(codexHome);
     const legacyPending = pending.filter((transaction) => transaction.operationKind !== "restore");
@@ -206,19 +224,19 @@ export async function executeRestore({
       }
       const missingKinds = [];
       if ((getStartedJournalTargets(boundJournal, "rollout").length > 0
-          || conservativeCoverage?.sessions) && !restoreSessions) {
+          || conservativeCoverage?.sessions) && !effectiveRestore.sessions) {
         missingKinds.push("rollout sessions");
       }
       if ((getStartedJournalTargets(boundJournal, "sqlite").length > 0
-          || conservativeCoverage?.database) && !restoreDatabase) {
+          || conservativeCoverage?.database) && !effectiveRestore.database) {
         missingKinds.push("SQLite database");
       }
       if ((getStartedJournalTargets(boundJournal, "config").length > 0
-          || conservativeCoverage?.config) && !restoreConfig) {
+          || conservativeCoverage?.config) && !effectiveRestore.config) {
         missingKinds.push("config.toml");
       }
       if ((getStartedJournalTargets(boundJournal, "globalState").length > 0
-          || conservativeCoverage?.globalState) && !restoreConfig) {
+          || conservativeCoverage?.globalState) && !effectiveRestore.globalState) {
         missingKinds.push("global state");
       }
       if (missingKinds.length > 0) {
@@ -235,9 +253,10 @@ export async function executeRestore({
     const result = await restoreRecovery.execute({
       storage,
       sourceBackup,
-      restoreConfig,
-      restoreDatabase,
-      restoreSessions,
+      restoreConfig: effectiveRestore.config,
+      restoreGlobalState: effectiveRestore.globalState,
+      restoreDatabase: effectiveRestore.database,
+      restoreSessions: effectiveRestore.sessions,
       allowSqliteHomeRelocation,
       stateDbResource,
       resolvesOperationIds: boundRestore
@@ -259,7 +278,9 @@ export async function executeRestore({
         backupInventoryWarning: `Backup inventory refresh failed: ${inventoryError instanceof Error ? inventoryError.message : String(inventoryError)}`
       };
     }
-    return result;
+    return restoreWarnings.length > 0
+      ? { ...result, skippedNotCapturedTargetKinds, restoreWarnings }
+      : result;
   } finally {
     await releaseLock();
   }
@@ -310,18 +331,40 @@ export async function prepareRestore(options = {}) {
   // diagnostics while the source is canonicalized immediately afterwards.
   const context = await preparePlanContext(options, "restore");
   const backup = await resolvePreparedBackup(options, codexHome);
+  const undoTargets = await getBackupUndoTargets(backup.backupDir, context.storage);
+  const effectiveRestore = {
+    config: restoreConfig && undoTargets.config,
+    globalState: restoreConfig && undoTargets.globalState,
+    database: restoreDatabase && undoTargets.sqlite,
+    sessions: restoreSessions && undoTargets.rollout
+  };
+  const skippedNotCapturedTargetKinds = [
+    ...(restoreConfig && !undoTargets.config ? ["config"] : []),
+    ...(restoreConfig && !undoTargets.globalState ? ["globalState"] : []),
+    ...(restoreDatabase && !undoTargets.sqlite ? ["sqlite"] : []),
+    ...(restoreSessions && !undoTargets.rollout ? ["rollout"] : [])
+  ];
   const revisions = {
     ...context.revisions,
     backupRevision: await captureBackupRevision(backup.backupDir)
   };
-  if (restoreDatabase && !context.storage.stateDbLocation && isConfiguredSqliteHome(context.storage)) {
+  if (effectiveRestore.database && !context.storage.stateDbLocation && isConfiguredSqliteHome(context.storage)) {
     throw missingConfiguredStateDbError(context.storage);
   }
-  if (restoreDatabase) {
+  if (effectiveRestore.database) {
     await resolveRestoreStateDbTargetPath(backup.backupDir, context.storage);
   }
   const warnings = [];
+  for (const kind of skippedNotCapturedTargetKinds) {
+    warnings.push(`Restore skipped ${kind}: the selected backup did not capture this target.`);
+  }
   if (options.allowSqliteHomeRelocation) {
+    if (restoreConfig) {
+      throw new CoreError(
+        "INVALID_INPUT",
+        "Cannot restore config.toml while relocating SQLite home. Disable config restore to preserve the current target configuration."
+      );
+    }
     warnings.push("SQLite Home relocation is explicit; config.toml will not be restored.");
   }
   const summary = {
@@ -339,9 +382,9 @@ export async function prepareRestore(options = {}) {
       allowSqliteHomeRelocation: Boolean(options.allowSqliteHomeRelocation)
     },
     impact: {
-      rolloutFilesToChange: restoreSessions ? (backup.metadata?.changedSessionFiles ?? 0) : 0,
-      stateDbFilesToChange: restoreDatabase ? 1 : 0,
-      configFilesToChange: restoreConfig ? 1 : 0,
+      rolloutFilesToChange: effectiveRestore.sessions ? (backup.metadata?.changedSessionFiles ?? 0) : 0,
+      stateDbFilesToChange: effectiveRestore.database ? 1 : 0,
+      configFilesToChange: effectiveRestore.config ? 1 : 0,
       lockedRolloutFiles: context.revisions.lockedRolloutFiles,
       backupExpected: true
     },

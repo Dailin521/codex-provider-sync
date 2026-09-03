@@ -1627,14 +1627,20 @@ public sealed class CodexSyncService
                 requestedBackupDir,
                 cancellationToken);
             physicalBackupDir = lockedSourceBackup.BackupDir;
-            string stateDbTargetPath = await _backupService.ResolveRestoreStateDbTargetPathAsync(
+            if (await _backupService.HasCapturedUndoTargetAsync(
                 physicalBackupDir,
-                lockStorage,
-                options);
-            lockedStateDb = await StateDbLockResource.ResolveAsync(
-                stateDbTargetPath,
-                cancellationToken);
-            stateDbHandle = await _lockService.AcquireStateDbLockAsync(lockedStateDb, "restore");
+                "sqlite",
+                cancellationToken))
+            {
+                string stateDbTargetPath = await _backupService.ResolveRestoreStateDbTargetPathAsync(
+                    physicalBackupDir,
+                    lockStorage,
+                    options);
+                lockedStateDb = await StateDbLockResource.ResolveAsync(
+                    stateDbTargetPath,
+                    cancellationToken);
+                stateDbHandle = await _lockService.AcquireStateDbLockAsync(lockedStateDb, "restore");
+            }
         }
         await using LockHandle? stateDbLock = stateDbHandle;
         physicalBackupDir ??= (await RestoreV2Service.CaptureSourceIdentityAsync(
@@ -1729,6 +1735,10 @@ public sealed class CodexSyncService
             cancellationToken);
         string normalizedBackupDir = sourceBackup.BackupDir;
         string? stateDbTargetPath = options.RestoreDatabase
+            && await _backupService.HasCapturedUndoTargetAsync(
+                normalizedBackupDir,
+                "sqlite",
+                cancellationToken)
             ? await _backupService.ResolveRestoreStateDbTargetPathAsync(
                 normalizedBackupDir,
                 storage,
@@ -1752,13 +1762,13 @@ public sealed class CodexSyncService
                 + $"Restore the bound backup first: {backups}",
                 foreignPending);
         }
-        await EnsurePendingRecoveryCoverageAsync(normalizedBackupDir, codexHome, options);
         IReadOnlyList<RestoreJournalInfo> pendingRestores =
             await RestoreJournalService.FindBlockingAsync(codexHome, cancellationToken);
         string[] requestedKinds = restorePlan.Targets
             .Select(static target => target.Kind)
             .Distinct(StringComparer.Ordinal)
             .ToArray();
+        await EnsurePendingRecoveryCoverageAsync(normalizedBackupDir, codexHome, requestedKinds);
         List<RestoreJournalInfo> boundRestores = [];
         List<RestoreJournalInfo> foreignRestores = [];
         foreach (RestoreJournalInfo transaction in pendingRestores)
@@ -1826,12 +1836,16 @@ public sealed class CodexSyncService
         RestorePreparation preparation,
         CancellationToken cancellationToken)
     {
+        bool restoreConfig = RestorePlanContainsTarget(preparation.RestorePlan, "config");
+        bool restoreGlobalState = RestorePlanContainsTarget(preparation.RestorePlan, "globalState");
+        bool restoreSessions = RestorePlanContainsTarget(preparation.RestorePlan, "rollout");
+        bool restoreDatabase = RestorePlanContainsTarget(preparation.RestorePlan, "sqlite");
         List<CoreWriteTargetSpec> targets =
         [
             new(preparation.BackupDirectory, "read-restore-source"),
-            new(preparation.ConfigPath, preparation.Options.RestoreConfig ? "restore" : "read")
+            new(preparation.ConfigPath, restoreConfig ? "restore" : "read")
         ];
-        if (preparation.Options.RestoreConfig)
+        if (restoreGlobalState)
         {
             targets.Add(new CoreWriteTargetSpec(
                 _globalStateService.StatePath(preparation.CodexHome),
@@ -1840,7 +1854,7 @@ public sealed class CodexSyncService
                 _globalStateService.BackupPath(preparation.CodexHome),
                 "restore"));
         }
-        if (preparation.Options.RestoreSessions)
+        if (restoreSessions)
         {
             targets.Add(new CoreWriteTargetSpec(
                 Path.Combine(preparation.CodexHome, "sessions"),
@@ -1851,7 +1865,7 @@ public sealed class CodexSyncService
                 "restore",
                 CoreWriteFingerprintMode.RecursiveInventory));
         }
-        if (preparation.Options.RestoreDatabase)
+        if (restoreDatabase)
         {
             string databasePath = preparation.StateDbTargetPath
                 ?? throw new InvalidOperationException("Restore preparation did not resolve a State DB target.");
@@ -1872,9 +1886,10 @@ public sealed class CodexSyncService
             preparation.BackupDirectory,
             preparation.Storage.SqliteHome,
             preparation.Storage.SqliteHomeSource,
-            preparation.Options.RestoreConfig,
-            preparation.Options.RestoreDatabase,
-            preparation.Options.RestoreSessions,
+            RestoreConfig = restoreConfig,
+            RestoreGlobalState = restoreGlobalState,
+            RestoreDatabase = restoreDatabase,
+            RestoreSessions = restoreSessions,
             preparation.Options.AllowSqliteHomeRelocation
         });
         return await CoreWriteSnapshotBuilder.BuildAsync(
@@ -1896,7 +1911,7 @@ public sealed class CodexSyncService
     private async Task EnsurePendingRecoveryCoverageAsync(
         string backupDir,
         string codexHome,
-        RestoreBackupOptions options)
+        IReadOnlyCollection<string> effectiveTargetKinds)
     {
         string journalPath = Path.Combine(backupDir, FileTransactionJournal.FileName);
         if (!File.Exists(journalPath))
@@ -1911,33 +1926,42 @@ public sealed class CodexSyncService
         }
 
         bool requireConfig;
+        bool requireGlobalState;
         bool requireDatabase;
         bool requireSessions;
         if (journal.InvalidTail || string.IsNullOrWhiteSpace(journal.OperationId))
         {
             BackupRecoveryCoverage coverage = await _backupService.GetRecoveryCoverageAsync(backupDir, codexHome);
+            // Legacy malformed journals represent config/global state as one
+            // coverage bit. Treat it conservatively as requiring both concrete
+            // stores, so a reduced backup cannot falsely resolve the journal.
             requireConfig = coverage.Config;
+            requireGlobalState = coverage.Config;
             requireDatabase = coverage.Database;
             requireSessions = coverage.Sessions;
         }
         else
         {
-            requireConfig = journal.AffectedTargets.Any(
-                static target => target.Kind is "config" or "globalState");
+            requireConfig = journal.AffectedTargets.Any(static target => target.Kind == "config");
+            requireGlobalState = journal.AffectedTargets.Any(static target => target.Kind == "globalState");
             requireDatabase = journal.AffectedTargets.Any(static target => target.Kind == "sqlite");
             requireSessions = journal.AffectedTargets.Any(static target => target.Kind == "rollout");
         }
 
         List<string> missing = [];
-        if (requireConfig && !options.RestoreConfig)
+        if (requireConfig && !effectiveTargetKinds.Contains("config", StringComparer.Ordinal))
         {
-            missing.Add("config/global state");
+            missing.Add("config.toml");
         }
-        if (requireDatabase && !options.RestoreDatabase)
+        if (requireGlobalState && !effectiveTargetKinds.Contains("globalState", StringComparer.Ordinal))
+        {
+            missing.Add("global state");
+        }
+        if (requireDatabase && !effectiveTargetKinds.Contains("sqlite", StringComparer.Ordinal))
         {
             missing.Add("SQLite");
         }
-        if (requireSessions && !options.RestoreSessions)
+        if (requireSessions && !effectiveTargetKinds.Contains("rollout", StringComparer.Ordinal))
         {
             missing.Add("rollout sessions");
         }
@@ -2166,6 +2190,11 @@ public sealed class CodexSyncService
         {
             throw StateDbLockChanged();
         }
+    }
+
+    private static bool RestorePlanContainsTarget(RestoreBackupPlan plan, string kind)
+    {
+        return plan.Targets.Any(target => string.Equals(target.Kind, kind, StringComparison.Ordinal));
     }
 
     private static async Task AssertStateDbTargetLockMatchesAsync(

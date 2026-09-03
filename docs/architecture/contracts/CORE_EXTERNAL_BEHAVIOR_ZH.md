@@ -446,11 +446,14 @@ dbFiles
 sqliteDbFiles
 globalStateFiles
 changedSessionFiles
+undoTargets
 sizeBytes
 fileCount
 ```
 
-兼容 v1 备份时字段会有所不同。inventory 刷新失败时增加：
+新 C3 UndoBackup 的 `undoTargets` 固定包含 `config`、`globalState`、`sqlite`、`rollout` 四项；每项以 `captured` 明确表示本次实际 mutation 集是否被捕获，SQLite 可附 `present`，rollout 可附 `entryCount`。Restore 只处理 `captured=true` 的目标；用户请求了未捕获目标时以固定 warning 跳过，不把缺少备份文件解释为删除或恢复失败。存在 `undoTargets` 但缺项、缺少布尔 `captured` 或类型错误时 fail closed。旧 v1/v2 没有 `undoTargets` 时按历史完整备份解释，保持兼容。
+
+Core `listBackups` 只公开四项布尔 `capturedTargetKinds`，不公开路径。Restore 跳过未捕获项时增加固定枚举 warning；inventory 刷新失败时增加：
 
 ```text
 backupInventoryWarning
