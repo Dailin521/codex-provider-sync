@@ -104,7 +104,8 @@ class FakeUtility {
   postMessage(frame) {
     this.messages.push(frame);
     if (frame.kind === "shutdown") {
-      queueMicrotask(() => this.exit());
+      if (this.behavior.exitSynchronouslyOnShutdown) this.exit();
+      else queueMicrotask(() => this.exit());
       return;
     }
     if (frame.kind === "cancel") {
@@ -687,4 +688,25 @@ test("shutdown before activation permanently rejects later requests", async () =
   assert.equal(response.ok, false);
   assert.equal(response.error.code, "INTERNAL_ERROR");
   assert.equal(children.length, 0);
+});
+
+test("shutdown observes a Utility that exits synchronously", { timeout: 1_000 }, async () => {
+  const children = [];
+  const supervisor = new CoreRuntimeSupervisor({
+    appVersion: "0.5.0",
+    spawnUtility(identity) {
+      const child = new FakeUtility(identity, { exitSynchronouslyOnShutdown: true });
+      children.push(child);
+      return child;
+    }
+  });
+
+  assert.equal((await supervisor.request(readRequest("getStatus", "activate"))).ok, true);
+  await supervisor.shutdown();
+
+  assert.equal(children.length, 1);
+  assert.equal(children[0].messages.some((frame) => frame.kind === "shutdown"), true);
+  assert.equal(children[0].killCalls, 0);
+  assert.equal(children[0].exited, true);
+  assert.equal(supervisor.snapshot.state, "stopped");
 });

@@ -315,6 +315,23 @@ export class CoreRuntimeSupervisor {
       this.#state = "stopped";
       return;
     }
+    const exited = new Promise<void>((resolve) => {
+      let settled = false;
+      let detach = () => {};
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        detach();
+        resolve();
+      };
+      const timeout = setTimeout(() => {
+        child.kill();
+        finish();
+      }, 30_000);
+      detach = child.onExit(finish);
+      if (settled) detach();
+    });
     try {
       child.postMessage({
         kind: "shutdown",
@@ -324,17 +341,7 @@ export class CoreRuntimeSupervisor {
     } catch {
       child.kill();
     }
-    await new Promise<void>((resolve) => {
-      const timeout = setTimeout(() => {
-        child.kill();
-        resolve();
-      }, 30_000);
-      const detach = child.onExit(() => {
-        clearTimeout(timeout);
-        detach();
-        resolve();
-      });
-    });
+    await exited;
     await this.#activation?.catch(() => undefined);
     this.#clearChild(child);
     this.#failAllPending("INTERNAL_ERROR");
