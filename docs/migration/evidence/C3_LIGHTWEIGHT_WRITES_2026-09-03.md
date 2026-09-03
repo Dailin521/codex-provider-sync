@@ -1,6 +1,6 @@
 # C3 轻量普通写与重试收敛证据（2026-09-03）
 
-状态：C3 checkpoint `c09d8a2` 已完成；本地候选门禁通过，等待当前修正提交与远端 CI。
+状态：C3 checkpoint `c09d8a2` 已完成；职责抽取、actual-target UndoBackup、跨运行时兼容修正和本地候选门禁已完成，等待当前 head 的远端 CI。
 
 ## 已实现边界
 
@@ -13,6 +13,7 @@
 - Restore 继续独立使用恢复前 snapshot、完整 manifest/hash、durable journal、确认与补偿，但同样只获取 Home 锁。普通写路径不能创建 Restore recovery 状态。
 - 旧 v0.5 Sync/Switch journal 继续只读显示在 Diagnostics，并由 Restore/Prune 识别关联证据；它不再阻断新的 Sync/Switch/Repair 或 Electron cold-start 普通写。
 - Electron Utility Process 崩溃会拒绝 pending 请求；下一次请求重启一次并检查 Restore recovery。测试 fault marker 跨 generation 保持单次触发，重试不会重复注入同一崩溃点。
+- Windows packaged smoke 只在首次 `connectOverCDP` 握手超时、endpoint 已就绪且旧进程已完整清理时，以全新进程重试一次；endpoint、page、Renderer、业务或清理失败不重试。
 
 ## 关键回归证据
 
@@ -28,14 +29,16 @@
 
 | 命令 | 结果 |
 | --- | --- |
-| `npm test` | 418 tests：365 passed，0 failed，53 expected skipped |
+| `npm test` | 427 tests：374 passed，0 failed，53 expected skipped |
 | `node --test test/plan-apply.test.js` | 15 passed，0 failed/skipped；包含备份后取消与 SQLite 已对齐时 busy preflight |
-| `npm run workspaces:check` | 全部 workspace build、unit/contract 与依赖边界通过；Desktop 74、Core 18、CoreClient 21、Contracts 12 |
+| `npm run workspaces:check` | 全部 workspace build、unit/contract 与依赖边界通过；Desktop 76、Core 18、CoreClient 21、Contracts 12 |
 | `npm run fixtures:cross-runtime` | 11 passed，0 failed/skipped；新 Node Sync source 从 config 读取 Provider，Restore 继续兼容 Node/.NET 旧备份与 journal。旧 State DB 资源锁对抗用例随 C3 协议退役 |
-| 隐藏 Electron `playwright test -c playwright.config.mjs` | 15 passed，0 failed，1 个真实 WSL 条件用例 skipped；包含 native SQLite fallback、Repair、partial、四个 Utility crash/retry 点和 Restore relocation |
-| Web Playwright | 2 passed，0 failed |
-| Node 16.20.2 根包门禁 | runtime verify、package smoke、lifecycle/SQLite smoke 全部通过 |
-| `dotnet test CodexProviderSync.sln -c Release --nologo` | Legacy：417 passed，0 failed，1 个真实 WSL 条件测试 skipped |
+| 隐藏 Electron `playwright test -c playwright.config.mjs` | 14 个未受断言修正影响的场景 passed，1 个真实 WSL 条件用例 skipped；actual-target Restore 断言修正后定向场景 1/1 passed。包含 native SQLite fallback、Repair、partial、四个 Utility crash/retry 点和 Restore relocation |
+| Windows unpacked production smoke | 当前源码重建、Electron ABI rebuild 后 2/2 passed；覆盖生产只读边界与真实 Sync→Restore，窗口 hidden |
+| Web production build + Playwright | production build 通过，2/2 passed；`web/dist` 已刷新为当前共享 UI |
+| 根 npm tarball（本机 Node 24） | content smoke 与 install-lifecycle/SQLite Sync→Restore smoke 通过；UndoBackup 只恢复 captured rollout/SQLite，不回退未捕获 config |
+| Node 16.20.2 根包门禁 | 当前 head 等待远端 Windows/Ubuntu 的隔离 production-only install、runtime verify 与两类 tarball smoke |
+| `dotnet test CodexProviderSync.sln -c Release --nologo` | Legacy：426 passed，0 failed，1 个真实 WSL 条件测试 skipped |
 | `npm audit --omit=dev --audit-level=moderate` | 0 vulnerabilities |
 | `npm audit --audit-level=high` | 0 vulnerabilities |
 | `git diff --check` | 通过；仅 Windows 工作区 CRLF 提示 |
