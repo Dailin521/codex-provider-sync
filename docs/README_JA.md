@@ -2,7 +2,7 @@
 
 # codex-provider-sync
 
-### Provider 切り替え後も Codex の過去セッションを再表示する
+### Provider 切り替え後に Codex の既存セッションを再利用するためのツール
 
 [![CI](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml)
 [![CLI / Web](https://img.shields.io/npm/v/%40dailin521%2Fcodex-provider-sync?label=CLI%20%2F%20Web)](https://www.npmjs.com/package/@dailin521/codex-provider-sync)
@@ -16,13 +16,15 @@
 
 ## 解決すること
 
-`model_provider` を切り替えた後、既存セッションが Codex Desktop や `/resume` から消えることがあります。**データ自体は通常ディスク上に残っています**。セッションファイルと SQLite インデックス内の Provider 情報だけが同期されていません。
+**セッションが表示されていても、現在の Provider で続行できるとは限りません。** `model_provider` の切り替え後も、セッションファイルと SQLite インデックスに以前の Provider が残る場合があります。本ツールはその情報を現在の設定に揃え、Provider の不一致で利用できない既存セッションの再利用を支援します。履歴一覧の再表示ではなく、切り替え後の再利用が目的です。異なる Provider 間での続行や compact を保証するものではなく、暗号化内容やモデルの互換性は別の問題です。
 
 このツールはセッションファイルと SQLite インデックスの Provider 情報を揃えます。実際の変更前にバックアップを作成し、既定で最新 2 件を保持します。変更がなければバックアップは作成しません。ログイン、アカウント切り替え、復号やメッセージの再構築は行わず、`auth.json` も読み取り・変更しません。
 
-<p align="center">
-  <img src="../images/README/provider-metadata-sync-flow.png" alt="Provider メタデータ同期の前後" width="760">
-</p>
+| Provider 情報 | 同期前の例 | 同期後 |
+| --- | --- | --- |
+| 現在の設定 | Provider B | Provider B（変更なし） |
+| セッションファイル | Provider A | Provider B |
+| SQLite チャットインデックス | Provider A | Provider B |
 
 ### 同期が必要なのはいつですか？
 
@@ -83,7 +85,7 @@ Web UI はデフォルトで `127.0.0.1` のみで待ち受け、ブラウザを
 3. Preview sync で確認後に実行するか、Sync now をクリックします。
 4. 結果が partial の場合は、使用中のセッションを終了して再試行します。スキップされた記録を更新済みとして扱わないでください。
 
-> **注意：** メタデータ同期で復元されるのは履歴の可視性だけです。Provider をまたいで旧セッションを続行すると、切り替え先のバックエンドが `encrypted_content` の推論内容を復号できず、続行や compact に失敗する場合があります。
+> **注意：** メタデータ同期は Provider の不一致を解消するもので、利用できない原因をすべて修復するものではありません。Provider をまたいで旧セッションを続行すると、切り替え先のバックエンドが `encrypted_content` の推論内容を復号できず、続行や compact に失敗する場合があります。
 
 [Web UI の詳細（中国語）](README_WEB_UI_ZH.md)
 

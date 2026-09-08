@@ -2,11 +2,11 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { DESKTOP_CANDIDATE_TARGETS } from "./resolve-candidate-build.mjs";
+import { assertDesktopArtifactVersion } from "./desktop-artifact-version.mjs";
 
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = path.resolve(desktopRoot, "../..");
 const outputRoot = path.join(repositoryRoot, "dist-desktop");
-const VERSION_PATTERN = /^1\.0\.0-(?:alpha|beta|rc)\.\d+$/;
 const BUILD_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 
 const TARGET_CONFIG = Object.freeze({
@@ -38,7 +38,7 @@ const target = process.env.CPS_CANDIDATE_TARGET;
 const version = process.env.CPS_DESKTOP_VERSION;
 const buildId = process.env.CPS_DESKTOP_BUILD_ID;
 if (!DESKTOP_CANDIDATE_TARGETS.includes(target)) throw new Error("CPS_CANDIDATE_TARGET is invalid.");
-if (!VERSION_PATTERN.test(version || "")) throw new Error("CPS_DESKTOP_VERSION is not a supported v1 candidate version.");
+assertDesktopArtifactVersion({ version, target, releaseChannel: process.env.CPS_RELEASE_CHANNEL });
 if (!BUILD_ID_PATTERN.test(buildId || "")) throw new Error("CPS_DESKTOP_BUILD_ID is invalid.");
 
 const config = TARGET_CONFIG[target];

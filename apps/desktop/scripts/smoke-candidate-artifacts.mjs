@@ -11,13 +11,13 @@ import {
   sha256File
 } from "./release-audit.mjs";
 
-const VERSION_PATTERN = /^1\.0\.0-(?:alpha|beta|rc)\.\d+$/;
+import { assertDesktopArtifactVersion } from "./desktop-artifact-version.mjs";
 const LINUX_SANDBOX_HELPER = fileURLToPath(new URL("./configure-linux-sandbox.mjs", import.meta.url));
 const target = process.env.CPS_CANDIDATE_TARGET;
 const version = process.env.CPS_DESKTOP_VERSION;
 const descriptor = RELEASE_TARGETS[target];
 if (!descriptor) throw new Error("CPS_CANDIDATE_TARGET is invalid.");
-if (!VERSION_PATTERN.test(version || "")) throw new Error("CPS_DESKTOP_VERSION is invalid.");
+assertDesktopArtifactVersion({ version, target, releaseChannel: process.env.CPS_RELEASE_CHANNEL });
 if (process.platform !== descriptor.platform || process.arch !== descriptor.arch) {
   throw new Error(`Candidate ${target} smoke must run on native ${descriptor.platform}/${descriptor.arch}.`);
 }

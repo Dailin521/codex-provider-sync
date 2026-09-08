@@ -10,9 +10,10 @@ const SHA_PATTERN = /^[0-9a-f]{40}$/i;
  * workflow. This deliberately accepts only an existing, version-matched tag:
  * the workflow must never mint a tag as a side effect of building a candidate.
  */
-export function prepareElectronWindowsRelease({ releaseRef, version, expectedSha }) {
-  if (!VERSION_PATTERN.test(version || "")) {
-    throw new Error("Release version must be a supported 1.0.0 rc candidate version.");
+export function prepareElectronWindowsRelease({ releaseRef, version, expectedSha, channel = "rc" }) {
+  if (!(channel === "rc" && VERSION_PATTERN.test(version || ""))
+    && !(channel === "stable-manual" && version === "1.0.0")) {
+    throw new Error("Release version must match the explicit RC or Windows stable-manual channel.");
   }
   if (!SHA_PATTERN.test(expectedSha || "")) {
     throw new Error("Expected commit must be a full 40-character hexadecimal SHA.");
@@ -27,6 +28,7 @@ export function prepareElectronWindowsRelease({ releaseRef, version, expectedSha
     releaseRef,
     releaseTag: `v${version}`,
     version,
+    channel,
     commit,
     target: "windows-x64",
     buildId: `${version}-${commit.slice(0, 12)}-windows-x64`
@@ -37,6 +39,7 @@ async function main() {
   const result = prepareElectronWindowsRelease({
     releaseRef: process.env.CPS_RELEASE_REF,
     version: process.env.CPS_RELEASE_VERSION,
+    channel: process.env.CPS_RELEASE_CHANNEL,
     expectedSha: process.env.CPS_EXPECTED_SHA
   });
   if (process.env.GITHUB_OUTPUT) {
@@ -44,6 +47,7 @@ async function main() {
       `release_ref=${result.releaseRef}`,
       `release_tag=${result.releaseTag}`,
       `version=${result.version}`,
+      `channel=${result.channel}`,
       `commit=${result.commit}`,
       `target=${result.target}`,
       `build_id=${result.buildId}`,

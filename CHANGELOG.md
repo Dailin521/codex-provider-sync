@@ -4,11 +4,15 @@
 
 ## [Unreleased]
 
-以下说明当前 V1 开发实现，不代表 1.0.0 已公开发布、签名或完成所有平台/线上升级验收。下载、更新通道与发布状态分别以正式发布说明和证据为准，历史版本条目不改写为 V1 行为。
+后续变更在此记录。
+
+## [1.0.0] - 2026-09-08
+
+本次发行范围为 **Windows x64 Electron**，未签名、手动安装。以下也记录同一源码中共享 Core、CLI/Web 的开发变化，但本轮不发布 npm、macOS/Linux 或 Legacy 安装包，不代表签名或线上自动升级已验收。发布状态与下载以 [GitHub Release](https://github.com/Dailin521/codex-provider-sync/releases/tag/v1.0.0) 为准；[安装与迁移说明](docs/release-notes/v1.0.0-zh.md)。
 
 ### 新增
 
-- 独立 Windows Electron 发布准备流程：精确 tag/SHA 与 main CI 门禁、NSIS/ZIP 容器验收及候选 Draft；不触发 Legacy 或 npm 发布，不自动公开 stable/latest。
+- 独立 Windows Electron 发布准备流程：精确 tag/SHA 与 main CI 门禁、NSIS/ZIP 容器验收及 Draft；默认 RC，显式 stable-manual 只接受 Windows 1.0.0。不触发 Legacy 或 npm 发布，核验后再独立公开并设置 latest。
 
 - Electron 主桌面端与重建后的共享 Web UI：概览集中同步/切换，备份统一管理，聊天按项目和父子任务组织，存储配置、双语、三主题及高级功能独立提供。
 - “直接同步”以一次点击授权，内部继续 Prepare/Apply；“单独切换 Provider”先修改配置再同步 Provider，根模型三种策略均不改历史模型。
@@ -24,6 +28,9 @@
 - 普通 Sync/Switch/Repair 使用 Codex Home 锁、SQLite 原生事务和覆盖实际目标的 UndoBackup；mutation 后故障返回带备份、失败阶段和重试建议的 `partial`，由重复执行收敛。
 
 ### 修复与优化
+
+- 完成、警告和错误浮动通知支持点击内容/× 关闭，也支持 Enter、空格和 Esc；仅关闭通知，不删除结果、日志或备份。
+- README 及现行中英日韩入口改为“切换 Provider 后帮助旧会话重新可用”，不再以恢复列表可见性为主要定位；保留跨 Provider 解密、继续与 compact 的兼容限制。
 
 - Sync/Switch 计划按 Provider 相关状态复核，普通聊天追加和无关 SQLite 更新不单独导致 stale；真实配置、目标集合/身份和 Provider 变化仍拒绝旧计划。未定义自定义 Provider 时在修改前停止。
 - Prepare 复用同轮首行事实；Windows 优化临时文件清理并保留 Force 回退，不采用更大 CopyTo 缓冲区，不取消备份、Flush 或文件时间戳恢复。耗时基准只作对应样本参考。

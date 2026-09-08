@@ -12,6 +12,7 @@ import {
   RELEASE_TARGETS
 } from "../scripts/release-audit.mjs";
 import { prepareElectronWindowsRelease } from "../scripts/prepare-electron-windows-release.mjs";
+import { assertDesktopArtifactVersion } from "../scripts/desktop-artifact-version.mjs";
 import { resolveCandidateBuild } from "../scripts/resolve-candidate-build.mjs";
 import {
   hasSuccessfulCiGateJob,
@@ -64,6 +65,7 @@ test("Windows release preparation accepts only an existing immutable RC tag and 
     releaseRef: "refs/tags/v1.0.0-rc.42",
     releaseTag: "v1.0.0-rc.42",
     version: "1.0.0-rc.42",
+    channel: "rc",
     commit: sha,
     target: "windows-x64",
     buildId: "1.0.0-rc.42-0123456789ab-windows-x64"
@@ -88,6 +90,43 @@ test("Windows release preparation accepts only an existing immutable RC tag and 
     version: "1.0.0-rc.42",
     expectedSha: "0123456"
   }));
+});
+
+test("stable Windows preparation requires explicit manual channel and exact stable tag/version", () => {
+  const input = { releaseRef: "refs/tags/v1.0.0", version: "1.0.0", expectedSha: "a".repeat(40), channel: "stable-manual" };
+  assert.deepEqual(prepareElectronWindowsRelease(input), {
+    releaseRef: input.releaseRef, releaseTag: "v1.0.0", version: "1.0.0", channel: "stable-manual",
+    commit: input.expectedSha, target: "windows-x64", buildId: "1.0.0-aaaaaaaaaaaa-windows-x64"
+  });
+  for (const change of [
+    { channel: "rc" }, { channel: "stable" }, { version: "1.0.1" },
+    { version: "1.0.0-rc.1" }, { releaseRef: "refs/heads/main" }, { expectedSha: "aaaaaaa" }
+  ]) assert.throws(() => prepareElectronWindowsRelease({ ...input, ...change }));
+});
+
+test("artifact build, stage and smoke accept stable only for explicit Windows manual release", async () => {
+  for (const target of Object.keys(RELEASE_TARGETS)) {
+    assert.doesNotThrow(() => assertDesktopArtifactVersion({ version: "1.0.0-rc.42", target }));
+    assert.throws(() => assertDesktopArtifactVersion({ version: "1.0.0", target }));
+    if (target === "windows-x64") {
+      assert.doesNotThrow(() => assertDesktopArtifactVersion({ version: "1.0.0", target, releaseChannel: "stable-manual" }));
+    } else {
+      assert.throws(() => assertDesktopArtifactVersion({ version: "1.0.0", target, releaseChannel: "stable-manual" }));
+    }
+  }
+  for (const version of ["1.0.1", "1.0.0-rc.1", "1.0.0; echo unsafe"]) {
+    assert.throws(() => assertDesktopArtifactVersion({ version, target: "windows-x64", releaseChannel: "stable-manual" }));
+  }
+  for (const file of ["build-candidate", "stage-candidate", "smoke-candidate-artifacts"]) {
+    assert.match(await read(`apps/desktop/scripts/${file}.mjs`), /assertDesktopArtifactVersion\(\{ version, target, releaseChannel: process\.env\.CPS_RELEASE_CHANNEL \}\)/);
+  }
+});
+
+test("existing stable releases cannot be overwritten and ambiguous API errors fail closed", async () => {
+  const input = { repository: "Dailin521/codex-provider-sync", releaseTag: "v1.0.0", token: "test-token" };
+  await assertNoExistingRelease({ ...input, fetchImpl: async () => ({ ok: false, status: 404 }) });
+  await assert.rejects(() => assertNoExistingRelease({ ...input, fetchImpl: async () => ({ ok: true, status: 200 }) }), /already exists/);
+  await assert.rejects(() => assertNoExistingRelease({ ...input, fetchImpl: async () => ({ ok: false, status: 403 }) }), /HTTP 403/);
 });
 
 test("release preparation requires a same-SHA push ci-gate, never a PR result", async () => {
@@ -321,7 +360,7 @@ test("a newer failed or pending main run cannot fall back to an older successful
   }
 });
 
-test("Windows Electron release workflow is RC-only, candidate-only by default, and Draft-only", async () => {
+test("Windows Electron release workflow defaults to RC, explicitly allows manual stable, and stays Draft-only", async () => {
   const workflow = await read(".github/workflows/publish-electron-windows.yml");
   const preparation = await read("apps/desktop/scripts/prepare-electron-windows-release.mjs");
   const ciGate = await read("apps/desktop/scripts/verify-exact-ci-gate.mjs");
@@ -350,7 +389,11 @@ test("Windows Electron release workflow is RC-only, candidate-only by default, a
   assert.match(workflow, /Recheck exact push ci-gate and refuse an existing Release/);
   assert.match(ciGate, /A GitHub Release already exists for this immutable tag/);
   assert.match(workflow, /gh release create/);
-  assert.match(workflow, /--verify-tag[\s\S]*--draft --prerelease --latest=false/);
+  assert.match(workflow, /release_channel:[\s\S]*default: rc[\s\S]*- stable-manual/);
+  assert.match(workflow, /CPS_RELEASE_CHANNEL: \$\{\{ needs\.verify-input\.outputs\.channel \}\}/);
+  assert.match(workflow, /release_flags=\(--prerelease\)/);
+  assert.match(workflow, /if \[ "\$CPS_RELEASE_CHANNEL" = stable-manual \]; then\s+release_flags=\(--prerelease=false\)/);
+  assert.match(workflow, /--verify-tag[\s\S]*--draft "\$\{release_flags\[@\]}" --latest=false/);
   assert.match(workflow, /sha256sum --check metadata\/SHA256SUMS\.txt/);
   assert.match(workflow, /metadata\/audit-report\.v1\.json metadata\/candidate-staging\.v1\.json/);
   assert.doesNotMatch(workflow, /action-gh-release|--clobber|gh release edit/);

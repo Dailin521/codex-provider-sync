@@ -2,7 +2,7 @@
 
 # codex-provider-sync
 
-### Provider 전환 후 Codex의 이전 세션을 다시 표시합니다
+### Provider 전환 후 기존 Codex 세션을 다시 사용할 수 있도록 돕습니다
 
 [![CI](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml)
 [![CLI / Web](https://img.shields.io/npm/v/%40dailin521%2Fcodex-provider-sync?label=CLI%20%2F%20Web)](https://www.npmjs.com/package/@dailin521/codex-provider-sync)
@@ -16,13 +16,15 @@
 
 ## 해결하는 문제
 
-`model_provider`를 전환하면 이전 세션이 Codex Desktop 또는 `/resume`에서 사라질 수 있습니다. **데이터는 보통 디스크에 그대로 남아 있으며**, 세션 파일과 SQLite 인덱스의 Provider 정보만 동기화되지 않은 상태입니다.
+**세션이 보여도 현재 Provider로 계속 사용할 수 있다는 뜻은 아닙니다.** `model_provider`를 전환한 뒤에도 세션 파일과 SQLite 인덱스에 이전 Provider가 남아 있을 수 있습니다. 이 도구는 해당 정보를 현재 설정에 맞춰 Provider 불일치로 사용할 수 없는 기존 세션의 재사용을 돕습니다. 기록 목록을 다시 표시하는 것이 아니라 전환 후 세션을 다시 사용하는 데 초점을 둡니다. 서로 다른 Provider 간의 대화 계속이나 compact를 보장하지 않으며 암호화된 내용과 모델 호환성은 별도 문제입니다.
 
 이 도구는 세션 파일과 SQLite 인덱스의 Provider 정보를 맞춥니다. 실제 변경 전에 백업을 만들고 기본적으로 최신 2개를 유지하며, 변경이 없으면 백업을 만들지 않습니다. 로그인, 계정 전환, 복호화나 메시지 재구성을 하지 않으며 `auth.json`을 읽거나 수정하지 않습니다.
 
-<p align="center">
-  <img src="../images/README/provider-metadata-sync-flow.png" alt="Provider 메타데이터 동기화 전후" width="760">
-</p>
+| Provider 정보 | 동기화 전 예시 | 동기화 후 |
+| --- | --- | --- |
+| 현재 설정 | Provider B | Provider B (변경 없음) |
+| 세션 파일 | Provider A | Provider B |
+| SQLite 채팅 인덱스 | Provider A | Provider B |
 
 ### 언제 동기화가 필요한가요?
 
@@ -83,7 +85,7 @@ Web UI는 기본적으로 `127.0.0.1`에서만 수신하며, 브라우저를 자
 3. Preview sync으로 확인 후 실행하거나 Sync now를 클릭합니다.
 4. partial 결과라면 사용 중인 세션을 종료하고 다시 동기화합니다. 건너뛴 기록을 업데이트 완료로 간주하지 마세요.
 
-> **주의:** 메타데이터 동기화는 기록의 표시만 복원합니다. Provider를 바꾼 뒤 이전 세션을 계속하면 대상 백엔드가 `encrypted_content`의 추론 내용을 복호화하지 못해 대화 계속 또는 compact가 실패할 수 있습니다.
+> **주의:** 메타데이터 동기화는 Provider 불일치를 해결하며 세션을 사용할 수 없는 모든 원인을 복구하지는 않습니다. Provider를 바꾼 뒤 이전 세션을 계속하면 대상 백엔드가 `encrypted_content`의 추론 내용을 복호화하지 못해 대화 계속 또는 compact가 실패할 수 있습니다.
 
 [Web UI 전체 안내 (중국어)](README_WEB_UI_ZH.md)
 

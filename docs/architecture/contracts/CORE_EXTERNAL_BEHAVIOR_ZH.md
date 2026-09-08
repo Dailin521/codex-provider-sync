@@ -1066,6 +1066,8 @@ V1/C3 已实现上述边界；`runSync/runSwitch/runRepair/runRestore/runWatch` 
 
 ### 16.11 状态与操作反馈完善（ADR-0025）
 
+- 共享浮动通知支持点击内容/右上角 ×、键盘 Enter/空格/Esc 关闭，保留原有 5 秒自动收起及悬停/聚焦暂停；本地化关闭名称和可见焦点。只移除选中的 Toast，不关闭操作结果、不删除日志/备份、不刷新或改变运行状态；全局恢复/进行中阻断不受影响。Core 业务接口不变。
+
 - Overview“正在使用的会话”改用 Status 的可选 `sessionActivity`，Provider 预览通过 `impact.sessionActivity` 使用相同采集器。Windows 仅观察当前物理 Home 的 UUID 空 writer-lock 文件中 OS 证明由 `codex.exe` 持有的会话（PID/创建时间匹配），包含已对齐 Provider、等待输入和子会话；不代表正在生成或全局加载状态。旧 `syncSessionUsage` 不再生成，仅保留兼容解析；旧 `lockedRolloutFiles` 含义不变，二者均不能回退为活动计数。
 - `sessionActivity` 严格为 `{state:"checked",count:非负整数}` 或 `{state:"unavailable"|"unsupported",count:null}`；Facade/协议对 Status 和 Plan 同样白名单处理。RM/权限/身份失败、未知协议、重解析点、枚举漂移、缺目录或 8 秒采集超时为 unavailable；非 Windows/UNC 为 unsupported。最多 512 个会话资源，一次隐藏进程，不读消息/日志/凭据、不获取用户锁。已释放遗留空文件不计入。缺字段、未知快照、`statusReadBlocked` 或 `operationInProgress` 时 UI 显示“未知”。卡片只有标题和数值/未知，不加开发注释。预览的“本次将跳过的会话”仍按实际待写目标独占检查，Apply 原样重检，activity 不授权写入、不参与 revision。无定时刷新。详见 ADR-0030（取代 ADR-0029 的展示口径）。
 - 无有效 Status 快照时，Provider/计数显示 `—`，健康状态显示读取中或尚未验证；刷新中保留的快照明示为上次读取结果，失败不使用旧成功值。

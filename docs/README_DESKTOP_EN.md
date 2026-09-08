@@ -1,6 +1,6 @@
 # Codex Provider Sync Desktop
 
-V1 Electron is the primary desktop interface for aligning Provider metadata in local Codex session files and the chat index. Build targets are Windows, macOS, and Linux; available downloads depend on actual Release assets. Local builds do not imply public release, signing, or an enabled update channel.
+V1 Electron is the primary desktop interface for aligning Provider metadata in local Codex session files and the chat index, helping reuse sessions affected by Provider mismatches after switching. Sync does not guarantee cross-provider decryption or continuation. Build targets are Windows, macOS, and Linux; available downloads depend on actual Release assets. Local builds do not imply public release, signing, or an enabled update channel.
 
 ## First use
 
@@ -11,6 +11,8 @@ V1 Electron is the primary desktop interface for aligning Provider metadata in l
 5. Everyday sync does not require Advanced features.
 
 Wide windows place storage details beside the Sync controls, below the status and Provider distributions. **Switch Provider separately** stays at the bottom. Narrow windows stack the controls.
+
+Click anywhere on a floating notification, including its × icon, to dismiss it, or focus it and press Enter, Space or Escape. Automatic dismissal remains available. Dismissing feedback does not delete the operation result, logs or backups.
 
 ## Sync and switch Provider
 
