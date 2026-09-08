@@ -18,7 +18,8 @@ import {
 } from "../dist/shared/constants.js";
 import {
   createRuntimeOperationEventFrame,
-  createRuntimeResponseFrame
+  createRuntimeResponseFrame,
+  createRuntimeWatchStoppedFrame
 } from "../dist/shared/runtime-protocol.js";
 
 const profile = { profileId: "default", profileRevision: "profile-r1" };
@@ -41,6 +42,39 @@ function statusResult({ pending = false, legacyPending = false, selectedProfile 
     operationInProgress: null,
     rolloutScanComplete: true,
     lockedRolloutFiles: []
+  };
+}
+
+function diagnosticsResult() {
+  return {
+    schemaVersion: 1,
+    generatedAt: "2026-08-26T00:00:00.000Z",
+    runtime: { node: "v24", platform: "win32", arch: "x64" },
+    storage: { sqliteHomeSource: "default", stateDbFound: true, sqliteSupported: true },
+    provider: {
+      current: "openai",
+      implicit: false,
+      configured: ["openai"],
+      rolloutCounts: { sessions: {}, archived_sessions: {} },
+      sqliteCounts: { sessions: {}, archived_sessions: {} }
+    },
+    issues: {
+      rootModelAvailable: true,
+      rolloutModelFilesNeedingRepair: 0,
+      sqliteModelRowsNeedingRepair: 0,
+      cwdRowsNeedingRepair: 0,
+      userEventRowsNeedingRepair: 0,
+      workspaceRootsNeedingRepair: 0,
+      encryptedContentFiles: 0
+    },
+    safety: {
+      pendingRecovery: false,
+      pendingTransactions: [],
+      operationInProgress: null,
+      rolloutScanComplete: true,
+      lockedRolloutCount: 0,
+      projectThreadVisibilityAvailable: true
+    }
   };
 }
 
@@ -148,6 +182,11 @@ class FakeUtility {
         this.emitMessage(createRuntimeResponseFrame(frame.generation, frame.dispatchId, response));
         return;
       }
+      if (request.method === "getDiagnostics") {
+        const response = createCoreSuccessEnvelope(request, diagnosticsResult());
+        this.emitMessage(createRuntimeResponseFrame(frame.generation, frame.dispatchId, response));
+        return;
+      }
       if (request.method === "prepareSync"
           || request.method === "prepareSwitch"
           || request.method === "prepareRestore") {
@@ -236,7 +275,10 @@ class FakeUtility {
         ));
       }
     };
-    if (this.behavior.responseDelayMs) setTimeout(respond, this.behavior.responseDelayMs);
+    const responseDelayMs = frame.envelope.method === "getDiagnostics"
+      ? this.behavior.diagnosticsResponseDelayMs ?? this.behavior.responseDelayMs
+      : this.behavior.responseDelayMs;
+    if (responseDelayMs) setTimeout(respond, responseDelayMs);
     else queueMicrotask(respond);
   }
 
@@ -303,6 +345,46 @@ test("runtime handshake completes before the first read", async () => {
   assert.equal(children.length, 1);
   assert.deepEqual(children[0].messages.map((frame) => frame.envelope?.method), ["getStatus"]);
   assert.equal(supervisor.snapshot.generation, 1);
+});
+
+test("supervisor delivers one current-generation Watch stopped event", async () => {
+  const children = [];
+  const supervisor = new CoreRuntimeSupervisor({
+    appVersion: "0.5.0",
+    spawnUtility(identity) { const child = new FakeUtility(identity); children.push(child); return child; }
+  });
+  assert.equal((await supervisor.request(readRequest("getStatus", "watch-terminal-activate"))).ok, true);
+  const received = [];
+  supervisor.subscribeWatchStopped((event) => received.push(event));
+  children[0].emitMessage(createRuntimeWatchStoppedFrame(1, {
+    profileId: "default",
+    profileRevision: "profile-r1",
+    watch: {
+      schemaVersion: 1,
+      watchId: "watch-terminal",
+      status: "stopped",
+      startedAt: "2026-09-07T00:00:00.000Z",
+      stoppedAt: "2026-09-07T00:01:00.000Z",
+      stopReason: "recovery-required",
+      includeStateDb: true,
+      once: false
+    }
+  }));
+  assert.deepEqual(received, [{
+    generation: 1,
+    profileId: "default",
+    profileRevision: "profile-r1",
+    watch: {
+      schemaVersion: 1,
+      watchId: "watch-terminal",
+      status: "stopped",
+      startedAt: "2026-09-07T00:00:00.000Z",
+      stoppedAt: "2026-09-07T00:01:00.000Z",
+      stopReason: "recovery-required",
+      includeStateDb: true,
+      once: false
+    }
+  }]);
 });
 
 test("first cold-start write preflights Status before Prepare", async () => {
@@ -629,7 +711,7 @@ test("incompatible read-only capability hello fails before C8 business dispatch"
   assert.equal(children[0].messages.length, 0);
 });
 
-test("read timeout kills its generation before a late response can alias", async () => {
+test("ordinary read timeout kills its generation before a late response can alias", async () => {
   const children = [];
   const supervisor = new CoreRuntimeSupervisor({
     appVersion: "0.5.0",
@@ -647,6 +729,52 @@ test("read timeout kills its generation before a late response can alias", async
   await new Promise((resolve) => setTimeout(resolve, 35));
   assert.equal((await supervisor.request(readRequest("getStatus", "late"))).ok, true);
   assert.equal(children.length, 2);
+});
+
+test("Diagnostics may exceed the ordinary read timeout", async () => {
+  const children = [];
+  const supervisor = new CoreRuntimeSupervisor({
+    appVersion: "0.5.0",
+    requestTimeoutMs: 5,
+    diagnosticsRequestTimeoutMs: 50,
+    spawnUtility(identity) {
+      const child = new FakeUtility(identity, { diagnosticsResponseDelayMs: 25 });
+      children.push(child);
+      return child;
+    }
+  });
+  const response = await supervisor.request(readRequest("getDiagnostics", "delayed-diagnostics"));
+  assert.equal(response.ok, true);
+  assert.equal(supervisor.snapshot.state, "ready");
+  assert.equal(children[0].killCalls, 0);
+});
+
+test("Diagnostics timeout kills its generation before a late response can alias", async () => {
+  const children = [];
+  const supervisor = new CoreRuntimeSupervisor({
+    appVersion: "0.5.0",
+    requestTimeoutMs: 50,
+    diagnosticsRequestTimeoutMs: 5,
+    spawnUtility(identity) {
+      const child = new FakeUtility(
+        identity,
+        children.length === 0 ? { diagnosticsResponseDelayMs: 25 } : {}
+      );
+      children.push(child);
+      return child;
+    }
+  });
+  const timedOut = await supervisor.request(readRequest("getDiagnostics", "late-diagnostics"));
+  assert.equal(timedOut.ok, false);
+  assert.equal(timedOut.error.code, "INTERNAL_ERROR");
+  assert.equal(supervisor.snapshot.state, "crashed");
+  await new Promise((resolve) => setTimeout(resolve, 35));
+  assert.equal((await supervisor.request(readRequest("getDiagnostics", "after-late-diagnostics"))).ok, true);
+  assert.equal(children.length, 2);
+  assert.deepEqual(
+    children[1].messages.filter((frame) => frame.kind === "request").map((frame) => frame.envelope.method),
+    ["getStatus", "getDiagnostics"]
+  );
 });
 
 test("write timeout is a Runtime crash, never a cancellation, and the restart preflights", async () => {

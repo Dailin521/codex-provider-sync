@@ -462,6 +462,63 @@ test("versioned Core HTTP stream forwards progress and cancels only its correlat
   }
 });
 
+test("versioned Core HTTP stream forwards request progress for Repair Prepare without an operation id", async () => {
+  const handle = await startFixture({
+    coreFacade: {
+      async prepareRepair(input, control) {
+        control.onProgress({ stage: "scan_repair", status: "start", progress: 0 });
+        control.onProgress({ stage: "scan_repair", status: "complete", progress: 1, count: 2 });
+        const profile = handle.stateStore.getProfile(input.profile.profileId);
+        return {
+          schemaVersion: 1,
+          planId: "p".repeat(32),
+          operation: "repair",
+          createdAt: "2026-09-07T00:00:00.000Z",
+          expiresAt: "2026-09-07T00:10:00.000Z",
+          profile: { id: profile.id, revision: profile.revision },
+          storageRevision: "storage",
+          configRevision: "config",
+          rolloutRevision: "rollout",
+          stateDbRevision: "state-db",
+          target: { targets: ["models"] },
+          impact: { rolloutFilesToChange: 0 },
+          warnings: [],
+          requiresConfirmation: true
+        };
+      }
+    }
+  });
+  try {
+    const { credential } = await handle.pair();
+    const profile = handle.stateStore.getProfile("default");
+    const response = await streamRequest({
+      origin: handle.origin,
+      pathname: "/api/core",
+      headers: {
+        Accept: "application/x-ndjson",
+        Origin: handle.origin,
+        "X-Codex-Provider-Device": credential
+      },
+      body: {
+        protocolVersion: 1,
+        requestId: "repair-prepare-progress",
+        method: "prepareRepair",
+        payload: { profile: { profileId: profile.id, profileRevision: profile.revision }, targets: ["models"] }
+      }
+    });
+    let text = "";
+    for await (const chunk of response.body) text += chunk.toString("utf8");
+    const frames = text.trim().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual(frames.map((frame) => frame.event ?? (frame.ok ? "success" : frame.error.code)), [
+      "request-progress", "request-progress", "success"
+    ]);
+    assert.equal(frames.every((frame) => frame.requestId === "repair-prepare-progress"), true);
+    assert.equal(frames.slice(0, 2).every((frame) => frame.operationId === undefined), true);
+  } finally {
+    await handle.close();
+  }
+});
+
 test("status alignment follows the current provider without requiring equal inventory counts", async () => {
   let currentStatus = {
     currentProvider: "dal",

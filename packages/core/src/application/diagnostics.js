@@ -1,6 +1,8 @@
 // @ts-check
 
-import { getStatus } from "./status.js";
+import { getDiagnosticSnapshot } from "./status.js";
+import { codexStorage } from "../infrastructure/node-core-ports.js";
+import { emitProgress, throwIfAborted } from "./runtime-support.js";
 
 /** @param {Record<string, Record<string, number>> | null | undefined} distribution */
 function countDistribution(distribution) {
@@ -16,10 +18,20 @@ function countDistribution(distribution) {
  * @param {Record<string, unknown>} [options]
  */
 export async function getDiagnostics(options = {}) {
-  const status = await getStatus({ ...options, rolloutScanMode: "full" });
+  const control = /** @type {import("../index.js").CoreHostOperationControl | undefined} */ (options.requestControl);
+  const { onProgress, signal } = control ?? {};
+  throwIfAborted(signal);
+  emitProgress(onProgress, { stage: "prepare_diagnostics", status: "running" });
+  const status = await getDiagnosticSnapshot(options);
+  throwIfAborted(signal);
+  emitProgress(onProgress, { stage: "inspect_history_integrity", status: "running" });
+  const historyIntegrity = await codexStorage.sessions.inspectHistoryIntegrity(status.codexHome, { onProgress, signal });
+  throwIfAborted(signal);
+  emitProgress(onProgress, { stage: "finish_diagnostics", status: "completed" });
   return {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
+    historyIntegrity,
     runtime: {
       node: process.version,
       platform: process.platform,
@@ -61,7 +73,8 @@ export async function getDiagnostics(options = {}) {
         preRestoreSnapshotId: transaction.preRestoreSnapshotId
       })),
       operationInProgress: status.operationInProgress,
-      rolloutScanComplete: status.rolloutScanComplete,
+      rolloutScanComplete: Boolean(status.diagnosticIssues) && status.rolloutScanComplete
+        && !status.statusReadBlocked && !status.operationInProgress,
       lockedRolloutCount: status.lockedRolloutFiles?.length ?? 0,
       projectThreadVisibilityAvailable: status.projectThreadVisibilityAvailable
     }

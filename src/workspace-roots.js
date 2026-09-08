@@ -402,14 +402,15 @@ function buildWorkspaceRootRepair(originalText, cwdStats, backupMissing) {
   const activeRootsChanged = JSON.stringify(originalActiveValue ?? null) !== JSON.stringify(nextActiveValue ?? null);
   const labelsChanged = JSON.stringify(state["electron-workspace-root-labels"] ?? null) !== JSON.stringify(nextLabels ?? null);
   const openTargetsChanged = JSON.stringify(state["open-in-target-preferences"] ?? null) !== JSON.stringify(nextOpenTargets ?? null);
-  const changedFieldCount = [
-    savedRootsChanged,
-    projectOrderChanged,
-    activeRootsChanged,
-    labelsChanged,
-    openTargetsChanged,
-    backupMissing
-  ].filter(Boolean).length;
+  const workspaceSettingsChangeKinds = Object.entries({
+    savedRoots: savedRootsChanged,
+    projectOrder: projectOrderChanged,
+    activeRoots: activeRootsChanged,
+    labels: labelsChanged,
+    openTargets: openTargetsChanged,
+    settingsBackup: backupMissing
+  }).filter(([, changed]) => changed).map(([kind]) => kind);
+  const changedFieldCount = workspaceSettingsChangeKinds.length;
 
   state["electron-saved-workspace-roots"] = nextSavedRoots;
   state["project-order"] = nextProjectOrder;
@@ -426,6 +427,7 @@ function buildWorkspaceRootRepair(originalText, cwdStats, backupMissing) {
     nextText,
     updated: changedFieldCount > 0,
     workspaceRootsNeedingRepair: changedFieldCount,
+    workspaceSettingsChangeKinds,
     updatedWorkspaceRoots: countArrayChanges(existingSavedRoots, nextSavedRoots),
     savedWorkspaceRootCount: nextSavedRoots.length
   };
@@ -458,6 +460,7 @@ export async function readWorkspaceRootRepairStats(storageOrCodexHome, options =
         present: false,
         needsRepair: false,
         workspaceRootsNeedingRepair: 0,
+        workspaceSettingsChangeKinds: [],
         savedWorkspaceRootCount: 0
       };
     }
@@ -470,6 +473,7 @@ export async function readWorkspaceRootRepairStats(storageOrCodexHome, options =
     present: true,
     needsRepair: repair.updated,
     workspaceRootsNeedingRepair: repair.workspaceRootsNeedingRepair,
+    workspaceSettingsChangeKinds: repair.workspaceSettingsChangeKinds,
     savedWorkspaceRootCount: repair.savedWorkspaceRootCount
   };
 }

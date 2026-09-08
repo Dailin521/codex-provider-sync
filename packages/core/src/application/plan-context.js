@@ -20,6 +20,7 @@ import {
 import { scanStatus } from "./status.js";
 
 const { readConfigText } = codexStorage.config;
+const { collectProviderPreparationFacts } = codexStorage.sessions;
 
 export async function verifyExpectedPlanState({
   expectedPlanState,
@@ -55,6 +56,7 @@ export async function verifyExpectedPlanState({
     storage,
     backupDir,
     rolloutRevisionMode: expectedPlanState.rolloutRevisionMode ?? "content",
+    minimumRolloutSizes: expectedPlanState.revisions.providerRolloutSizes,
     platform
   });
   const reason = revisionMismatch(expectedPlanState.revisions, actual);
@@ -77,7 +79,7 @@ export async function assertNoPendingRestoreTransactions(codexHome) {
   );
 }
 
-export async function preparePlanContext(options, operation, { backupDir = null } = {}) {
+export async function preparePlanContext(options, operation, { backupDir = null, resolveProviderTarget = null } = {}) {
   const codexHome = options.storage?.codexHome ?? normalizeCodexHome(options.codexHome);
   if (operationCoordinator.isActive(codexHome, options.platform)) {
     throw new CoreError("OPERATION_BUSY", "Lock already exists for this Codex Home; another write operation is active.", {
@@ -93,6 +95,10 @@ export async function preparePlanContext(options, operation, { backupDir = null 
   const storage = await prepareStorage({ codexHome, sqliteHome, configText, platform: options.platform });
   assertSqliteAccessSupported(storage, operation);
   const profile = profileFromOptions(options, codexHome, sqliteHome, options.platform);
+  // The use case supplies this resolver directly, never through caller options.
+  // Only Provider Prepare shares ephemeral facts; Apply/Repair/Restore still read afresh.
+  const providerFacts = resolveProviderTarget && (operation === "sync" || operation === "switch")
+    ? await collectProviderPreparationFacts(codexHome, resolveProviderTarget(configText)) : null;
   const status = await scanStatus({
     codexHome,
     sqliteHome,
@@ -101,9 +107,12 @@ export async function preparePlanContext(options, operation, { backupDir = null 
     profileId: profile.id,
     profileRevision: profile.suppliedRevision,
     rolloutScanMode: options.rolloutScanMode ?? "metadata",
+    // Provider previews show the same independent ownership metric as Overview.
+    // Actual write targets are still probed separately by the use case.
+    includeSessionActivity: operation === "sync" || operation === "switch",
     platform: options.platform
-  });
-  const rolloutRevisionMode = options.rolloutRevisionMode
+  }, providerFacts ? { ...providerFacts.scan, incompletePaths: [] } : null);
+  const rolloutRevisionMode = (operation === "sync" || operation === "switch" ? "provider" : options.rolloutRevisionMode)
     ?? (options.rolloutScanMode === "full" ? "content" : "metadata");
   const revisions = await captureOperationRevisions({
     codexHome,
@@ -113,7 +122,8 @@ export async function preparePlanContext(options, operation, { backupDir = null 
     backupDir,
     rolloutRevisionMode,
     platform: options.platform
-  });
+  }, providerFacts?.rollout);
   operationCoordinator.cacheStatus(codexHome, status, options.platform);
-  return { codexHome, sqliteHome, configText, storage, profile, revisions, status, rolloutRevisionMode };
+  return { codexHome, sqliteHome, configText, storage, profile, revisions, status, rolloutRevisionMode,
+    providerScan: providerFacts?.scan };
 }

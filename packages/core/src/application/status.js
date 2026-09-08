@@ -24,6 +24,7 @@ import {
   profileFromOptions,
   sumCounts
 } from "./runtime-support.js";
+import { emitProgress, throwIfAborted } from "./runtime-support.js";
 
 const {
   listConfiguredProviderIds,
@@ -34,6 +35,7 @@ const {
 const {
   collectDiagnosticsFacts,
   collectStatusRolloutMetadata,
+  readSessionActivity,
   summarizeProviderCounts
 } = codexStorage.sessions;
 const { readSqliteProviderCounts, readSqliteRepairStats } = codexStorage.stateDb;
@@ -68,8 +70,10 @@ export async function scanStatus({
   profileId,
   profileRevision,
   rolloutScanMode = "metadata",
+  includeSessionActivity = true,
+  requestControl,
   platform
-} = {}) {
+} = {}, preparedProviderScan = null) {
   const codexHome = providedStorage?.codexHome ?? normalizeCodexHome(explicitCodexHome);
   const configPath = path.join(codexHome, "config.toml");
   const configText = providedConfigText ?? await readConfigText(configPath);
@@ -78,14 +82,23 @@ export async function scanStatus({
   const currentModel = readRootModelFromConfigText(configText);
   const configuredProviders = listConfiguredProviderIds(configText);
   const metadataOnly = rolloutScanMode === "metadata";
+  const { onProgress, signal } = metadataOnly ? {} : requestControl ?? {};
+  throwIfAborted(signal);
   const rolloutScan = metadataOnly
-    ? await collectStatusRolloutMetadata(codexHome, { skipLockedReads: true })
+    ? preparedProviderScan ?? await collectStatusRolloutMetadata(codexHome, { skipLockedReads: true })
     : await collectDiagnosticsFacts(codexHome, {
         skipLockedReads: true,
-        targetModel: currentModel
+        targetModel: currentModel,
+        onProgress,
+        signal
       });
+  throwIfAborted(signal);
+  emitProgress(onProgress, { stage: "inspect_diagnostics_index", status: "running" });
   const { providerCounts, lockedPaths } = rolloutScan;
   const incompletePaths = metadataOnly ? rolloutScan.incompletePaths : [];
+  // Writer ownership is independent of Provider alignment and rollout readability.
+  // It is display-only, never an admission check for Sync/Restore mutations.
+  const sessionActivity = includeSessionActivity ? await readSessionActivity(codexHome) : null;
   const encryptedContentCounts = metadataOnly
     ? { sessions: {}, archived_sessions: {} }
     : rolloutScan.encryptedContentCounts;
@@ -123,6 +136,8 @@ export async function scanStatus({
       projectThreadVisibilityAvailable = false;
     }
   }
+  throwIfAborted(signal);
+  emitProgress(onProgress, { stage: "inspect_diagnostics_backups", status: "running" });
   const backupSummary = await getBackupSummary(codexHome);
   const pendingTransactions = await findPendingTransactions(codexHome);
   const trustedProfile = createProfileSnapshot({
@@ -161,6 +176,7 @@ export async function scanStatus({
     configuredProviders,
     rolloutCounts: summarizeProviderCounts(providerCounts),
     lockedRolloutFiles: lockedPaths,
+    ...(sessionActivity ? { sessionActivity } : {}),
     encryptedContentCounts,
     encryptedContentWarning: buildEncryptedContentWarning(encryptedContentCounts, current.provider ?? DEFAULT_PROVIDER),
     sqliteCounts,
@@ -246,7 +262,7 @@ async function blockedStatus(codexHome, profile, operation, platform, details = 
     status.pathComparisonCaseInsensitive = (platform ?? process.platform) === "win32";
   }
   status.statusReadBlocked = details ?? { reason: "write-operation" };
-  if (operation.lockState === "unverifiable") {
+  if (!operation || operation.lockState === "unverifiable") {
     status.rolloutScanComplete = false;
     try {
       const pendingTransactions = await findPendingTransactions(codexHome);
@@ -271,10 +287,19 @@ async function blockedStatus(codexHome, profile, operation, platform, details = 
 }
 
 export async function getStatus(options = {}) {
+  return readStatus(options);
+}
+
+// Internal one-shot diagnostic read, not a public Status option or Apply policy.
+export async function getDiagnosticSnapshot(options = {}) {
+  return readStatus({ ...options, rolloutScanMode: "full", includeSessionActivity: false }, true);
+}
+
+async function readStatus(options = {}, diagnostic = false) {
   const codexHome = options.storage?.codexHome ?? normalizeCodexHome(options.codexHome);
   const platform = options.platform ?? process.platform;
   const sqliteHome = explicitSqliteHomeFromOptions(options);
-  const rolloutRevisionMode = options.rolloutScanMode === "full" ? "content" : "metadata";
+  const rolloutRevisionMode = !diagnostic && options.rolloutScanMode === "full" ? "content" : "metadata";
   const profile = profileFromOptions(options, codexHome, sqliteHome, platform);
   const activeSnapshot = operationCoordinator.statusDuringWrite(
     codexHome,
@@ -316,11 +341,11 @@ export async function getStatus(options = {}) {
       rolloutRevisionMode,
       platform
     });
-  } catch (error) {
+  } catch {
     return blockedStatus(
       codexHome,
       profile,
-      externalOperationFromLock({ error, scope: "codex-home" }),
+      null,
       platform,
       { reason: "revision-unverifiable" }
     );
@@ -348,6 +373,7 @@ export async function getStatus(options = {}) {
   }
 
   let afterRevision;
+  let revisionUnverifiable = false;
   try {
     const latestConfigText = await readConfigText(configPath);
     afterRevision = await captureOperationRevisions({
@@ -358,17 +384,19 @@ export async function getStatus(options = {}) {
       rolloutRevisionMode,
       platform
     });
-  } catch (error) {
-    return blockedStatus(
+  } catch {
+    if (diagnostic) {
+      revisionUnverifiable = true;
+    } else return blockedStatus(
       codexHome,
       profile,
-      externalOperationFromLock({ error, scope: "codex-home" }),
+      null,
       platform,
       { reason: "revision-unverifiable" }
     );
   }
-  let driftReason = revisionMismatch(beforeRevision, afterRevision);
-  if (driftReason === "state-db" || driftReason === "rollout") {
+  let driftReason = revisionUnverifiable ? null : revisionMismatch(beforeRevision, afterRevision);
+  if (!diagnostic && (driftReason === "state-db" || driftReason === "rollout")) {
     // Opening a WAL database for read-only Status can legitimately create or
     // refresh its SHM sidecar. Retry once from that new complete baseline; a
     // real concurrent writer will either expose its lock or drift again.
@@ -382,26 +410,21 @@ export async function getStatus(options = {}) {
       profileRevision: profile.suppliedRevision,
       platform
     });
-    const retryConfigText = await readConfigText(configPath);
-    const retryRevision = await captureOperationRevisions({
-      codexHome,
-      profileRevision: profile.revision,
-      configText: retryConfigText,
-      storage,
-      rolloutRevisionMode,
-      platform
-    });
-    driftReason = revisionMismatch(afterRevision, retryRevision);
-    afterRevision = retryRevision;
-  }
-  if (driftReason) {
-    return blockedStatus(
-      codexHome,
-      profile,
-      externalOperationFromLock({ scope: driftReason === "state-db" ? "state-db" : "codex-home" }),
-      platform,
-      { reason: "state-changed-during-status", revision: driftReason }
-    );
+    try {
+      const retryConfigText = await readConfigText(configPath);
+      const retryRevision = await captureOperationRevisions({
+        codexHome,
+        profileRevision: profile.revision,
+        configText: retryConfigText,
+        storage,
+        rolloutRevisionMode,
+        platform
+      });
+      driftReason = revisionMismatch(afterRevision, retryRevision);
+      afterRevision = retryRevision;
+    } catch {
+      return blockedStatus(codexHome, profile, null, platform, { reason: "revision-unverifiable" });
+    }
   }
 
   const homeFinal = await inspectStatusLock(homeLockPath, { scope: "codex-home", platform });
@@ -416,7 +439,24 @@ export async function getStatus(options = {}) {
       lockState: operation.lockState
     });
   }
-  operationCoordinator.cacheStatus(codexHome, snapshot, platform);
+  if (revisionUnverifiable) {
+    return { ...snapshot, rolloutScanComplete: false, statusReadBlocked: { reason: "revision-unverifiable" } };
+  }
+  if (driftReason) {
+    if (diagnostic) {
+      // Keep this scan's observations, never cache them as a complete Status.
+      // An active Codex writer may append while a long diagnostic read runs.
+      return { ...snapshot, rolloutScanComplete: false,
+        statusReadBlocked: { reason: "state-changed-during-status", revision: driftReason } };
+    }
+    // A changing rollout/SQLite revision is not evidence of another tool
+    // operation. Preserve the last complete snapshot as unverified, without
+    // inventing an external writer or clearing any real lock.
+    return blockedStatus(codexHome, profile, null, platform, {
+      reason: "state-changed-during-status", revision: driftReason
+    });
+  }
+  if (!diagnostic) operationCoordinator.cacheStatus(codexHome, snapshot, platform);
   return snapshot;
 }
 

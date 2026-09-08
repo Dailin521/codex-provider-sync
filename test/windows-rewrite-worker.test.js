@@ -1,7 +1,6 @@
 import { EventEmitter } from "node:events";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import test, { afterEach } from "node:test";
@@ -10,6 +9,22 @@ import { fileURLToPath } from "node:url";
 
 const cleanups = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+const TEST_TEMP_ROOT = "D:\\Temp";
+
+function completeTiming(overrides = {}) {
+  return {
+    workerMs: 1,
+    sourceOpenMs: 1,
+    readHeaderMs: 1,
+    tempCreateMs: 1,
+    copyTailMs: 1,
+    flushMs: 1,
+    replaceMs: 1,
+    cleanupMs: 1,
+    restoreMtimeMs: 1,
+    ...overrides
+  };
+}
 
 import {
   applySessionChanges,
@@ -77,7 +92,11 @@ test("native Windows helper recovers short writes and flush failures", {
   skip: process.platform !== "win32"
 }, () => {
   const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-    "-File", fileURLToPath(new URL("./windows-provider-bytes.ps1", import.meta.url))], { encoding: "utf8", timeout: 60000 });
+    "-File", fileURLToPath(new URL("./windows-provider-bytes.ps1", import.meta.url))], {
+    encoding: "utf8",
+    timeout: 60000,
+    env: { ...process.env, TEMP: TEST_TEMP_ROOT, TMP: TEST_TEMP_ROOT }
+  });
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /PASS: native partial-write exception/);
 });
@@ -112,10 +131,37 @@ test("Windows rewrite worker reuses one process and preserves the closed result 
   assert.deepEqual(results, expectedResults);
 });
 
+test("Windows rewrite worker keeps valid rewrite results when timing is absent or invalid", async () => {
+  let request = 0;
+  const fake = createFakeSpawn({
+    respond(message) {
+      request += 1;
+      return {
+        protocolVersion: 1,
+        type: "result",
+        id: message.id,
+        path: message.path,
+        result: "APPLIED",
+        ...(request === 2 ? { timing: { workerMs: -1 } } : {})
+      };
+    }
+  });
+  const worker = await createWindowsExclusiveRewriteWorker({ spawnImpl: fake.spawnImpl });
+  try {
+    assert.equal(await worker.rewrite({ path: path.resolve("rollout-no-timing.jsonl") }, { requireOriginalMatch: true }), "APPLIED");
+    assert.equal(worker.takeTiming(), null);
+    assert.equal(await worker.rewrite({ path: path.resolve("rollout-invalid-timing.jsonl") }, { requireOriginalMatch: true }), "APPLIED");
+    assert.equal(worker.takeTiming(), null);
+  } finally {
+    await worker.close();
+  }
+});
+
 test("real Windows in-place apply/recovery retains file ID and appended data", {
   skip: process.platform !== "win32"
 }, async (t) => {
-  const home = await fs.mkdtemp(path.join(os.tmpdir(), "provider-bytes-windows-"));
+  await fs.mkdir(TEST_TEMP_ROOT, { recursive: true });
+  const home = await fs.mkdtemp(path.join(TEST_TEMP_ROOT, "provider-bytes-windows-"));
   cleanups.push(() => fs.rm(home, { recursive: true, force: true }));
   await fs.mkdir(path.join(home, "sessions"));
   const file = path.join(home, "sessions", "rollout-[fixture].jsonl");
@@ -124,7 +170,14 @@ test("real Windows in-place apply/recovery retains file ID and appended data", {
   await fs.writeFile(file, original);
   const { changes } = await collectSessionChanges(home, "prov_a", { fast: true });
   const before = await fs.stat(file, { bigint: true });
-  assert.equal((await applySessionChanges(changes)).inPlaceChanges, 1);
+  const timings = [];
+  assert.equal((await applySessionChanges(changes, { onTiming: timing => timings.push(timing) })).inPlaceChanges, 1);
+  assert.equal(timings.length, 1);
+  assert.equal(timings[0].measuredFiles, 1);
+  assert.equal(timings[0].inPlaceFiles, 1);
+  assert.equal(timings[0].flushMs >= 0 && timings[0].restoreMtimeMs >= 0, true);
+  assert.equal(timings[0].readHeaderMs >= 0, true);
+  assert.equal(timings[0].workerMs >= timings[0].cleanupMs, true);
   assert.equal((await fs.stat(file, { bigint: true })).ino, before.ino);
   const entry = { ...changes[0], mutation: changes[0].inPlaceMutation };
   const h = await fs.open(file, "r+");
@@ -140,6 +193,30 @@ test("real Windows in-place apply/recovery retains file ID and appended data", {
   await unknown.write(Buffer.from("!"), 0, 1, entry.mutation.byteOffset + 1);
   await unknown.close();
   await assert.rejects(restoreSessionChanges([entry]), AggregateError);
+});
+
+test("native failure timing survives PowerShell exception wrapping without rewriting unknown bytes", { skip: process.platform !== "win32" }, async () => {
+  const home = await fs.mkdtemp(path.join(TEST_TEMP_ROOT, "provider-native-timing-error-"));
+  cleanups.push(() => fs.rm(home, { recursive: true, force: true }));
+  await fs.mkdir(path.join(home, "sessions"));
+  const file = path.join(home, "sessions", "rollout-error.jsonl");
+  const original = JSON.stringify({ type: "session_meta", payload: { id: "fixture", model_provider: "openai" } }) + "\nsynthetic tail\n";
+  await fs.writeFile(file, original);
+  const { changes } = await collectSessionChanges(home, "prov_a", { fast: true });
+  const damaged = original.replace('"openai"', '"!penai"');
+  await fs.writeFile(file, damaged);
+  const worker = await createWindowsExclusiveRewriteWorker();
+  try {
+    let failureMessage;
+    await assert.rejects(worker.rewrite({ ...changes[0], restoreProviderBytes: true }, { requireOriginalMatch: true }), (error) => { failureMessage = error.message; return true; });
+    const observed = worker.takeTiming();
+    assert.equal(observed.complete, false);
+    assert.match(failureMessage, /Unknown rollout bytes during provider recovery/);
+    assert.doesNotMatch(failureMessage, /not serializable/);
+    assert.ok(observed.timing.readHeaderMs > 0, `InnerException holds measured native header-read time: ${failureMessage}`);
+    assert.ok(observed.timing.workerMs >= observed.timing.cleanupMs);
+    assert.equal(await fs.readFile(file, "utf8"), damaged);
+  } finally { await worker.close().catch(() => {}); }
 });
 
 test("Windows rewrite worker rejects mismatched and malformed protocol responses", async (t) => {
@@ -260,10 +337,116 @@ test("applySessionChanges creates one Windows worker and does not queue the next
   ]);
 });
 
+test("applySessionChanges publishes one aggregate Windows timing without trusting observers", {
+  skip: process.platform !== "win32"
+}, async () => {
+  const observations = [];
+  let request = 0;
+  const result = await applySessionChanges([
+    { path: path.resolve("rollout-timing-a.jsonl"), originalMtimeMs: Date.now(), modelOnlyChange: false },
+    { path: path.resolve("rollout-timing-b.jsonl"), originalMtimeMs: Date.now(), modelOnlyChange: false }
+  ], {
+    windowsRewriteWorkerFactory: async () => ({
+      async rewrite() {
+        request += 1;
+        return request === 1 ? "APPLIED_IN_PLACE" : "SKIP_BUSY";
+      },
+      takeTiming() {
+        return request === 1 ? completeTiming() : completeTiming({ copyTailMs: 2 });
+      },
+      async close() {}
+    }),
+    async onTiming(timing) {
+      observations.push(timing);
+      throw new Error("observer must be isolated");
+    }
+  });
+
+  assert.equal(result.appliedChanges, 1);
+  assert.equal(observations.length, 1);
+  const [timing] = observations;
+  assert.deepEqual(Object.keys(timing).sort(), [
+    "attemptedFiles", "cleanupMs", "copyTailMs", "flushMs", "inPlaceFiles", "measuredFiles",
+    "readHeaderMs", "replaceMs", "requestRoundTripMs", "restoreMtimeMs", "rewrittenFiles",
+    "schemaVersion", "scope", "skippedFiles", "sourceOpenMs", "tempCreateMs", "totalMs",
+    "workerCloseMs", "workerMs", "workerStartupMs"
+  ].sort());
+  assert.equal(timing.schemaVersion, 1);
+  assert.equal(timing.scope, "windows-first-line");
+  assert.deepEqual({ attempted: timing.attemptedFiles, measured: timing.measuredFiles, inPlace: timing.inPlaceFiles,
+    rewritten: timing.rewrittenFiles, skipped: timing.skippedFiles }, { attempted: 2, measured: 2, inPlace: 1, rewritten: 0, skipped: 1 });
+  for (const [field, value] of Object.entries(timing)) {
+    if (field !== "scope") assert.equal(Number.isFinite(value) && value >= 0, true, field);
+  }
+});
+
+test("applySessionChanges reports partial Windows timing after a worker crash", {
+  skip: process.platform !== "win32"
+}, async () => {
+  const observations = [];
+  await assert.rejects(applySessionChanges([
+    { path: path.resolve("rollout-timing-crash.jsonl"), originalMtimeMs: Date.now(), modelOnlyChange: false }
+  ], {
+    windowsRewriteWorkerFactory: async () => ({
+      async rewrite() { throw new Error("crashed before response"); },
+      async close() {}
+    }),
+    onTiming(timing) { observations.push(timing); }
+  }), /crashed before response/);
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0].attemptedFiles, 1);
+  assert.equal(observations[0].measuredFiles, 0);
+});
+
+test("applySessionChanges retains a failed worker stage timing without counting it complete", {
+  skip: process.platform !== "win32"
+}, async () => {
+  const fake = createFakeSpawn({
+    respond(request) {
+      return {
+        protocolVersion: 1,
+        type: "error",
+        id: request.id,
+        path: request.path,
+        message: "injected stage failure",
+        timing: completeTiming({ readHeaderMs: 2, cleanupMs: 1, workerMs: 3 })
+      };
+    }
+  });
+  const observations = [];
+  await assert.rejects(applySessionChanges([
+    { path: path.resolve("rollout-timing-stage-failure.jsonl"), originalMtimeMs: Date.now(), modelOnlyChange: false }
+  ], {
+    windowsRewriteWorkerFactory: () => createWindowsExclusiveRewriteWorker({ spawnImpl: fake.spawnImpl }),
+    onTiming(timing) { observations.push(timing); }
+  }), /Windows rewrite worker failed/);
+  assert.equal(observations.length, 1);
+  assert.deepEqual({ attempted: observations[0].attemptedFiles, measured: observations[0].measuredFiles }, { attempted: 1, measured: 0 });
+  assert.equal(observations[0].readHeaderMs, 2);
+  assert.equal(observations[0].cleanupMs, 1);
+});
+
+test("applySessionChanges ignores a synchronous Windows timing observer failure", {
+  skip: process.platform !== "win32"
+}, async () => {
+  const result = await applySessionChanges([
+    { path: path.resolve("rollout-timing-sync-observer.jsonl"), originalMtimeMs: Date.now(), modelOnlyChange: false }
+  ], {
+    windowsRewriteWorkerFactory: async () => ({
+      async rewrite() { return "SKIP_CHANGED"; },
+      takeTiming() { return completeTiming(); },
+      async close() {}
+    }),
+    onTiming() { throw new Error("synchronous observer must be isolated"); }
+  });
+  assert.deepEqual(result.skippedChangedPaths, [path.resolve("rollout-timing-sync-observer.jsonl")]);
+});
+
 test("real Windows worker handles sequential Unicode and literal wildcard paths", {
   skip: process.platform !== "win32"
 }, async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "provider-worker-test-"));
+  await fs.mkdir(TEST_TEMP_ROOT, { recursive: true });
+  const root = await fs.mkdtemp(path.join(TEST_TEMP_ROOT, "provider-worker-test-"));
   try {
     const changes = [];
     for (let index = 0; index < 2; index += 1) {

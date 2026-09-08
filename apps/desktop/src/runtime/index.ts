@@ -14,6 +14,9 @@ import {
   assertRuntimeRequestFrame,
   assertRuntimeShutdownFrame,
   createRuntimeOperationEventFrame,
+  createRuntimeRequestProgressFrame,
+  createRuntimeWatchActivityFrame,
+  createRuntimeWatchStoppedFrame,
   createRuntimeResponseFrame,
   type RuntimeHelloFrame
 } from "../shared/runtime-protocol.js";
@@ -57,7 +60,11 @@ const testApplyInvoker = __CPS_DESKTOP_TEST_BUILD__
   && process.env.CPS_DESKTOP_E2E === "1"
   ? (await import("./e2e-gate.js")).createDesktopTestApplyInvoker()
   : undefined;
-const host = createDesktopRuntimeHost(profiles, testApplyInvoker);
+const host = createDesktopRuntimeHost(profiles, testApplyInvoker, (activity) => {
+  parentPort.postMessage(createRuntimeWatchActivityFrame(generation, activity));
+}, (stopped) => {
+  parentPort.postMessage(createRuntimeWatchStoppedFrame(generation, stopped));
+});
 const active = new Map<string, ActiveDispatch>();
 let shuttingDown = false;
 
@@ -126,6 +133,13 @@ function startDispatch(frame: unknown): void {
         throw new Error("Desktop progress event preceded operation-started.");
       }
       parentPort.postMessage(createRuntimeOperationEventFrame(
+        generation,
+        frame.dispatchId,
+        envelope
+      ));
+    },
+    onRequestProgress(envelope) {
+      parentPort.postMessage(createRuntimeRequestProgressFrame(
         generation,
         frame.dispatchId,
         envelope

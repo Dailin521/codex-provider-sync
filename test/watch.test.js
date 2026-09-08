@@ -4,6 +4,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import { getBackupSummary } from "../src/backup.js";
+import { openDatabase } from "../src/sqlite.js";
 import { getWatchStatus, runWatch, startWatch, stopWatch } from "../src/watch.js";
 import { OperationCoordinator } from "../src/operation-coordinator.js";
 
@@ -46,6 +48,51 @@ async function waitUntil(predicate, message, timeoutMs = 3000) {
   throw new Error(message);
 }
 
+async function waitForBackupCount(codexHome, expectedCount, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await getBackupSummary(codexHome)).count === expectedCount) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Managed backup count did not reach ${expectedCount}.`);
+}
+
+async function writeWatchRetentionFixture(codexHome) {
+  const configPath = path.join(codexHome, "config.toml");
+  const rolloutPath = path.join(codexHome, "sessions", "rollout-watch-retention.jsonl");
+  const dbPath = path.join(codexHome, "sqlite", "state_5.sqlite");
+  await fs.mkdir(path.dirname(rolloutPath), { recursive: true });
+  await fs.writeFile(rolloutPath, `${JSON.stringify({
+    type: "session_meta",
+    timestamp: "2026-09-07T00:00:00.000Z",
+    payload: { id: "watch-retention", cwd: "C:\\AITemp", model_provider: "apigather" }
+  })}\n`, "utf8");
+  await fs.rm(dbPath, { force: true });
+  const db = await openDatabase(dbPath);
+  try {
+    db.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT, archived INTEGER NOT NULL DEFAULT 0)");
+    db.prepare("INSERT INTO threads (id, model_provider, archived) VALUES (?, ?, ?)")
+      .run("watch-retention", "apigather", 0);
+  } finally {
+    db.close();
+  }
+  const backupRoot = path.join(codexHome, "backups_state", "provider-sync");
+  for (let index = 0; index < 3; index += 1) {
+    const backupDir = path.join(backupRoot, `20240101T00000${index}000Z`);
+    await fs.mkdir(backupDir, { recursive: true });
+    await fs.writeFile(path.join(backupDir, "metadata.json"), JSON.stringify({
+      version: 1,
+      namespace: "provider-sync",
+      codexHome,
+      targetProvider: "openai",
+      createdAt: `2024-01-01T00:00:0${index}.000Z`,
+      dbFiles: [],
+      changedSessionFiles: 0
+    }), "utf8");
+  }
+  return { configPath, rolloutPath };
+}
+
 test("runWatch rejects invalid debounce-ms values", async () => {
   const { codexHome } = await makeTempCodexHome();
   await assert.rejects(
@@ -54,6 +101,17 @@ test("runWatch rejects invalid debounce-ms values", async () => {
       && /Invalid --debounce-ms value/.test(error.message)
   );
   await fs.rm(codexHome, { recursive: true, force: true });
+});
+
+test("runWatch rejects invalid retention before accessing storage", async () => {
+  for (const keepCount of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    let accessed = false;
+    await assert.rejects(
+      () => runWatch({ keepCount, accessImpl: async () => { accessed = true; } }),
+      (error) => error?.code === "INVALID_INPUT"
+    );
+    assert.equal(accessed, false);
+  }
 });
 
 test("runWatch rejects when codex home or config.toml is missing", async () => {
@@ -71,6 +129,52 @@ test("runWatch rejects when codex home or config.toml is missing", async () => {
       && /config\.toml not found/.test(error.message)
   );
   await fs.rm(root, { recursive: true, force: true });
+});
+
+test("runWatch forwards keepCount to automatic Provider Sync retention", async (t) => {
+  const { root, codexHome } = await makeTempCodexHome();
+  let handle;
+  t.after(async () => { await handle?.stop(); await fs.rm(root, { recursive: true, force: true }); });
+  const { configPath, rolloutPath } = await writeWatchRetentionFixture(codexHome);
+  handle = await runWatch({ codexHome, debounceMs:20, includeStateDb: false, keepCount: 1, onLog() {} });
+
+  await fs.appendFile(configPath, "\n# trigger automatic sync\n", "utf8");
+  await waitForBackupCount(codexHome, 1);
+  assert.match(await fs.readFile(rolloutPath, "utf8"), /"model_provider":"openai"/);
+});
+
+test("runWatch keeps the default automatic backup retention at two", async (t) => {
+  const { root, codexHome } = await makeTempCodexHome();
+  let handle;
+  t.after(async () => { await handle?.stop(); await fs.rm(root, { recursive: true, force: true }); });
+  const { configPath, rolloutPath } = await writeWatchRetentionFixture(codexHome);
+  handle = await runWatch({ codexHome, debounceMs: 20, includeStateDb: false, onLog() {} });
+
+  await fs.appendFile(configPath, "\n# trigger automatic sync\n", "utf8");
+  await waitForBackupCount(codexHome, 2);
+  assert.match(await fs.readFile(rolloutPath, "utf8"), /"model_provider":"openai"/);
+});
+
+test("Watch activity preserves mutation partial details and only a backup ID", async (t) => {
+  const { root, codexHome } = await makeTempCodexHome();
+  const events = [];
+  let handle;
+  t.after(async () => { await handle?.stop(); await fs.rm(root, { recursive: true, force: true }); });
+  handle = await runWatch({
+    codexHome, watchId: "fixture-watch", includeStateDb: false, debounceMs: 20, onLog() {},
+    onActivity: (event) => events.push(event),
+    onSync: async () => ({ partial: true, partialReason: "mutation-failed", failedStage: "update_sqlite", failureCode: "SQLITE_BUSY", retryRecommended: true, backupDir: path.join(codexHome, "backups", "fixture-backup"), changedSessionFiles: 1, sqliteRowsUpdated: 0, skippedLockedRolloutFiles: [] })
+  });
+  await fs.writeFile(path.join(codexHome, "config.toml"), 'model_provider = "apigather"\n');
+  await waitUntil(() => events.some((event) => event.event === "finished"), "Watch activity did not finish");
+  const result = events.find((event) => event.event === "finished");
+  assert.equal(result.outcome, "partial");
+  assert.equal(result.backupId, "fixture-backup");
+  assert.equal(result.failedStage, "update_sqlite");
+  assert.equal(result.failureCode, "SQLITE_BUSY");
+  assert.equal(result.partialReason, "mutation-failed");
+  assert.equal(result.retryRecommended, true);
+  assert.equal(JSON.stringify(events).includes(codexHome), false);
 });
 
 test("runWatch distinguishes access denial from a missing Codex home", async () => {
@@ -436,6 +540,28 @@ test("startWatch exposes registry status and stopWatch is idempotent", async () 
     assert.equal(stopped.status, "stopped");
     assert.equal((await stopWatch({ watchId: started.watchId })).status, "stopped");
     assert.ok(getWatchStatus().watches.some((watch) => watch.watchId === started.watchId));
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("startWatch emits one terminal snapshot after an explicit stop", async () => {
+  const { root, codexHome } = await makeTempCodexHome();
+  const stopped = [];
+  try {
+    const started = await startWatch({
+      codexHome,
+      includeStateDb: false,
+      onLog() {},
+      onStopped: (snapshot) => stopped.push(snapshot),
+      onSync: async () => ({ targetProvider: "openai", changedSessionFiles: 0, sqliteRowsUpdated: 0 })
+    });
+    const first = await stopWatch({ watchId: started.watchId });
+    await stopWatch({ watchId: started.watchId });
+    assert.equal(first.status, "stopped");
+    assert.equal(stopped.length, 1);
+    assert.deepEqual(stopped[0], getWatchStatus({ watchId: started.watchId }));
+    assert.equal(stopped[0].stopReason, "external");
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

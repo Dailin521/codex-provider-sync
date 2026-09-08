@@ -28,6 +28,7 @@ export interface DesktopDiagnosticsExporterOptions {
   appVersion: string;
   isPackaged: boolean;
   now?: () => Date;
+  recentLogs?: () => string;
 }
 
 const CAPABILITY_TTL_MS = 5 * 60_000;
@@ -120,6 +121,7 @@ export class DesktopDiagnosticsExporter {
   readonly #appVersion: string;
   readonly #isPackaged: boolean;
   readonly #now: () => Date;
+  readonly #recentLogs: () => string;
   readonly #targets = new Map<string, TargetCapability>();
   readonly #reservedTargets = new Map<string, string>();
   readonly #activeDestinations = new Set<string>();
@@ -128,6 +130,7 @@ export class DesktopDiagnosticsExporter {
     this.#appVersion = options.appVersion;
     this.#isPackaged = options.isPackaged;
     this.#now = options.now ?? (() => new Date());
+    this.#recentLogs = options.recentLogs ?? (() => "");
   }
 
   authorizeTarget(targetPath: string): string {
@@ -187,6 +190,15 @@ export class DesktopDiagnosticsExporter {
           generatedAt: snapshot.generatedAt,
           provider: snapshot.provider,
           issues: snapshot.issues,
+          ...(snapshot.historyIntegrity ? { historyIntegrity: {
+            version: snapshot.historyIntegrity.version,
+            outcome: snapshot.historyIntegrity.outcome,
+            counts: snapshot.historyIntegrity.counts,
+            skipped: snapshot.historyIntegrity.skipped,
+            displayIndex: snapshot.historyIntegrity.displayIndex,
+            issuesTruncated: snapshot.historyIntegrity.issuesTruncated
+            // Export aggregate observations only, never session identities.
+          } } : {}),
           safety: {
             pendingRecovery: snapshot.safety.pendingRecovery,
             operationInProgress: snapshot.safety.operationInProgress,
@@ -206,11 +218,12 @@ export class DesktopDiagnosticsExporter {
           pendingTransactions: snapshot.safety.pendingTransactions
         }),
         {
+          name: "recent-redacted-logs/operations.jsonl",
+          data: Buffer.from(`${this.#recentLogs()}\n`, "utf8")
+        },
+        {
           name: "recent-redacted-logs/README.txt",
-          data: Buffer.from(
-            "No persistent application logs were included. Credentials, message bodies, rollout files, and databases are excluded.\n",
-            "utf8"
-          )
+          data: Buffer.from("This package contains app status and structured operation metadata only. Credentials, chat content, session files, databases, and raw console output are excluded.\n此诊断包仅包含应用状态和结构化操作信息，不包含凭据、聊天内容、会话文件、数据库或原始控制台输出。\n", "utf8")
         }
       ];
       const archive = createStoredZip(entries);

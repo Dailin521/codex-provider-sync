@@ -1,9 +1,8 @@
 export const APP_ROUTES = [
   "overview",
-  "sync",
-  "switch-provider",
   "backups-restore",
   "history",
+  "operation-logs",
   "profiles",
   "diagnostics",
   "settings"

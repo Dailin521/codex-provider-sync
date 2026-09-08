@@ -30,6 +30,8 @@ async function filesUnder(root) {
 }
 
 const files = await filesUnder(outputRoot);
+const outputBytes = (await Promise.all(files.map(async (file) => (await fs.stat(file)).size))).reduce((sum, bytes) => sum + bytes, 0);
+assert.ok(outputBytes <= 1.5 * 1024 * 1024, `Production application code exceeds 1.5 MiB (${outputBytes}); check minification.`);
 const relative = files.map((file) => path.relative(outputRoot, file).replaceAll("\\", "/"));
 for (const required of ["main/index.js", "main/runtime.js", "preload/index.cjs", "renderer/index.html"]) {
   assert.ok(relative.includes(required), `Production Electron output is missing ${required}.`);

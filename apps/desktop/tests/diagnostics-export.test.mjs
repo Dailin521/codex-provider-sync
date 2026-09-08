@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { DesktopDiagnosticsExporter } from "../dist/main/diagnostics-export.js";
+import { publicHistoryIntegrity } from "../../../src/history-integrity-dto.js";
 
 function readStoredEntries(archive) {
   const entries = new Map();
@@ -79,12 +80,31 @@ test("diagnostics exporter writes one valid fixed-entry redacted ZIP through a o
     "status-summary.json",
     "storage-layout.json",
     "pending-transaction-summary.json",
+    "recent-redacted-logs/operations.jsonl",
     "recent-redacted-logs/README.txt"
   ]);
   const text = archive.toString("utf8");
   assert.equal(text.includes(root), false);
   assert.doesNotMatch(text, /auth\.json|encrypted_content|message body sentinel|state_5\.sqlite|rollout-.*\.jsonl/i);
   assert.equal((await exporter.export(token, diagnosticsSnapshot())).status, "failed");
+});
+
+test("diagnostics export includes integrity counts without session issue identities", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cps-integrity-export-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const exporter = new DesktopDiagnosticsExporter({ appVersion: "test", isPackaged: false });
+  const target = path.join(root, "diagnostics.zip");
+  const snapshot = diagnosticsSnapshot();
+  snapshot.historyIntegrity = publicHistoryIntegrity({ outcome: "findings", counts: { duplicateOrdinals: 2 }, issues: [
+    { code: "ordinal-duplicate-observed", sessionId: "private-session-sentinel", scope: "sessions", line: 3 }
+  ] });
+  assert.equal((await exporter.export(exporter.authorizeTarget(target), snapshot)).status, "created");
+  const archive = await fs.readFile(target);
+  const summary = JSON.parse(readStoredEntries(archive).get("status-summary.json"));
+  assert.equal(summary.historyIntegrity.counts.duplicateOrdinals, 2);
+  assert.equal(summary.historyIntegrity.displayIndex.status, "unsupported");
+  assert.equal("issues" in summary.historyIntegrity, false);
+  assert.doesNotMatch(archive.toString("utf8"), /private-session-sentinel/);
 });
 
 test("diagnostics exporter rejects malformed snapshots and never accepts Renderer paths", async (t) => {

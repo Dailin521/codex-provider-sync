@@ -8,6 +8,7 @@ import { createAppI18n } from "./i18n.js";
 import { APP_ROUTES } from "./routes.js";
 import type { AppUiProps } from "./types.js";
 import { ToastProvider } from "./ui.js";
+import { ClipboardContext, browserCopyText } from "./shared/clipboard.js";
 
 export function AppUi(props: AppUiProps) {
   const requestedLocale = props.preferences.getLocale() ?? props.initialLocale;
@@ -52,7 +53,9 @@ export function AppUi(props: AppUiProps) {
     <I18nextProvider i18n={i18n}>
       <AppErrorBoundary locale={() => i18n.language}>
         <QueryClientProvider client={queryClient}>
-          <ToastProvider><AppContent props={props} /></ToastProvider>
+          <ClipboardContext.Provider value={props.host.copyText ?? browserCopyText}>
+            <ToastProvider><AppContent props={props} /></ToastProvider>
+          </ClipboardContext.Provider>
         </QueryClientProvider>
       </AppErrorBoundary>
     </I18nextProvider>

@@ -138,6 +138,60 @@ export class DesktopProfileRepository {
     return trusted;
   }
 
+  async save(input: {
+    name: string;
+    profileId?: string;
+    profileRevision?: string;
+    codexHome?: string;
+    sqliteHome?: string | null;
+  }): Promise<DesktopProfileSummary> {
+    this.#assertInitialized();
+    const current = input.profileId
+      ? this.#profiles.find((profile) => profile.id === input.profileId)
+      : undefined;
+    if (input.profileId === "default") {
+      throw profileError("INVALID_INPUT", "The default profile is managed by the launch environment.");
+    }
+    if (input.profileId && !current) throw profileError("INVALID_INPUT", "Unknown desktop profile.");
+    if (current && input.profileRevision !== revisionOf(current)) {
+      throw profileError("PROFILE_CHANGED", "The desktop profile changed.");
+    }
+    if (!current && !input.codexHome) {
+      throw profileError("INVALID_INPUT", "Codex Home is required for a new profile.");
+    }
+    const profile = normalizeProfile({
+      id: current?.id ?? `profile-${randomBytes(12).toString("hex")}`,
+      name: input.name,
+      codexHome: input.codexHome ?? current?.codexHome,
+      ...((input.sqliteHome === null
+        ? undefined
+        : input.sqliteHome ?? current?.sqliteHome)
+        ? { sqliteHome: input.sqliteHome ?? current?.sqliteHome }
+        : {})
+    });
+    if (current) {
+      this.#profiles.splice(this.#profiles.indexOf(current), 1, profile);
+    } else {
+      this.#profiles.push(profile);
+    }
+    await this.#persist();
+    return this.list().find((candidate) => candidate.id === profile.id)!;
+  }
+
+  async delete(profileId: string, profileRevision: string): Promise<void> {
+    this.#assertInitialized();
+    if (profileId === "default") {
+      throw profileError("INVALID_INPUT", "The default profile cannot be deleted.");
+    }
+    const profile = this.#profiles.find((candidate) => candidate.id === profileId);
+    if (!profile) throw profileError("INVALID_INPUT", "Unknown desktop profile.");
+    if (revisionOf(profile) !== profileRevision) {
+      throw profileError("PROFILE_CHANGED", "The desktop profile changed.");
+    }
+    this.#profiles.splice(this.#profiles.indexOf(profile), 1);
+    await this.#persist();
+  }
+
   #assertInitialized(): void {
     if (!this.#initialized) throw new Error("Desktop profile repository is not initialized.");
   }

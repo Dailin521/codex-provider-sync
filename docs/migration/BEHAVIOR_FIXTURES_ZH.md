@@ -1,5 +1,34 @@
 # vNext 行为兼容 Fixture 清单
 
+## 2026-09-08：Windows 清理与分项计时（ADR-0038）
+
+- windows-rewrite-worker.test.js / windows-provider-bytes.ps1：Force 清理回退、两种更新、正文/身份/mtime、单批聚合、未知计时和 observer/worker 失败。
+- provider-sync-lite.test.js、file-update-timing-json.test.js：Facade/CLI、partial 计时、noop 缺失与备份手动 Restore；Contracts file-update-timing.contract.mjs 固定数值白名单。
+- Desktop file-update-timing-log.test.mjs 与 UI file-update-timing.vitest.tsx：成功/partial、重启/诊断导出、Watch 终态、旧日志缺失、中英文与毫秒细项；production boundary 增补 packaged Switch 的真实计时和详情。
+- benchmark-windows-provider-rewrite.mjs --large-only/--representative --samples=3：正式 worker、D 盘至少 2,000 合成文件，计时参考与 hash/大小/mtime/原地身份门禁分别记录。
+
+## 2026-09-08：切换历史与单轮 Provider Prepare（ADR-0037）
+
+- `provider-preparation-facts.test.js`：3→1 有界首行读取、相同 revision/descriptor、锁/非法/超限/链接/跨目录、读取期追加，以及 Apply 新时间戳和追加字节保留。`plan-apply.test.js` 保留缩短/替换/文件集合变化在备份前拒绝，新增 Switch 根模型与 Provider 原值。
+- Desktop `operation-log-service/operation-log-validation/ipc-router`、UI `switch-provider-state/operation-logs-page`：前后值、缺失旧记录、partial、Profile/revision、最近成功的填入/刷新/过滤，不自动执行。
+- `scripts/benchmark-windows-provider-rewrite.mjs`：仅手动合成基准，不加入耗时数值门禁；CopyTo/Flush/Replace/mtime 分项与正文 hash/大小/原地身份/时间戳断言。不得用于真实 Home。
+
+
+## 2026-09-08：同步提速说明与日志双栏（ADR-0036）
+
+- `packages/app-ui/tests/sync-performance-tip.vitest.tsx`：中英说明默认收起、展开零业务调用；Sync/Switch 只凭实际替换 ≥100 提示，不采用预计计数、非法值或 Repair/Restore。
+- `packages/app-ui/tests/operation-logs-page.vitest.tsx`：列表/详情独立滚动、选择/返回焦点、筛选/分页/刷新清理、缺失与迟到详情，以及既有字段/手动刷新/复制保持。
+- `apps/desktop/e2e/desktop-production-boundary.spec.mjs`：仅临时 userData 合成日志；1366/1024 双栏、683×384 等效 200% 和 390×700 窄屏，验证滚动/布局/焦点，保留临时 Core Sync→Restore fixture。结果另记本轮 evidence。
+
+ADR-0035：`plan-apply.test.js` 覆盖普通聊天追加、非 Provider WAL 更新/checkpoint 不再误过期，实际 Provider/config/schema/清单/替换/截断变化仍拒绝，以及未配置 Provider 的零写入失败；`config-file.test.js` 覆盖单引号/行尾注释/带引号 section。`in-place-transaction.test.js` 仅补齐合成 Provider 声明，保留原有文件身份/正文/partial 断言。Desktop `operation-log-service.test.mjs` 与共享 UI 日志测试覆盖目标/预计计数/实际计数分离、失败原因、复核耗时、未知字段过滤和重启读取。Core I/O 与 Restore crash matrix 必须继续通过，失败与重跑分别记录。
+
+## 2026-09-07：高级功能请求进度
+
+- `test/request-progress.test.js`：真实临时 rollout 的扫描阶段/count、无路径/正文、无写入、无 operation-started、observer 异常、取消，以及 Prepare control 不进入 Apply。
+- `packages/app-ui/tests/request-progress.vitest.tsx`：本地耗时、真实阶段进度、未知总数、终态与 Profile 切换清理、晚到帧忽略、明确点击才扫描、修复预览可见进度。
+- contracts/core-client、Desktop runtime-protocol/runtime-supervisor/ipc-router/operation-log-service 与 `test/web-server.test.js`：request-progress 白名单、HTTP NDJSON、桌面请求订阅/取消和日志阶段耗时。
+- 实现与契约：[ADR-0032](../adr/0032-explicit-scan-and-preview-progress.md)。现有 Provider I/O 与恢复 fixture 保持有效，不能以进度功能放宽写入门禁。
+
 > **状态：Accepted（阶段 0 语义清单；ADR-0016 C2/C3 轻量写 Fixture 已加入）**
 >
 > **日期：2026-08-24**
@@ -8,7 +37,9 @@
 >
 > **架构基线：[vNext Electron + Node 单核心架构](../VNEXT_ELECTRON_NODE_ARCHITECTURE_ZH.md)**
 
-V1 性能夹具：`test/provider-sync-lite.test.js` 验证 Provider Sync 不读取 rollout 正文、32 MiB 等长更新保持正文 Hash/文件大小/文件身份、不等长流式替换保持正文 bytes，以及 Diagnostics/Repair/C3 partial 收敛；`test/in-place-transaction.test.js` 与 Windows worker 测试继续验证低层原地更新兼容。耗时与吞吐基准只作参考，不作为 CI 数值门禁。
+V1 Provider 门禁以 [PIO-1～PIO-6](../architecture/NODE_CORE_ARCHITECTURE_ZH.md#3-provider-io-不变量必须保持) 为准。`test/provider-sync-lite.test.js` 验证无全文正文扫描、32 MiB 合格等字节长度原地更新的正文 Hash/大小/身份、不等长流式复制的正文 bytes，以及 Diagnostics/Repair/C3 partial 收敛。新增 Facade Prepare/Apply 回归限制全文读取入口，检查 ordinal/cwd 与 SQLite model/cwd/updated_at 不变；变化文件跳过后重试可收敛。底层有界首行块预读不等于零尾部字节 I/O。
+
+`npm run core:test:provider-io` 组合上述测试、`test/in-place-transaction.test.js` 与 `test/windows-rewrite-worker.test.js`；`npm run architecture:check` 再组合既有 workspace 边界检查并由 CI 运行。Windows/POSIX 特定用例分别执行或明确 skip。耗时只作参考，不作为数值门禁；本地通过不替代完整平台或发布证据。
 
 ## 1. 目的与边界
 
@@ -19,6 +50,12 @@ C4 已建立私有 workspace、严格 schema 和只向临时目录复制的安�
 Fixture 不是用户数据样本，严禁从真实 `~/.codex`、认证文件或私人会话复制内容。
 
 ## 2. 通用 Fixture 合同
+
+History 项目布局补充：`test/history-project-summary.test.js` 保留平铺词法分组兼容；`test/history-project-tree.test.js` 验证全量 metadata 建树、保存项目根、父子关系、独立分页与孤儿访问。`history-project-menu.vitest.tsx` 验证树形展示、按需展开、无后台读取、右键/键盘菜单和焦点；本地别名由 `project-alias-preferences.vitest.ts` 验证，不写 Codex 数据。`history-actions`、`clipboard-host`、`history-scroll` 和 packaged Electron 回归继续覆盖复制/独立滚动边界，不再以本页五条分组描述当前项目树。
+
+更新入口补充（ADR-0020）：`apps/desktop/tests/public-release-checker.test.mjs` 覆盖固定公开源、正式版本比较、Electron目标资产、超时/HTTP/大小错误；`updater.test.mjs`覆盖手动模式与自动安装隔离、进度推送和失败可重试；`packages/app-ui/tests/settings-updates.vitest.tsx`覆盖设置当前版本、手动查更/下载页、IPC错误反馈和推送不轮询。生产packaged测试只验证入口，不下载真实更新或替换程序。
+
+V1 本地交互补充 fixture：`packages/app-ui/tests/direct-sync.vitest.tsx` 验证默认保留2份、一次 Prepare/同 planId Apply、无二次确认、重复点击、取消 Prepare、失败不写、completed/partial结果与焦点返回；`advanced-features.vitest.tsx` 验证诊断扫描中/失败/重试、旧结果保留与导航不自动扫描；Desktop `runtime-supervisor.test.mjs` 验证诊断独立超时预算、普通读预算保持、超时后迟到响应隔离。均使用合成数据。
 
 未来每个 Fixture 必须声明：
 
@@ -131,18 +168,34 @@ C8 的 executable mapping 为 `test/restore-v2-state-machine.test.js`、`Restore
 | --- | --- | --- |
 | `restore-relocation` | Backup 的 SQLite Home 与当前目标不同；Electron Renderer 只看到 `sqliteHomeConfigured` 摘要 | 默认拒绝；只有可信命名 profile 的显式目标和 relocation 确认才允许，且跨 SQLite Home Restore 不恢复 config。隐藏 Electron UI 回归必须证明 source 业务状态不变、目标 DB 恢复 |
 | `prune-managed-only` | backup root 同时包含受管备份、普通目录和 Pending Journal 引用 | 只删除超过保留数的受管备份；普通目录和 Pending Journal 所在目录永不删除 |
+| `default-backup-retention` | Sync、Switch、Repair 或 Prune 未显式提供 keepCount | Node Core、CLI、Web 与 Electron 默认保留最近 2 份托管备份；显式 keepCount 继续覆盖默认值 |
 | `backup-first-no-mutation` | Backup 期间空间、权限或 snapshot 失败 | 返回 `BACKUP_FAILED`；不存在 Journal/目标 mutation；原始 Hash 不变 |
 
 `bidirectional-backup-roundtrip` 与 `foreign-pending-restore` 是迁移期淘汰 .NET 前的强制门槛，不因单向 Restore 成功而视为通过。
 
 ## 7. Workspace 与 History
 
+History滚动回归：`history-scroll.vitest.tsx`保护视口壳、独立可聚焦滚动区、切换会话右侧复位及其他页面滚动；`launch-history-scroll-fixture.mjs`为Playwright CLI提供50会话/82消息隐藏Electron，实测滚轮后另一栏、详情标题和外层坐标不变，展开信息无外层溢出，覆盖1280×800、760×560、380×280视口。
+
+Desktop复制回归：`packages/app-ui/tests/clipboard-host.vitest.tsx`覆盖共享UI优先Host、浏览器拒绝时仍可复制、失败提示和不增加History读取；`apps/desktop/tests/clipboard.test.mjs`、`ipc-router.test.mjs`覆盖严格schema、UTF-8字节限制、来源拒绝、无Core/日志调用；`desktop-readonly.spec.mjs`使用合成fixture和隐藏窗口，在原生写入边界捕获文本，不操作用户剪贴板。`advanced-features.vitest.tsx`验证中英文诊断差异/加密计数说明且不自动修复。
+
 | Fixture ID | 输入语义 | 关键预期 |
 | --- | --- | --- |
 | `workspace-roots` | global state、rollout cwd 与 SQLite cwd 不一致，含跨平台路径形式 | 只修复合同允许的 workspace/cwd 元数据；路径规范化一致；Backup/Restore 覆盖 global state |
 | `history-safe-content` | user/event/response-item 重复消息、无 thread id、同 id 多 rollout，并包含大正文 rollout 与多个大 decoy | 无 query 列表只读受限首行 metadata、返回 `messageCountKnown=false` 且 UI 不显示伪 0；显式搜索仍可全文匹配并返回精确计数；详情定位只深读用户选择的 rollout；列表选择稳定会话；正文不进入日志、诊断包、Query cache 或应用数据库 |
-| `desktop-readonly-c6` | 临时 Codex Home 含无标题 rollout、真实 SQLite row、valid pending journal 与正文 marker | production bridge 无测试/Node 能力；列表/Profiles/Diagnostics 无路径和正文；显式详情后才显示 marker；写 IPC 拒绝；Utility crash 后按 profile preflight 并恢复；测试前后 Codex Home 全树 Hash 不变 |
+| `desktop-readonly-c6` | 临时 Codex Home 含无标题 rollout、带保存标题的真实 SQLite row、valid pending journal 与正文 marker | production bridge 无测试/Node 能力；概览显示当前完整路径；列表使用 SQLite 保存名称，列表/Profiles/Diagnostics 无路径和正文；显式详情后才显示 marker；错误 channel 写 IPC 拒绝；Utility crash 后按 profile preflight 并恢复；测试前后 Codex Home 全树 Hash 不变 |
+| `desktop-status-display-paths` | 默认、config、env、Profile override、legacy DB 与缺失 DB | 可信 Desktop 同一 snapshot 显示 Codex/SQLite Home 和实际 DB 路径；默认 Core/Web 无 displayPaths；请求无法开启可信选项；刷新和 Profile 切换后不残留旧路径 |
+| `history-saved-titles` | Home 名称索引、重复改名、损坏/超长记录、超长 SQLite title、config 与 default DB 不同、Profile override、缺 title 列 | 名称索引最新有效名称→所选 DB title→metadata，列表和详情一致；超长保存标题截短，坏记录不阻断回退；绝不把 first_user_message 或聊天正文当标题，不写 DB |
+| `history-unnamed-identities` | 无标题子代理、嵌套/根级 agent metadata、普通无标题会话、已有标题 | 可选 subagentName 仅包含任务末段/昵称，最长160；已保存标题优先；空标题 UI 显示本地化子任务名或日期+ID末8位；列表详情一致、不隐藏记录、不扫描正文、不写回名称 |
+| `history-session-actions` | 真实/内部ID、明确父关系、metadata/content 查询、主子过滤、metadataOnly详情 | UI默认全部+metadata；复制操作不深读正文；无真实ID不生成继续命令；筛选先于分页；按会话ID通过Main定位，不允许任意路径；详情路径只供可信Desktop展示；文件更新时间不冒充聊天时间 |
+| `history-project-root-pagination` | 保存工作区/标签、嵌套目录、同名根、超过50条主会话、页外父子、缺父/循环及后代 | 项目视图先建全图再按项目主会话分页；子任务独立按需读取并继承明确父项目；孤儿单独可访问；main计数不含子任务；搜索保留父链；无正文/路径泄漏，平铺API不变。映射 `test/history-project-tree.test.js` |
+| `history-project-ui-preferences` | 项目独立加载、子任务折叠、项目本地显示名、失败与Profile切换 | 无后台请求；右键/键盘可操作；显示名只经Host偏好存储，按Profile/revision及项目指纹隔离，失败不伪报成功；不修改会话标题/目录/原始数据；左右栏滚动与窄屏返回保持。映射 `history-project-menu.vitest.tsx`、`project-alias-preferences.vitest.ts` |
+| `everyday-sync-advanced-repair` | 普通Sync失败、进入/重入高级功能、完整诊断失败、展开与提交专项修复 | 不自动升级为诊断/修复；完整诊断只手动触发，Repair默认折叠且全不选，先Prepare再确认；默认2份备份；中英文不声称能修ordinal或重建显示索引。映射 `packages/app-ui/tests/advanced-features.vitest.tsx` 和 `test/provider-sync-lite.test.js` |
 | `desktop-release-candidate-c9` | 四个 host-native target 各自生成两个最终发行容器；容器只含 synthetic build content 与 target-native SQLite binding | 每个容器解包/安装后重新审计 ASAR/Fuse/embedded integrity/native binding，隐藏执行 Status 与 Sync→Restore，正常退出；NSIS 卸载清理；SBOM/manifest/checksum 完整闭包；四目标 aggregate 的 version/commit/lock/tool/policy 一致；任何 source map、fixture、凭据名、真实数据、非目标 binding 或未清单文件均阻断 |
+| `desktop-history-two-pane` | 多会话、Markdown/代码、超过 200 条消息及无标题 metadata | 宽屏双栏、窄屏单页；整行选择后才深读；Assistant Markdown/代码复制；截断提示；输入搜索不触发扫描，Enter/按钮才运行；无标题不读首条消息 |
+| `desktop-operation-log` | Prepare 等待后 Apply，success/partial/cancel/dismiss/crash/restart 与多阶段 progress | Prepare/Apply 单条记录；active/wall/阶段耗时、计数和关联 ID 完整；重启遗留为 interrupted；仅初始/手动刷新；5×5 MiB 轮转；诊断包包含脱敏日志 |
+| `desktop-profile-directory-token` | 原生目录选择取消、token 重放/类型错用、revision 竞争、默认 Profile 修改与活动写/Watch | Renderer 不见原始路径；token 短时单次消费；Main 生成 ID；默认不可改删；保存后选择新 Profile 并刷新；活动写/Watch 时拒绝修改 |
+| `desktop-windows-size-budget` | Windows x64 packaged output | `app.asar≤3 MiB`、解包≤280 MiB、NSIS≤105 MiB、ZIP≤130 MiB，candidate 按本次目录/版本验证全部四项；locale 精确为 en-US/zh-CN；许可证原文归档 byte/hash 一致；隐藏启动加载 SQLite 并完成 Sync→Restore |
 
 C6 executable mapping：`test-support/desktop-readonly-fixture.mjs`、`apps/desktop/tests/*.test.mjs`、`apps/desktop/e2e/desktop-production-boundary.spec.mjs` 与 `desktop-readonly.spec.mjs`。production unpacked smoke 通过 `apps/desktop/scripts/run-packaged-e2e.mjs` 解析当前平台 builder 输出；Windows/macOS/Linux Node 24 job 同时验证正常 production bundle、真实 SQLite/History 边界和 test build 的 Utility crash/restart。正式安装器、双架构 macOS 发行产物和 native fallback 留在 C9。
 
@@ -194,6 +247,47 @@ SQLite live WAL、真实文件锁、跨进程 crash 和 WSL UNC 不能作为静�
 4. 差异必须记录“Node 行为 / .NET 行为 / 权威选择 / 安全理由 / 对应测试”；
 5. Node 是 vNext 目标核心，但不能以“新实现”为理由静默覆盖更安全的既有行为。
 
+## 10.1 V1 用户体验审查增量（ADR-0024）
+
+| Fixture | 自动证据 | 固定行为 |
+| --- | --- | --- |
+| profile-scoped-watch-feedback | `packages/core/checks/core-surface.contract.mjs`、`packages/app-ui/tests/settings-watch-scope.vitest.tsx`、Desktop IPC 测试 | 不同 Home 隔离，同 Home 显式别名去重；旧请求取消、错误不跨配置 |
+| backup-read-error-and-captured-targets | `packages/app-ui/tests/ux-review-fixes.vitest.tsx` | 错误不是空列表，可重试；选项匹配实际捕获，旧备份兼容，relocation 取消配置恢复 |
+| selected-profile-preservation | 同上 | 只在删除当前配置时回默认，不因删除其他配置切换 |
+| history-detail-local-retry | 同上 | Retry 不重读列表，不重建展开/分页，正文不缓存 |
+| overview-information-before-actions | `packages/app-ui/tests/overview-paths.vitest.tsx`、Web/packaged Electron E2E | 摘要→分布→存储/路径左与Sync右同排→独立最底部Switch；宽屏摘要四项一排，1280×720/1366×768首屏同步按钮完整可见；窄屏存储→Sync，不裁剪路径或改变操作 |
+| partial-log-feedback | `packages/app-ui/tests/partial-feedback.vitest.tsx`、`apps/desktop/tests/operation-log-service.test.mjs`、`test/watch.test.js` | 嵌套失败字段/计数及备份 ID 保留，日志重启一致，返回/恢复预览严格匹配配置版本 |
+| cli-progress-operation-isolation | `test/cli-json-contract.test.js`、`test/sync-service.test.js` | Sync/Switch 六阶段不变，Repair 单独七阶段 |
+
+## 10.2 V1 反馈与窗口偏好增量（ADR-0025）
+
+| Fixture | 自动证据 | 固定行为 |
+| --- | --- | --- |
+| unknown-status-is-not-zero | `packages/app-ui/tests/ux-polish.vitest.tsx` | 无快照/加载/失败不误报不对齐或零计数，旧快照刷新提示 |
+| writer-owned-session-activity | `test/session-activity.test.js`、`packages/app-ui/tests/overview-session-usage.vitest.tsx`、`plan-review.vitest.tsx`、Contracts、Desktop production E2E | ADR-0030：真实合成 OS owner 持有两个 writer 会话即计 2（同一进程、已对齐、等待输入、中文路径），释放后遗留文件为 0；非 Codex owner 不计；缺协议/未知/失败/超时不伪报零；Status/公开 Plan 同源且与实际写入 blocker 分离，原始数据不变 |
+| preview-write-blockers | `test/sync-service.test.js`、`test/provider-sync-lite.test.js` | 实际目标共享可读但占用不可写时预览将跳过；已对齐不进入写入集合。Apply 原检查和 PIO 门禁不变，不能以 sessionActivity 代替写许可 |
+| overview-session-usage-product-copy | `packages/app-ui/tests/overview-session-usage.vitest.tsx` | 中英文卡片只显示标题和数字/“未知”，不常驻同步范围等开发注释；真实数据源另由 writer-owned-session-activity 用例验证 |
+| switch-target-current-provider | `packages/app-ui/tests/switch-provider-state.vitest.tsx` | 异步首读和手动刷新跟随当前 Provider，不以候选首项代替；保留手动目标、成功后重建默认基线；失败不重置，切换 Profile 重置草稿；卡片改名不改变 config 后同步的语义 |
+| prune-estimate-and-confirm | 同上、`provider-sync-mode.vitest.tsx` | 默认 2，上限估计、0 提示、确认/取消、列表或配置版本改变阻断 |
+| current-profile-badge | `packages/app-ui/tests/ux-polish.vitest.tsx` | 当前使用标记与编辑选择独立 |
+| post-write-status-verification | 同上 | 单次现有 Status 复核、失败不使用旧值、完整/不完整对齐明确区分 |
+| history-draft-reset | 同上 | 草稿不扫描，清除回元数据默认筛选，不缓存正文 |
+| desktop-window-state | `apps/desktop/tests/window-state.test.mjs` | 正常边界/最大化分离、负坐标/显示器失效/小工作区、原子偏好、退出 flush 和测试隔离 |
+
 ## 11. 阶段验收边界
 
+ADR-0031 fixture：`packages/app-ui/tests/repair-clarity.vitest.tsx`、`advanced-features.vitest.tsx`、`plan-review.vitest.tsx` 和 Desktop production E2E 验证专项修复三项/模型高级调整独立默认空选，双语用途和实际 Plan 说明；当前完整诊断仅提供展开/聚焦，不自动选中或请求；旧/失败/不完整/不可写结果不推荐；切换 Profile/revision 重置、禁用表单提交不绕过。保持原模型调整 → Restore hash 回环和 Provider I/O fixture。
+
+ADR-0028 fixture：`operation-log-validation.test.mjs`、`operation-log-service.test.mjs` 与 Desktop Sync/Switch E2E 验证真实 Preload 可读 revision/partial 日志、阶段耗时及轮转后内存/重启一致；`test/history-lookup-cache.test.js` 用 300 个合成文件证明稳定详情只打开所选文件两次，并验证重复 ID、移动和 Home 隔离。`test/watch.test.js`、Desktop runtime protocol/supervisor/IPC 与共享 Settings Watch 测试验证终态一次、早于响应、旧 generation、别名、离页更新和不复活。`core-js-check-boundary.contract.mjs`/`storage-types.ts` 固定类型豁免与端口参数；`test/publish-npm.test.js` 只用模拟 runner 验证所有失败阻断发布、dry-run 无认证/发布、Node 16 门禁不可省略。四平台 updater 单元测试固定未授权安装通道时的手动查更回退，不冒充 macOS/Linux 实机测试。
+
+ADR-0027：`packages/app-ui/tests/backup-retention.vitest.tsx` 验证唯一数量入口、持久化/重开、跨 Profile 同值、Sync/直接 Sync/Switch/Repair/Watch 参数一致；草稿/保存不清理、活动 Watch/查询/存储失败不保存、非法值拒绝。`test/watch.test.js` 以真实临时备份池验证显式 keepCount=1 和默认 2 的自动同步清理。Desktop Sync/Switch E2E 改用统一入口保存 5，确认未创建/清理备份，再进行各操作，清理前保存 2 并确认。
+
+ADR-0026 包体 fixture：`apps/desktop/tests/package-size.test.mjs` 验证 Windows Chromium 许可证完整原文归档、损坏检测、失败保留原文、构建输出路径边界、指定目录/版本尺寸门禁及严格参数解析。生产输出显式 minify，预算 1.5 MiB；Windows ASAR/解包预算 3/280 MiB。压缩后仍需原生 SQLite、生产包 Sync → Restore 和最终容器验证，不用下载大小冒充安装占用。
+
+ADR-0021 增量 fixture：`test/repair-scoped.test.js` 覆盖原生会话范围隔离和修后核验；`test/advanced-repair-facade.test.js` 覆盖公开输入、预览和核验 DTO；`test/history-integrity.test.js` 覆盖只读有界记录检查、未知/超限不伪报完整、显示索引明确未验证。共享 UI 对应专项修复选择、诊断过期与核验回归；所有测试使用合成临时数据，不修复真实会话。
+
+ADR-0034：上述 Repair fixture 增加字段合计/分类/去重会话、固定工作区设置类别与 Prepare 零写入；`plan-review.vitest.tsx` 验证全局只读明细、双语数量标签、100 条截断和独立滚动。`status-coordination.test.js` 验证诊断事实只扫一次、不额外全文哈希、漂移/后 revision 失败保留本次事实及最终真实 Home 锁优先；`request-progress.test.js` 验证每个事实扫描阶段仅完成一次。`advanced-features.vitest.tsx` 验证未完整结果提示、保留结果和不自动重试。
+
 阶段 0 的完成标志是本文场景、预期和安全门槛获得确认。C5 已为 `bidirectional-backup-roundtrip` 与 `foreign-pending-restore` 建立真实跨进程 Windows harness 和 required CI job；这只证明这两个 Phase 2 门槛，不代表 Restore v2、全 crash matrix、WSL 或三平台产物等价。其余 Corpus、Builder 与 CI Matrix 必须在对应 checkpoint 真正通过后才能宣称完成。
+
+ADR-0033：`test/status-coordination.test.js` 使用临时合成 rollout，在首行读取之后确定性追加，验证首次/缓存状态漂移无假 Operation、最多一次重试、首轮/扫描后/重试后 revision 失败均未核验、重试期间真实 Home 锁优先、HTTP DTO 不误健康。`test/cli-json-contract.test.js` 验证降级 Human 不崩溃、不输出假计数、JSON 保留原因不泄漏细节；`packages/app-ui/tests/app-status-gating.vitest.tsx` 与 `apps/web/e2e/web-ui.spec.mjs` 验证中性提示、真实 busy、手动刷新及全部既有写入门控，不添加轮询。

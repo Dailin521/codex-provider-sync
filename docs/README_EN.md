@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml)
 [![CLI / Web](https://img.shields.io/npm/v/%40dailin521%2Fcodex-provider-sync?label=CLI%20%2F%20Web)](https://www.npmjs.com/package/@dailin521/codex-provider-sync)
-[![Windows GUI](https://img.shields.io/github/v/release/Dailin521/codex-provider-sync?label=Windows%20GUI)](https://github.com/Dailin521/codex-provider-sync/releases/latest)
+[![Releases](https://img.shields.io/github/v/release/Dailin521/codex-provider-sync?label=Releases)](https://github.com/Dailin521/codex-provider-sync/releases)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
 [![Community](https://img.shields.io/badge/community-LINUX%20DO-2ea043.svg)](https://linux.do/)
 
@@ -18,7 +18,7 @@
 
 After switching `model_provider`, older sessions may disappear from Codex Desktop or `/resume`. **The data usually remains on disk**; only the provider information in session files and the SQLite index is out of sync.
 
-This tool synchronizes session files and the SQLite index, restoring session visibility and creating a backup before writing. It does not sign in, switch accounts, or modify `auth.json` or message content.
+This tool aligns Provider metadata in session files and the SQLite index. Actual changes are backed up first, retaining the two most recent managed backups by default; a no-op creates no backup. Desktop/Web manage retention only in Backups / Restore. Operations share the app setting, with a separate pool per Codex Home; Desktop, browsers and CLI do not share preferences. Saving the setting does not immediately delete backups, and recovery-protected backups may exceed the limit. It does not sign in, switch accounts, decrypt or reconstruct messages, or modify `auth.json`.
 
 <p align="center">
   <img src="../images/README/provider-metadata-sync-flow.png" alt="Provider metadata before and after synchronization" width="760">
@@ -32,32 +32,28 @@ This tool synchronizes session files and the SQLite index, restoring session vis
 
 ## Quick Start
 
-> The Windows GUI and Local Web UI currently use a Simplified Chinese interface.
->
-> CLI/Web and the current Windows GUI are released independently, so their version numbers may differ.
->
-> **V1 candidate designation:** This PR labels Electron as the new primary desktop candidate and the retained .NET Windows/macOS implementations as post-handoff Legacy fallbacks. **Public release status is separate:** Releases still provide only the Windows .NET GUI; Electron is not merged into `main`, published, signed, downloadable, or on an update channel. The candidate designation does not claim that Electron has publicly replaced .NET.
+> This guide describes the V1 code: Electron is its primary desktop interface, with .NET retained as Legacy. A local V1 build does not imply public release, signing, or an enabled update channel. Use only assets actually listed in Releases; npm installs the published version. See [delivery status](migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md).
 
 | Scenario | Recommended interface |
 | --- | --- |
-| Windows desktop | [Download the currently published Windows GUI (.NET)](https://github.com/Dailin521/codex-provider-sync/releases/latest) · [`V1` Electron primary desktop candidate guide (no public download)](README_DESKTOP_EN.md) |
-| macOS desktop | [Local Web UI (CLI required)](#local-web-ui); [native GUI build guide](README_MAC_GUI_EN.md) |
+| Windows desktop | V1 Electron · [User guide](README_DESKTOP_EN.md) · [Published assets](https://github.com/Dailin521/codex-provider-sync/releases) |
+| macOS / Linux desktop | [Build and platform guide](README_DESKTOP_EN.md); availability depends on actual assets for that version |
 | Browser interface or cross-platform use | [Local Web UI (CLI required)](#local-web-ui) |
 | Scripts, CI, or WSL | [CLI](#cli) |
 
-### Currently published Windows GUI (.NET; V1 Legacy fallback target)
+### Desktop app
 
-Download `CodexProviderSync.exe` from [Releases](https://github.com/Dailin521/codex-provider-sync/releases/latest):
+Use the complete supplied V1 program folder or an available platform package from [Releases](https://github.com/Dailin521/codex-provider-sync/releases). Do not copy only the Electron EXE:
 
-1. Click `刷新` (Refresh).
-2. Select the target provider.
-3. Click `立即同步` (Sync Now).
+1. Open Overview and check the current Provider and sync status.
+2. After switching elsewhere, choose Preview sync to review the impact, or Sync now to execute immediately. Both have the same scope.
+3. To change Provider in this app, select the Provider and root-model strategy, review, and confirm.
 
-The application is not code-signed, so Windows may show a security warning. Download only from this project's Releases.
+History groups main chats by project with collapsed subtasks and independent Load more controls. Right-click a chat for ID/resume-command actions or a project to set its local display name. The app also provides logs, storage profiles and advanced diagnostics/repair. Data loads initially or after explicit actions, without background polling. Watch must be enabled explicitly. Updates check once on the first launch each day or manually, without automatic installation.
 
-[Full Windows GUI guide (Chinese)](README_GUI_ZH.md)
+New Windows operation logs break file updates into copying, flushing, replacement, cleanup and timestamp restoration. Old records have no retroactive timings. Performance work retains backup-first, flushes and file timestamps; synthetic benchmark gains are not promises for a real Home.
 
-See the [Electron primary desktop candidate guide](README_DESKTOP_EN.md) for its capabilities, security boundaries, and internal acceptance workflow. A source role is not a public release; that guide provides no download and authorizes no release.
+[Full desktop guide](README_DESKTOP_EN.md)
 
 ### Local Web UI
 
@@ -68,10 +64,6 @@ npm install -g @dailin521/codex-provider-sync
 codex-provider web
 ```
 
-<p align="center">
-  <a href="../images/README/2026-08-05T03-53-48.708Z.png"><img src="../images/README/2026-08-05T03-53-48.708Z.png" alt="Web UI overview" width="760"></a>
-</p>
-
 Common options:
 
 ```bash
@@ -80,14 +72,14 @@ codex-provider web --port 8792     # Use a specific port
 codex-provider web --reset-access  # Pair a browser again
 ```
 
-The Web UI listens on `127.0.0.1` by default and opens a browser to pair automatically. Storage paths are managed by the storage configuration (profile) at the top of the page. Write operations require confirmation.
+The Web UI listens on `127.0.0.1` by default and opens a browser to pair automatically. Storage paths are managed by server-side profiles. Sync now authorizes execution on click; Preview sync, Switch, Repair and Restore show a confirmation first. All use Prepare/Apply internally.
 
 #### Synchronize history after switching providers
 
 1. Switch providers with CCSwitch or your usual tool.
-2. Click `读取状态` (Read Status) in the Web UI if needed (optional).
-3. Keep `仅同步元数据` (Metadata Only), select the target provider, and confirm the sync.
-4. You are done when the page shows `Provider 元数据已对齐` (Provider Metadata Aligned).
+2. Check the current Provider and sync status on Overview.
+3. Choose Preview sync and confirm, or click Sync now.
+4. Inspect the result. For partial completion, end the active session and sync again; skipped records are not updated records.
 
 > **Note:** Metadata sync restores history visibility only. When continuing an old session across providers, the target backend may be unable to decrypt its `encrypted_content` reasoning data, causing continuation or compaction to fail.
 
@@ -113,11 +105,13 @@ codex-provider sync
 | `codex-provider restore <backup-dir>` | Restore a backup |
 | `codex-provider watch` | Watch configuration and SQLite changes |
 
-By default, `switch` also updates the root-level `model` when the target provider section defines one. Use `--keep-root-model` to preserve the current value, or `--model <name>` to set it explicitly.
+CLI write commands execute without an interactive confirmation. For a review screen, use Desktop or Web. Scripts should use `--json` and inspect the outcome; partial completion exits with code `3`. See the [CLI guide (Chinese)](README_CLI_ZH.md) and [CLI contract](architecture/contracts/CLI_CONTRACT_ZH.md).
 
-`sync` always uses the current root `model_provider` in `config.toml` and reads only each rollout header. Equal-length Provider values are updated in place; unequal-length values use a streamed temporary file and atomic replacement while preserving the conversation body byte for byte. Sync never changes models, cwd, user-event flags, workspace roots, or encrypted content.
+By default, `switch` updates the root-level `model` when the target provider section defines one, otherwise preserving it. Use `--keep-root-model` to keep the current value or `--model <name>` to set it explicitly. None of these strategies rewrites historical models; that requires explicit Repair.
 
-A full scan occurs only when the user explicitly runs `diagnostics`, and it is read-only. Use `repair` to explicitly select `models`, `cwd`, `userEvent`, or `workspaceRoots`; selecting `workspaceRoots` also includes `cwd`. The shared Web and Electron UI expose the same Diagnostics and Repair capabilities. See [ADR-0016](adr/0016-node-core-responsibility-boundaries-and-lightweight-writes.md).
+`sync` uses the root `model_provider` in `config.toml` (defaulting to `openai`) and only parses rollout headers for its business scan. **Safe Provider IDs with equal-length JSON literal bytes and an unambiguous location are updated in place; other valid headers use streamed temporary replacement.** Both preserve body bytes. Character count is not byte length; users need not rename Providers to a fixed length. There is no `--fast` or `sync --provider` option. See the [Core I/O invariants](architecture/NODE_CORE_ARCHITECTURE_ZH.md#3-provider-io-不变量必须保持).
+
+Models, cwd, user-event flags, workspace roots and encrypted content are outside everyday Sync. Full diagnostics require an explicit read-only `diagnostics` request. `repair` scans only data required by selected `models`, `cwd`, `userEvent` or `workspaceRoots` (which includes cwd). Web/Electron expose these under Advanced features. Sync failures never auto-escalate into diagnostics or repair; record renumbering and history display-index rebuilding are not supported.
 
 SQLite Home resolution order: `--sqlite-home` → root-level `sqlite_home` in `config.toml` → `CODEX_SQLITE_HOME` → `<Codex Home>/sqlite`. Only the default layout falls back to `<Codex Home>/state_5.sqlite`.
 
@@ -125,39 +119,31 @@ SQLite Home resolution order: `--sqlite-home` → root-level `sqlite_home` in `c
 
 ```mermaid
 flowchart LR
-    Browser["Browser React UI"] --> HttpClient["HttpCoreClient"]
-    HttpClient --> WebServer["Local Web Host<br/>127.0.0.1 + pairing"]
-    WebServer --> NodeCore["Node Core public facade"]
-    CLI["Node CLI"] --> NodeCore
-
-    ElectronRenderer["Electron Renderer<br/>V1 primary desktop candidate"] --> DesktopClient["DesktopCoreClient"]
-    DesktopClient --> ElectronHost["Preload / Main<br/>narrow IPC"]
-    ElectronHost --> Utility["Utility Process"]
-    Utility --> NodeCore
-
-    WindowsGUI[".NET GUI<br/>published now; V1 Legacy fallback target"] --> Application[".NET Application"]
-    Application --> DotNetCore[".NET Core"]
-    MacGUI["macOS GUI"] --> DotNetCore
-
-    NodeCore --> Storage["Codex Storage"]
-    DotNetCore --> Storage
-
-    Storage --> Config["config.toml"]
-    Storage --> Rollouts["sessions / archived_sessions"]
-    Storage --> SQLite["state_5.sqlite"]
-    Storage --> Backups["managed backups"]
+    CLI["CLI"] --> Adapter["public-api compatibility adapter"]
+    Adapter --> UseCases["Shared Node Core use cases"]
+    Web["Web UI"] --> Host["HttpCoreClient / Local Web Host"]
+    Host --> Facade["CoreFacade"]
+    Electron["Electron UI"] --> IPC["DesktopCoreClient / narrow IPC"]
+    IPC --> Utility["Utility Process"]
+    Utility --> Facade
+    Facade --> UseCases
+    UseCases --> Storage["Node storage ports"]
+    Storage --> Files["config / sessions / SQLite / backups"]
+    Legacy["Legacy .NET desktop"] --> DotNet["Separate .NET Core"]
+    DotNet --> Files
 ```
 
-- Web requests flow through `HttpCoreClient → /api/core → Node Core public facade`; the CLI calls the same public Core boundary directly.
-- The `V1` Electron primary desktop candidate uses `DesktopCoreClient → narrow Preload/Main IPC → Utility Process → Node Core`; its Renderer has no Node, arbitrary-path, or generic-IPC access.
+- Web/Electron use CoreFacade; the CLI retains `src/public-api.js` compatibility adapters that run Prepare/Apply in-process. They share the same ProviderSync and do not parse each other's human output.
+- The V1 Electron desktop app uses `DesktopCoreClient → narrow Preload/Main IPC → Utility Process → Node Core`; its Renderer has no Node, arbitrary-path, or generic-IPC access.
 - The Windows GUI calls .NET Core through the Application layer; the macOS GUI currently calls .NET Core directly.
-- The Node service and .NET Core enforce the same configuration, rollout, SQLite, and backup safety boundaries.
+- .NET is a separate Legacy implementation. Its historical model-repair, journal and automatic rollback behavior must not be attributed to the current Node Core.
 
-The `V1` candidate carries the C10 handoff target of Electron as the new primary desktop and .NET as a retained Legacy fallback. .NET remains buildable, tested, and retained for at least two maintenance cycles. Public Releases still provide .NET; Electron has not been merged, published, or signed. Do not describe this candidate label as a completed public entry-point switch; remaining release gates are tracked in the [vNext migration execution index](migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md).
+Module ownership, Provider I/O invariants and regression gates are defined in the [current Node Core architecture](architecture/NODE_CORE_ARCHITECTURE_ZH.md). .NET remains buildable and testable; release and migration completion are tracked separately in the [execution index](migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md).
 
 ## Safety boundaries
 
-- Before every `sync` or `switch`, a backup is created at `<Codex Home>/backups_state/provider-sync/<timestamp>`; with the default Codex Home, this is `~/.codex/backups_state/provider-sync/<timestamp>`.
+- Actual Sync/Switch/Repair changes are backed up under `<Codex Home>/backups_state/provider-sync/<timestamp>`. Default retention is two; no-op operations create no backup.
+- Ordinary writes use the Home lock, native SQLite transactions and UndoBackup, without cross-file journals or automatic full rollback. Post-mutation failure is partial: prepare and retry to converge, or manually Restore. Restore retains its own snapshot, journal and compensation.
 - Does not modify message content, session titles, authentication data, `auth.json`, or `updated_at`.
 - If SQLite is in use, close Codex, Codex App, and app-server, then retry.
 - If an active session locks rollout files, other files continue; sync again after that session ends.
@@ -166,23 +152,30 @@ The `V1` candidate carries the C10 handoff target of Electron as the new primary
 
 ## Documentation
 
+- [Current Node Core architecture and development constraints](architecture/NODE_CORE_ARCHITECTURE_ZH.md)
 - [AI / Agent Guide](../AGENTS.md)
-- [Windows GUI guide (Chinese)](README_GUI_ZH.md)
-- [V1 Electron primary desktop candidate guide](README_DESKTOP_EN.md)
+- [Legacy .NET Windows GUI guide (Chinese)](README_GUI_ZH.md)
+- [CLI guide (Chinese)](README_CLI_ZH.md)
+- [V1 Electron desktop guide](README_DESKTOP_EN.md)
 - [Web UI guide (Chinese)](README_WEB_UI_ZH.md)
 - [中文](../README.md) · [日本語](README_JA.md) · [한국어](README_KO.md)
-- [macOS GUI: 中文](README_MAC_GUI_ZH.md) · [English](README_MAC_GUI_EN.md)
+- [Legacy .NET macOS GUI: 中文](README_MAC_GUI_ZH.md) · [English](README_MAC_GUI_EN.md)
 - [How it works (Chinese)](WORKING_PRINCIPLE_ZH.md) · [Changelog](../CHANGELOG.md) · [Contributing](../CONTRIBUTING.md)
 
 ## Development
 
+Full workspace development uses Node 24; the installed root CLI still supports Node 16.20.2.
+
 ```bash
 npm ci
+npm run architecture:check
 npm run web:build
 npm run web:start
 npm test
 dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj
 ```
+
+`architecture:check` reuses workspace/public-boundary checks and Provider in-place/streamed/Windows-worker regressions. CI runs the same command. Intentional Core behavior changes require an ADR, contracts, tests and user-guide updates; relaxing tests is not a substitute.
 
 Maintainers can publish the CLI/Web package independently of Windows GUI releases. See the [npm publishing guide (Chinese)](NPM_PUBLISHING.md).
 

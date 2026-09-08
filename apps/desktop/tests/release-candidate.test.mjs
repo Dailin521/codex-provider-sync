@@ -11,7 +11,14 @@ import {
   parseMacInfoPlist,
   RELEASE_TARGETS
 } from "../scripts/release-audit.mjs";
+import { prepareElectronWindowsRelease } from "../scripts/prepare-electron-windows-release.mjs";
 import { resolveCandidateBuild } from "../scripts/resolve-candidate-build.mjs";
+import {
+  hasSuccessfulCiGateJob,
+  assertNoExistingRelease,
+  selectExactSuccessfulCiRuns,
+  verifyExactMainCiGate
+} from "../scripts/verify-exact-ci-gate.mjs";
 
 const desktopRoot = path.resolve(import.meta.dirname, "..");
 const repositoryRoot = path.resolve(desktopRoot, "../..");
@@ -45,6 +52,87 @@ test("candidate identity is injected without mutating the source package version
   assert.equal(desktopManifest.homepage, "https://github.com/Dailin521/codex-provider-sync#readme");
   assert.equal(desktopManifest.devDependencies.plist, "5.0.0");
   assert.equal(desktopManifest.devDependencies.resedit, "3.1.0");
+});
+
+test("Windows release preparation accepts only an existing immutable RC tag and full SHA", () => {
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+  assert.deepEqual(prepareElectronWindowsRelease({
+    releaseRef: "refs/tags/v1.0.0-rc.42",
+    version: "1.0.0-rc.42",
+    expectedSha: sha
+  }), {
+    releaseRef: "refs/tags/v1.0.0-rc.42",
+    releaseTag: "v1.0.0-rc.42",
+    version: "1.0.0-rc.42",
+    commit: sha,
+    target: "windows-x64",
+    buildId: "1.0.0-rc.42-0123456789ab-windows-x64"
+  });
+  assert.throws(() => prepareElectronWindowsRelease({
+    releaseRef: "refs/tags/v1.0.0",
+    version: "1.0.0",
+    expectedSha: sha
+  }));
+  assert.throws(() => prepareElectronWindowsRelease({
+    releaseRef: "refs/tags/v1.0.0-beta.42",
+    version: "1.0.0-beta.42",
+    expectedSha: sha
+  }));
+  assert.throws(() => prepareElectronWindowsRelease({
+    releaseRef: "refs/tags/v1.0.0-rc.41",
+    version: "1.0.0-rc.42",
+    expectedSha: sha
+  }));
+  assert.throws(() => prepareElectronWindowsRelease({
+    releaseRef: "refs/tags/v1.0.0-rc.42",
+    version: "1.0.0-rc.42",
+    expectedSha: "0123456"
+  }));
+});
+
+test("release preparation requires a same-SHA push ci-gate, never a PR result", async () => {
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+  const runs = {
+    workflow_runs: [
+      { id: 10, head_sha: sha, head_branch: "release", event: "push", conclusion: "success", path: ".github/workflows/ci.yml" },
+      { id: 9, head_sha: sha, head_branch: "main", event: "pull_request", conclusion: "success", path: ".github/workflows/ci.yml" },
+      { id: 8, head_sha: "f".repeat(40), head_branch: "main", event: "push", conclusion: "success", path: ".github/workflows/ci.yml" },
+      { id: 7, head_sha: sha.toUpperCase(), head_branch: "main", event: "push", conclusion: "success", path: ".github/workflows/ci.yml" }
+    ]
+  };
+  assert.deepEqual(selectExactSuccessfulCiRuns(runs, sha).map((run) => run.id), [7]);
+  assert.equal(hasSuccessfulCiGateJob({ jobs: [{ name: "ci-gate", conclusion: "success" }] }), true);
+  assert.equal(hasSuccessfulCiGateJob({ jobs: [{ name: "ci-gate", conclusion: "failure" }] }), false);
+
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(url);
+    if (url.includes("/workflows/ci.yml/runs?")) return { ok: true, status: 200, json: async () => runs };
+    if (url.endsWith("/runs/7/jobs?filter=latest&per_page=100")) {
+      return { ok: true, status: 200, json: async () => ({ jobs: [{ name: "ci-gate", conclusion: "success" }] }) };
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  assert.deepEqual(await verifyExactMainCiGate({
+    repository: "Dailin521/codex-provider-sync",
+    expectedSha: sha,
+    token: "test-token",
+    fetchImpl
+  }), { runId: 7, commit: sha });
+  assert.equal(calls.length, 2);
+
+  await assertNoExistingRelease({
+    repository: "Dailin521/codex-provider-sync",
+    releaseTag: "v1.0.0-rc.42",
+    token: "test-token",
+    fetchImpl: async () => ({ ok: false, status: 404, json: async () => ({}) })
+  });
+  await assert.rejects(() => assertNoExistingRelease({
+    repository: "Dailin521/codex-provider-sync",
+    releaseTag: "v1.0.0-rc.42",
+    token: "test-token",
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({}) })
+  }), /already exists/);
 });
 
 test("macOS release audit parses XML Info.plist buffers as XML", () => {
@@ -172,6 +260,10 @@ test("builder and candidate scripts enforce native fallback, fuses, audit metada
   );
   assert.match(buildScript, /"--publish",\s*"never"/);
   assert.match(buildScript, /--config\.extraMetadata\.version=/);
+  assert.match(buildScript, /--config\.directories\.output=\$\{outputRoot\}/);
+  assert.match(buildScript, /if \(target === "windows-x64"\) \{[\s\S]*?verify-size-budget\.mjs[\s\S]*?"--output", outputRoot,[\s\S]*?"--version", version/);
+  assert.match(buildScript, /if \(sizeCheck\.status !== 0\) throw/);
+  assert.doesNotMatch(buildScript, /"--directory"/);
   assert.match(buildScript, /CPS_DESKTOP_RELEASE_AUTHORIZED:\s*"false"/);
   assert.match(attributes, /^package-lock\.json text eol=lf$/m);
   assert.match(attributes, /^apps\/desktop\/release\/artifact-audit-policy\.v1\.json text eol=lf$/m);
@@ -219,4 +311,48 @@ test("builder and candidate scripts enforce native fallback, fuses, audit metada
     "Both Linux Electron jobs must install the pinned runtime before configuring its sandbox."
   );
   assert.doesNotMatch(workflow, /sudo\s+(?:chown|chmod)\b/);
+});
+
+test("a newer failed or pending main run cannot fall back to an older successful run", () => {
+  const sha = "a".repeat(40);
+  const green = { id: 1, head_sha: sha, head_branch: "main", event: "push", conclusion: "success", path: ".github/workflows/ci.yml" };
+  for (const conclusion of ["failure", "cancelled", "skipped", null]) {
+    assert.deepEqual(selectExactSuccessfulCiRuns({ workflow_runs: [green, { ...green, id: 2, conclusion }] }, sha), []);
+  }
+});
+
+test("Windows Electron release workflow is RC-only, candidate-only by default, and Draft-only", async () => {
+  const workflow = await read(".github/workflows/publish-electron-windows.yml");
+  const preparation = await read("apps/desktop/scripts/prepare-electron-windows-release.mjs");
+  const ciGate = await read("apps/desktop/scripts/verify-exact-ci-gate.mjs");
+  assert.match(preparation, /\^1\\\.0\\\.0-rc\\\./);
+  assert.doesNotMatch(preparation, /alpha\|beta\|rc/);
+  assert.match(workflow, /workflow_dispatch:/);
+  assert.match(workflow, /run: test "\$GITHUB_REF" = refs\/heads\/main/);
+  assert.match(workflow, /contents: write\r?\n\s+actions: read/);
+  assert.match(workflow, /create_draft_release:/);
+  assert.match(workflow, /default: false/);
+  assert.match(workflow, /refs\/tags\/v1\.0\.0-rc\.N/);
+  assert.match(workflow, /git merge-base --is-ancestor/);
+  assert.match(workflow, /Require a successful exact push ci-gate/);
+  assert.match(ciGate, /run\.event === "push"/);
+  assert.match(ciGate, /run\.head_branch === "main"/);
+  assert.match(ciGate, /job\.name === "ci-gate"/);
+  assert.match(workflow, /CPS_CANDIDATE_TARGET: windows-x64/);
+  assert.match(workflow, /npm run desktop:pack:candidate/);
+  assert.match(workflow, /npm run desktop:stage:candidate/);
+  assert.match(workflow, /npm run desktop:smoke:candidate:artifacts/);
+  assert.match(workflow, /windows-x64-setup\.exe/);
+  assert.match(workflow, /windows-x64-portable\.zip/);
+  assert.match(workflow, /sbom\.cyclonedx\.json/);
+  assert.match(workflow, /SHA256SUMS\.txt/);
+  assert.match(workflow, /environment: electron-windows-release/);
+  assert.match(workflow, /Recheck exact push ci-gate and refuse an existing Release/);
+  assert.match(ciGate, /A GitHub Release already exists for this immutable tag/);
+  assert.match(workflow, /gh release create/);
+  assert.match(workflow, /--verify-tag[\s\S]*--draft --prerelease --latest=false/);
+  assert.match(workflow, /sha256sum --check metadata\/SHA256SUMS\.txt/);
+  assert.match(workflow, /metadata\/audit-report\.v1\.json metadata\/candidate-staging\.v1\.json/);
+  assert.doesNotMatch(workflow, /action-gh-release|--clobber|gh release edit/);
+  assert.doesNotMatch(workflow, /npm publish|publish:npm|publish-gui\.ps1|package-release-assets\.ps1|CodexProviderSync\.Automation/i);
 });

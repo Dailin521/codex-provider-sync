@@ -2,6 +2,7 @@ import {
   createCoreFailureEnvelope,
   createPublicCoreErrorDto,
   type CoreOperationEventEnvelope,
+  type CoreRequestProgressEnvelope,
   type CoreMethodName,
   type CoreRequestEnvelope
 } from "@codex-provider-sync/contracts";
@@ -118,7 +119,7 @@ export interface DesktopCoreBridge {
   requestMaintenance<M extends DesktopMaintenanceMethod>(
     envelope: CoreRequestEnvelope<M>
   ): Promise<unknown>;
-  subscribeOperation(listener: (event: CoreOperationEventEnvelope) => void): () => void;
+  subscribeOperation(listener: (event: CoreOperationEventEnvelope | CoreRequestProgressEnvelope) => void): () => void;
   cancelOperation(input: DesktopCancelOperationInput): Promise<DesktopCancelOperationResult>;
 }
 
@@ -133,6 +134,10 @@ function safeNotify<T>(observer: ((event: T) => void) | undefined, event: T): vo
 
 const DESKTOP_CANCEL_RETRY_MIN_DELAY_MS = 25;
 const DESKTOP_CANCEL_RETRY_MAX_DELAY_MS = 1_000;
+
+function supportsRequestProgress(method: CoreMethodName): boolean {
+  return method === "prepareRepair" || method === "getDiagnostics";
+}
 
 class DesktopCoreTransport implements CoreTransport {
   readonly #bridge: DesktopCoreBridge;
@@ -154,7 +159,8 @@ class DesktopCoreTransport implements CoreTransport {
     if (options.signal?.aborted) {
       throw abortError();
     }
-    if (isDesktopReadMethod(envelope.method)) {
+    const requestProgress = supportsRequestProgress(envelope.method);
+    if (isDesktopReadMethod(envelope.method) && !requestProgress) {
       const request = this.#bridge.requestReadOnly(
         envelope as CoreRequestEnvelope<DesktopReadMethod>
       );
@@ -169,6 +175,11 @@ class DesktopCoreTransport implements CoreTransport {
     }
 
     const requestManaged = (): Promise<unknown> => {
+      if (isDesktopReadMethod(envelope.method)) {
+        return this.#bridge.requestReadOnly(
+          envelope as CoreRequestEnvelope<DesktopReadMethod>
+        );
+      }
       if (isDesktopSyncSwitchMethod(envelope.method)) {
         return this.#bridge.requestSyncSwitch(
           envelope as CoreRequestEnvelope<DesktopSyncSwitchMethod>
@@ -187,7 +198,7 @@ class DesktopCoreTransport implements CoreTransport {
       || envelope.method === "applySwitch"
       || envelope.method === "applyRepair"
       || envelope.method === "applyRestore";
-    if (!isApply) {
+    if (!isApply && !requestProgress) {
       const request = requestManaged();
       if (!options.signal) return request;
       return new Promise((resolve, reject) => {
@@ -246,6 +257,10 @@ class DesktopCoreTransport implements CoreTransport {
     };
     const unsubscribe = this.#bridge.subscribeOperation((event) => {
       if (event.requestId !== envelope.requestId) return;
+      if (event.event === "request-progress") {
+        if (requestProgress) safeNotify(options.onRequestProgress, event);
+        return;
+      }
       if (event.event === "operation-started") {
         operationId = event.operationId;
         safeNotify(options.onOperationStarted, event);

@@ -4,7 +4,11 @@
 - Date: 2026-08-24
 - Scope: vNext
 
+V1 修订范围：[ADR-0016](0016-node-core-responsibility-boundaries-and-lightweight-writes.md) 规定普通写不创建跨文件 journal；[ADR-0019](0019-everyday-sync-and-advanced-repair.md) 允许直接同步按钮授权后连续 Prepare/Apply，无二次确认页。二者均保留一次性 Plan 和锁内复核；不能从下面的原始交互描述推导“所有按钮都必须再次确认”。Prune 继续使用独立受管备份合同。
+
 ## Context
+
+当前普通 Provider revision 的范围以 [ADR-0035](0035-provider-plan-semantic-revisions-and-sync-validation.md) 为准：正文追加/非 Provider 索引更新不是 Sync/Switch 的确认漂移；实际 Provider、身份、清单、配置变化仍拒绝。Repair/Restore 不放宽。
 
 Sync、Switch 和 Restore 的目标状态可能在用户查看影响与真正执行之间变化。桌面 UI 不能把几秒前的扫描结果当作当前事实，也不能把任意路径和写参数直接交给 Renderer 重放。
 

@@ -36,12 +36,17 @@ import {
 } from "../../../../src/backup.js";
 import { acquireLock, inspectPathLock } from "../../../../src/locking.js";
 import { getHistorySession, listHistory } from "../../../../src/history.js";
+import { inspectHistoryIntegrity } from "../../../../src/history-integrity.js";
+import { readSessionActivity } from "../../../../src/session-activity.js";
+export { publicHistoryIntegrity } from "../../../../src/history-integrity-dto.js";
+export { publicFileUpdateTiming } from "../../../contracts/dist/index.js";
 import { resolveStateDbLockResource } from "../../../../src/state-db-lock.js";
 import { PlanLedger } from "../../../../src/plan-ledger.js";
 import { sharedOperationCoordinator as operationCoordinator } from "../../../../src/operation-coordinator.js";
 import {
   captureBackupRevision,
   captureOperationRevisions,
+  collectProviderPreparationFacts,
   captureStorageRevision,
   revisionMismatch,
   sha256Revision,
@@ -116,10 +121,13 @@ export const codexStorage = createCodexStorage({
     applySessionChanges,
     collectDiagnosticsFacts,
     collectProviderChanges,
+    collectProviderPreparationFacts,
     collectRepairChanges,
     collectSessionChanges,
     collectStatusRolloutMetadata,
     getHistorySession,
+    inspectHistoryIntegrity,
+    readSessionActivity,
     listHistory,
     splitLockedSessionChanges,
     summarizeProviderCounts

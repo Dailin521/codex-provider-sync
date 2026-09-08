@@ -792,7 +792,8 @@ export function createWebUiServer({
             const dispatched = await dispatchWebCoreRequest(coreFacade, body, {
               signal: controller.signal,
               onRequestValidated(validatedRequest) {
-                if (!CORE_APPLY_METHODS.has(validatedRequest.method)) return;
+                if (!CORE_APPLY_METHODS.has(validatedRequest.method)
+                    && !["prepareRepair", "getDiagnostics"].includes(validatedRequest.method)) return;
                 if (activeCoreOperations.has(validatedRequest.requestId)) {
                   throw Object.assign(new Error("A Core request with this requestId is already active."), {
                     code: "OPERATION_BUSY",
@@ -813,6 +814,9 @@ export function createWebUiServer({
                 writeCoreStream(response, event);
               },
               onProgress(event) {
+                writeCoreStream(response, event);
+              },
+              onRequestProgress(event) {
                 writeCoreStream(response, event);
               },
               onRequestSettled() {
@@ -893,7 +897,7 @@ export function createWebUiServer({
         }
 
         if (pathname === "/api/history") {
-          const input = legacyCoreReadInput(body, ["page", "pageSize", "query", "project", "provider", "archived"]);
+          const input = legacyCoreReadInput(body, ["page", "pageSize", "query", "project", "provider", "archived", "searchScope", "sessionKind"]);
           const history = await callLegacyCoreRead("listHistory", input, response);
           if (!history) return;
           sendJson(response, 200, { history });
@@ -901,7 +905,7 @@ export function createWebUiServer({
         }
 
         if (pathname === "/api/history/session") {
-          const input = legacyCoreReadInput(body, ["sessionId", "messageLimit"]);
+          const input = legacyCoreReadInput(body, ["sessionId", "messageLimit", "metadataOnly"]);
           const history = await callLegacyCoreRead("getHistorySession", input, response);
           if (!history) return;
           sendJson(response, 200, { history });
@@ -985,6 +989,7 @@ export function createWebUiServer({
             profile: { id: profile.id, revision: profile.revision },
             profileResolver: resolveCurrentProfile,
             targets,
+            ...(body.sessionIds === undefined ? {} : { sessionIds: body.sessionIds }),
             keepCount: requireKeepCount(body.keepCount),
             platform
           });

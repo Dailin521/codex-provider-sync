@@ -1,3 +1,5 @@
+// @ts-check
+
 /**
  * Project an internal observer event onto the public, pathless ProgressEvent DTO.
  * Invalid optional numeric fields are omitted instead of causing the trusted host

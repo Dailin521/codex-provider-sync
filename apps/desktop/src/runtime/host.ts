@@ -1,16 +1,18 @@
 import {
   createCoreFailureEnvelope,
+  createCoreRequestProgressEnvelope,
   createCoreSuccessEnvelope,
   createPublicCoreErrorDto,
   sanitizePublicCoreErrorDto,
   type CoreMethodMap,
   type CoreOperationStartedEnvelope,
   type CoreProgressEnvelope,
+  type CoreRequestProgressEnvelope,
   type CoreRequestEnvelope,
   type CoreResponseEnvelope,
   type ProgressEvent
 } from "@codex-provider-sync/contracts";
-import { createCoreFacade } from "@codex-provider-sync/core";
+import { createCoreFacade, type WatchActivityEvent, type WatchStoppedEvent } from "@codex-provider-sync/core";
 import type { DesktopRuntimeMethod } from "@codex-provider-sync/core-client";
 
 import type { DesktopProfileRepository } from "../profiles/repository.js";
@@ -19,6 +21,7 @@ export interface DesktopRuntimeDispatchControl {
   signal?: AbortSignal;
   onOperationStarted?(event: CoreOperationStartedEnvelope): void;
   onProgress?(event: CoreProgressEnvelope): void;
+  onRequestProgress?(event: CoreRequestProgressEnvelope): void;
 }
 
 export type DesktopRuntimeTestApplyInvoker = (
@@ -43,10 +46,15 @@ export interface DesktopRuntimeHost {
 
 export function createDesktopRuntimeHost(
   profiles: DesktopProfileRepository,
-  testApplyInvoker?: DesktopRuntimeTestApplyInvoker
+  testApplyInvoker?: DesktopRuntimeTestApplyInvoker,
+  onWatchActivity?: (event: WatchActivityEvent) => void,
+  onWatchStopped?: (event: WatchStoppedEvent) => void
 ): DesktopRuntimeHost {
   const core = createCoreFacade({
-    resolveProfile: async (selector) => profiles.resolve(selector)
+    resolveProfile: async (selector) => profiles.resolve(selector),
+    includeLocalDisplayPaths: true,
+    ...(onWatchActivity ? { onWatchActivity } : {}),
+    ...(onWatchStopped ? { onWatchStopped } : {})
   });
 
   return Object.freeze({
@@ -80,7 +88,12 @@ export function createDesktopRuntimeHost(
             });
           },
           onProgress(progress) {
-            if (!operationId) return;
+            if (!operationId) {
+              if (request.method === "prepareRepair" || request.method === "getDiagnostics") {
+                control.onRequestProgress?.(createCoreRequestProgressEnvelope(request.requestId, progress));
+              }
+              return;
+            }
             control.onProgress?.({
               protocolVersion: 1,
               requestId: request.requestId,

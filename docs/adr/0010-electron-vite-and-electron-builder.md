@@ -55,5 +55,7 @@ V1 的 Windows x64 候选已在本地完成 ZIP/NSIS 最终容器验证；macOS 
 
 ## Related
 
+- [Windows 构建压缩与完整许可证无损归档](0026-windows-package-size-budget.md)
+
 - [Electron 选型 ADR](0001-electron-over-tauri.md)
 - [Utility Process ADR](0005-run-core-in-electron-utility-process.md)

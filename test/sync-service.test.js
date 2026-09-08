@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
@@ -3452,6 +3453,73 @@ test("prepareSync reports a numeric locked rollout impact", async () => {
   }
 });
 
+test("Preview write blockers exclude aligned sessions and are not Status activity", { skip: process.platform !== "win32" }, async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const changed = path.join(codexHome, "sessions", "rollout-正在使用[1].jsonl");
+  const aligned = path.join(codexHome, "sessions", "rollout-aligned.jsonl");
+  await writeRollout(changed, "in-use", "apigather");
+  await writeRollout(aligned, "aligned", "openai");
+  await writeStateDb(codexHome, [{ id: "in-use", model_provider: "apigather", archived: false }]);
+  const before = await fs.readFile(changed);
+  const beforeStat = await fs.stat(changed);
+  const locks = [];
+  try {
+    // Readable headers, but an exclusive writer must be rejected.
+    locks.push(await lockRolloutFile(changed, "Read"));
+    locks.push(await lockRolloutFile(aligned, "Read"));
+    const status = await getStatus({ codexHome });
+    assert.deepEqual(status.lockedRolloutFiles, []);
+    assert.deepEqual(status.sessionActivity, { state: "unavailable", count: null });
+    const plan = await prepareSync({ codexHome });
+    assert.equal(plan.impact.lockedRolloutFiles, 1);
+    assert.deepEqual(plan.impact.sessionActivity, status.sessionActivity);
+    assert.equal(status.backupSummary.count, 0);
+  } finally {
+    await Promise.all(locks.map((child) => new Promise((resolve) => {
+      child.once("exit", resolve);
+      child.kill();
+    })));
+  }
+  assert.deepEqual(await fs.readFile(changed), before);
+  const afterStat = await fs.stat(changed);
+  assert.equal(afterStat.ino, beforeStat.ino);
+  assert.equal(afterStat.mtimeMs, beforeStat.mtimeMs);
+  assert.deepEqual((await getStatus({ codexHome })).sessionActivity, { state: "unavailable", count: null });
+  assert.equal((await prepareSync({ codexHome })).impact.lockedRolloutFiles, 0);
+});
+
+test("Status stays usable while Preview rejects a missing Windows write verifier", { skip: process.platform !== "win32" }, async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  await writeRollout(path.join(codexHome, "sessions", "rollout-probe-failure.jsonl"), "probe-failure", "apigather");
+  // Isolate PATH failure to this child: never change the host/test runner environment.
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== "path"));
+  env.PATH = "";
+  const serviceUrl = new URL("../src/service.js", import.meta.url).href;
+  const script = `import { getStatus, prepareSync } from ${JSON.stringify(serviceUrl)};
+    const options = { codexHome: ${JSON.stringify(codexHome)} };
+    const status = await getStatus(options);
+    let rejected = false;
+    try { await prepareSync(options); } catch { rejected = true; }
+    console.log(JSON.stringify({ usage: status.sessionActivity, backups: status.backupSummary.count, rejected }));`;
+  const { stdout } = await promisify(execFile)(process.execPath, ["--input-type=module", "-e", script], {
+    env, windowsHide: true, timeout: 20_000
+  });
+  assert.deepEqual(JSON.parse(stdout), { usage: { state: "unavailable", count: null }, backups: 0, rejected: true });
+});
+
+test("Status does not invent activity when no writer protocol is present", async () => {
+  const { codexHome } = await makeTempCodexHome();
+  await writeConfig(codexHome, 'model_provider = "openai"');
+  const file = path.join(codexHome, "sessions", "rollout-incomplete.jsonl");
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, '{"type":"session_meta"');
+  const status = await getStatus({ codexHome });
+  assert.equal(status.rolloutScanComplete, false);
+  assert.deepEqual(status.sessionActivity, { state: process.platform === "win32" ? "unavailable" : "unsupported", count: null });
+});
+
 test("applySessionChanges skips rollout files that changed after collection", async () => {
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
@@ -4080,6 +4148,7 @@ test("pruneBackups never deletes a backup referenced by an unfinished transactio
 });
 
 test("runSync auto-prunes backups to the default retention count", async () => {
+  assert.equal(DEFAULT_BACKUP_RETENTION_COUNT, 2);
   const { codexHome } = await makeTempCodexHome();
   await writeConfig(codexHome, 'model_provider = "openai"');
   const sessionPath = path.join(codexHome, "sessions", "2026", "03", "19", "rollout-a.jsonl");

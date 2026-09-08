@@ -11,7 +11,7 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "test": "node --test checks/contracts.contract.mjs"
+    "test": "node --test checks/*.contract.mjs"
   },
   "engines": {
     "node": ">=24"

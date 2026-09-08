@@ -13,8 +13,8 @@ afterEach(() => {
 
 describe("AppErrorBoundary", () => {
   it.each([
-    ["en", "Application error", "The page encountered an unexpected error. No write was started automatically.", "Reload"],
-    ["zh-CN", "应用错误", "页面遇到未预期错误；系统没有自动启动任何写操作。", "重新加载"]
+    ["en", "This page is temporarily unavailable", "Your data was not changed. Reopen the app; if the problem continues, check Operation logs or export diagnostics.", "Reopen"],
+    ["zh-CN", "页面暂时无法显示", "你的数据没有被更改。请重新打开应用；如果问题持续，请查看操作日志或导出诊断信息。", "重新打开"]
   ])("renders the %s fail-closed recovery surface", (locale, heading, message, reload) => {
     vi.spyOn(console, "error").mockImplementation(() => {});
 

@@ -8,11 +8,13 @@ import { describe, expect, it, vi } from "vitest";
 
 import { HistoryPage, HISTORY_PAGE_SIZE } from "../src/features/history/HistoryPage.js";
 import { createAppI18n } from "../src/i18n.js";
+import { historyProjectPage } from "./helpers/history-fixtures.js";
 
 const profile = { id: "fixture", name: "Fixture", revision: "rev-1" };
 
 function page(pageNumber: number, messageCountKnown = true): HistoryPageDto {
   return {
+    ...historyProjectPage([]),
     page: pageNumber,
     pageSize: HISTORY_PAGE_SIZE,
     total: 51,
@@ -37,9 +39,14 @@ function detail(): HistorySessionDetail {
       text: "history-body-marker",
       timestamp: "2026-08-27T00:00:00.000Z",
       sequence: 1
+    }, {
+      role: "assistant",
+      text: "## Answer\n\n```js\nconsole.log('ok')\n```",
+      timestamp: "2026-08-27T00:00:01.000Z",
+      sequence: 2
     }],
     truncated: false,
-    returnedMessageCount: 1
+    returnedMessageCount: 2
   };
 }
 
@@ -73,7 +80,7 @@ describe("HistoryPage privacy and pagination", () => {
       expect.objectContaining({ signal: expect.any(AbortSignal) })
     );
 
-    await user.click(screen.getByRole("button", { name: "Next" }));
+    await user.click(screen.getByRole("button", { name: "Load more" }));
     expect(await screen.findByText("Session 2")).toBeVisible();
     expect(listHistory).toHaveBeenLastCalledWith(
       expect.objectContaining({ page: 2, pageSize: HISTORY_PAGE_SIZE }),
@@ -81,9 +88,11 @@ describe("HistoryPage privacy and pagination", () => {
     );
     expect(getHistorySession).not.toHaveBeenCalled();
 
-    const open = screen.getByRole("button", { name: "Open session" });
+    const open = screen.getByRole("button", { name: /View chat: Session 2/ });
     await user.click(open);
     expect(await screen.findByText("history-body-marker")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Answer" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Copy" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "Session 2" })).toHaveFocus();
     expect(getHistorySession).toHaveBeenCalledWith(
       expect.objectContaining({ sessionId: "session-2", messageLimit: 200 }),
@@ -93,8 +102,8 @@ describe("HistoryPage privacy and pagination", () => {
       expect(JSON.stringify(queryClient.getQueryCache().getAll().map((query) => query.state.data)))
         .not.toContain("history-body-marker");
     });
-    await user.click(screen.getByRole("button", { name: "Back to sessions" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Open session" })).toHaveFocus());
+    await user.click(screen.getByRole("button", { name: "Back to chats" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /View chat: Session 2/ })).toHaveFocus());
   });
 
   it("loads once, ignores ambient refresh triggers, and refreshes only on request", async () => {
@@ -117,6 +126,18 @@ describe("HistoryPage privacy and pagination", () => {
 
     expect(await screen.findByText("Session 1")).toBeVisible();
     expect(screen.queryByText("0 messages")).not.toBeInTheDocument();
-    expect(screen.getByText("fixture-provider")).toBeVisible();
+    expect(screen.getByRole("button", { name: "View chat: Session 1" })).toHaveAttribute("title", expect.stringContaining("fixture-provider"));
+  });
+
+  it("submits content search only on Enter or the search button", async () => {
+    const user = userEvent.setup();
+    const { listHistory } = await renderHistory();
+    await screen.findByText("Session 1");
+    const search = screen.getByRole("textbox", { name: "Search" });
+    await user.type(search, "marker");
+    expect(listHistory).toHaveBeenCalledTimes(1);
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(listHistory).toHaveBeenCalledTimes(2));
+    expect(listHistory).toHaveBeenLastCalledWith(expect.objectContaining({ query: "marker" }), expect.anything());
   });
 });

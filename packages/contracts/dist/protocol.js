@@ -1,5 +1,6 @@
 import { CORE_METHODS, CORE_PROTOCOL_VERSION } from "./dto.js";
 import { CORE_ERROR_CODES, isCanonicalPublicCoreErrorDto } from "./errors.js";
+import { isFileUpdateTiming } from "./file-update-timing.js";
 const METHOD_SET = new Set(CORE_METHODS);
 const ERROR_CODE_SET = new Set(CORE_ERROR_CODES);
 const SEVERITY_SET = new Set(["info", "warning", "error", "fatal"]);
@@ -85,12 +86,17 @@ export function assertCoreMethodInput(method, value) {
             }
             return;
         case "prepareRepair": {
-            assertProfileInput(value, ["targets", "keepCount"]);
+            assertProfileInput(value, ["targets", "keepCount", "sessionIds"]);
             const targets = Array.isArray(value.targets) ? value.targets : [];
             if (targets.length < 1
                 || targets.length > REPAIR_TARGETS.length
                 || targets.some((target) => typeof target !== "string" || !REPAIR_TARGET_SET.has(target))
                 || new Set(targets).size !== targets.length
+                || (value.sessionIds !== undefined && (!Array.isArray(value.sessionIds)
+                    || value.sessionIds.length < 1 || value.sessionIds.length > 100
+                    || value.sessionIds.some((id) => typeof id !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(id))
+                    || new Set(value.sessionIds).size !== value.sessionIds.length
+                    || targets.includes("workspaceRoots")))
                 || (value.keepCount !== undefined
                     && (!Number.isSafeInteger(value.keepCount) || Number(value.keepCount) < 1))) {
                 throw new ContractValidationError("INVALID_INPUT", "Invalid Repair input.");
@@ -129,21 +135,27 @@ export function assertCoreMethodInput(method, value) {
             }
             return;
         case "listHistory":
-            assertProfileInput(value, ["page", "pageSize", "query", "project", "provider", "archived"]);
+            assertProfileInput(value, ["page", "pageSize", "query", "project", "provider", "archived", "searchScope", "sessionKind", "view", "projectId", "parentId"]);
             if ((value.page !== undefined && (!Number.isSafeInteger(value.page) || Number(value.page) < 1))
                 || (value.pageSize !== undefined
                     && (!Number.isSafeInteger(value.pageSize)
                         || Number(value.pageSize) < 10
                         || Number(value.pageSize) > 100))
-                || ["query", "project", "provider"].some((key) => (value[key] !== undefined && typeof value[key] !== "string"))
+                || ["query", "project", "provider", "projectId", "parentId"].some((key) => (value[key] !== undefined && typeof value[key] !== "string"))
+                || (value.view !== undefined && !["flat", "projects"].includes(String(value.view)))
+                || (value.projectId !== undefined && !(/^[a-f0-9]{64}$/.test(String(value.projectId)) || ["unassigned", "orphans"].includes(String(value.projectId))))
+                || (value.parentId !== undefined && (!isNonEmptyString(value.parentId) || value.parentId.length > 512))
+                || (value.searchScope !== undefined && !["metadata", "content"].includes(String(value.searchScope)))
+                || (value.sessionKind !== undefined && !["all", "main", "subagent"].includes(String(value.sessionKind)))
                 || (value.archived !== undefined
                     && !["all", "active", "archived"].includes(String(value.archived)))) {
                 throw new ContractValidationError("INVALID_INPUT", "Invalid History list input.");
             }
             return;
         case "getHistorySession":
-            assertProfileInput(value, ["sessionId", "messageLimit"]);
+            assertProfileInput(value, ["sessionId", "messageLimit", "metadataOnly"]);
             if (!isNonEmptyString(value.sessionId)
+                || (value.metadataOnly !== undefined && typeof value.metadataOnly !== "boolean")
                 || (value.messageLimit !== undefined
                     && (!Number.isSafeInteger(value.messageLimit)
                         || Number(value.messageLimit) < 1
@@ -152,11 +164,13 @@ export function assertCoreMethodInput(method, value) {
             }
             return;
         case "startWatch":
-            assertProfileInput(value, ["includeStateDb", "debounceMs", "once"]);
+            assertProfileInput(value, ["includeStateDb", "debounceMs", "once", "keepCount"]);
             if ((value.includeStateDb !== undefined && typeof value.includeStateDb !== "boolean")
                 || (value.once !== undefined && typeof value.once !== "boolean")
                 || (value.debounceMs !== undefined
-                    && (!Number.isSafeInteger(value.debounceMs) || Number(value.debounceMs) < 0))) {
+                    && (!Number.isSafeInteger(value.debounceMs) || Number(value.debounceMs) < 0))
+                || (value.keepCount !== undefined
+                    && (!Number.isSafeInteger(value.keepCount) || Number(value.keepCount) < 1))) {
                 throw new ContractValidationError("INVALID_INPUT", "Invalid Watch input.");
             }
             return;
@@ -169,10 +183,13 @@ export function assertCoreMethodInput(method, value) {
             return;
         case "getWatchStatus":
             if (!isRecord(value)
-                || !exactObjectKeys(value, ["watchId"])
-                || (value.watchId !== undefined && !isNonEmptyString(value.watchId))) {
+                || !exactObjectKeys(value, ["profile", "watchId"])
+                || (value.watchId !== undefined && !isNonEmptyString(value.watchId))
+                || (value.profile !== undefined && value.watchId !== undefined)) {
                 throw new ContractValidationError("INVALID_INPUT", "Invalid Watch status input.");
             }
+            if (value.profile !== undefined)
+                assertProfileSelector(value.profile);
             return;
         default:
             throw new ContractValidationError("INVALID_INPUT", "Unknown Core method input.");
@@ -346,6 +363,33 @@ function isDiagnosticOperationState(value) {
         && (value.errorCode === undefined
             || (typeof value.errorCode === "string" && /^[A-Z0-9_]{1,80}$/.test(value.errorCode)));
 }
+function isHistoryIntegrity(value) {
+    if (!isRecord(value) || !exactObjectKeys(value, ["version", "outcome", "issuesTruncated", "counts", "skipped", "displayIndex", "issues", "limits"]))
+        return false;
+    const fields = [
+        ["counts", ["filesDiscovered", "filesScanned", "recordsRead", "sessionsWithId", "jsonCorruptRecords", "oversizedRecords", "duplicateOrdinals", "outOfOrderOrdinals", "changedFiles", "truncatedFiles", "unsupportedFiles"]],
+        ["skipped", ["symlinkOrReparse", "outOfRoot", "notRegular", "unreadable", "scanLimit"]],
+        ["limits", ["maxFiles", "maxRecordsPerFile", "maxLineBytes", "maxIssues"]]
+    ];
+    const codes = ["json-corrupt", "record-too-large", "ordinal-duplicate-observed", "ordinal-out-of-order-observed", "record-limit-reached", "changed-during-scan", "unterminated-record", "unsupported-format", "invalid-utf8", "unverified"];
+    return value.version === 1
+        && ["no-findings", "findings", "inconclusive", "findings-and-inconclusive"].includes(String(value.outcome))
+        && typeof value.issuesTruncated === "boolean"
+        && fields.every(([section, keys]) => {
+            const item = value[section];
+            return isRecord(item) && exactObjectKeys(item, [...keys]) && keys.every((key) => isNonNegativeInteger(item[key]));
+        })
+        && isRecord(value.displayIndex)
+        && exactObjectKeys(value.displayIndex, ["status", "reason"])
+        && value.displayIndex.status === "unsupported" && value.displayIndex.reason === "no-known-display-index-schema"
+        && Array.isArray(value.issues) && value.issues.length <= 100
+        && value.issues.every((issue) => isRecord(issue)
+            && exactObjectKeys(issue, ["code", "sessionId", "scope", "line"])
+            && codes.includes(String(issue.code))
+            && (issue.sessionId === null || (typeof issue.sessionId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(issue.sessionId)))
+            && ["sessions", "archived_sessions"].includes(String(issue.scope))
+            && (issue.line === null || (isNonNegativeInteger(issue.line) && Number(issue.line) > 0)));
+}
 function assertDiagnosticsSnapshot(value) {
     const diagnostics = requireSchemaObject(value, "DiagnosticsSnapshot");
     const runtime = isRecord(diagnostics.runtime) ? diagnostics.runtime : null;
@@ -360,8 +404,10 @@ function assertDiagnosticsSnapshot(value) {
         "storage",
         "provider",
         "issues",
-        "safety"
+        "safety",
+        "historyIntegrity"
     ])
+        && (diagnostics.historyIntegrity === undefined || isHistoryIntegrity(diagnostics.historyIntegrity))
         && isNonEmptyString(diagnostics.generatedAt)
         && diagnostics.generatedAt.length <= 64
         && runtime !== null
@@ -426,6 +472,18 @@ function isHistorySummary(value) {
         return false;
     return isNonEmptyString(value.id)
         && typeof value.title === "string"
+        && (value.project === undefined || value.project === null || (isRecord(value.project)
+            && Object.keys(value.project).every((key) => ["id", "name"].includes(key))
+            && typeof value.project.id === "string" && (/^[a-f0-9]{64}$/.test(value.project.id) || ["unassigned", "orphans"].includes(value.project.id))
+            && isNonEmptyString(value.project.name) && value.project.name.length <= 160
+            && !/[\x00-\x1f\x7f]/.test(value.project.name)))
+        && (value.nativeSessionId === undefined || value.nativeSessionId === null || (isNonEmptyString(value.nativeSessionId) && value.nativeSessionId.length <= 512))
+        && (value.parentSessionId === undefined || value.parentSessionId === null || (isNonEmptyString(value.parentSessionId) && value.parentSessionId.length <= 512))
+        && (value.sessionKind === undefined || ["main", "subagent"].includes(String(value.sessionKind)))
+        && (value.childCount === undefined || isNonNegativeInteger(value.childCount))
+        && (value.fileModifiedAt === undefined || isNonEmptyString(value.fileModifiedAt))
+        && (value.subagentName === undefined || (isNonEmptyString(value.subagentName)
+            && value.subagentName.length <= 160 && !/[\\/\x00-\x1f]/.test(value.subagentName)))
         && !("cwd" in value)
         && isNonEmptyString(value.provider)
         && typeof value.archived === "boolean"
@@ -447,23 +505,42 @@ function assertWatchSnapshot(value) {
         throw new ContractValidationError("INVALID_INPUT", "Invalid WatchSnapshot.");
     }
 }
+function isSessionActivity(value) {
+    return isRecord(value) && Object.keys(value).sort().join(",") === "count,state"
+        && (value.state === "checked" ? isNonNegativeInteger(value.count)
+            : (value.state === "unavailable" || value.state === "unsupported") && value.count === null);
+}
 export function assertCoreMethodOutput(method, value) {
     switch (method) {
         case "getStatus": {
             const status = requireSchemaObject(value, "StatusSnapshot");
             const profile = isRecord(status.profile) ? status.profile : null;
+            const displayPath = (value) => typeof value === "string"
+                && value.length > 0 && value.length <= 32768 && !value.includes("\0")
+                && /^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(value);
+            const paths = status.displayPaths;
+            const usage = status.syncSessionUsage;
             if (!isNonEmptyString(status.snapshotAt)
                 || !isNonEmptyString(status.storageRevision)
                 || !profile
                 || !isNonEmptyString(profile.id)
                 || !isNonEmptyString(profile.revision)
                 || !isNonEmptyString(status.currentProvider)
+                || (status.sessionActivity !== undefined && !isSessionActivity(status.sessionActivity))
+                || (usage !== undefined && (!isRecord(usage)
+                    || Object.keys(usage).sort().join(",") !== "count,state"
+                    || !(usage.state === "checked" ? isNonNegativeInteger(usage.count)
+                        : (usage.state === "unavailable" || usage.state === "unsupported") && usage.count === null)))
                 || !isProviderDistribution(status.rolloutCounts)
                 || (status.modelCounts !== undefined && !isProviderDistribution(status.modelCounts))
                 || !("sqliteCounts" in status)
                 || !isJsonValue(status.sqliteCounts)
                 || "codexHome" in status
                 || "sqliteHome" in status
+                || (paths !== undefined && (!isRecord(paths)
+                    || Object.keys(paths).sort().join(",") !== "codexHome,sqliteHome,stateDbPath"
+                    || !displayPath(paths.codexHome) || !displayPath(paths.sqliteHome)
+                    || !(paths.stateDbPath === null || displayPath(paths.stateDbPath))))
                 || !isNonEmptyString(status.codexHomeSource)
                 || !isNonEmptyString(status.sqliteHomeSource)
                 || !isRecord(status.backupSummary)
@@ -528,6 +605,7 @@ export function assertCoreMethodOutput(method, value) {
                 || !isJsonValue(plan.target)
                 || !isRecord(plan.impact)
                 || !isJsonValue(plan.impact)
+                || (plan.impact.sessionActivity !== undefined && !isSessionActivity(plan.impact.sessionActivity))
                 || !Array.isArray(plan.warnings)
                 || plan.warnings.some((entry) => typeof entry !== "string")
                 || typeof plan.requiresConfirmation !== "boolean") {
@@ -567,6 +645,9 @@ export function assertCoreMethodOutput(method, value) {
             if (!("result" in result) || !isJsonValue(result.result)) {
                 throw new ContractValidationError("INVALID_INPUT", "OperationResult result is required.");
             }
+            if (isRecord(result.result) && result.result.fileUpdateTiming !== undefined && !isFileUpdateTiming(result.result.fileUpdateTiming)) {
+                throw new ContractValidationError("INVALID_INPUT", "Invalid file update timing.");
+            }
             return;
         }
         case "listBackups": {
@@ -602,7 +683,14 @@ export function assertCoreMethodOutput(method, value) {
                 || !isNonNegativeInteger(value.total)
                 || typeof value.hasNextPage !== "boolean"
                 || !Array.isArray(value.sessions)
-                || value.sessions.some((entry) => !isHistorySummary(entry))) {
+                || value.sessions.some((entry) => !isHistorySummary(entry))
+                || (value.view !== undefined && value.view !== "projects")
+                || (value.projects !== undefined && (!Array.isArray(value.projects) || value.projects.some((entry) => !isRecord(entry)
+                    || Object.keys(entry).sort().join(",") !== "id,kind,name,total"
+                    || typeof entry.id !== "string" || !(/^[a-f0-9]{64}$/.test(entry.id) || ["unassigned", "orphans"].includes(entry.id))
+                    || !isNonEmptyString(entry.name) || entry.name.length > 160 || !["workspace", "directory", "unassigned", "orphans"].includes(String(entry.kind))
+                    || !isNonNegativeInteger(entry.total))))
+                || (value.projectId !== undefined && !(value.projectId === null || typeof value.projectId === "string"))) {
                 throw new ContractValidationError("INVALID_INPUT", "Invalid HistoryPage.");
             }
             return;
@@ -610,6 +698,11 @@ export function assertCoreMethodOutput(method, value) {
         case "getHistorySession": {
             if (!isRecord(value)
                 || !isHistorySummary(value.session)
+                || (value.storage !== undefined && (!isRecord(value.storage)
+                    || Object.keys(value.storage).some((key) => !["cwd", "rolloutPath"].includes(key))
+                    || typeof value.storage.cwd !== "string" || value.storage.cwd.length > 32768
+                    || !isNonEmptyString(value.storage.rolloutPath) || value.storage.rolloutPath.length > 32768
+                    || /[\x00]/.test(value.storage.cwd + value.storage.rolloutPath)))
                 || !Array.isArray(value.messages)
                 || value.messages.some((entry) => {
                     const message = isRecord(entry) ? entry : null;
@@ -713,6 +806,20 @@ export function assertCoreProgressEnvelope(value, expectedRequestId, expectedOpe
     }
     assertProgressEvent(value.progress);
 }
+export function assertCoreRequestProgressEnvelope(value, expectedRequestId) {
+    if (!isRecord(value)
+        || !exactObjectKeys(value, ["protocolVersion", "requestId", "event", "progress"])) {
+        throw new ContractValidationError("INVALID_INPUT", "Invalid Core request progress envelope.");
+    }
+    assertProtocolVersion(value.protocolVersion);
+    if (!isNonEmptyString(value.requestId)
+        || value.requestId.length > 512
+        || (expectedRequestId !== undefined && value.requestId !== expectedRequestId)
+        || value.event !== "request-progress") {
+        throw new ContractValidationError("INVALID_INPUT", "Invalid Core request progress envelope.");
+    }
+    assertProgressEvent(value.progress);
+}
 export function assertCoreOperationEventEnvelope(value, expectedRequestId, expectedOperationId) {
     if (isRecord(value) && value.event === "operation-started") {
         assertCoreOperationStartedEnvelope(value, expectedRequestId, expectedOperationId);
@@ -740,6 +847,16 @@ export function createCoreProgressEnvelope(requestId, operationId, progress) {
         progress
     };
     assertCoreProgressEnvelope(envelope);
+    return envelope;
+}
+export function createCoreRequestProgressEnvelope(requestId, progress) {
+    const envelope = {
+        protocolVersion: CORE_PROTOCOL_VERSION,
+        requestId,
+        event: "request-progress",
+        progress
+    };
+    assertCoreRequestProgressEnvelope(envelope);
     return envelope;
 }
 export function createCoreRequestEnvelope(method, payload, requestId, operationId) {

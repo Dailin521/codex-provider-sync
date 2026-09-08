@@ -1,8 +1,41 @@
 import { expect, test } from "@playwright/test";
+import { mkdir } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
 import { createWebUiFixture } from "../../../scripts/run-web-ui-fixture.js";
 
 let fixture;
+
+async function assertOverviewOrder(page) {
+  const elements = [
+    page.getByRole("heading", { name: "Session files", exact: true }),
+    page.getByRole("heading", { name: "Local chat index", exact: true }),
+    page.getByText("Storage profile", { exact: true }),
+    page.getByRole("button", { name: "Preview sync", exact: true }),
+    page.getByRole("heading", { name: "Switch Provider separately", exact: true })
+  ];
+  await expect(elements[0]).toBeVisible();
+  const boxes = await Promise.all(elements.map((element) => element.boundingBox()));
+  for (const box of boxes) expect(box).not.toBeNull();
+  expect(boxes[0].y + boxes[0].height).toBeLessThan(boxes[2].y);
+  expect(boxes[1].y + boxes[1].height).toBeLessThan(boxes[2].y);
+  expect(boxes[2].y + boxes[2].height).toBeLessThan(boxes[3].y);
+  expect(boxes[3].y + boxes[3].height).toBeLessThan(boxes[4].y);
+  const cells = page.getByTestId("overview-storage-sync").locator(":scope > div");
+  const [storage, sync] = await Promise.all([cells.nth(0).boundingBox(), cells.nth(1).boundingBox()]);
+  if (page.viewportSize().width >= 1024) {
+    expect(Math.abs(storage.y - sync.y)).toBeLessThan(2);
+    expect(storage.x + storage.width).toBeLessThan(sync.x);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await expect(page.getByRole("button", { name: "Preview sync", exact: true })).toBeInViewport({ ratio: 1 });
+    await expect(page.getByRole("button", { name: "Sync now", exact: true })).toBeInViewport({ ratio: 1 });
+  } else {
+    expect(storage.y + storage.height).toBeLessThan(sync.y);
+  }
+  const artifactRoot = new URL("../../../output/playwright/", import.meta.url);
+  await mkdir(artifactRoot, { recursive: true });
+  await page.screenshot({ path: fileURLToPath(new URL(`overview-usage-${page.viewportSize().width}.png`, artifactRoot)), fullPage: true });
+}
 
 test.beforeAll(async () => {
   fixture = await createWebUiFixture();
@@ -33,7 +66,7 @@ test("paired production UI keeps history lazy and Apply opaque", async ({ page }
   expect(nonce).toBeTruthy();
   expect(await page.locator("script[nonce]").evaluate((element) => element.nonce)).toBe(nonce);
   await expect(page).toHaveURL(`${fixture.origin}/`);
-  await expect(page.getByRole("heading", { name: "Provider metadata overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Provider sync overview" })).toBeVisible();
   await expect(page.locator("html")).toHaveAttribute("lang", "en");
   await page.keyboard.press("Tab");
   await expect(page.getByRole("link", { name: "Skip to content" })).toBeFocused();
@@ -43,32 +76,34 @@ test("paired production UI keeps history lazy and Apply opaque", async ({ page }
   expect(coreRequests.some((entry) => entry.method === "getHistorySession")).toBe(false);
   expect(JSON.stringify(coreRequests)).not.toContain("C5_BODY_ONLY_MARKER");
   expect(JSON.stringify(coreRequests)).not.toMatch(/codexHome|sqliteHome|cwd/i);
+  await assertOverviewOrder(page);
 
   const pages = [
-    ["Sync", "Sync current Provider"],
-    ["Switch Provider", "Switch Provider"],
     ["Backups / Restore", "Backups and Restore"],
     ["Profiles", "Profiles"],
-    ["Diagnostics", "Diagnostics"],
+    ["Advanced features", "Advanced features"],
     ["Settings", "Settings"],
-    ["Overview", "Provider metadata overview"]
+    ["Overview", "Provider sync overview"]
   ];
-  for (const [navigation, heading] of pages) {
+  for (const [navigation, heading] of [...pages, ["History", "Chats"]]) {
     await page.getByRole("button", { name: navigation, exact: true }).click();
     await expect(page.getByRole("heading", { name: heading, level: 1 })).toBeVisible();
   }
 
   await page.getByRole("button", { name: "History", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "History", level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Chats", level: 1 })).toBeVisible();
   await expect(page.getByText("Synthetic History")).toBeVisible();
   expect(coreRequests.filter((entry) => entry.method === "listHistory")).toHaveLength(1);
   expect(coreRequests.some((entry) => entry.method === "getHistorySession")).toBe(false);
   await expect(page.getByText("C5_BODY_ONLY_MARKER")).toHaveCount(0);
 
-  await page.getByRole("button", { name: "Open session" }).click();
+  await page.setViewportSize({ width: 640, height: 900 });
+  const sessionRow = page.getByRole("button", { name: "View chat: Synthetic History" });
+  await sessionRow.click();
   await expect(page.getByText("C5_BODY_ONLY_MARKER")).toBeVisible();
   expect(coreRequests.filter((entry) => entry.method === "getHistorySession")).toHaveLength(1);
-  await page.getByRole("button", { name: "Back to sessions" }).click();
+  await page.getByRole("button", { name: "Back to chats" }).click();
+  await expect(sessionRow).toBeFocused();
   await expect(page.getByText("C5_BODY_ONLY_MARKER")).toHaveCount(0);
   await page.getByRole("button", { name: "Overview", exact: true }).click();
   await page.getByRole("button", { name: "History", exact: true }).click();
@@ -80,7 +115,7 @@ test("paired production UI keeps history lazy and Apply opaque", async ({ page }
   await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
   await expect(page.getByLabel("存储配置")).toBeVisible();
   await expect(page.locator('nav[aria-label="主导航"]')).toBeVisible();
-  await expect(page.getByText("英文为兜底语言")).toBeVisible();
+  await expect(page.getByText("修改后立即生效。")).toBeVisible();
   await page.getByLabel("语言").selectOption("en");
   await expect(page.getByRole("heading", { name: "Settings", level: 1 })).toBeVisible();
   await expect(page.locator("html")).toHaveAttribute("lang", "en");
@@ -104,13 +139,13 @@ test("paired production UI keeps history lazy and Apply opaque", async ({ page }
   } finally {
     releaseBundle();
   }
-  await expect(coldPage.getByRole("heading", { name: "Provider metadata overview" })).toBeVisible();
+  await expect(coldPage.getByRole("heading", { name: "Provider sync overview" })).toBeVisible();
   await coldPage.close();
   await page.emulateMedia({ reducedMotion: "reduce" });
   expect(parseFloat(await page.getByRole("button", { name: "Overview", exact: true }).evaluate((element) => getComputedStyle(element).transitionDuration))).toBeLessThanOrEqual(0.001);
 
   await page.setViewportSize({ width: 640, height: 900 });
-  for (const [navigation, heading] of [...pages, ["History", "History"]]) {
+  for (const [navigation, heading] of [...pages, ["History", "Chats"]]) {
     await page.getByRole("button", { name: navigation, exact: true }).click();
     await expect(page.getByRole("heading", { name: heading, level: 1 })).toBeVisible();
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
@@ -119,10 +154,11 @@ test("paired production UI keeps history lazy and Apply opaque", async ({ page }
       scrollWidth: document.documentElement.scrollWidth
     }));
     expect(layout.scrollWidth, `${navigation} overflowed the 640px/200% equivalent viewport`).toBeLessThanOrEqual(layout.clientWidth);
+    if (navigation === "Overview") await assertOverviewOrder(page);
   }
 
   await page.setViewportSize({ width: 380, height: 700 });
-  for (const [navigation, heading] of [...pages, ["History", "History"]]) {
+  for (const [navigation, heading] of [...pages, ["History", "Chats"]]) {
     await page.getByRole("button", { name: navigation, exact: true }).click();
     const pageHeading = page.getByRole("heading", { name: heading, level: 1 });
     await expect(pageHeading).toBeVisible();
@@ -132,25 +168,26 @@ test("paired production UI keeps history lazy and Apply opaque", async ({ page }
       scrollWidth: document.documentElement.scrollWidth
     }));
     expect(layout.scrollWidth, `${navigation} overflowed the 760px window at 200% zoom`).toBeLessThanOrEqual(layout.clientWidth);
+    if (navigation === "Overview") await assertOverviewOrder(page);
   }
   await expect(page.getByLabel("Profile")).toBeVisible();
-  await expect(page.getByText("Local service ready", { exact: true })).toBeVisible();
+  await expect(page.locator("header").getByText("Ready", { exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: "Sync", exact: true }).click();
-  const prepare = page.getByRole("button", { name: "Prepare sync" });
+  await page.getByRole("button", { name: "Overview", exact: true }).click();
+  const prepare = page.getByRole("button", { name: "Preview sync" });
   await prepare.click();
-  const planDialog = page.getByRole("dialog", { name: "Review plan" });
+  const planDialog = page.getByRole("dialog", { name: "Confirm sync" });
   await expect(planDialog).toBeVisible();
-  await expect(planDialog.getByText("Rollout files affected")).toBeVisible();
+  await expect(planDialog.getByText("Session files to update")).toBeVisible();
   await expect(planDialog.getByText("A backup will be created before writes.")).toHaveCount(0);
-  await expect(planDialog.getByText("Technical details")).toBeVisible();
-  await expect(planDialog.locator("details")).not.toHaveAttribute("open", "");
+  await expect(planDialog.getByText("Expected changes")).toBeVisible();
+  await expect(planDialog.getByText("The app checks the data again before applying these changes. If anything changed, you will be asked to review again.")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(prepare).toBeFocused();
 
   await prepare.click();
-  await page.getByRole("button", { name: "Confirm and apply" }).click();
-  await expect(page.getByRole("dialog", { name: "Review plan" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Confirm sync" }).click();
+  await expect(page.getByRole("dialog", { name: "Confirm sync" })).toHaveCount(0);
   const resultDialog = page.getByRole("dialog", { name: "Operation result" });
   await expect(resultDialog).toBeVisible();
   const resultLayout = await page.evaluate(() => ({
@@ -171,6 +208,8 @@ test("paired production UI keeps history lazy and Apply opaque", async ({ page }
 test("global partial, recovery, operation and error states are visible", async ({ page }) => {
   let recovery = false;
   let failStatus = false;
+  let needsRefresh = true;
+  let statusRequests = 0;
   await page.route(`${fixture.origin}/api/core`, async (route) => {
     const envelope = route.request().postDataJSON();
     const success = (result) => route.fulfill({
@@ -184,6 +223,7 @@ test("global partial, recovery, operation and error states are visible", async (
       })
     });
     if (envelope.method === "getStatus") {
+      statusRequests += 1;
       if (failStatus) {
         await route.fulfill({
           status: 500,
@@ -220,7 +260,8 @@ test("global partial, recovery, operation and error states are visible", async (
         pendingRecovery: recovery,
         pendingTransactions: recovery ? [{ operationId: "recovery-operation", state: "recovery-required" }] : [],
         operationInProgress: recovery ? { operationId: "active-operation", operation: "restore", busyScope: "state-db" } : null,
-        rolloutScanComplete: true,
+        ...(needsRefresh ? { statusReadBlocked: { reason: "state-changed-during-status" } } : {}),
+        rolloutScanComplete: !needsRefresh,
         lockedRolloutFiles: []
       });
       return;
@@ -263,17 +304,29 @@ test("global partial, recovery, operation and error states are visible", async (
   });
 
   await page.goto(fixture.issuePairingUrl());
-  await page.getByRole("button", { name: "Sync", exact: true }).click();
-  await page.getByRole("button", { name: "Prepare sync" }).click();
-  await page.getByRole("button", { name: "Confirm and apply" }).click();
-  await expect(page.getByText("Partially completed. Retry the same operation to converge.", { exact: true })).toBeVisible();
+  const recheck = page.getByRole("button", { name: "Check status again" });
+  await expect(recheck).toBeVisible();
+  await expect(page.locator("header").getByText("Refresh needed", { exact: true })).toBeVisible();
+  await expect(page.getByText("Operation in progress", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Sync now" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Preview sync" })).toBeDisabled();
+  await page.screenshot({ path: test.info().outputPath("status-refresh-needed.png"), fullPage: true });
+  expect(statusRequests).toBe(1);
+  needsRefresh = false;
+  await recheck.click();
+  await expect(recheck).toHaveCount(0);
+  await expect(page.locator("header").getByText("Ready", { exact: true })).toBeVisible();
+  expect(statusRequests).toBe(2);
+  await page.getByRole("button", { name: "Preview sync" }).click();
+  await page.getByRole("button", { name: "Confirm sync" }).click();
+  await expect(page.getByRole("dialog", { name: "Operation result" })).toContainText("Partially completed");
+  await expect(page.getByText("Some changes were not completed. Follow the guidance below to retry, or restore from a backup.", { exact: true })).toBeVisible();
 
   recovery = true;
   await page.reload();
-  await expect(page.getByText("RECOVERY_REQUIRED")).toBeVisible();
+  await expect(page.locator("#main-content").getByText("Recovery required", { exact: true })).toBeVisible();
   await expect(page.locator("#main-content").getByText("Operation in progress", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Sync", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Prepare sync" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Preview sync" })).toBeDisabled();
 
   recovery = false;
   failStatus = true;

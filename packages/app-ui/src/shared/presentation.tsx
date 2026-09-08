@@ -5,6 +5,8 @@ import type { ReactNode, Ref } from "react";
 import type { HostProfile } from "../types.js";
 import { cn } from "../ui.js";
 
+type Translate = (key: string, options?: Record<string, unknown>) => string;
+
 export function profileSelector(profile: HostProfile): ProfileSelector {
   return { profileId: profile.id, profileRevision: profile.revision };
 }
@@ -32,9 +34,32 @@ export function formatDate(value?: string | null, locale = "en"): string {
   }).format(date);
 }
 
-export function safeErrorText(error: unknown, fallback: string): string {
-  if (error instanceof CoreClientError) return `${error.dto.message} (${error.code})`;
+export function safeErrorText(error: unknown, t: Translate): string {
+  const fallback = t("errors.fallback");
+  if (error instanceof CoreClientError) {
+    if (error.code === "INVALID_INPUT" && error.dto.details?.reason === "provider-not-configured") {
+      return t("errors.providerNotConfigured");
+    }
+    return t(`errors.${error.code}`, { defaultValue: fallback });
+  }
   return fallback;
+}
+
+export function displayProfileName(profile: Pick<HostProfile, "id" | "name">, t: Translate): string {
+  return profile.id === "default" ? t("profiles.defaultName") : profile.name;
+}
+
+export function displayWarningText(warning: string, t: Translate): string {
+  if (warning === "Backup inventory refresh failed.") return t("warnings.backupInventory");
+  if (warning === "Automatic backup cleanup failed.") return t("warnings.backupCleanup");
+  if (warning === "Some encrypted histories may require their original Provider or account for continuation.") return t("warnings.encryptedHistory");
+  if (warning === "One or more rollout files are locked and may be skipped.") return t("warnings.lockedSessions");
+  if (warning === "The selected Provider has no default model; the root model will remain unchanged.") return t("warnings.missingDefaultModel");
+  if (warning === "Project visibility diagnostics are unavailable; backup-first protection remains enabled.") return t("warnings.projectVisibility");
+  if (warning === "SQLite Home relocation is confirmed; config.toml will not be restored.") return t("warnings.relocationConfig");
+  if (/^Restore skipped /.test(warning)) return t("warnings.restoreSkipped");
+  if (warning === "The operation made only part of the requested change. Retry it to converge, or restore the managed backup.") return t("warnings.partial");
+  return t("warnings.additional");
 }
 
 export function PageHeading({

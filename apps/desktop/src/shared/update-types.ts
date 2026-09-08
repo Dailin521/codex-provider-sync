@@ -25,6 +25,8 @@ export type DesktopUpdateInstallBlockedReason =
   | "recovery-unverified";
 
 export type DesktopUpdateStatus = {
+  currentVersion?: string;
+  mode?: "manual";
   schemaVersion: 2;
   state: DesktopUpdateState;
   installAllowed: boolean;

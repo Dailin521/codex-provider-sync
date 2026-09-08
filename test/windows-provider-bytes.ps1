@@ -31,6 +31,14 @@ $root = Join-Path ([IO.Path]::GetTempPath()) ("provider-bytes-native-" + [Guid]:
 [IO.Directory]::CreateDirectory($root) | Out-Null
 try {
   $file = Join-Path $root "rollout-fixture.jsonl"
+  $cleanupFile = Join-Path $root "cleanup-force-fixture.tmp"
+  [IO.File]::WriteAllText($cleanupFile, "cleanup")
+  [IO.File]::SetAttributes($cleanupFile, [IO.FileAttributes]::ReadOnly -bor [IO.FileAttributes]::Hidden)
+  if (-not [ProviderByteFile]::TryDelete($cleanupFile)) {
+    # This is the same Force fallback retained by the worker for readonly/hidden artifacts.
+    Remove-Item -LiteralPath $cleanupFile -Force -ErrorAction Stop
+  }
+  if (Test-Path -LiteralPath $cleanupFile) { throw "Readonly/hidden cleanup artifact remained" }
   $utf8 = [Text.UTF8Encoding]::new($false)
   $header = $utf8.GetBytes('{"type":"session_meta","payload":{"model_provider":"openai"}}' + "`n")
   $old = $utf8.GetBytes('"openai"')

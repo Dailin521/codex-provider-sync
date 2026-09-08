@@ -585,6 +585,58 @@ test("DesktopCoreClient reuses the Core envelope through one read-only bridge", 
   ]);
 });
 
+test("DesktopCoreClient streams and cancels getDiagnostics through the read-only bridge", async () => {
+  let listener = null;
+  let finishDiagnostics;
+  const cancellations = [];
+  const client = new DesktopCoreClient({
+    requestReadOnly(request) {
+      return new Promise((resolve) => {
+        finishDiagnostics = () => resolve({
+          protocolVersion: 1,
+          requestId: request.requestId,
+          ok: false,
+          error: {
+            code: "OPERATION_CANCELLED",
+            message: "The operation was cancelled.",
+            severity: "info",
+            retryable: true,
+            recoveryRequired: false
+          }
+        });
+      });
+    },
+    async requestSyncSwitch() { throw new Error("unexpected write"); },
+    async requestRestore() { throw new Error("unexpected restore"); },
+    async requestMaintenance() { throw new Error("unexpected maintenance"); },
+    subscribeOperation(next) { listener = next; return () => { listener = null; }; },
+    async cancelOperation(input) {
+      cancellations.push(input);
+      finishDiagnostics();
+      return { accepted: true };
+    }
+  }, { requestIdFactory: () => "desktop-diagnostics-progress" });
+  const controller = new AbortController();
+  const progress = [];
+  const diagnostics = client.getDiagnostics(profile, {
+    signal: controller.signal,
+    onRequestProgress: (event) => progress.push(event)
+  });
+  listener({
+    protocolVersion: 1,
+    requestId: "desktop-diagnostics-progress",
+    event: "request-progress",
+    progress: { stage: "prepare_diagnostics", status: "running", progress: 1 }
+  });
+  controller.abort();
+  await assert.rejects(diagnostics, (error) => (
+    error instanceof CoreClientError && error.code === "OPERATION_CANCELLED"
+  ));
+  assert.equal(progress.length, 1);
+  assert.equal(progress[0].operationId, undefined);
+  assert.deepEqual(cancellations, [{ requestId: "desktop-diagnostics-progress" }]);
+});
+
 test("DesktopCoreClient routes the exact C8 surface and forwards lifecycle cancellation", async () => {
   let calls = 0;
   let listener = null;

@@ -32,6 +32,8 @@
     "lucide-react": "1.34.0",
     "react-hook-form": "7.86.0",
     "react-i18next": "17.0.12",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
     "tailwind-merge": "3.6.0",
     "zod": "4.4.3"
   },

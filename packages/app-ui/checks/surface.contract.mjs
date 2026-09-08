@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   APP_ROUTES,
   APP_UI_MIGRATION_STATE,
+  DEFAULT_BACKUP_RETENTION_COUNT,
   DESKTOP_C8_APP_UI_CAPABILITIES,
   FULL_APP_UI_CAPABILITIES,
   READ_ONLY_APP_UI_CAPABILITIES,
@@ -19,10 +20,9 @@ import {
 test("app-ui owns the complete target navigation vocabulary", () => {
   assert.deepEqual(APP_ROUTES, [
     "overview",
-    "sync",
-    "switch-provider",
     "backups-restore",
     "history",
+    "operation-logs",
     "profiles",
     "diagnostics",
     "settings"
@@ -43,8 +43,10 @@ test("shared UI exposes explicit read-only, C7, and C8 capability profiles", asy
     forgetBrowser: false,
     exportDiagnostics: false,
     viewUpdateStatus: false
+    ,operationLogs: false
   });
-  assert.equal(Object.values(FULL_APP_UI_CAPABILITIES).every(Boolean), true);
+  assert.equal(FULL_APP_UI_CAPABILITIES.operationLogs, false);
+  assert.equal(Object.entries(FULL_APP_UI_CAPABILITIES).filter(([key]) => key !== "operationLogs").every(([, value]) => value), true);
   assert.equal(Object.isFrozen(READ_ONLY_APP_UI_CAPABILITIES), true);
   assert.deepEqual(SYNC_SWITCH_APP_UI_CAPABILITIES, {
     sync: true,
@@ -58,6 +60,7 @@ test("shared UI exposes explicit read-only, C7, and C8 capability profiles", asy
     forgetBrowser: false,
     exportDiagnostics: false,
     viewUpdateStatus: false
+    ,operationLogs: false
   });
   assert.equal(Object.isFrozen(SYNC_SWITCH_APP_UI_CAPABILITIES), true);
   assert.deepEqual(DESKTOP_C8_APP_UI_CAPABILITIES, {
@@ -67,18 +70,19 @@ test("shared UI exposes explicit read-only, C7, and C8 capability profiles", asy
     restore: true,
     pruneBackups: true,
     watch: true,
-    manageProfiles: false,
+    manageProfiles: true,
     revealProfilePaths: false,
     forgetBrowser: false,
     exportDiagnostics: true,
-    viewUpdateStatus: true
+    viewUpdateStatus: true,
+    operationLogs: true
   });
   assert.equal(Object.isFrozen(DESKTOP_C8_APP_UI_CAPABILITIES), true);
   const appContentSource = await fs.readFile(new URL("../src/app/AppContent.tsx", import.meta.url), "utf8");
   const appSource = await fs.readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
   const settingsSource = await fs.readFile(new URL("../src/features/settings/SettingsPage.tsx", import.meta.url), "utf8");
   const typesSource = await fs.readFile(new URL("../src/types.ts", import.meta.url), "utf8");
-  assert.match(appContentSource, /route === "sync" && capabilities\.sync/);
+  assert.match(appContentSource, /prepareSync=\{\(values/);
   assert.match(settingsSource, /enabled: capabilities\.watch/);
   assert.match(settingsSource, /recoveryBlocked \|\| writeBlocked/);
   assert.match(appContentSource, /applySubmissionPending\.current/);
@@ -102,8 +106,11 @@ test("shared UI exposes explicit read-only, C7, and C8 capability profiles", asy
 
 test("shared UI translations and write forms keep one strict schema", () => {
   assert.equal(resourcesHaveMatchingKeys(), true);
-  assert.equal(switchSchema.safeParse({ provider: "relay", modelMode: "explicit", model: "gpt", keepCount: 5 }).success, true);
-  assert.equal(switchSchema.safeParse({ provider: "relay", modelMode: "keep-root-model", keepCount: 5 }).success, true);
+  assert.equal(DEFAULT_BACKUP_RETENTION_COUNT, 2);
+  assert.equal(switchSchema.safeParse({ provider: "relay", modelMode: "explicit", model: "gpt" }).success, true);
+  assert.equal(switchSchema.safeParse({ provider: "relay", modelMode: "keep-root-model" }).success, true);
+  assert.equal(syncSchema.safeParse({}).success, true);
+  assert.equal(syncSchema.safeParse({ keepCount: 5 }).success, false);
   assert.equal(switchSchema.safeParse({ provider: "relay", modelMode: "provider-default", keepCount: 5, syncMode: "fast" }).success, false);
   assert.equal(syncSchema.safeParse({ keepCount: 0 }).success, false);
   assert.equal(switchSchema.safeParse({ provider: "relay", modelMode: "provider-default", keepCount: 0 }).success, false);

@@ -203,7 +203,7 @@ export async function executeOrdinaryWrite({
     } catch (error) {
       if (!state.mutationStarted) throw error;
       await tryRefreshBackupInventory(state.backupDir);
-      return program.toResult({ context, state, outcome: "partial", error });
+      return await program.toResult({ context, state, outcome: "partial", error });
     }
 
     try {
@@ -222,7 +222,7 @@ export async function executeOrdinaryWrite({
       status: "complete",
       deletedCount: state.autoPruneResult?.deletedCount ?? 0
     });
-    return program.toResult({ context, state, outcome: "completed", error: null });
+    return await program.toResult({ context, state, outcome: "completed", error: null });
   } finally {
     await releaseLock();
   }

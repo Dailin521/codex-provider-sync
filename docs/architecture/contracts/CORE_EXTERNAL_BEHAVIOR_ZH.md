@@ -1,5 +1,13 @@
 # Node Core 外部行为兼容合同
 
+## 2026-09-08：Windows 文件更新计时
+
+[ADR-0038](../../adr/0038-windows-cleanup-and-file-update-timing.md)：Sync/Switch 结果可选 result.fileUpdateTiming，包含固定 schema v1、windows-first-line 范围、五种非负整数文件计数和有限非负毫秒分项（可有小数），完整字段以 Contracts FileUpdateTiming 为准。一次批次聚合，mutation 后 partial 可保留已测部分；noop、非 Windows、未收到观测时缺失，不造零。Watch finished 可信 activity 和 Desktop 日志可复用投影。嵌套时间不可相加；观测失败不改变业务结果。Provider I/O、Apply 输入、ProgressEvent 和 CLI 退出码保持。
+
+## 2026-09-07：高级功能请求进度补充
+
+见 [ADR-0032](../../adr/0032-explicit-scan-and-preview-progress.md)。`prepareRepair/getDiagnostics` 可通过可信 Host control 发送既有 `ProgressEvent`；公开产品输入和 Apply 契约不变。HTTP NDJSON / Desktop 固定事件通道使用 `{protocolVersion:1,requestId,event:"request-progress",progress}`，不包含 operationId，不触发写 Operation。其余方法不得发送此事件。阶段内扫描按已枚举文件数量报告 progress/count，未知数量不报告百分比。observer 失败不影响结果；请求控制器不得被 Prepare 计划保留。完成/错误/取消/Runtime 崩溃后停止进度，旧请求/Profile 的事件不影响新请求；既有 Diagnostics 与 Prepare 日志保留。无后台轮询或额外正文扫描。
+
 > 状态：Phase 0 兼容基线
 >
 > 基线版本：`@dailin521/codex-provider-sync` v0.5.0
@@ -10,10 +18,12 @@
 
 ## 1. 文档目的
 
+当前模块和开发门禁见 [Node Core 当前架构](../NODE_CORE_ARCHITECTURE_ZH.md)。本文保留 Phase 0 兼容记录；以下 V1 增量及明示修订优先于已被取代的旧普通写行为，不可因旧段落重新引入全文 Sync、双资源锁或自动全量回滚。
+
 V1/ADR-0016 当前增量（尚未公开发布）：
 
 - ProviderSync 固定从 config 当前根级 `model_provider` 取目标，只扫描每个 rollout 的首条 `session_meta`。公开 Provider override、`syncMode`、`--fast` 和 `FAST_MODE_UNSUPPORTED` 已移除。
-- Provider 字面量等长时原地更新并保留文件身份、大小与正文 Hash；长度不同时流式生成临时文件并原子替换，聊天正文逐字节保持不变。
+- Provider 字面量满足安全 ID、UTF-8 字节等长、唯一定位与文件校验条件时必须原地更新，保留文件身份、大小与正文 Hash；不符合原地资格的有效首行使用流式替换，正文逐字节保持。具体资格、禁止失败后强制替换及有界首行预读见 PIO-1～PIO-3，不能简化为字符数相等。
 - Diagnostics 是用户主动触发的一次完整只读流式扫描；Repair 通过 `prepareRepair/applyRepair` 显式修复 `models`、`cwd`、`userEvent`、`workspaceRoots`。加密内容只诊断、不修改。
 - 普通 Sync/Switch/Repair 只持有 Codex Home lock，SQLite 并发由原生事务处理；实际 mutation 前才创建 UndoBackup，不创建跨文件普通 journal，也不自动全量回滚。mutation 后故障返回带 backup、阶段和重试建议的 `partial`。
 - Restore 继续使用独立的恢复前 snapshot、耐久 journal、Hash 验证与补偿状态机，但同样只使用 Codex Home lock。
@@ -201,7 +211,7 @@ codexHome?
 sqliteHome?
 storage?
 expectedConfigText?
-keepCount = 5
+keepCount = 2
 onProgress?
 platform?
 signal?
@@ -332,7 +342,7 @@ expectedConfigText?
 provider             # 必填
 model?
 keepRootModel=false
-keepCount=5
+keepCount=2
 onProgress?
 platform?
 signal?
@@ -375,7 +385,7 @@ modelSync.warning
 
 `getDiagnostics` 只在调用方显式请求时执行一次完整流式扫描，返回有界聚合计数；不后台刷新、不定时运行、不写入目标，也不把消息正文、路径、凭据或加密内容写入结果。
 
-`prepareRepair/applyRepair` 支持 `models`、`cwd`、`userEvent`、`workspaceRoots`。目标必须显式选择且不可重复；`workspaceRoots` 自动包含 `cwd`。模型修复取 config 当前根模型，缺失时 Prepare 失败。Repair 只扫描所选目标需要的数据；SQLite 修改在单个原生事务中提交，并与 Sync/Switch 使用相同的 Home lock、UndoBackup 和 partial/retry 语义。
+`prepareRepair/applyRepair` 支持 `models`、`cwd`、`userEvent`、`workspaceRoots`。目标必须显式选择且不可重复；`workspaceRoots` 自动包含 `cwd`。模型修复取 config 当前根模型，缺失时 Prepare 失败。Repair 只扫描所选目标需要的数据；SQLite 修改在单个原生事务中提交，并与 Sync/Switch 使用相同的 Home lock、UndoBackup 和 partial/retry 语义。未提供 `keepCount` 时默认保留 `2` 份托管备份。
 
 ## 7. `runRestore`
 
@@ -467,7 +477,7 @@ backupInventoryWarning
 
 ```text
 codexHome?
-keepCount=5
+keepCount=2
 ```
 
 `keepCount` 必须是非负整数，允许 `0`。
@@ -561,9 +571,11 @@ messageCount
 messageCountKnown?
 ```
 
-vNext 公共 Core/HTTP/IPC 列表投影不返回 `rolloutPath`、`cwd` 或 `firstUserMessage`。`title` 只能来自显式 session metadata；metadata 没有标题时返回空字符串，由 UI 本地化显示“未命名会话”，不得用消息正文回退。列表搜索可以在本次只读扫描内匹配安全抽取文本，但消息正文不能进入列表 DTO、日志或缓存；正文只能由用户明确调用 `getHistorySession` 后返回。
+vNext 公共 Core/HTTP/IPC 列表投影不返回 `rolloutPath`、`cwd` 或 `firstUserMessage`。`title` 依次来自当前 Codex Home 的 `session_index.jsonl` 中匹配 ID 的最新有效非空 `thread_name`（追加顺序）、当前解析的 SQLite `threads.title`、显式 `session_meta.title/name`；全部缺失时返回空字符串，由 UI 本地化显示“未命名会话”，不得用消息正文回退。名称索引只读流式扫描，固定初始文件范围，单行最多 64 KiB，忽略损坏/超长/空名称记录和链接文件。已保存名称最多保留 1024 字符，超长截短而非丢弃。SQLite 查询每批最多 500 个已发现 ID，只选择 `id` 和截短的 `title`；索引/DB 不可用时逐级回退，不写回任何标题。Facade 注入可信 Profile 的 SQLite override，继续按 Profile→config→env→default 解析，不接收 Renderer 路径。列表搜索可以在本次只读扫描内匹配安全抽取文本，但消息正文不能进入列表 DTO、日志或缓存；正文只能由用户明确调用 `getHistorySession` 后返回。
 
 无 query 的普通列表以受限首行 metadata 构造摘要：thread id、title、cwd、Provider/model、timestamp 分别限制为 512、1024、32768、512、128 字符，越界字段为空、使用固定缺省值或基于路径的 fallback ID；`updatedAt` 使用经复核的文件 mtime，`messageCount=0` 且 `messageCountKnown=false`；UI 必须隐藏该占位计数，不得显示为“0 条消息”。旧实现或全文扫描结果缺省 `messageCountKnown`，以及显式 `true`，均表示 `messageCount` 精确。用户显式输入 query 时才允许全文流式扫描，以匹配安全正文并返回精确计数和最后可见时间；扫描仍只保留计数、时间与 query 命中等常量聚合状态，不按消息数常驻 descriptor 或正文。
+
+空标题展示补充（ADR-0017）：有 `source.subagent` 或非空 `parent_thread_id` 的首行 metadata 可以产生可选 `subagentName`，优先读取嵌套 thread_spawn/root agent_path 的最后一段，再取 agent_nickname，最多 160 字符且不含路径分隔符/控制字符。Core 不用该字段回填 title。共享 UI 保留全部记录，已有 title 优先；空 title 有 subagentName 时显示本地化“子任务 · 名称”，否则显示“无标题会话 · 创建日期时间 · ID末8位”（缺创建时间才用更新时间）。列表、详情、无障碍名称共用格式，不写回名称，不扫描正文生成标题。
 
 详情定位先用同一受限 metadata 路径去重并选定 rollout，只对用户选择的目标文件做一次全文读取；其他 rollout 不得因详情定位而扫描正文。目标必须绑定定位阶段记录的 regular-file identity、稳定物理路径与 sessions 根边界，从同一文件句柄读取并在读前/读后复核；删除、替换、symlink/junction 逃逸或保留 mtime 的换档均返回 `STALE_STATE`，不得返回另一文件的正文。
 
@@ -574,11 +586,23 @@ vNext 公共 Core/HTTP/IPC 列表投影不返回 `rolloutPath`、`cwd` 或 `firs
 - 不返回认证信息、token、推理内容或任意原始 JSONL；
 - 结果包含 `session`、`messages`、`truncated`、`returnedMessageCount`。
 
+#### ADR-0018 会话操作增量
+
+- summary 增加可选 `project: {id,name}|null`，id 为词法规范化路径分组指纹，不是文件操作参数或安全令牌。平铺视图沿用 cwd 末级名；[ADR-0022](../../adr/0022-history-project-roots-and-child-pagination.md) 项目视图优先当前 Home 的有界已保存工作区/名称，按最长匹配根归属；明确子任务继承主会话项目。Windows 大小写折叠、POSIX 区分大小写；不访问真实项目目录，完整路径仍不返回。
+- `listHistory({view:"projects"})` 在全体首行 metadata 去重/建父子图后分页，增加 `projects:{id,name,kind,total}[]`、`projectId` 和 summary `childCount`；kind 为 workspace/directory/unassigned/orphans。首次返回首个非孤儿项目的第一页（默认10条）；`projectId` 查询单项目主会话页，`parentId` 查询直接子任务页，不受旧全局50条限制。孤儿/循环及其后代可在 orphans 组访问；搜索命中子任务保留父链上下文，main 过滤不显示子任务。仅用于显示的本地项目别名由 Host PreferenceStore 管理，不进入 Core。省略 view 的调用保持平铺合同。UI 右键菜单、手动刷新、显式正文读取不变。
+
+- summary 增加 `nativeSessionId: string|null`、`sessionKind: main|subagent`、`parentSessionId: string|null`、`fileModifiedAt`。公开契约为向后兼容可选字段；当前实现均提供。nativeSessionId 不使用基于路径生成的列表 ID。父 ID 只取显式 parent_thread_id。
+- listHistory 的 `sessionKind=all|main|subagent` 默认 all，过滤在分页之前；`searchScope=metadata|content` 省略时保留 content 兼容。新 UI 默认显式 metadata，搜索名称、ID、cwd、Provider、子任务名称，不读取正文；正文搜索只由用户提交触发。
+- `getHistorySession({metadataOnly:true})` 只做 metadata/标题读取，返回 `messages=[]`、`returnedMessageCount=0`、`truncated=false`，消息计数仍为 unknown；普通详情不变。
+- 可信 Desktop 详情可以有 `storage={cwd,rolloutPath}` 供本地展示/复制，默认 Core/Web 无该字段，列表仍脱敏。桌面定位只接受 Profile+sessionId，由 Main→Utility 重查后定位，不接收 Renderer 任意路径。路径不进入日志、诊断或后台缓存。
+- UI 复制原始 ID；只有有效 UUID 才生成继续命令且不执行；显示项目、记录的 Provider/model、创建时间和文件更新时间，文件时间不得标为最后聊天时间。详见 [ADR-0018](../../adr/0018-history-session-actions.md)。
+
 ### 9.4 `runWatch`
 
 当前行为需保留：
 
 - 默认 debounce 750 ms；
+- `startWatch/runWatch` 可选 `keepCount` 为正安全整数，缺省 2；启动时捕获，透传每次内部 ProviderSync。活动 Watch 复用首个启动参数，不随 UI 偏好动态改写（ADR-0027）；
 - 默认监听 config 和当前唯一 state DB/WAL/SHM；
 - 配置变化后重新解析 storage；
 - SQLite busy 软跳过；
@@ -625,11 +649,11 @@ vNext 公共 Core/HTTP/IPC 列表投影不返回 `rolloutPath`、`cwd` 或 `firs
 
 重解析结果与确认快照不一致时必须返回 stale/changed，不得继续使用锁外缓存的 storage 对象。
 
-当前 direct CLI sync/restore 的主要路径会在锁内读取 config；但 Web 会传入预解析 storage，switch 也存在锁外准备再交给 sync 的路径。`expectedConfigText` 能防止部分 config 漂移，却不能证明所有 DB 选择和文件系统状态均未改变。这是 Phase 1/Plan-Apply 下沉时必须关闭的 TOCTOU 缺口。
+Phase 0 历史实现中，direct CLI、Web 预解析 storage 和 Switch 锁外准备曾存在重校验缺口。V1 已由共享 Plan/Apply 和锁内重新解析校验取代，当前适配器不得退回仅比较 `expectedConfigText` 的旧路径；验证见 `plan-apply.test.js` 和 Core Facade 合同测试。
 
 ### 10.4 跨 Codex Home 共享 SQLite Home
 
-不同 Codex Home 可以解析到同一个 SQLite 数据库，因此它们持有不同 Home lock 时仍可能同时到达数据库。V1/C3 不再增加 State DB 文件资源锁；竞争由 SQLite 原生事务串行化或以 busy 失败。调用方必须把 SQLite busy 视为 mutation 前可重试失败，不能把不同 Profile 直接等同于不同数据库资源。
+不同 Codex Home 可以解析到同一数据库。V1/C3 不增加 State DB 文件资源锁，竞争由 SQLite 原生事务串行化或返回 busy。预检 busy 必须在 mutation 前失败；预检不保留后续写锁，最终事务仍可能 busy，此时若已有 mutation 必须返回 partial 与备份/重试信息。不能把所有 busy 都描述为零写入，也不能把不同 Profile 当成不同数据库资源。
 
 ### 10.5 pending transaction
 
@@ -699,9 +723,9 @@ code = ABORT_ERR
 
 取消只在首次 mutation 前生效并映射为稳定的 cancelled；进入 mutation 后取消请求不再中断普通写。
 
-### 11.2 当前 message-only 错误类别
+### 11.2 v0.5 基线的 message-only 错误类别
 
-下列错误目前大多只是普通 `Error` 和稳定核心 message，没有统一 code：
+冻结 v0.5 基线时，下列错误大多只是普通 `Error` 和稳定核心 message，没有统一 code。V1 已采用 [错误码合同](ERROR_CODES_ZH.md)与 Contracts 的结构化 DTO；以下列表只保留迁移背景，不表示当前 HTTP/IPC 仍缺少 code：
 
 - 参数缺失或非法；
 - Provider 未配置；
@@ -717,7 +741,7 @@ code = ABORT_ERR
 - history 条目不存在；
 - 文件权限、空间和其他 I/O 错误。
 
-PR 3 引入结构化 Error Code 时必须保留现有人类提示的关键语义，并为 CLI、Web、Runtime/IPC 分别建立映射测试。
+V1 结构化 Error Code 映射必须保留现有人类提示的关键语义，并维护 CLI、Web、Runtime/IPC 的映射测试。
 
 ### 11.3 vNext 不得假设的行为
 
@@ -726,9 +750,11 @@ PR 3 引入结构化 Error Code 时必须保留现有人类提示的关键语义
 - 不得让 Web 丢失 `RECOVERY_REQUIRED` 后仍显示成普通可重试失败；
 - 不得因 observer 或 inventory warning 把已提交操作改判为失败。
 
-## 12. Local Web UI Revision 合同
+## 12. Local Web UI Revision 合同与迁移边界
 
-当前 Web adapter 已实现的并发与确认保护必须在迁移时保留，并最终下沉到 Core 的 Plan/Revision/Apply 能力。
+当前共享 UI 使用 `HttpCoreClient → POST /api/core → CoreFacade` 的版本化协议，Prepare/Apply 与错误 DTO 已由同一 Core 管理。以下 12.1/12.2/12.4/12.5/12.6 记录旧 HTTP adapter 的冻结背景，不是新 Renderer 的 API 规范；现有兼容路径按源码和 `test/web-server.test.js` 保留，不扩大。
+
+V1 当前协议以 [Contracts](../../../packages/contracts/src/protocol.ts)、[Web adapter](../../../src/web-core-adapter.js)和对应 HTTP 测试为准。原地写、Sync 输入收窄、一次性 Plan、Direct Sync 点击授权和结构化错误修订优先于旧 endpoint 表述。
 
 ### 12.1 Server-managed Profile
 
@@ -769,18 +795,20 @@ STORAGE_CHANGED
 
 确认快照失效时，必须刷新并重新确认，不得静默重新解析后继续写入。
 
-### 12.3 Web 到 service 的调用映射
+### 12.3 V1 Web 到 Core 的当前映射
 
-| Endpoint | 当前调用 |
+| 入口 | 当前调用与边界 |
 | --- | --- |
-| `POST /api/status` | `getStatus({ storage, configText, ...profile })` |
-| `POST /api/backups` | `listBackups(codexHome)` |
-| `POST /api/history` | `listHistory(codexHome, body)` |
-| `POST /api/history/session` | `getHistorySession(codexHome, sessionId)` |
-| `POST /api/sync` | `runSync({ storage, expectedConfigText, provider, keepCount, model, onProgress })` |
-| `POST /api/switch` | `runSwitch({ storage, expectedConfigText, provider, keepCount, model, keepRootModel, onProgress })` |
-| `POST /api/restore` | `runRestore({ storage, expectedConfigText, backupDir, restore*, allowSqliteHomeRelocation })` |
-| `POST /api/prune` | `runPruneBackups({ codexHome, keepCount })` |
+| `POST /api/core` | 版本化 envelope 指定 method/input；只分派 CoreFacade 公开白名单方法，先验证协议与输入 |
+| `prepareSync` / `applySync` | Prepare 输入为可信 Profile/备份设置，不接受 Provider/model/模式覆盖；Apply 仅 `{schemaVersion:1,planId}` |
+| `prepareSwitch` / `applySwitch` | 用户选择已配置 Provider 与根模型策略，Apply 消费原计划；历史模型不变 |
+| `prepareRepair` / `applyRepair`、`prepareRestore` / `applyRestore` | 同一 Core 的显式修复或受管 backupId 恢复；Apply 不接受任意路径 |
+| `getStatus` / `listBackups` / `listHistory` / `getHistorySession` | 同一 Facade 的只读 DTO；正文仅显式 History 交互 |
+| `POST /api/core/cancel` | 取消已关联请求/操作，不扩张任意通道或执行参数 |
+| 旧 `/api/*/prepare`、`/api/*/apply` | 为兼容保留的适配路由；新共享 UI 不使用它们，不作为新产品 API 扩张 |
+| 旧直接 `POST /api/sync`、`/api/switch`、`/api/restore` | 已退役，返回 HTTP 410 / `PLAN_REQUIRED`，不能继续按旧 service 参数调用 |
+
+“直接同步”是 UI 在一次点击授权后连续调用 Prepare/Apply，不是恢复旧的 `/api/sync` 直接写路由。HTTP 输出使用公开结构化 DTO，不由 Renderer 解析 service/CLI 文本。
 
 ### 12.4 单写操作
 
@@ -820,9 +848,9 @@ Web 的 `alignment.aligned` 当前要求：
 
 rollout 与 SQLite 总数不要求完全相等。
 
-### 12.6 当前兼容缺口
+### 12.6 v0.5 兼容缺口（历史记录）
 
-Web `withOperation` 当前把 operation 异常映射为 HTTP 400 `{error}`，没有透传 Core `error.code`。这是已知缺口，不应被描述为理想合同。
+冻结 v0.5 时，Web `withOperation` 把 operation 异常映射为 HTTP 400 `{error}`，没有透传 Core `error.code`。V1 `/api/core` 已通过版本化失败 envelope 映射稳定错误码，不能把该历史缺口当成当前行为。
 
 后续结构化错误改造需要：
 
@@ -930,7 +958,7 @@ V1/C3 已实现上述边界；`runSync/runSwitch/runRepair/runRestore/runWatch` 
 - `prepareSync/prepareSwitch/prepareRepair/prepareRestore` 返回不可变 `PlanSummary` schema v1。`planId` 为 32-byte 随机不透明标识；TTL 固定 10 分钟；ledger 仅驻留当前进程并单次消费，重启、过期、重放和跨 operation 使用均返回 `PLAN_EXPIRED`。
 - Plan ledger 必须按最早 expiry 使用不阻止进程退出的自治 timer 清理弃置计划；不得依赖后续 consume 或新的 Prepare 才回收。人工 Plan intent 同样按每个 Home 的最早 expiry 自治清理并重新 arm，多个 Watch waiter 不得各自创建 10 分钟 timer。
 - `applySync/applySwitch/applyRepair/applyRestore` 只接受精确的 `{schemaVersion: 1, planId}`。任何附加路径、Provider、model、backupId 或 mutation 参数都返回 `INVALID_INPUT`，且不消费合法 Plan。
-- Apply 在 Codex Home lock 内重新读取可信 Profile、config、rollout inventory、State DB main/WAL/SHM 与 Restore source backup revision；任一漂移统一返回 `STALE_STATE`，且在 Backup/mutation 前停止。
+- Apply 在 Codex Home lock 内重新读取可信 Profile、config、rollout inventory、State DB 与 Restore source backup revision；相关状态漂移统一返回 `STALE_STATE`，且在 Backup/mutation 前停止。ADR-0035 起，仅 Sync/Switch 的 rollout revision 绑定文件身份/首行/清单并拒绝截断，DB revision 绑定物理身份、threads schema 和 ID/Provider 行集合；正文追加、非 Provider 列变化、WAL/SHM/checkpoint 不单独使 Provider 计划失效。Repair/Restore 保持原内容与 main/WAL/SHM revision；不自动重放过期计划。
 - Web 只公开 `*/prepare` 与 `*/apply`。旧 `/api/sync`、`/api/switch`、`/api/restore` 固定返回 `410 PLAN_REQUIRED`，不得调用兼容 `run*` 写入口。
 - Switch Plan 固定表达 `provider-default`、`keep-root-model`、`explicit` 三种 model intent；Apply 不再接收 model 参数。
 
@@ -948,7 +976,7 @@ V1/C3 已实现上述边界；`runSync/runSwitch/runRepair/runRestore/runWatch` 
 - `packages/core` 的模块导出仅为 `createCoreFacade({resolveProfile})`；factory 返回对象的业务方法集合精确等于本节 15 个目标方法。根 `src/public-api.js` 继续承载 CLI 与迁移适配器，不被描述为 Renderer 稳定 API。
 - `resolveProfile({profileId, profileRevision?})` 只能由 Local Web Host、Electron Main/Utility Host 或测试 Host 注入，返回可信的 `{id, revision, codexHome, sqliteHome?}`。Facade 必须验证 ID、revision 和绝对路径；selector revision 漂移时 fail closed，不能回退到 `CODEX_HOME` 或默认用户目录。
 - UI/HTTP/IPC 产品输入只包含 profile ID/revision、Provider/model mode、受管 backupId 等产品字段；不得携带 `codexHome`、`sqliteHome`、backup path 或底层 apply 参数。Apply 仍精确只收 schemaVersion/planId。
-- Status 在 facade 处移除 `codexHome`、`sqliteHome` 和 State DB 路径，只保留来源枚举、revision、分布与安全状态；warning 只能由固定类别/固定文案投影，不得透传底层任意字符串。
+- Status 默认在 facade 处移除 `codexHome`、`sqliteHome` 和 State DB 路径，只保留来源枚举、revision、分布与安全状态。ADR-0017 允许本地 Desktop Utility 以可信构造选项 `includeLocalDisplayPaths:true` 增加 `displayPaths={codexHome,sqliteHome,stateDbPath}`，仅投影同一完整 snapshot；缺 DB 时为 null，缺可用 snapshot 时不猜路径。Web/default facade 不启用；Renderer 请求不能开启此选项，路径不进入日志/诊断导出，也不是写入参数。warning 只能由固定类别/固定文案投影，不得透传底层任意字符串。
 - 备份列表在 facade 处移除 backup root、绝对 path 与 metadata 中的存储路径，只返回 `backupId`、size 和有界展示元数据；History 列表移除 rollout path、`cwd` 与首条消息预览，正文只能由用户明确调用详情方法后读取。
 - `TransportCoreClient` 对成功 payload 执行按方法的最小 runtime guard；协议版本不兼容映射为固定 `PROTOCOL_VERSION_MISMATCH`，其他畸形 envelope/result 收口为固定 `INTERNAL_ERROR`。HTTP 非 2xx 不得携带成功 envelope。
 
@@ -970,7 +998,7 @@ V1/C3 已实现上述边界；`runSync/runSwitch/runRepair/runRestore/runWatch` 
 - Main 只接受主窗口顶层 `cps-app://app` sender，Core envelope 上限 64 KiB；Profile 列表只返回 `id/name/revision/codexHomeConfigured/sqliteHomeConfigured`，不得返回 Codex/SQLite 路径。
 - Runtime Hello 必须同时匹配 runtime/core protocol、app/core version、buildId、随机 nonce、generation 和精确只读 capability。崩溃立即拒绝全部 pending 为 `CORE_RUNTIME_CRASHED`；不后台重启；下一次用户请求每个 profile/revision 都必须先完成 `getStatus` pending-journal preflight，失败不得被后续请求绕过。
 - request timeout 必须终止当前 Runtime generation，避免迟到响应与复用 requestId 错误关联；下一次用户请求按 crash restart/preflight 规则处理。shutdown 是终结性、幂等操作，调用前后都拒绝新请求，不能产生孤儿 Utility。response 的 requestId/generation/operationId 及 preflight profile 必须与请求关联。
-- History 列表标题只能来自显式 metadata；无标题返回空字符串并由 UI 本地化。消息正文只在用户显式打开详情后返回，离开详情立即清空/abort，不进入 Query cache、日志或 Diagnostics。
+- History 列表和详情标题按 9.2 从 Home 名称索引、当前 SQLite `threads.title`、rollout 显式 metadata 依次获取；无标题返回空字符串并由 UI 本地化。消息正文只在用户显式打开详情后返回，离开详情立即清空/abort，不进入 Query cache、日志或 Diagnostics。
 
 ### 16.6 C7 Electron Sync / Switch 候选边界
 
@@ -999,6 +1027,54 @@ V1/C3 已实现上述边界；`runSync/runSwitch/runRepair/runRestore/runWatch` 
 - 每个目标输出 CycloneDX SBOM、最终容器报告、release manifest 和 `SHA256SUMS.txt`。checksum 必须精确覆盖所有资产与 metadata；aggregate 必须证明四目标 version/commit/lockfile/tool versions/fuse policy/audit policy 一致，且任一 matrix job 失败、取消或跳过都使唯一 `ci-gate` 失败。
 - 推送 tag 不得自动发布。旧发布工作流改为显式 `workflow_dispatch` 并要求既有 `v` 前缀 tag 位于 `main`；这只是发布授权后的入口，不表示当前已获 tag、npm/GitHub Release、签名、公证或更新通道授权。
 
+### 16.9 Desktop Host UI、日志与 Profile 扩展（不改变 CoreFacade）
+
+- ADR-0036：概览提供默认折叠的同步速度说明；Sync/Switch 结果和 Desktop 日志仅凭实际 `rewrittenSessionFiles >= 100` 显示折叠提速入口，不按预计数量或耗时推断策略，不新增 Fast/改名/扫描能力。日志宽屏（≥1024 CSS px）左列表右详情、独立滚动；窄屏选择后切换详情并提供返回。翻页/筛选/配置变化或刷新后日志被清理时，不保留无关联旧详情；详情迟到响应按 ID 隔离。预计/实际计数、阶段时间、可复制编号和 Profile/revision 操作门禁保留，首次/手动刷新及既有推送策略不变。History 之外的固定视口例外仅新增日志页，其余页面滚动不变。
+
+- ADR-0027：保留数量仅在“备份与恢复”设置，范围 1–1000、默认 2；Host 持久化一份应用偏好，各 Codex Home 分别应用，不按操作类型分池。共享 UI 的 Sync/Switch/Repair 表单不再带 keepCount，由 App 在 Prepare 时注入，Watch 在启动时注入。保存只查本 Core 全部 Watch 并写 Host 偏好，不清理备份；活动 Watch/读取失败/持久化失败不保存。手动清理采用已保存值，草稿未保存时不允许清理；高级“删除全部可清理备份”仍在确认后调用 keep=0，自动策略不能设为 0。Restore 快照/journal/受保护备份及 CLI `--keep` 不变。
+
+- 更新检查启动策略补充：每天首次启动后延迟15秒尝试一次，使用userData本地日历日期标记跨启动去重；失败也消耗当天自动检查资格，持久化失败则跳过自动检查，手动检查不限。只有发现新版才由Main显示原生提示，不自动下载或安装；日常Status/Diagnostics/History仍无后台刷新。启动检查记操作日志，更新推送由UI根级接收。
+
+- ADR-0020补充16.7：便携/未授权本地打包版允许用户手动检查固定公开GitHub Releases（15秒/2MiB/最多30项），只筛选较新正式版及当前平台Electron资产；不实例化electron-updater、不自动下载/安装。下载按钮在此模式仅由Main打开固定官方版本页。授权安装版继续既有安装门禁；currentVersion/mode为schema v2可选字段，Preload增加只读subscribe更新状态，UI接收推送而非轮询。检查失败明确显示且可重试；不更改发布授权。
+
+- Overview 新增“直接同步”，点击即授权执行，无二次确认；内部连续调用 prepareSync/applySync，Apply 仍仅传 schemaVersion/planId。保留“预览同步”。Prepare 阶段的取消/失败不进入 Apply；运行中阻止重复提交与 Profile 切换，沿用进度、取消、结果及默认 2 份备份。
+- Desktop 完整诊断独立请求预算为 15 分钟，不沿用普通只读的 30 秒。UI 显示扫描中、失败、重试和成功时间；重试失败时保留并明确标记上次成功结果。仍按 Profile/revision 隔离、无后台扫描。
+
+- Desktop复制遵循ADR-0018补充：Host提供只写`copyText`，窄IPC只接受`{schemaVersion:1,text}`且完整JSON UTF-8≤64KiB；Main验证顶层来源并使用原生剪贴板，失败有反馈，无读取/日志/Utility转发。Web保留浏览器复制接口。
+- 诊断的`*NeedingRepair`字段保持原有算法与兼容名称，UI解释为可选元数据差异，不是聊天损坏数。模型标签可有合法历史差异；workspaceRoots计数为设置项变化/缺失备份数；encryptedContentFiles为出现加密字段的文件数，非解密测试或修复请求。
+
+- ADR-0019 将 `diagnostics` route 的展示入口命名为“高级功能 / Advanced features”，不改 Core/CLI 方法。完整诊断只由显式按钮触发；专项修复默认折叠、targets 默认全不选，选择后仍需 Prepare/Confirm/Apply。普通 Sync/Switch 成功或失败均不自动调用 Diagnostics/Repair；会话 ordinal 修复和 Codex 历史显示索引重建不在当前 targets 中，也不得暗含在日常同步中。必要备份、锁和占用跳过语义不变。
+- ADR-0031 将 models 独立为“高级调整 → 统一历史模型名称”，其余为“修正会话所属目录 / 补全用户消息标记 / 整理项目目录记录”。两组独立、默认折叠/不选，Profile ID/revision 改变即重置。当前完整成功诊断且可写时提供相应正计数的“查看修复”，只展开并聚焦，不勾选、不调用 Core；模型差异/加密字段不作为推荐修复。旧/失败/刷新中/不完整/占用/缺数据库结果不推荐。手动选项仍可直接 Prepare，不强制完整扫描。预览按实际 targets 说明改动及不变项；workspaceRoots 全配置且包含 cwd。API、算法、计数、默认 2 份备份和 Apply 输入不变。
+
+- Sync/Switch route 从共享导航移除，两个 Prepare 表单集中到 Overview；Core 的 prepare/apply 方法、DTO、plan ledger 与 Utility 方法面不变。
+- Overview 切换卡片展示名为“单独切换 Provider”；仍修改 config 后同步历史 Provider，不引入仅改配置的操作。目标默认采用当前有效 Status 的 currentProvider，而非 configuredProviders 第一项；首次读取/手动刷新只更新未编辑目标，已编辑目标成为当前值时重新建立默认基线。状态读取失败不重置草稿为 openai；Profile ID/revision 改变时重置整张切换表单。沿用既有 Status 请求，不增加后台刷新。
+- History 列表只在初始进入和手动刷新/提交搜索时读取；整行选择后才调用 `getHistorySession(messageLimit:200)`。宽屏双栏、窄屏单页、Markdown/代码复制和截断提示都是 UI 投影，不扩大 Core 的正文读取或持久化范围。
+- History视口布局不允许长详情撑高整页：列表和详情各自滚动，分页/详情标题固定在各自滚动区外；滚到底不带动其他栏或外层。窄屏详情提供返回和手动刷新，低高度控件区独立滚动，选择/加载不触发外层滚动。其余页面滚动保持不变。
+- Operation Log 是 Electron Main 的 Host 能力，不加入 CoreFacade。Main 将同一 sender 的 Prepare/Apply 合并，使用单调时钟区分 active 与 wall duration，并按 ProgressEvent 到达时间生成阶段时间线；确认关闭为 dismissed，启动时未终结的 active record 为 interrupted。终态 JSONL 固定为 5 个文件、每个最多 5 MiB，Diagnostics 可包含最近结构化脱敏记录。
+- Desktop Profile 列表仍只返回 `id/name/revision/*Configured`。Renderer 选择目录时只获得 5 分钟、单次、类型绑定 token；Main 消费 token 后创建/更新具名 Profile，ID 由 Main 生成。默认 Profile 不可改删，写操作或 Watch 活动期间拒绝修改；保存后新 revision 使旧 Plan 失效。
+- Windows 包体门禁为 app.asar≤3 MiB、解包≤280 MiB、NSIS≤105 MiB、portable ZIP≤130 MiB，Chromium locale 精确为 en-US/zh-CN（ADR-0026）。Windows candidate 打包后按本次目录和注入版本验证全部四项，不得跳过最终容器大小。移除的生产依赖必须已由 Vite 打包；native SQLite fallback 与正常 Windows D3D/GPU 路径必须由 packaged smoke 验证。Chromium 许可证完整原文保存在包内 ZIP，构建及最终容器审计验证解压 byte/hash 一致，并保留离线阅读说明；本次不增加运行文件裁剪。
+
+### 16.10 V1 用户体验审查修复（ADR-0024）
+
+- `getWatchStatus` 输入为互斥的 `{}`、`{watchId}`、`{profile}`。前者保留全局状态供守卫；`profile` 先可信解析/revision 校验，再返回该配置显式启用的 watcher。不同 Home 隔离；同物理 Home 的显式别名启用仍复用一个 watcher，状态查询与启动返回值一致。
+- 设置页 Watch 缓存/错误/请求按 Profile ID+revision 隔离。启停只更新匹配 watchId 的缓存；切换配置取消旧查询，不增加后台轮询。
+- 同 Home 的共享 Watch 保持首次启用者的 options/SQLite override 和 Main 资源所有者；自动执行/停止日志归首次配置，不按别名复制。后启用的配置可通过日志“全部配置”查看，设置页明示此规则。
+- Restore UI 映射 capturedTargetKinds：配置=`config || globalState`，索引=`sqlite`，会话=`rollout`；缺省字段保持旧完整备份兼容。relocation 自动取消/禁用配置恢复且必须选中索引和目标；不改变 Core journal 或补偿。备份读失败不是空列表，显示错误/重试并阻止使用失败快照写入；已不存在的指定备份不自动替换为另一份。
+- Desktop Log schema v1 可选增加 profileRevision/failedStage/failureCode/partialReason/retryRecommended，逐项白名单读取嵌套结果；Watch activity 可带这些字段和不含路径的 backupId。所有失败类 Restore outcome 日志显示 failed，不能显示 completed。只有相同 Profile/revision 的记录提供指定备份预览/返回操作页；旧日志无 revision 时不推断目标。页面跳转不自动重试，不重放 Plan。
+- Overview 顺序按 ADR-0025 的 2026-09-07 用户布局修订执行：摘要 → 分布 → 当前存储配置和完整路径（左）与 Sync（右）同排 → 最底部单独 Switch；窄屏仍为存储→Sync。桌面宽屏摘要四项一排，常用视口首屏可见同步按钮；不隐藏完整路径或缩小字体。取代本节原“主操作在路径之前”要求。删除非当前 Profile 不切换选择；History 本地详情 Retry 保留左侧展开和分页，只重新读取选中详情。保留手动刷新及正文不缓存规则。
+- CLI Sync/Switch 仍为六阶段，Repair 的 verify_repair 独立为第七阶段。
+
+### 16.11 状态与操作反馈完善（ADR-0025）
+
+- Overview“正在使用的会话”改用 Status 的可选 `sessionActivity`，Provider 预览通过 `impact.sessionActivity` 使用相同采集器。Windows 仅观察当前物理 Home 的 UUID 空 writer-lock 文件中 OS 证明由 `codex.exe` 持有的会话（PID/创建时间匹配），包含已对齐 Provider、等待输入和子会话；不代表正在生成或全局加载状态。旧 `syncSessionUsage` 不再生成，仅保留兼容解析；旧 `lockedRolloutFiles` 含义不变，二者均不能回退为活动计数。
+- `sessionActivity` 严格为 `{state:"checked",count:非负整数}` 或 `{state:"unavailable"|"unsupported",count:null}`；Facade/协议对 Status 和 Plan 同样白名单处理。RM/权限/身份失败、未知协议、重解析点、枚举漂移、缺目录或 8 秒采集超时为 unavailable；非 Windows/UNC 为 unsupported。最多 512 个会话资源，一次隐藏进程，不读消息/日志/凭据、不获取用户锁。已释放遗留空文件不计入。缺字段、未知快照、`statusReadBlocked` 或 `operationInProgress` 时 UI 显示“未知”。卡片只有标题和数值/未知，不加开发注释。预览的“本次将跳过的会话”仍按实际待写目标独占检查，Apply 原样重检，activity 不授权写入、不参与 revision。无定时刷新。详见 ADR-0030（取代 ADR-0029 的展示口径）。
+- 无有效 Status 快照时，Provider/计数显示 `—`，健康状态显示读取中或尚未验证；刷新中保留的快照明示为上次读取结果，失败不使用旧成功值。
+- 清理备份展示“最多删除/至少保留”的当前列表估计，再确认执行；保留 0 特别提示。受保护备份由 Core 保留，最终数量以结果为准。Profile revision/列表变化或读取不可用使确认失效，Prune API 不变。
+- Profile 当前使用标记独立于编辑选择。
+- Apply 后只复用既有一次 Status 复核，结果与最终健康分开。要求 operationId 与当前结果匹配、Profile ID/revision 与原操作/当前配置一致，且 SQLite 可读、扫描完整、无占用/活动操作/恢复阻断；按 Core alignment 展示。请求失败/不完整明确未验证，不从 outcome 推断对齐。
+- History 草稿关键词/Provider/范围不自动提交；显示待搜索提示和清除筛选入口。清除只重置既有筛选状态，不触发 Diagnostics 或隐式正文扫描；归档/类型保持即时筛选。
+- Main 只在应用 userData 保存窗口边界/最大化/显示器偏好；显示器失效时回到可见工作区。隐藏/副屏自动验证不读写该偏好，不改变 Core/IPC。
+
 ## 17. Phase 1 提取要求
 
 Phase 1 只提取边界，不改变算法或结果：
@@ -1018,6 +1094,8 @@ Phase 1 只提取边界，不改变算法或结果：
 
 ### 18.1 Status
 
+ADR-0033 当前修订：正常数据追加/更新导致的 revision 漂移不再生成 external Operation。无实际锁/运行时操作时，返回 `operationInProgress:null`、`statusReadBlocked.reason=state-changed-during-status`（或 `revision-unverifiable`）、`rolloutScanComplete:false`。最后完整快照只作未核验缓存；真实 Home 锁与恢复阻断不变。最多一次原有重试；共享 UI 显示“状态待刷新”、提供手动重试，未核验时禁用写入、Watch 启动/安装和 Plan 确认，不添加轮询。Diagnostics 复用此状态时同样不报告完整。
+
 - implicit `openai`；
 - configured Provider 列表；
 - default 与 legacy state DB 选择；
@@ -1036,7 +1114,7 @@ Phase 1 只提取边界，不改变算法或结果：
 - config/storage revision 变化阻断；
 - result 字段和 progress stage；
 - observer 失败不影响事务；
-- Provider Sync 不打开正文；等长更新保留文件身份/大小/正文 Hash，不等长更新保持正文 bytes；
+- Provider Sync 不开启全文正文扫描；合格等字节长度更新保留文件身份/大小/正文 Hash，其余有效首行流式替换保持正文 bytes；有界块预读不等于全文扫描；
 - 模型、cwd、user-event、workspace roots 与加密内容不被 Sync/Switch 修改；
 - mutation 前故障零业务写入，mutation 后故障为带 UndoBackup 的 partial，重复执行可收敛；
 - default/custom keep 自动清理与 warning 降级；
@@ -1067,9 +1145,37 @@ Phase 1 只提取边界，不改变算法或结果：
 - alignment 不要求总数相等；
 - runtime storage identity 与安全复用；
 - History 列表/详情必须显式读取，详情正文不缓存且离页清空；
-- production CSP nonce、八个共享页面、双语/主题、键盘焦点、reduced motion 与 200% 等效窄视口。
+- production CSP nonce、六个共享导航页（Sync/Switch 合并到概览）、Desktop capability 操作日志、双语/主题、键盘焦点、reduced motion 与 200% 等效窄视口。
 
 ## 19. 变更控制
+
+### 修复计数与单次诊断（ADR-0034）
+
+- Repair impact 的 `sqliteRowsToChange` 保持字段累计；可选 `sqliteModelRowsToChange/sqliteCwdRowsToChange/sqliteUserEventRowsToChange` 为所选目标分类数，合计等于前者。`repairPreviewTotal` 才是去重会话数，不含全局设置项。
+- `workspaceRootsToChange` 为设置类别数；可选 `workspaceSettingsChangeKinds` 仅包含 `savedRoots/projectOrder/activeRoots/labels/openTargets/settingsBackup`，按固定顺序去重投影，不含路径或动态值。全局修复仍可查看最多 100 条只读会话预览，但不可选择局部范围。
+- Diagnostics 完整事实扫描最多一次，前后 rollout revision 仅采 stat 元数据；不执行 Status 重试或写其快照缓存。本轮扫描后发生漂移/核验失败时保留观察结果、`safety.rolloutScanComplete=false`，不能作为健康结论或当前完整修复建议；实际 Home 锁优先。独立有界 `historyIntegrity` 仍扫描，Prepare/Apply 仍重新按自身合同校验。
+
+### 实测前反馈优化（ADR-0028）
+
+- 公开 Core 方法、Apply 输入和 ProgressEvent 不变。可信 Facade 构造可选 `onWatchStopped` 仅向 Host 通报一次停止快照，含启动 Profile/revision；observer 失败不能影响业务。Desktop 私有 runtime 协议 v3 新增终态事件，公开 Core 协议仍为 v1。
+- History 列表始终新读；详情可以复用 15 秒闲置有效的进程内定位表（最多 8 个物理 Home，每个 8192 个候选），仅包含 ID/路径/身份，不包含标题或正文。每次仍重新枚举并核对候选身份及选中首行；发生变化时重新选择 canonical 文件，正文只在显式详情/正文搜索读取。
+- Desktop 日志传输允许并验证现有 Profile revision、partial 阶段/错误/重试字段；磁盘轮转淘汰的终态不继续留在内存列表。活动记录不因归档轮转消失。此能力属于 Host，不增加 Core 业务方法。
+
+### V1 切换历史与预览复用（ADR-0037）
+
+- Switch Plan target 可选增加 `previousProvider:string`、`previousRootModel:string|null`；与目标 `provider/model/modelMode` 同 config 绑定，仅描述计划，不代表已经写入。根模型三策略和历史模型边界不变。
+- Desktop 日志可选 `switchPlan:{previousProvider,targetProvider,previousRootModel,targetRootModel,modelMode}`，严格校验；旧记录不补猜，partial 的实际结果仍看 outcome/counts。Host list 可选 profileRevision，仅最近成功候选按 Profile/revision 筛选，旧 revision 日志仍可浏览。
+- Sync/Switch Prepare 内部分布、revision、change descriptor 共用一次有限首行读取，不公开预计算输入、不持久缓存。Apply 仍重扫、重验，含最小大小/物理身份/首行和 SQLite Provider 语义校验。
+- 必须保留既有文件 mtime 恢复；使用 Apply 锁内新鲜时间，不回拨真实追加时间；不改消息时间或 `threads.updated_at`。变长现有毫秒 best-effort 行为不因提速变更。细节与 fixture 见 [ADR-0037](../../adr/0037-switch-history-and-provider-preparation-facts.md)。
+
+### V1 专项修复增量（ADR-0021）
+
+- `prepareRepair` 可选 `sessionIds` 指定1～100个唯一原生会话 ID（`[A-Za-z0-9_-]`、长度1～128），省略保持全 Profile；`workspaceRoots` 仅能按全 Profile 执行。目标范围同时约束 rollout 与 SQLite；不接受 Renderer 路径，不存在的 ID 在写入前拒绝。
+- Repair Plan target 增加 `scope/sessionIds`；impact 增加 `repairPreview`（最多100条 `{sessionId, changes:[{target,before,after}]}`）、`repairPreviewTotal`、`repairPreviewTruncated`。预览不含正文和 cwd 路径。切换选择需重新 Prepare，Apply 契约不变。
+- Repair result 增加 `verification`：`status=verified/remaining/unavailable`，以及 `remainingRolloutFiles/remainingSqliteRows/remainingWorkspaceRoots/skippedSessions`。在 Home 锁内核验；不完整/有残留为 partial，可手动重试或 Restore。计数分别按文件、字段差异、设置项，不相加冒充唯一会话数。
+- Repair 的写后复扫发出 `stage=verify_repair`、`status=start/complete`，沿用现有 ProgressEvent 字段，使操作日志可统计核验阶段耗时；observer 仍不影响业务结果。
+- Diagnostics 增加可选 `historyIntegrity`：有界只读记录格式/JSON/UTF-8/数字序号观察、扫描上限与问题明细；未知格式、截断、变化和超限为未完整核验。显示索引固定标注未验证，不提供改序号或重建索引。Sync/Status 不调用此扫描。
+- 写操作使旧诊断过期，但不会自动重新运行诊断。诊断包只包含历史完整性聚合计数，不包含会话问题明细或消息正文。
 
 修改以下任一内容，必须同时更新本文、相关 ADR、Contract Test 和发布说明：
 

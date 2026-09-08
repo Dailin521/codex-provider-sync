@@ -20,6 +20,7 @@ const {
   configDeclaresProvider,
   listConfiguredProviderIds,
   readConfigText,
+  readCurrentProviderFromConfigText,
   readProviderModel,
   readRootModelFromConfigText,
   setRootModelInConfigText,
@@ -31,7 +32,8 @@ export function buildSwitchIntent(originalConfigText, provider, model, keepRootM
   if (!configDeclaresProvider(originalConfigText, provider)) {
     throw new CoreError(
       "INVALID_INPUT",
-      `Provider "${provider}" is not available in config.toml. Configure it first or use one of: ${listConfiguredProviderIds(originalConfigText).join(", ")}`
+      `Provider "${provider}" is not available in config.toml. Configure it first or use one of: ${listConfiguredProviderIds(originalConfigText).join(", ")}`,
+      { details: { reason: "provider-not-configured" } }
     );
   }
   if (model !== undefined && model !== null && keepRootModel) {
@@ -177,8 +179,11 @@ export async function prepareSwitch(options = {}) {
   }
   const keepRootModel = Boolean(options.keepRootModel);
   const intent = buildSwitchIntent(configText, options.provider, options.model, keepRootModel);
-  return prepareProviderPlan("switch", { ...options, keepRootModel }, {
+  const current = readCurrentProviderFromConfigText(configText);
+  return prepareProviderPlan("switch", { ...options, expectedConfigText: configText, keepRootModel }, {
     provider: options.provider,
+    previousProvider: current.provider,
+    previousRootModel: readRootModelFromConfigText(configText),
     rootModel: intent.rootModel,
     modelSync: intent.modelSync,
     configMutationExpected: intent.nextConfigText !== configText,

@@ -95,11 +95,13 @@ test("updater exposes a redacted Main-only check, download and install state mac
   const { controller, port, state } = fixture();
   assert.deepEqual(controller.status, {
     schemaVersion: 2,
+    currentVersion: "1.0.0",
     state: "idle",
     installAllowed: false
   });
   assert.deepEqual(await controller.check(), {
     schemaVersion: 2,
+    currentVersion: "1.0.0",
     state: "available",
     installAllowed: false,
     version: "1.0.1"
@@ -107,6 +109,7 @@ test("updater exposes a redacted Main-only check, download and install state mac
   const downloaded = await controller.download();
   assert.deepEqual(downloaded, {
     schemaVersion: 2,
+    currentVersion: "1.0.0",
     state: "downloaded",
     installAllowed: true,
     version: "1.0.1",
@@ -206,6 +209,7 @@ test("updater fails closed without leaking raw errors or allowing invalid event 
   });
   assert.deepEqual(await checkFailure.controller.check(), {
     schemaVersion: 2,
+    currentVersion: "1.0.0",
     state: "error",
     installAllowed: false,
     reason: "check-failed"
@@ -218,6 +222,7 @@ test("updater fails closed without leaking raw errors or allowing invalid event 
   };
   assert.deepEqual(await invalid.controller.check(), {
     schemaVersion: 2,
+    currentVersion: "1.0.0",
     state: "error",
     installAllowed: false,
     reason: "check-failed"
@@ -245,6 +250,7 @@ test("updater stays disabled before a packaged, authorized and configured releas
   });
   assert.deepEqual(await controller.check(), {
     schemaVersion: 2,
+    currentVersion: "0.0.0",
     state: "disabled",
     installAllowed: false,
     reason: "not-packaged"
@@ -272,6 +278,7 @@ test("unsigned candidate never creates an updater port or schedules network work
   });
   assert.deepEqual(controller.status, {
     schemaVersion: 2,
+    currentVersion: "1.0.0-rc.205",
     state: "disabled",
     installAllowed: false,
     reason: "not-authorized"
@@ -283,4 +290,140 @@ test("unsigned candidate never creates an updater port or schedules network work
   await controller.install();
   assert.equal(created.length, 0);
   controller.dispose();
+});
+
+test("portable manual updates check on demand, open official downloads and never install", async () => {
+  let checks = 0;
+  let pages = 0;
+  const published = [];
+  const { controller, port, state } = fixture({
+    releaseAuthorized: false,
+    manualUpdates: {
+      check: async () => { checks++; return { version: "1.1.0" }; },
+      openDownloadPage: async () => { pages++; }
+    },
+    onStatus: status => published.push(status)
+  });
+  assert.equal(controller.status.mode, "manual");
+  assert.equal(controller.status.state, "idle");
+  controller.scheduleInitialCheck(0);
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(checks, 0);
+  assert.equal((await controller.check()).version, "1.1.0");
+  assert.equal(checks, 1);
+  assert.equal((await controller.download()).state, "available");
+  assert.equal(pages, 1);
+  assert.equal((await controller.install()).installAllowed, false);
+  assert.equal(port.checks + port.downloads + port.installs, 0);
+  assert.equal(state.gateClosed, false);
+  assert.ok(published.some(status => status.state === "checking"));
+  controller.dispose();
+});
+
+test("manual check failure is retryable and status observers cannot break updates", async () => {
+  let attempts = 0;
+  const { controller, port } = fixture({
+    manualUpdates: {
+      force: true,
+      check: async () => { if (++attempts === 1) throw new Error("private URL"); return null; },
+      openDownloadPage: async () => { throw new Error("must not open"); }
+    },
+    onStatus: () => { throw new Error("broken renderer"); }
+  });
+  assert.equal((await controller.check()).reason, "check-failed");
+  assert.equal((await controller.check()).state, "not-available");
+  await controller.download();
+  assert.equal(port.checks, 0);
+  controller.dispose();
+});
+
+for (const [platform, arch] of [["win32", "x64"], ["darwin", "x64"], ["darwin", "arm64"], ["linux", "x64"]]) {
+  test(`unreleased packaged ${platform}/${arch} falls back to manual checks without force`, async () => {
+    let checks = 0;
+    const { controller, port } = fixture({
+      platform, arch, releaseAuthorized: false, configured: true,
+      manualUpdates: { force: false, check: async () => { checks++; return null; }, openDownloadPage: async () => {} }
+    });
+    assert.equal(controller.status.mode, "manual");
+    await controller.check();
+    assert.equal(checks, 1);
+    await controller.install();
+    assert.equal(controller.status.installAllowed, false);
+    assert.equal(port.checks + port.downloads + port.installs, 0);
+    controller.dispose();
+  });
+}
+
+test("download failures clear version and report valid error state; progress is pushed", async () => {
+  const statuses = [];
+  const { controller, port } = fixture({ onStatus: status => statuses.push(status) });
+  await controller.check();
+  await controller.download();
+  assert.ok(statuses.some(status => status.state === "downloading" && status.progressPercent === 51));
+  assert.ok(statuses.some(status => status.state === "downloaded" && status.installAllowed));
+  controller.dispose();
+  const failed = fixture();
+  await failed.controller.check();
+  failed.port.downloadError = new Error("network offline");
+  const result = await failed.controller.download();
+  assert.equal(result.reason, "download-failed");
+  assert.equal(result.version, undefined);
+  assert.equal(result.progressPercent, undefined);
+  failed.controller.dispose();
+});
+
+test("daily startup check runs once, notifies only for a newer version and leaves manual check available", async () => {
+  let claimed = false;
+  let checks = 0;
+  const notices = [];
+  const callbacks = [];
+  const options = {
+    releaseAuthorized: false,
+    claimStartupCheck: async () => { if (claimed) return false; claimed = true; return true; },
+    onStartupUpdateAvailable: async status => { notices.push(status.version); },
+    manualUpdates: { check: async () => { checks++; return { version: "1.1.0" }; }, openDownloadPage: async () => {} },
+    setTimeoutImpl: callback => { callbacks.push(callback); return { unref() {} }; }
+  };
+  const first = fixture(options).controller;
+  first.scheduleInitialCheck();
+  first.scheduleInitialCheck();
+  assert.equal(callbacks.length, 1);
+  callbacks.shift()();
+  for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(checks, 1);
+  assert.deepEqual(notices, ["1.1.0"]);
+  first.scheduleInitialCheck();
+  assert.equal(callbacks.length, 0);
+  const second = fixture(options).controller;
+  second.scheduleInitialCheck();
+  callbacks.shift()();
+  for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(checks, 1);
+  await second.check();
+  assert.equal(checks, 2);
+  assert.deepEqual(notices, ["1.1.0"], "manual check must not raise a startup popup");
+  first.dispose(); second.dispose();
+});
+
+test("startup checks remain silent on failure/no update and do not retry during the run", async () => {
+  for (const fail of [false, true]) {
+    let run;
+    let notices = 0;
+    let checks = 0;
+    const { controller } = fixture({
+      releaseAuthorized: false,
+      claimStartupCheck: async () => true,
+      onStartupUpdateAvailable: async () => { notices++; },
+      manualUpdates: { check: async () => { checks++; if (fail) throw new Error("offline"); return null; }, openDownloadPage: async () => {} },
+      setTimeoutImpl: callback => { run = callback; return { unref() {} }; }
+    });
+    controller.scheduleInitialCheck();
+    run();
+    for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
+    controller.scheduleInitialCheck();
+    assert.equal(checks, 1);
+    assert.equal(notices, 0);
+    assert.equal(controller.status.state, fail ? "error" : "not-available");
+    controller.dispose();
+  }
 });

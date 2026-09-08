@@ -14,6 +14,7 @@ import {
 } from "@electron/fuses";
 import { parse as parsePlist, parseBinary as parseBinaryPlist } from "plist";
 import { NtExecutable, NtExecutableResource } from "resedit";
+import windowsNotices from "./windows-license-archive.cjs";
 
 const require = createRequire(import.meta.url);
 const scriptRoot = path.dirname(fileURLToPath(import.meta.url));
@@ -356,6 +357,8 @@ async function verifyNativeDriver(nativeBinding, asarPath) {
     : [nativeProbeScript];
   const result = spawnSync(electronBinary, args, {
     cwd: desktopRoot,
+    windowsHide: true,
+    timeout: 45_000,
     env: {
       ...process.env,
       CPS_NATIVE_DRIVER_PACKAGE: sourcePackage,
@@ -391,6 +394,7 @@ export async function auditPackagedLayout({ layout, target, version, buildId }) 
   assert.equal(asarStat.isFile(), true, "Packaged app.asar is missing.");
   assert.equal(executableStat.isFile(), true, "Packaged executable is missing.");
   await assertSafeContainerTree(layout.appRoot);
+  if (descriptor.platform === "win32") await windowsNotices.verifyLicenseArchive(layout.appRoot);
 
   const entries = listPackage(asarPath, { isPack: false }).map(normalizeEntry);
   const entrySet = new Set(entries);
@@ -594,6 +598,20 @@ export async function createRuntimeProjection(lockfilePath) {
 
   const rootRef = visit(rootKey, "@codex-provider-sync/desktop");
   const root = records.get(rootRef);
+  // electron-vite compiles these product workspaces into Main/Renderer. They
+  // are build-time links rather than shipped node_modules, but their runtime
+  // dependency closure still belongs in the release SBOM.
+  for (const workspaceKey of [
+    "packages/app-ui",
+    "packages/contracts",
+    "packages/core",
+    "packages/core-client",
+    "packages/design-system"
+  ]) {
+    const workspace = packages[workspaceKey];
+    assert.equal(typeof workspace?.name, "string", `Bundled workspace is absent from lockfile: ${workspaceKey}`);
+    root.dependencies.add(visit(workspaceKey, workspace.name));
+  }
   records.delete(rootRef);
   return Object.freeze({
     rootDependencies: [...root.dependencies].sort(),

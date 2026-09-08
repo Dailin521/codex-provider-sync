@@ -27,6 +27,15 @@ export interface CoreProgressEnvelope {
     event: "progress";
     progress: ProgressEvent;
 }
+/** Progress for an explicitly allowlisted non-Apply request.  It deliberately
+ * has no operationId so readonly scans and plan preparation cannot masquerade
+ * as a write lifecycle. */
+export interface CoreRequestProgressEnvelope {
+    protocolVersion: CoreProtocolVersion;
+    requestId: string;
+    event: "request-progress";
+    progress: ProgressEvent;
+}
 export interface CoreOperationStartedEnvelope {
     protocolVersion: CoreProtocolVersion;
     requestId: string;
@@ -49,9 +58,11 @@ export declare function assertCoreMethodOutput<M extends CoreMethodName>(method:
 export declare function assertProgressEvent(value: unknown): asserts value is ProgressEvent;
 export declare function assertCoreOperationStartedEnvelope(value: unknown, expectedRequestId?: string, expectedOperationId?: string): asserts value is CoreOperationStartedEnvelope;
 export declare function assertCoreProgressEnvelope(value: unknown, expectedRequestId?: string, expectedOperationId?: string): asserts value is CoreProgressEnvelope;
+export declare function assertCoreRequestProgressEnvelope(value: unknown, expectedRequestId?: string): asserts value is CoreRequestProgressEnvelope;
 export declare function assertCoreOperationEventEnvelope(value: unknown, expectedRequestId?: string, expectedOperationId?: string): asserts value is CoreOperationEventEnvelope;
 export declare function createCoreOperationStartedEnvelope(requestId: string, operationId: string, operation: CoreOperationStartedEnvelope["operation"]): CoreOperationStartedEnvelope;
 export declare function createCoreProgressEnvelope(requestId: string, operationId: string, progress: ProgressEvent): CoreProgressEnvelope;
+export declare function createCoreRequestProgressEnvelope(requestId: string, progress: ProgressEvent): CoreRequestProgressEnvelope;
 export declare function createCoreRequestEnvelope<M extends CoreMethodName>(method: M, payload: CoreMethodMap[M]["input"], requestId: string, operationId?: string): CoreRequestEnvelope<M>;
 export declare function createCoreSuccessEnvelope<M extends CoreMethodName>(request: CoreRequestEnvelope<M>, result: CoreMethodMap[M]["output"], operationId?: string): CoreResponseEnvelope<M>;
 export declare function createCoreFailureEnvelope<M extends CoreMethodName>(request: CoreRequestEnvelope<M>, error: CoreErrorDto, operationId?: string): CoreResponseEnvelope<M>;

@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml)
 [![CLI / Web](https://img.shields.io/npm/v/%40dailin521%2Fcodex-provider-sync?label=CLI%20%2F%20Web)](https://www.npmjs.com/package/@dailin521/codex-provider-sync)
-[![Windows GUI](https://img.shields.io/github/v/release/Dailin521/codex-provider-sync?label=Windows%20GUI)](https://github.com/Dailin521/codex-provider-sync/releases/latest)
+[![Releases](https://img.shields.io/github/v/release/Dailin521/codex-provider-sync?label=Releases)](https://github.com/Dailin521/codex-provider-sync/releases)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
 [![Community](https://img.shields.io/badge/community-LINUX%20DO-2ea043.svg)](https://linux.do/)
 
@@ -18,7 +18,7 @@
 
 `model_provider` を切り替えた後、既存セッションが Codex Desktop や `/resume` から消えることがあります。**データ自体は通常ディスク上に残っています**。セッションファイルと SQLite インデックス内の Provider 情報だけが同期されていません。
 
-このツールはセッションファイルと SQLite インデックスを同期してセッションの可視性を復元し、書き込み前にバックアップを作成します。ログイン、アカウント切り替え、`auth.json`、メッセージ本文は扱いません。
+このツールはセッションファイルと SQLite インデックスの Provider 情報を揃えます。実際の変更前にバックアップを作成し、既定で最新 2 件を保持します。変更がなければバックアップは作成しません。ログイン、アカウント切り替え、復号やメッセージの再構築は行わず、`auth.json` も読み取り・変更しません。
 
 <p align="center">
   <img src="../images/README/provider-metadata-sync-flow.png" alt="Provider メタデータ同期の前後" width="760">
@@ -32,32 +32,30 @@
 
 ## クイックスタート
 
-> Windows GUI とローカル Web UI の画面表示は現在、簡体字中国語のみです。
->
-> CLI/Web と Windows GUI は別々にリリースされるため、バージョン番号が異なる場合があります。
->
-> **V1 候補での位置付け：**本 PR は C10 の移行目標として Electron を新しい主デスクトップ候補、既存の .NET Windows/macOS 実装を移行後の Legacy fallback として示します。**公開リリースの状態は別です：**Releases で現在提供されているのは Windows .NET GUI だけで、Electron は `main` 未マージ、未公開、未署名で、ダウンロードや自動更新の対象ではありません。この候補上の表示は、Electron がすでに .NET を公開製品として置き換えたという意味ではありません。
+> 本書は V1 コードの説明です。Electron が主デスクトップアプリで、.NET は Legacy 互換版として維持されます。ローカル V1 ビルドは公開リリース、署名、更新チャネルの有効化を意味しません。Releases に実際に掲載されたファイルのみを利用してください。npm は公開済みバージョンをインストールします。[提供状況](migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md)も確認してください。
 
 | 利用場面 | 推奨する入口 |
 | --- | --- |
-| Windows デスクトップ | [現在公開中の Windows GUI（.NET）をダウンロード](https://github.com/Dailin521/codex-provider-sync/releases/latest)・[`V1` Electron 主デスクトップ候補ガイド（公開ダウンロードなし）](README_DESKTOP_EN.md) |
-| macOS デスクトップ | [ローカル Web UI（CLI が必要）](#ローカル-web-ui)・[ネイティブ GUI のビルド手順（英語）](README_MAC_GUI_EN.md) |
+| Windows デスクトップ | V1 Electron・[ユーザーガイド（英語）](README_DESKTOP_EN.md)・[公開済みファイル](https://github.com/Dailin521/codex-provider-sync/releases) |
+| macOS / Linux デスクトップ | [ビルドとプラットフォームガイド（英語）](README_DESKTOP_EN.md)。提供状況は各バージョンの公開済みファイルによります。 |
 | ブラウザ UI またはクロスプラットフォーム利用 | [ローカル Web UI（CLI が必要）](#ローカル-web-ui) |
 | スクリプト、CI、または WSL | [CLI](#cli) |
 
-### 現在公開中の Windows GUI（.NET、V1 の Legacy fallback 目標）
+### デスクトップ版
 
-[Releases](https://github.com/Dailin521/codex-provider-sync/releases/latest) から `CodexProviderSync.exe` をダウンロードします。
+提供された V1 の完全なプログラムフォルダー、または [Releases](https://github.com/Dailin521/codex-provider-sync/releases) に実際に掲載された対応パッケージを使用します。Electron の EXE だけをコピーしないでください。
 
-1. 「刷新」（Refresh）をクリックします。
-2. 対象の Provider を選択します。
-3. 「立即同步」（Sync Now）をクリックします。
+1. Overview で現在の Provider と同期状態を確認します。
+2. 外部ツールで切り替えた場合は **Preview sync** で確認するか、**Sync now** で直ちに同期します。
+3. 本アプリで変更する場合は **Switch Provider separately** で Provider とルートモデル方針を選び、プレビュー後に確認します。設定変更後に履歴 Provider も同期されます。
 
-コード署名は付与していないため、Windows でセキュリティ警告が表示される場合があります。本プロジェクトの Releases からのみダウンロードしてください。
+チャットはプロジェクトごとに主セッションと折りたたまれた子タスクを表示し、右クリックで ID や再開コマンドをコピーできます。データは初回または明示的な操作後に読み込み、バックグラウンドで定期更新しません。Watch は手動で有効化します。更新確認はその日の初回起動時または手動のみで、自動インストールしません。
 
-[Windows GUI の詳細（中国語）](README_GUI_ZH.md)
+バックアップ保持数は Backups / Restore で一元管理し、同じアプリの各操作で共有します。保存先 Home ごとに保持し、Desktop・ブラウザ・CLI 間で設定は共有しません。保存だけでは削除せず、復元に必要な保護対象は上限を超えて残る場合があります。
 
-新しい Electron 主デスクトップ候補の機能、安全境界、内部検証は [Electron primary desktop candidate guide（英語）](README_DESKTOP_EN.md) を参照してください。候補上の役割は公開リリースを意味せず、このガイドはダウンロードやリリース権限を提供しません。
+Windows の新しい操作ログはコピー、フラッシュ、置換、一時ファイル削除、タイムスタンプ復元の時間を表示します。旧ログの値は補いません。旧 .NET の単一 EXE 更新では Electron に直接移行できず、完全な新パッケージが必要です。
+
+[デスクトップ版ガイド（英語）](README_DESKTOP_EN.md)
 
 ### ローカル Web UI
 
@@ -68,10 +66,6 @@ npm install -g @dailin521/codex-provider-sync
 codex-provider web
 ```
 
-<p align="center">
-  <a href="../images/README/2026-08-05T03-53-48.708Z.png"><img src="../images/README/2026-08-05T03-53-48.708Z.png" alt="Web UI 概要" width="760"></a>
-</p>
-
 よく使うオプション:
 
 ```bash
@@ -80,14 +74,14 @@ codex-provider web --port 8792     # ポートを指定する
 codex-provider web --reset-access  # ブラウザを再ペアリングする
 ```
 
-Web UI はデフォルトで `127.0.0.1` のみで待ち受け、ブラウザを自動で開いてペアリングします。保存先はページ上部の保存設定（Profile）で管理します。書き込み操作には確認が必要です。
+Web UI はデフォルトで `127.0.0.1` のみで待ち受け、ブラウザを自動で開いてペアリングします。保存先はサーバー管理の Profile で指定します。Sync now はクリックで実行を許可し、内部で Prepare/Apply を続けて行います。Preview sync、Switch、Repair、Restore はプレビュー確認後に実行します。Web にはデスクトップ操作ログやアプリ更新はありません。
 
 #### Provider 切り替え後に履歴を同期する
 
 1. CCSwitch など普段使用しているツールで Provider を切り替えます。
-2. 必要に応じて Web UI で「读取状态」（Read Status）をクリックします（省略可）。
-3. 「仅同步元数据」（Metadata Only）のまま対象 Provider を選択し、同期の実行を確認します。
-4. 「Provider 元数据已对齐」（Provider Metadata Aligned）が表示されれば完了です。
+2. Overview で現在の Provider と同期状態を確認します。
+3. Preview sync で確認後に実行するか、Sync now をクリックします。
+4. 結果が partial の場合は、使用中のセッションを終了して再試行します。スキップされた記録を更新済みとして扱わないでください。
 
 > **注意：** メタデータ同期で復元されるのは履歴の可視性だけです。Provider をまたいで旧セッションを続行すると、切り替え先のバックエンドが `encrypted_content` の推論内容を復号できず、続行や compact に失敗する場合があります。
 
@@ -108,10 +102,19 @@ codex-provider sync
 | `codex-provider status` | Provider、rollout、SQLite の状態を確認する |
 | `codex-provider sync` | 現在の Provider に同期する |
 | `codex-provider switch <provider-id>` | Provider を切り替えてから同期する |
+| `codex-provider diagnostics` | 明示的な読み取り専用の完全診断 |
+| `codex-provider repair <targets>` | 選択したメタデータだけを修復する |
+| `codex-provider prune-backups --keep N` | 古い管理対象バックアップを削除する |
 | `codex-provider restore <backup-dir>` | バックアップを復元する |
 | `codex-provider watch` | 設定と SQLite の変更を監視する |
 
-`switch` は、対象 Provider section に `model` が定義されている場合、デフォルトでルートレベルの `model` も更新します。現在の値を保持するには `--keep-root-model`、明示的に指定するには `--model <name>` を使用します。
+`switch` は対象 Provider に `model` があればルートモデルへ反映し、なければ現在値を保持します。`--keep-root-model` は現在値を保持、`--model <name>` は明示的に指定します。どの方法も履歴モデルを変更しません。
+
+`sync` は config のルート `model_provider` を使用し、未指定時は `openai` です。カスタム Provider は事前定義が必要です。同期時のスキャンでは先頭行だけを解析します。安全な ID の JSON リテラルが UTF-8 バイト長で等しく一意に特定できれば、その位置を直接更新します。それ以外の有効な先頭行は一時ファイルへストリームコピーして置換し、本文のバイト列を保ちます。失敗したインプレース更新を強制的な全ファイル置換へ切り替えません。タイムスタンプ復元も維持します。固定長の名前に揃える必要はなく、`--fast` や `sync --provider` はありません。
+
+モデル、cwd、userEvent、workspaceRoots の変更は明示的な Repair に分離されています。workspaceRoots は cwd を含みます。Diagnostics は手動の読み取り専用検査で、失敗した Sync から自動実行しません。暗号化内容の変更、記録番号の変更、履歴表示インデックスの再構築は提供しません。
+
+CLI の書き込みコマンドは対話確認なしで実行します。プレビューが必要なら Desktop/Web を使ってください。有限コマンドの `--json` は stdout に単一結果、stderr に進捗を出し、partial は終了コード 3 です。Watch/Web はこの JSON モードに非対応です。[CLI ガイド（中国語）](README_CLI_ZH.md)
 
 SQLite Home の解決順序: `--sqlite-home` → `config.toml` ルートの `sqlite_home` → `CODEX_SQLITE_HOME` → `<Codex Home>/sqlite`。デフォルトレイアウトだけが `<Codex Home>/state_5.sqlite` にフォールバックします。
 
@@ -119,39 +122,31 @@ SQLite Home の解決順序: `--sqlite-home` → `config.toml` ルートの `sql
 
 ```mermaid
 flowchart LR
-    Browser["Browser React UI"] --> HttpClient["HttpCoreClient"]
-    HttpClient --> WebServer["Local Web Host<br/>127.0.0.1 + pairing"]
-    WebServer --> NodeCore["Node Core public facade"]
-    CLI["Node CLI"] --> NodeCore
-
-    ElectronRenderer["Electron Renderer<br/>V1 primary desktop candidate"] --> DesktopClient["DesktopCoreClient"]
-    DesktopClient --> ElectronHost["Preload / Main<br/>narrow IPC"]
-    ElectronHost --> Utility["Utility Process"]
-    Utility --> NodeCore
-
-    WindowsGUI[".NET GUI<br/>published now; V1 Legacy fallback target"] --> Application[".NET Application"]
-    Application --> DotNetCore[".NET Core"]
-    MacGUI["macOS GUI"] --> DotNetCore
-
-    NodeCore --> Storage["Codex Storage"]
-    DotNetCore --> Storage
-
-    Storage --> Config["config.toml"]
-    Storage --> Rollouts["sessions / archived_sessions"]
-    Storage --> SQLite["state_5.sqlite"]
-    Storage --> Backups["managed backups"]
+    CLI["CLI"] --> Adapter["public-api compatibility adapter"]
+    Adapter --> UseCases["Shared Node Core use cases"]
+    Web["Web UI"] --> Host["HttpCoreClient / Local Web Host"]
+    Host --> Facade["CoreFacade"]
+    Electron["Electron UI"] --> IPC["DesktopCoreClient / narrow IPC"]
+    IPC --> Utility["Utility Process"]
+    Utility --> Facade
+    Facade --> UseCases
+    UseCases --> Storage["Node storage ports"]
+    Storage --> Files["config / sessions / SQLite / backups"]
+    Legacy["Legacy .NET desktop"] --> DotNet["Separate .NET Core"]
+    DotNet --> Files
 ```
 
-- Web UI は `HttpCoreClient → /api/core → Node Core public facade`、CLI は同じ公開 Core 境界を直接使用します。
-- `V1` の Electron 主デスクトップ候補は `DesktopCoreClient → 制限された Preload/Main IPC → Utility Process → Node Core` を使用し、Renderer から Node、任意パス、汎用 IPC にはアクセスできません。
+- Web UI は `HttpCoreClient → /api/core → CoreFacade`、CLI は `src/public-api.js` 互換アダプターを通して同じ Node Core ユースケースを呼び出します。
+- `V1` の Electron 主デスクトップは `DesktopCoreClient → 制限された Preload/Main IPC → Utility Process → Node Core` を使用し、Renderer から Node、任意パス、汎用 IPC にはアクセスできません。
 - Windows GUI は Application 層を通じて .NET Core を呼び出し、macOS GUI は現在 .NET Core を直接呼び出します。
-- Node サービスと .NET Core は同じ設定、rollout、SQLite、バックアップの安全境界を扱います。
+- .NET は独立した Legacy 実装です。旧版のモデル修復、journal、自動全体ロールバックを新しい Node Core の動作として扱わないでください。
 
-`V1` 候補は C10 の移行目標として Electron を新しい主デスクトップ候補、保持する .NET Windows/macOS 実装を移行後の Legacy fallback と表示します。.NET は引き続きビルド・テストされ、少なくとも 2 メンテナンス周期は保持されます。公開 Releases はまだ .NET であり、Electron は未マージ・未公開・未署名です。この候補上の表示を、公開入口の切り替え完了と表現しないでください。
+V1 は Electron を主デスクトップアプリとして提供します。.NET Windows/macOS 実装は引き続きビルド・テストされる互換版として保持します。
 
 ## 安全上の境界
 
-- `sync` / `switch` の前に、毎回 `<Codex Home>/backups_state/provider-sync/<timestamp>` へバックアップします。デフォルトの Codex Home では `~/.codex/backups_state/provider-sync/<timestamp>` です。
+- Sync/Switch/Repair の実際の変更前に `<Codex Home>/backups_state/provider-sync/<timestamp>` へバックアップし、既定で最新 2 件を保持します。no-op では作成しません。
+- 通常の書き込みは Home ロックと SQLite トランザクションを使い、ファイル間の journal や自動全体ロールバックを行いません。変更後の失敗は partial として、新しいプレビューで確認して再試行するか、CLI コマンドを再実行します。取り消したい場合は手動で Restore します。Restore だけが独立したスナップショット、journal、補償処理を保持します。
 - メッセージ本文、セッションタイトル、認証情報、`auth.json`、`updated_at` は変更しません。
 - SQLite が使用中の場合は、Codex、Codex App、app-server を閉じてから再試行してください。
 - アクティブなセッションが rollout をロックしている場合、他のファイルは続行します。セッション終了後にもう一度同期してください。
@@ -161,8 +156,9 @@ flowchart LR
 ## ドキュメント
 
 - [AI / Agent ガイド](../AGENTS.md)
-- [Windows GUI（中国語）](README_GUI_ZH.md)
-- [V1 Electron 主デスクトップ候補（英語）](README_DESKTOP_EN.md)
+- [Legacy .NET Windows GUI（中国語）](README_GUI_ZH.md)
+- [現在の Core アーキテクチャ（中国語）](architecture/NODE_CORE_ARCHITECTURE_ZH.md)
+- [V1 Electron デスクトップ版ガイド（英語）](README_DESKTOP_EN.md)
 - [Web UI（中国語）](README_WEB_UI_ZH.md)
 - [中文](../README.md) · [English](README_EN.md) · 日本語 · [한국어](README_KO.md)
 - [macOS GUI: 中文](README_MAC_GUI_ZH.md) · [English](README_MAC_GUI_EN.md)
@@ -170,8 +166,11 @@ flowchart LR
 
 ## 開発
 
+ワークスペース、Web、Electron の構築は Node 24 を使用します。インストール済みのルート CLI は Node 16.20.2 以降に対応します。現在の Core ガイドを先に読み、Provider I/O の不変条件を維持してください。
+
 ```bash
 npm ci
+npm run architecture:check
 npm run web:build
 npm run web:start
 npm test

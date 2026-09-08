@@ -1,4 +1,5 @@
 import type { HostClient, HostProfile, PreferenceStore, SaveProfileInput } from "@codex-provider-sync/app-ui";
+import { createBackupPreferences, createProjectAliasPreferences } from "@codex-provider-sync/app-ui";
 
 const DEVICE_STORAGE_KEY = "cps.web.deviceCredential";
 const LOCALE_STORAGE_KEY = "cps.preference.locale";
@@ -88,6 +89,8 @@ export function createHostClient(deviceCredential: string): HostClient {
 }
 
 export const preferenceStore: PreferenceStore = {
+  ...createBackupPreferences(globalThis.localStorage, "cps.web"),
+  ...createProjectAliasPreferences(globalThis.localStorage, "cps.web"),
   getLocale() {
     const value = globalThis.localStorage.getItem(LOCALE_STORAGE_KEY);
     return value === "zh-CN" || value === "en" ? value : null;

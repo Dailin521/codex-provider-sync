@@ -5,6 +5,8 @@
 - 适用范围：V1 Node Core、CLI、Local Web UI、Electron Desktop
 - 取代范围：ADR-0015 的显式 `fast` 模式与普通 Sync 完整正文扫描决策；Provider 等长原地更新继续有效
 
+当前文件映射与原地写资格以 [Node Core 当前架构 PIO-1～PIO-6](../architecture/NODE_CORE_ARCHITECTURE_ZH.md) 为开发入口；“等长”须满足既有安全字面量和 UTF-8 字节条件，不是任意字符数相等。防漂移门禁见 [ADR-0023](0023-current-core-invariants-and-drift-gate.md)。这些说明不修改本 ADR 的业务决策。
+
 ## 背景
 
 现有 Node Core 已具备统一 Facade、Plan/Apply、锁、备份、事务与恢复能力，但普通 Provider 同步同时承担模型、cwd、user-event、workspace roots 修复，并把跨文件 journal、自动回滚和 State DB 资源锁应用到所有写路径。职责和保护范围都超过了 Provider 同步本身。

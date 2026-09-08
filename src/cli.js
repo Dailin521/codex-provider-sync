@@ -45,6 +45,9 @@ repair targets:
   models,cwd,userEvent,workspaceRoots
                        comma-separated; workspaceRoots automatically includes cwd
 
+backup flags:
+  --keep N             retain the newest N managed backups (default 2; prune allows 0)
+
 watch flags:
   --codex-home PATH    override CODEX_HOME (default: ~/.codex or $CODEX_HOME)
   --sqlite-home PATH   override sqlite_home and CODEX_SQLITE_HOME
@@ -309,7 +312,13 @@ function summarizeDiagnostics(result) {
     `SQLite cwd rows needing repair: ${issues.cwdRowsNeedingRepair ?? 0}`,
     `SQLite user-event rows needing repair: ${issues.userEventRowsNeedingRepair ?? 0}`,
     `Workspace roots needing repair: ${issues.workspaceRootsNeedingRepair ?? 0}`,
-    `Files containing encrypted content: ${issues.encryptedContentFiles ?? 0}`
+    `Files containing encrypted content: ${issues.encryptedContentFiles ?? 0}`,
+    ...(result.historyIntegrity ? [
+      `History record checks: ${result.historyIntegrity.outcome}`,
+      `JSON parse findings: ${result.historyIntegrity.counts.jsonCorruptRecords}`,
+      `Duplicate ordinal observations: ${result.historyIntegrity.counts.duplicateOrdinals}`,
+      "Codex display index: not verified (unsupported schema); no records or index were modified."
+    ] : [])
   ].join("\n");
 }
 
@@ -321,7 +330,14 @@ function summarizeRepair(result) {
     `Updated SQLite model rows: ${result.sqliteModelRowsUpdated ?? 0}`,
     `Updated SQLite cwd rows: ${result.sqliteCwdRowsUpdated ?? 0}`,
     `Updated SQLite user-event rows: ${result.sqliteUserEventRowsUpdated ?? 0}`,
-    `Updated workspace roots: ${result.updatedWorkspaceRoots ?? 0}`
+    `Updated workspace roots: ${result.updatedWorkspaceRoots ?? 0}`,
+    ...(result.verification ? [
+      `Repair verification: ${result.verification.status}`,
+      `Remaining rollout files: ${result.verification.remainingRolloutFiles}`,
+      `Remaining SQLite field differences: ${result.verification.remainingSqliteRows}`,
+      `Remaining workspace settings: ${result.verification.remainingWorkspaceRoots}`,
+      `Skipped sessions: ${result.verification.skippedSessions}`
+    ] : [])
   ].join("\n");
 }
 
@@ -358,11 +374,13 @@ const SYNC_PROGRESS_STAGES = [
   ["clean_backups", "Cleaning backups..."]
 ];
 
-const SYNC_PROGRESS_STAGE_INDEX = new Map(
-  SYNC_PROGRESS_STAGES.map(([stage], index) => [stage, index + 1])
-);
+const REPAIR_PROGRESS_STAGES = [
+  ...SYNC_PROGRESS_STAGES,
+  ["verify_repair", "Verifying selected repair targets..."]
+];
 
-function createSyncProgressReporter(writeLine, { includeBackupPath = true } = {}) {
+function createSyncProgressReporter(writeLine, { includeBackupPath = true, stages = SYNC_PROGRESS_STAGES } = {}) {
+  const stageIndexes = new Map(stages.map(([stage], index) => [stage, index + 1]));
   return (event) => {
     if (event?.stage === "update_config" && event.status === "start") {
       writeLine(includeBackupPath
@@ -371,7 +389,7 @@ function createSyncProgressReporter(writeLine, { includeBackupPath = true } = {}
       return;
     }
 
-    const stageIndex = SYNC_PROGRESS_STAGE_INDEX.get(event?.stage);
+    const stageIndex = stageIndexes.get(event?.stage);
     if (!stageIndex || event.status !== "start") {
       if (event?.stage === "create_backup" && event.status === "complete") {
         writeLine(includeBackupPath
@@ -381,7 +399,7 @@ function createSyncProgressReporter(writeLine, { includeBackupPath = true } = {}
       return;
     }
 
-    writeLine(`[${stageIndex}/${SYNC_PROGRESS_STAGES.length}] ${SYNC_PROGRESS_STAGES[stageIndex - 1][1]}`);
+    writeLine(`[${stageIndex}/${stages.length}] ${stages[stageIndex - 1][1]}`);
   };
 }
 
@@ -470,12 +488,16 @@ function validateJsonHelpArgs(parsed) {
 
 function fallbackCliErrorDto(error) {
   if (error?.code === "INVALID_INPUT") {
+    // Keep structured Core input reasons; the JSON adapter validates plain
+    // data and applies its existing whitelist before anything reaches stdout.
+    const details = Object.getOwnPropertyDescriptor(error, "details")?.value;
     return {
       code: "INVALID_INPUT",
       message: error instanceof Error ? error.message : "Invalid CLI input.",
       severity: "error",
       retryable: true,
-      recoveryRequired: false
+      recoveryRequired: false,
+      ...(details === undefined ? {} : { details })
     };
   }
   if (error?.name === "AbortError" && error?.code === "ABORT_ERR") {
@@ -597,7 +619,8 @@ async function executeCommand({ positionals, flags }, context) {
       targets: parseRepairTargets(positionals[1]),
       keepCount: parseKeepCount(flags.keep),
       onProgress: createSyncProgressReporter(jsonMode ? stderrLine : stdoutLine, {
-        includeBackupPath: !jsonMode
+        includeBackupPath: !jsonMode,
+        stages: REPAIR_PROGRESS_STAGES
       })
     });
     if (!jsonMode) stdoutLine(summarizeRepair(result));

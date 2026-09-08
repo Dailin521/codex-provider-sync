@@ -1,5 +1,9 @@
-// @ts-nocheck
+// @ts-check
 
+/**
+ * @param {Record<string, Record<string, number>> | null | undefined} sqliteCounts
+ * @param {string} targetProvider
+ */
 export function sqliteProviderRowsToChange(sqliteCounts, targetProvider) {
   let count = 0;
   for (const scope of ["sessions", "archived_sessions"]) {

@@ -1,10 +1,10 @@
 # Codex Provider Sync GUI
 
-> **V1 候选交接目标：保留的 .NET Legacy fallback；公开发行状态：当前仍是已发布的 Windows GUI。**该实现不是已退役产品，仍保持可构建、可测试并作为兼容行为依据。Electron 在 `V1` 中标记为新版主桌面端候选，但尚未合入 `main`、公开发布、签名或进入更新通道；候选角色不等于公开入口已经切换。
+> 本文介绍保留的 .NET Windows 兼容版。V1 Electron 是面向用户的主桌面端；.NET 实现仍保持可构建、可测试，未删除或退役。
 
 ## 适用场景
 
-这是 Windows 用户可用的图形界面版本。
+这是 Windows 用户可用的 .NET 兼容版图形界面。
 
 如果你不想装 Node、不想打开 PowerShell，也不想记命令，直接下载发布页里的 `CodexProviderSync.exe` 双击运行即可。
 

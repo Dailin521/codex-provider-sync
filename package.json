@@ -46,6 +46,8 @@
     "workspaces:build": "tsc -b tsconfig.workspaces.json && tsc -p packages/core/tsconfig.json",
     "workspaces:test": "npm run test --workspaces --if-present",
     "workspaces:check": "npm run workspaces:build && npm run workspaces:test && node scripts/verify-workspace-boundaries.js",
+    "core:test:provider-io": "node --test test/provider-sync-lite.test.js test/provider-preparation-facts.test.js test/in-place-transaction.test.js test/windows-rewrite-worker.test.js",
+    "architecture:check": "npm run workspaces:check && npm run core:test:provider-io",
     "package:smoke": "node scripts/smoke-root-tarball.js",
     "package:smoke:lifecycle": "node scripts/smoke-root-tarball.js --install-lifecycle",
     "package:verify-root-tree": "node scripts/verify-root-production-tree.js",

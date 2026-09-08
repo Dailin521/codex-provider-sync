@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
+import { appendFileSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -10,6 +11,9 @@ import { openDatabase } from "../src/sqlite.js";
 import { createWebCoreFacade } from "../src/web-core-adapter.js";
 import { createWebUiServer } from "../src/web-server.js";
 import { createMemoryWebUiState } from "../src/web-state.js";
+import { getStatus } from "../packages/core/src/application/status.js";
+import { acquireLock } from "../src/locking.js";
+import { getDiagnostics } from "../packages/core/src/application/diagnostics.js";
 
 async function request(origin, pathname, body, headers = {}) {
   return new Promise((resolve, reject) => {
@@ -82,7 +86,7 @@ async function makeFixture() {
   } finally {
     database.close();
   }
-  return { root, codexHome, sqliteHome, stateDbPath, configText };
+  return { root, codexHome, sqliteHome, stateDbPath, rolloutPath, configText };
 }
 
 async function startRealWeb(codexHome, webRoot) {
@@ -271,6 +275,253 @@ test("Core and Web Status block on the Home lock and ignore legacy State DB reso
     await fs.rm(lockDir, { recursive: true, force: true });
   } finally {
     await releaseHolder?.().catch(() => {});
+    await web.close();
+    await fs.rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+// Model a writer appending just after the header is read, without timers,
+// production hooks or any real Codex data. Revision capture itself uses stat.
+function afterHeaderRead(t, fixture, callback) {
+  const open = fs.open;
+  let reads = 0;
+  t.mock.method(fs, "open", async (filePath, flags, ...args) => {
+    const handle = await open(filePath, flags, ...args);
+    if (filePath === fixture.rolloutPath && flags === "r") {
+      const close = handle.close.bind(handle);
+      handle.close = async () => { await close(); await callback(++reads); };
+    }
+    return handle;
+  });
+  return () => reads;
+}
+
+const syntheticAppend = (fixture) => fs.appendFile(fixture.rolloutPath,
+  '{"type":"event_msg","payload":{"type":"user_message","message":"synthetic append"}}\n');
+
+for (const locked of [false, true]) {
+  test(`Diagnostics preserves current facts after revision failure, with Home lock priority (${locked})`, async (t) => {
+    const fixture = await makeFixture();
+    let release;
+    try {
+      await getStatus({ codexHome: fixture.codexHome, includeSessionActivity: false });
+      let armed = false;
+      let failed = false;
+      const stat = fs.stat;
+      t.mock.method(fs, "stat", async (file, ...args) => {
+        if (armed && !failed && file === fixture.rolloutPath) {
+          failed = true;
+          if (locked) release = await acquireLock(fixture.codexHome, "synthetic-sync");
+          throw Object.assign(new Error("synthetic stat failure"), { code: "EIO" });
+        }
+        return stat(file, ...args);
+      });
+      const result = await getDiagnostics({ codexHome: fixture.codexHome, requestControl: { onProgress(event) {
+        if (event.stage === "inspect_diagnostics_index") armed = true;
+      } } });
+      assert.equal(failed, true);
+      assert.equal(result.safety.rolloutScanComplete, false);
+      if (locked) assert.equal(result.safety.operationInProgress.lockState, "active");
+      else {
+        assert.equal(result.safety.operationInProgress, null);
+        assert.equal(result.provider.rolloutCounts.sessions.openai, 1);
+      }
+    } finally {
+      t.mock.restoreAll();
+      await release?.();
+      await fs.rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("Explicit Diagnostics scans facts once and retains current findings on drift without content hashing", async (t) => {
+  const fixture = await makeFixture();
+  try {
+    await getStatus({ codexHome: fixture.codexHome, includeSessionActivity: false });
+    const readFile = fs.readFile;
+    t.mock.method(fs, "readFile", async (file, ...args) => {
+      assert.notEqual(file, fixture.rolloutPath, "diagnostic revision must not re-read/hash the rollout body");
+      return readFile(file, ...args);
+    });
+    let scans = 0;
+    const diagnostics = await getDiagnostics({ codexHome: fixture.codexHome, includeSessionActivity: false,
+      requestControl: { onProgress: (event) => {
+        if (event.stage === "inspect_diagnostics_index") {
+          scans += 1;
+          appendFileSync(fixture.rolloutPath, '{"type":"event_msg","payload":{"type":"user_message","message":"synthetic"}}\n');
+        }
+      } }
+    });
+    assert.equal(scans, 1);
+    assert.equal(diagnostics.safety.operationInProgress, null);
+    assert.equal(diagnostics.safety.rolloutScanComplete, false);
+    assert.equal(diagnostics.provider.rolloutCounts.sessions.openai, 1);
+    assert.equal(diagnostics.historyIntegrity.counts.filesScanned, 1);
+  } finally {
+    t.mock.restoreAll();
+    await fs.rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("Diagnostic drift preserves findings but a real Home lock still takes priority", async (t) => {
+  const fixture = await makeFixture();
+  let release;
+  try {
+    await getStatus({ codexHome: fixture.codexHome, includeSessionActivity: false });
+    const readFile = fs.readFile;
+    let configReads = 0;
+    t.mock.method(fs, "readFile", async (file, ...args) => {
+      const value = await readFile(file, ...args);
+      if (file === path.join(fixture.codexHome, "config.toml") && ++configReads === 2) {
+        await syntheticAppend(fixture);
+        release = await acquireLock(fixture.codexHome, "synthetic-sync");
+      }
+      return value;
+    });
+    const result = await getDiagnostics({ codexHome: fixture.codexHome });
+    assert.equal(configReads, 2);
+    assert.equal(result.safety.operationInProgress.lockState, "active");
+    assert.equal(result.safety.rolloutScanComplete, false);
+  } finally {
+    t.mock.restoreAll();
+    await release?.();
+    await fs.rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+for (const revision of ["config", "state-db"]) {
+  test(`Status ${revision} drift also stays separate from operation state`, async (t) => {
+    const fixture = await makeFixture();
+    try {
+      afterHeaderRead(t, fixture, async (count) => {
+        if (revision === "config") {
+          await fs.writeFile(path.join(fixture.codexHome, "config.toml"), fixture.configText("new-provider"));
+        } else {
+          const database = await openDatabase(fixture.stateDbPath);
+          try { database.prepare("UPDATE threads SET model_provider = ? WHERE id = ?").run(`writer-${count}`, "status-thread"); }
+          finally { database.close(); }
+        }
+      });
+      const status = await getStatus({ codexHome: fixture.codexHome, includeSessionActivity: false });
+      assert.equal(status.operationInProgress, null);
+      assert.equal(status.rolloutScanComplete, false);
+      assert.deepEqual(status.statusReadBlocked, { reason: "state-changed-during-status", revision });
+    } finally {
+      t.mock.restoreAll();
+      await fs.rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const cached of [false, true]) {
+  test(`Status revision drift needs refresh, never a fabricated writer (cached=${cached})`, async (t) => {
+    const fixture = await makeFixture();
+    try {
+      const options = { codexHome: fixture.codexHome, includeSessionActivity: false };
+      const baseline = cached ? await getStatus(options) : null;
+      const reads = afterHeaderRead(t, fixture, () => syntheticAppend(fixture));
+      const blocked = await getStatus(options);
+      assert.equal(reads(), 2, "exactly one bounded retry, no polling");
+      assert.equal(blocked.operationInProgress, null);
+      assert.deepEqual(blocked.statusReadBlocked, { reason: "state-changed-during-status", revision: "rollout" });
+      assert.equal(blocked.rolloutScanComplete, false);
+      assert.equal(blocked.pendingRecovery, false);
+      if (baseline) {
+        assert.equal(blocked.snapshotAt, baseline.snapshotAt);
+        assert.deepEqual(blocked.rolloutCounts, baseline.rolloutCounts);
+        assert.equal(blocked.storageRevision, baseline.storageRevision);
+      } else {
+        assert.equal(blocked.currentProvider, undefined, "no invented Provider before the first complete snapshot");
+      }
+      t.mock.restoreAll();
+      const refreshed = await getStatus(options);
+      assert.equal(refreshed.operationInProgress, null);
+      assert.equal(refreshed.statusReadBlocked, undefined);
+      assert.equal(refreshed.rolloutScanComplete, true);
+      assert.equal(refreshed.backupSummary.count, 0);
+      assert.deepEqual(refreshed.rolloutCounts.sessions, { openai: 1 });
+    } finally {
+      t.mock.restoreAll();
+      await fs.rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("Status's one retry can settle an ordinary append", async (t) => {
+  const fixture = await makeFixture();
+  try {
+    const reads = afterHeaderRead(t, fixture, (count) => count === 1 ? syntheticAppend(fixture) : undefined);
+    const status = await getStatus({ codexHome: fixture.codexHome, includeSessionActivity: false });
+    assert.equal(reads(), 2);
+    assert.equal(status.operationInProgress, null);
+    assert.equal(status.statusReadBlocked, undefined);
+    assert.equal(status.rolloutScanComplete, true);
+  } finally {
+    t.mock.restoreAll();
+    await fs.rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+for (const phase of [0, 1, 2]) {
+  test(`Status revision capture failure at phase ${phase} stays unverified, not busy`, async (t) => {
+    const fixture = await makeFixture();
+    try {
+      const reads = afterHeaderRead(t, fixture, () => syntheticAppend(fixture));
+      const stat = fs.stat;
+      t.mock.method(fs, "stat", async (filePath, ...args) => {
+        if (filePath === fixture.rolloutPath && reads() >= phase) {
+          throw Object.assign(new Error("synthetic revision failure"), { code: "EIO" });
+        }
+        return stat(filePath, ...args);
+      });
+      const status = await getStatus({ codexHome: fixture.codexHome, includeSessionActivity: false });
+      assert.equal(reads(), phase);
+      assert.equal(status.operationInProgress, null);
+      assert.equal(status.statusReadBlocked.reason, "revision-unverifiable");
+      assert.equal(status.rolloutScanComplete, false);
+      t.mock.restoreAll();
+      assert.equal((await getStatus({ codexHome: fixture.codexHome, includeSessionActivity: false })).statusReadBlocked, undefined);
+    } finally {
+      t.mock.restoreAll();
+      await fs.rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("A real Home lock acquired during the retry takes priority over revision drift", async (t) => {
+  const fixture = await makeFixture();
+  let release;
+  try {
+    afterHeaderRead(t, fixture, async (count) => {
+      await syntheticAppend(fixture);
+      if (count === 2) release = await acquireLock(fixture.codexHome, "synthetic-sync");
+    });
+    const status = await getStatus({ codexHome: fixture.codexHome, includeSessionActivity: false });
+    assert.equal(status.statusReadBlocked.reason, "codex-home-lock");
+    assert.equal(status.operationInProgress.lockState, "active");
+    assert.equal(status.operationInProgress.busyScope, "codex-home");
+  } finally {
+    t.mock.restoreAll();
+    await release?.();
+    await fs.rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("Core facade and HTTP preserve the refresh-needed state without a busy operation", async (t) => {
+  const fixture = await makeFixture();
+  const web = await startRealWeb(fixture.codexHome, path.join(fixture.root, "web"));
+  try {
+    afterHeaderRead(t, fixture, () => syntheticAppend(fixture));
+    const response = await web.status();
+    assert.equal(response.status, 200);
+    assert.equal(response.payload.status.operationInProgress, null);
+    assert.deepEqual(response.payload.status.statusReadBlocked, { reason: "state-changed-during-status" });
+    assert.equal(response.payload.status.rolloutScanComplete, false);
+    assert.equal(response.payload.status.alignment.aligned, false);
+    t.mock.restoreAll();
+    assert.equal((await web.status()).payload.status.statusReadBlocked, undefined);
+  } finally {
+    t.mock.restoreAll();
     await web.close();
     await fs.rm(fixture.root, { recursive: true, force: true });
   }

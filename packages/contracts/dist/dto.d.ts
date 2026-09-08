@@ -26,6 +26,8 @@ export type RepairTarget = "models" | "cwd" | "userEvent" | "workspaceRoots";
 export interface PrepareRepairInput extends GetStatusInput {
     targets: RepairTarget[];
     keepCount?: number;
+    /** Native session IDs, not file paths. Omitted means the entire profile. */
+    sessionIds?: string[];
 }
 export interface ApplyPlanInput {
     schemaVersion: ContractSchemaVersion;
@@ -51,20 +53,33 @@ export interface ListHistoryInput extends GetStatusInput {
     project?: string;
     provider?: string;
     archived?: "all" | "active" | "archived";
+    searchScope?: "metadata" | "content";
+    sessionKind?: "all" | "main" | "subagent";
+    /** Additive display-only project forest. Omit for the compatible flat list. */
+    view?: "flat" | "projects";
+    /** Opaque project identity from a previous projects response. */
+    projectId?: string;
+    /** Existing session id whose direct children should be listed. */
+    parentId?: string;
 }
 export interface GetHistorySessionInput extends GetStatusInput {
     sessionId: string;
     messageLimit?: number;
+    metadataOnly?: boolean;
 }
 export interface StartWatchInput extends GetStatusInput {
     includeStateDb?: boolean;
     debounceMs?: number;
     once?: boolean;
+    /** Managed backup retention for every automatic Provider Sync; defaults to 2. */
+    keepCount?: number;
 }
 export interface WatchReferenceInput {
     watchId: string;
 }
 export interface GetWatchStatusInput {
+    /** Optional trusted profile selector for a profile-scoped Watch list. */
+    profile?: ProfileSelector;
     watchId?: string;
 }
 export interface GetDiagnosticsInput extends GetStatusInput {
@@ -80,11 +95,33 @@ export interface StatusSnapshot {
     };
     currentProvider: string;
     currentModel?: string | null;
+    /** Observed Codex thread-writer owners in the selected Home, including idle/child sessions. Not generating-turn activity. */
+    sessionActivity?: {
+        state: "checked";
+        count: number;
+    } | {
+        state: "unavailable" | "unsupported";
+        count: null;
+    };
+    /** @deprecated Older target-scoped write-blocker metric; never use for session activity. */
+    syncSessionUsage?: {
+        state: "checked";
+        count: number;
+    } | {
+        state: "unavailable" | "unsupported";
+        count: null;
+    };
     rolloutCounts: ProviderDistribution;
     modelCounts?: ProviderDistribution;
     sqliteCounts: JsonValue;
     codexHomeSource: string;
     sqliteHomeSource: string;
+    /** Display-only locations from a trusted local Desktop host. Omitted by Web/default hosts. */
+    displayPaths?: {
+        codexHome: string;
+        sqliteHome: string;
+        stateDbPath: string | null;
+    };
     backupSummary: {
         count: number;
         totalBytes: number;
@@ -112,6 +149,12 @@ export interface PlanSummary {
     stateDbRevision: string;
     backupRevision?: string;
     target: JsonObject;
+    /** Repair: sqliteRowsToChange is the sum of field changes, not distinct chats.
+     * Optional sqliteModelRowsToChange/sqliteCwdRowsToChange/sqliteUserEventRowsToChange
+     * provide the breakdown; repairPreviewTotal counts distinct affected session IDs.
+     * workspaceRootsToChange counts settings categories (not folders), enumerated by
+     * workspaceSettingsChangeKinds: savedRoots/projectOrder/activeRoots/labels/openTargets/settingsBackup.
+     */
     impact: JsonObject;
     warnings: string[];
     requiresConfirmation: boolean;
@@ -144,6 +187,19 @@ export interface PruneBackupsResult {
 export interface HistorySessionSummary {
     id: string;
     title: string;
+    /** Recorded working-directory label and opaque grouping identity, not a path or action target. */
+    project?: {
+        id: string;
+        name: string;
+    } | null;
+    /** Display-only subtask metadata, never a filesystem path or inferred message title. */
+    subagentName?: string;
+    nativeSessionId?: string | null;
+    parentSessionId?: string | null;
+    sessionKind?: "main" | "subagent";
+    /** Direct visible child count in the projects view. */
+    childCount?: number;
+    fileModifiedAt?: string;
     provider: string;
     model?: string | null;
     archived: boolean;
@@ -158,6 +214,19 @@ export interface HistoryPage {
     total: number;
     hasNextPage: boolean;
     sessions: HistorySessionSummary[];
+    /** Present only for ListHistoryInput.view = "projects". */
+    view?: "projects";
+    /** Catalog is local display metadata only; it contains no workspace paths. */
+    projects?: HistoryProjectGroup[];
+    /** Selected project for this page, or null until an orphan-only catalog is selected. */
+    projectId?: string | null;
+}
+export interface HistoryProjectGroup {
+    id: string;
+    name: string;
+    kind: "workspace" | "directory" | "unassigned" | "orphans";
+    /** Root rows after the active filter; direct children are not double counted. */
+    total: number;
 }
 export interface HistoryMessage {
     role: string;
@@ -167,6 +236,11 @@ export interface HistoryMessage {
 }
 export interface HistorySessionDetail {
     session: HistorySessionSummary;
+    /** Trusted local Desktop display only; never accepted as an action target. */
+    storage?: {
+        cwd: string;
+        rolloutPath: string;
+    };
     messages: HistoryMessage[];
     truncated: boolean;
     returnedMessageCount: number;
@@ -253,6 +327,49 @@ export interface DiagnosticsSnapshot {
     provider: DiagnosticsProvider;
     issues: DiagnosticsIssues;
     safety: DiagnosticsSafety;
+    historyIntegrity?: HistoryIntegritySnapshot;
+}
+/** Read-only observations, not proof that Codex's display index is healthy. */
+export interface HistoryIntegritySnapshot {
+    version: 1;
+    outcome: "no-findings" | "findings" | "inconclusive" | "findings-and-inconclusive";
+    issuesTruncated: boolean;
+    counts: {
+        filesDiscovered: number;
+        filesScanned: number;
+        recordsRead: number;
+        sessionsWithId: number;
+        jsonCorruptRecords: number;
+        oversizedRecords: number;
+        duplicateOrdinals: number;
+        outOfOrderOrdinals: number;
+        changedFiles: number;
+        truncatedFiles: number;
+        unsupportedFiles: number;
+    };
+    skipped: {
+        symlinkOrReparse: number;
+        outOfRoot: number;
+        notRegular: number;
+        unreadable: number;
+        scanLimit: number;
+    };
+    displayIndex: {
+        status: "unsupported";
+        reason: "no-known-display-index-schema";
+    };
+    issues: {
+        code: string;
+        sessionId: string | null;
+        scope: "sessions" | "archived_sessions";
+        line: number | null;
+    }[];
+    limits: {
+        maxFiles: number;
+        maxRecordsPerFile: number;
+        maxLineBytes: number;
+        maxIssues: number;
+    };
 }
 export interface ProgressEvent {
     stage: string;

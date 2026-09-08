@@ -62,8 +62,10 @@ describe("operation result presentation", () => {
     ));
 
     expect(await screen.findByRole("alert")).toBeVisible();
-    expect(screen.getByText("managed-backup")).toBeVisible();
-    expect(screen.getByText("rollout-safe-name.jsonl")).toBeVisible();
+    expect(screen.getByText("A backup was created. You can find it under Backups and Restore.")).toBeVisible();
+    expect(screen.getByText(/1 session record/)).toBeVisible();
+    expect(screen.getByText(/Managed backup ID: managed-backup/)).toBeVisible();
+    expect(screen.queryByText("rollout-safe-name.jsonl")).not.toBeInTheDocument();
     expect(screen.queryByText("must-not-render")).not.toBeInTheDocument();
     expect(screen.queryByText("suffix-string-must-not-render")).not.toBeInTheDocument();
     expect(screen.queryByText("42")).not.toBeInTheDocument();
@@ -72,6 +74,26 @@ describe("operation result presentation", () => {
     for (const close of closeButtons) expect(close).toBeDisabled();
     await user.click(closeButtons.at(-1)!);
     expect(closeCalls).toBe(0);
+  });
+
+  it.each(["en", "zh-CN"] as const)("shows verification results and only opens a restore preview in %s", async (locale) => {
+    const user = userEvent.setup();
+    const i18n = await createAppI18n(locale);
+    const openBackupRestore = vi.fn();
+    const result: OperationResult = {
+      schemaVersion: 1,
+      operationId: "11111111-1111-4111-8111-111111111127",
+      operation: "repair",
+      outcome: "partial",
+      backup: { backupId: "managed-backup" },
+      warnings: [],
+      result: { changedSessionFiles: 2, verification: { status: "remaining", remainingRolloutFiles: 1, remainingSqliteRows: 2, remainingWorkspaceRoots: 0, skippedSessions: 1 } }
+    };
+    render(createElement(I18nextProvider, { i18n }, createElement(OperationResultDialog, { close: () => {}, openBackupRestore, restoreFocus: () => {}, result })));
+    expect(await screen.findByText(i18n.t("operationResult.verification.title"))).toBeVisible();
+    expect(screen.getByText(i18n.t("operationResult.changeCountersHint"))).toBeVisible();
+    await user.click(screen.getByRole("button", { name: i18n.t("operationResult.openBackupRestore") }));
+    expect(openBackupRestore).toHaveBeenCalledWith("managed-backup");
   });
 
   it("restores focus after a completed result closes", async () => {
@@ -102,13 +124,13 @@ describe("operation result presentation", () => {
     render(createElement(I18nextProvider, { i18n }, createElement(Harness)));
 
     expect(await screen.findByText("Repair targets")).toBeVisible();
-    expect(screen.getByText("models, cwd")).toBeVisible();
-    expect(screen.getByText("Model rows updated")).toBeVisible();
+    expect(screen.getByText("Unify historical model names, Correct chat project folders")).toBeVisible();
+    expect(screen.getByText("Model records updated")).toBeVisible();
     await user.click((await screen.findAllByRole("button", { name: "Close" })).at(-1)!);
     await waitFor(() => expect(screen.getByRole("button", { name: "Prepare sync" })).toHaveFocus());
   });
 
-  it("separates locked and changed rollout evidence and recommends a fresh retry", async () => {
+  it("summarizes skipped chat records without exposing file paths", async () => {
     const i18n = await createAppI18n("en");
     const result: OperationResult = {
       schemaVersion: 1,
@@ -128,11 +150,10 @@ describe("operation result presentation", () => {
       close: () => {}, restoreFocus: () => {}, result
     })));
 
-    expect(await screen.findByText("Skipped locked rollout files")).toBeVisible();
-    expect(screen.getByText("Skipped changed rollout files")).toBeVisible();
-    expect(screen.getByText("Active session lock")).toBeVisible();
-    expect(screen.getByText("After the active session ends, prepare a fresh operation and retry to converge.")).toBeVisible();
-    expect(screen.getByText("locked.jsonl")).toBeVisible();
-    expect(screen.getByText("changed.jsonl")).toBeVisible();
+    expect(await screen.findByText("2 session records were not updated.")).toBeVisible();
+    expect(screen.getByText("A chat is still in use")).toBeVisible();
+    expect(screen.getByText("Close the active Codex session, then run sync again.")).toBeVisible();
+    expect(screen.queryByText("locked.jsonl")).not.toBeInTheDocument();
+    expect(screen.queryByText("changed.jsonl")).not.toBeInTheDocument();
   });
 });

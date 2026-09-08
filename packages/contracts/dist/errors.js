@@ -71,6 +71,7 @@ const SAFE_REASONS = new Set([
     "storage",
     "rollout",
     "state-db",
+    "provider-not-configured",
     "windows-wsl-unc"
 ]);
 const SAFE_CAUSE_CODES = new Set([

@@ -22,14 +22,14 @@ export class AppErrorBoundary extends Component<{
       <div className="grid min-h-screen place-items-center bg-[var(--surface)] p-6 text-[var(--text)]">
         <Card className="max-w-lg text-center">
           <ShieldAlert className="mx-auto text-[var(--danger)]" size={40} />
-          <h1 className="mt-4 text-xl font-bold">{chinese ? "应用错误" : "Application error"}</h1>
+          <h1 className="mt-4 text-xl font-bold">{chinese ? "页面暂时无法显示" : "This page is temporarily unavailable"}</h1>
           <p className="mt-2 text-sm text-[var(--muted)]">
             {chinese
-              ? "页面遇到未预期错误；系统没有自动启动任何写操作。"
-              : "The page encountered an unexpected error. No write was started automatically."}
+              ? "你的数据没有被更改。请重新打开应用；如果问题持续，请查看操作日志或导出诊断信息。"
+              : "Your data was not changed. Reopen the app; if the problem continues, check Operation logs or export diagnostics."}
           </p>
           <Button className="mt-5" onClick={() => globalThis.location?.reload()} type="button">
-            {chinese ? "重新加载" : "Reload"}
+            {chinese ? "重新打开" : "Reopen"}
           </Button>
         </Card>
       </div>

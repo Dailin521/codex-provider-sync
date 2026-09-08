@@ -1,6 +1,6 @@
 import { CORE_PROTOCOL_VERSION } from "@codex-provider-sync/contracts";
 
-export const DESKTOP_RUNTIME_PROTOCOL_VERSION = 2 as const;
+export const DESKTOP_RUNTIME_PROTOCOL_VERSION = 3 as const;
 export const DESKTOP_CORE_PROTOCOL_VERSION = CORE_PROTOCOL_VERSION;
 export const DESKTOP_CORE_VERSION = "0.0.0" as const;
 export const DESKTOP_BUILD_ID = typeof __CPS_DESKTOP_BUILD_ID__ === "string"
@@ -17,10 +17,21 @@ export const DESKTOP_IPC_CHANNELS = Object.freeze({
   coreRestore: "cps:v1:core:restore",
   coreMaintenance: "cps:v1:core:maintenance",
   operationEvent: "cps:v1:operation:event",
+  watchStoppedEvent: "cps:v1:watch:stopped",
   operationCancel: "cps:v1:operation:cancel",
   profilesList: "cps:v1:profiles:list",
+  profilesSelectDirectory: "cps:v1:profiles:select-directory",
+  profilesSave: "cps:v1:profiles:save",
+  profilesDelete: "cps:v1:profiles:delete",
+  profilesReveal: "cps:v1:profiles:reveal",
+  historyReveal: "cps:v1:history:reveal",
+  clipboardWriteText: "cps:v1:clipboard:write-text",
+  operationLogsList: "cps:v1:operation-logs:list",
+  operationLogsGet: "cps:v1:operation-logs:get",
+  operationLogsDismissPlan: "cps:v1:operation-logs:dismiss-plan",
   diagnosticsExport: "cps:v1:diagnostics:export",
   updateStatus: "cps:v1:update:status",
+  updateEvent: "cps:v1:update:event",
   updateCheck: "cps:v1:update:check",
   updateDownload: "cps:v1:update:download",
   updateInstall: "cps:v1:update:install"

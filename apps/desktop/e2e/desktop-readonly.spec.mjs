@@ -12,8 +12,57 @@ const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const packagedExecutable = process.env.CPS_DESKTOP_EXECUTABLE;
 const electronExecutable = packagedExecutable || require("electron");
 
+test("desktop copy buttons reach native write-only clipboard even with browser clipboard denied", async () => {
+  const fixture = await createDesktopReadOnlyFixture({ includeUntitled: true });
+  let electronApp;
+  try {
+    electronApp = await electron.launch({
+      executablePath: electronExecutable,
+      args: packagedExecutable ? ["--lang=en-US"] : [path.join(desktopRoot, "out", "main", "index.js"), "--lang=en-US"],
+      env: { ...process.env, CPS_DESKTOP_E2E: "1", CPS_DESKTOP_CODEX_HOME: fixture.codexHome,
+        CPS_DESKTOP_USER_DATA: fixture.userData, CPS_DESKTOP_WINDOW_DISPLAY: "hidden" }
+    });
+    // Capture at the native boundary without reading or overwriting the user's clipboard.
+    await electronApp.evaluate(({ clipboard }) => {
+      globalThis.__clipboardWrites = [];
+      clipboard.writeText = (text) => { globalThis.__clipboardWrites.push(text); };
+    });
+    const page = await electronApp.firstWindow();
+    await page.getByRole("button", { name: "History", exact: true }).click();
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+        writeText: async () => { throw new Error("Browser clipboard denied"); }
+      } });
+    });
+    const id = "11111111-2222-4333-8444-0000abcdef12";
+    await page.getByRole("region", { name: "Other chats", exact: true }).getByRole("button", { expanded: false }).click();
+    const row = page.getByRole("button", { name: /View chat: Untitled chat.*abcdef12/ });
+    await row.click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Copy session ID", exact: true }).click();
+    await expect(page.getByText("Copied", { exact: true })).toBeVisible();
+    await row.click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Copy resume command" }).click();
+    await expect.poll(() => electronApp.evaluate(() => globalThis.__clipboardWrites.length)).toBe(2);
+    expect(await electronApp.evaluate(() => globalThis.__clipboardWrites)).toEqual([id, `codex resume ${id}`]);
+    await row.click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Session information", exact: true }).click();
+    const actions = page.getByRole("region", { name: "Session actions" });
+    await actions.getByRole("button", { name: "Copy file path" }).click();
+    await expect.poll(() => electronApp.evaluate(() => globalThis.__clipboardWrites.length)).toBe(3);
+    expect((await electronApp.evaluate(() => globalThis.__clipboardWrites))[2]).toContain(`rollout-${id}.jsonl`);
+    expect(await page.evaluate(() => Object.keys(window.codexProvider.clipboard))).toEqual(["writeText"]);
+    await electronApp.evaluate(({ clipboard }) => { clipboard.writeText = () => { throw new Error("fixture native error"); }; });
+    await actions.getByRole("button", { name: "Copy session ID", exact: true }).click();
+    await expect(actions.getByRole("status")).toHaveText("Could not copy. Try again, or select the text and copy it manually.");
+  } finally {
+    await electronApp?.close();
+    await fixture.assertUnchanged();
+    await fixture.close();
+  }
+});
+
 test("secure desktop exposes the C8 surface and treats old ordinary journals as diagnostic-only", async () => {
-  test.setTimeout(90_000);
+  test.setTimeout(120_000);
   const fixture = await createDesktopReadOnlyFixture();
   const diagnosticsTarget = path.join(fixture.fixtureRoot, "diagnostics.zip");
   let electronApp;
@@ -42,6 +91,9 @@ test("secure desktop exposes the C8 surface and treats old ordinary journals as 
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     await expect(page.getByText("Codex Provider Sync", { exact: true })).toBeVisible();
     await expect(page.getByText("openai", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText(fixture.codexHome, { exact: true })).toBeVisible();
+    await expect(page.getByText(path.join(fixture.codexHome, "sqlite"), { exact: true })).toBeVisible();
+    await expect(page.getByText(path.join(fixture.codexHome, "sqlite", "state_5.sqlite"), { exact: true })).toBeVisible();
 
     const hiddenWindowState = await electronApp.evaluate(({ BrowserWindow }) => {
       const window = BrowserWindow.getAllWindows()[0];
@@ -73,6 +125,7 @@ test("secure desktop exposes the C8 surface and treats old ordinary journals as 
       bridgeKeys: Object.keys(window.codexProvider).sort(),
       coreKeys: Object.keys(window.codexProvider.core).sort(),
       updateKeys: Object.keys(window.codexProvider.updates).sort(),
+      watchKeys: Object.keys(window.codexProvider.watch).sort(),
       frozen: Object.isFrozen(window.codexProvider) && Object.isFrozen(window.codexProvider.core),
       csp: document.querySelector('meta[http-equiv="Content-Security-Policy"]')?.getAttribute("content")
     }));
@@ -80,7 +133,7 @@ test("secure desktop exposes the C8 surface and treats old ordinary journals as 
       process: "undefined",
       require: "undefined",
       buffer: "undefined",
-      bridgeKeys: ["core", "diagnostics", "profiles", "test", "updates", "version"],
+      bridgeKeys: ["clipboard", "core", "diagnostics", "history", "operationLogs", "profiles", "test", "updates", "version", "watch"],
       coreKeys: [
         "cancelOperation",
         "requestMaintenance",
@@ -89,7 +142,8 @@ test("secure desktop exposes the C8 surface and treats old ordinary journals as 
         "requestSyncSwitch",
         "subscribeOperation"
       ],
-      updateKeys: ["check", "download", "getStatus", "install"],
+      updateKeys: ["check", "download", "getStatus", "install", "subscribe"],
+      watchKeys: ["subscribeStopped"],
       frozen: true
     });
     expect(rendererBoundary.csp).toContain("script-src 'self'");
@@ -97,9 +151,9 @@ test("secure desktop exposes the C8 surface and treats old ordinary journals as 
     expect(rendererBoundary.csp).not.toContain("unsafe-eval");
 
     const navigation = page.getByRole("navigation").getByRole("button");
-    await expect(navigation).toHaveCount(8);
-    await expect(page.getByRole("button", { name: "Sync" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Switch Provider" })).toBeVisible();
+    await expect(navigation).toHaveCount(7);
+    await expect(page.getByRole("button", { name: "Preview sync" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Preview switch" })).toBeVisible();
 
     await electronApp.evaluate(({ BrowserWindow }) => {
       const window = BrowserWindow.getAllWindows()[0];
@@ -108,15 +162,14 @@ test("secure desktop exposes the C8 surface and treats old ordinary journals as 
     });
     await expect.poll(() => page.evaluate(() => document.documentElement.clientWidth)).toBeLessThanOrEqual(380);
     await expect(page.getByLabel("Profile")).toBeVisible();
-    await expect(page.getByText("Local service ready", { exact: true })).toBeVisible();
+    await expect(page.getByText("Ready", { exact: true })).toBeVisible();
     const zoomedPages = [
-      ["Overview", "Provider metadata overview"],
-      ["Sync", "Sync current Provider"],
-      ["Switch Provider", "Switch Provider"],
+      ["Overview", "Provider sync overview"],
       ["Backups / Restore", "Backups and Restore"],
-      ["History", "History"],
-      ["Profiles", "Profiles"],
-      ["Diagnostics", "Diagnostics"],
+      ["History", "Chats"],
+      ["Operation logs", "Operation logs"],
+      ["Profiles", "Storage profiles"],
+      ["Advanced features", "Advanced features"],
       ["Settings", "Settings"]
     ];
     for (const [navigationName, headingName] of zoomedPages) {
@@ -145,17 +198,17 @@ test("secure desktop exposes the C8 surface and treats old ordinary journals as 
     });
 
     await page.getByRole("button", { name: "Backups / Restore" }).click();
-    await expect(page.getByRole("button", { name: "Prepare restore" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Prune older backups" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Preview restore" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Delete older backups" })).toBeVisible();
 
     await page.getByRole("button", { name: "Profiles" }).click();
-    await expect(page.getByText(/profile IDs and revisions only/i)).toBeVisible();
+    await expect(page.getByRole("button", { name: "Create profile" })).toBeVisible();
     await expect(page.getByText(fixture.codexHome)).toHaveCount(0);
 
-    await page.getByRole("button", { name: "Diagnostics" }).click();
-    await expect(page.getByText("Diagnostics have not been scanned", { exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "Run full scan" }).click();
-    await expect(page.getByText(/runtime/i).first()).toBeVisible();
+    await page.getByRole("button", { name: "Advanced features" }).click();
+    await expect(page.getByText("Diagnostics have not been run", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Start diagnostics" }).click();
+    await expect(page.getByText("App environment", { exact: true })).toBeVisible();
     await expect(page.locator("body")).not.toContainText(fixture.codexHome);
     await page.getByRole("button", { name: "Export redacted bundle" }).click();
     await expect(page.getByText("Redacted diagnostics bundle created.", { exact: true })).toBeVisible();
@@ -165,11 +218,12 @@ test("secure desktop exposes the C8 surface and treats old ordinary journals as 
 
     await page.getByRole("button", { name: "Settings" }).click();
     await expect(page.getByText("Updates", { exact: true })).toBeVisible();
-    await expect(page.getByText("Update checks are available only in a packaged build.", { exact: true })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Start watch" })).toBeEnabled();
+    await expect(page.getByText("This installation does not support in-app updates.", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Enable automatic sync" })).toBeEnabled();
     const updateStatus = await page.evaluate(() => window.codexProvider.updates.getStatus());
     expect(updateStatus).toEqual({
       schemaVersion: 2,
+      currentVersion: await electronApp.evaluate(({ app }) => app.getVersion()),
       state: "disabled",
       reason: "not-packaged",
       installAllowed: false
@@ -178,10 +232,11 @@ test("secure desktop exposes the C8 surface and treats old ordinary journals as 
 
     await page.getByRole("button", { name: "History" }).click();
     await expect(page.locator("body")).not.toContainText("C6_DESKTOP_BODY_ONLY_MARKER");
-    await expect(page.getByText("Untitled session", { exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "Open session" }).click();
+    await expect(page.getByText("Saved desktop chat", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: /View chat: Saved desktop chat/ }).click();
     await expect(page.getByText("C6_DESKTOP_BODY_ONLY_MARKER")).toBeVisible();
-    await page.getByRole("button", { name: "Back to sessions" }).click();
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("button", { name: "History" }).click();
     await expect(page.locator("body")).not.toContainText("C6_DESKTOP_BODY_ONLY_MARKER");
 
     const profile = (await page.evaluate(() => window.codexProvider.profiles.list())).profiles[0];

@@ -50,10 +50,19 @@ function planResult(request) {
 
 function harness({
   holdApply = false,
+  emitTerminalDuringStart = false,
   diagnosticsSnapshot = null,
   diagnosticsExporter = null,
   diagnosticsTarget = "D:\\safe\\diagnostics.zip",
-  updateRestartPending = false
+  updateRestartPending = false,
+  writeClipboardText,
+  profileList = [{
+    id: "default",
+    name: "Default",
+    revision: "r1",
+    codexHomeConfigured: true,
+    sqliteHomeConfigured: false
+  }]
 } = {}) {
   const handlers = new Map();
   const ipcMain = {
@@ -79,7 +88,17 @@ function harness({
   let updateCalls = 0;
   const pendingApplies = [];
   const listeners = new Set();
+  const watchStoppedListeners = new Set();
   const activeWatchCounts = [];
+  let logCounter = 0;
+  const logBegins = [];
+  const operationLogs = {
+    async begin(input) { logBegins.push(input); logCounter += 1; return `log-${logCounter}`; },
+    async prepared() {}, async resume() {}, async bindOperation() {}, async progress() {}, async requestProgress() {},
+    async dismiss() {}, async finishFromResponse() {}, async finish() {},
+    list(input) { return { schemaVersion: 1, page: input.page, pageSize: input.pageSize, total: 0, hasNextPage: false, entries: [] }; },
+    get() { return null; }
+  };
   const supervisor = {
     snapshot: {
       state: "ready",
@@ -89,6 +108,7 @@ function harness({
       lastHandshakeAt: null
     },
     subscribeOperation(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+    subscribeWatchStopped(listener) { watchStoppedListeners.add(listener); return () => watchStoppedListeners.delete(listener); },
     async request(request) {
       calls.push({ kind: "read", request });
       if (request.method === "getDiagnostics") {
@@ -209,6 +229,20 @@ function harness({
         includeStateDb: true,
         once: false
       };
+      if (request.method === "startWatch" && emitTerminalDuringStart) {
+        const terminal = {
+          generation: 1,
+          profileId: selectedProfile.profileId,
+          profileRevision: selectedProfile.profileRevision,
+          watch: {
+            ...watch,
+            status: "stopped",
+            stoppedAt: "2026-08-26T00:01:00.000Z",
+            stopReason: "recovery-required"
+          }
+        };
+        for (const listener of watchStoppedListeners) listener(terminal);
+      }
       return createCoreSuccessEnvelope(
         request,
         request.method === "getWatchStatus" && !request.payload.watchId
@@ -226,14 +260,17 @@ function harness({
     getWindow: () => window,
     rendererOrigin: "cps-app://app",
     profiles: {
-      list: () => [{
-        id: "default",
-        name: "Default",
-        revision: "r1",
-        codexHomeConfigured: true,
-        sqliteHomeConfigured: false
-      }]
+      list: () => profileList,
+      resolve: () => ({ id: "default", name: "Default", revision: "r1", codexHome: "D:\\safe" }),
+      async save() { throw new Error("not configured"); },
+      async delete() { throw new Error("not configured"); }
     },
+    operationLogs,
+    writeClipboardText,
+    directorySelections: { async authorize() { return { token: "a".repeat(43), displayName: "safe" }; }, consume() { return "D:\\safe"; } },
+    async selectProfileDirectory() { return null; },
+    async revealProfileDirectory() { return true; },
+    isProfileMutationBlocked() { return false; },
     supervisor,
     diagnosticsExporter: diagnosticsExporter ?? {
       authorizeTarget(target) {
@@ -290,8 +327,11 @@ function harness({
     supervisor,
     diagnosticExports,
     activeWatchCounts,
+    watchStoppedListeners,
+    logBegins,
     get selectedTargets() { return selectedTargets; },
     get updateCalls() { return updateCalls; },
+    get logCounter() { return logCounter; },
     cleanup
   };
 }
@@ -322,6 +362,8 @@ test("Sync Prepare and same-method Apply use a one-time Main-owned plan", async 
     );
     const prepared = await value.handlers.get(DESKTOP_IPC_CHANNELS.coreSyncSwitch)(value.event, prepare);
     assert.equal(prepared.ok, true);
+    assert.equal(value.logBegins.at(-1).profileId, profile.profileId);
+    assert.equal(value.logBegins.at(-1).profileRevision, profile.profileRevision);
     const apply = createCoreRequestEnvelope(
       "applySync",
       { schemaVersion: 1, planId: prepared.result.planId },
@@ -376,6 +418,8 @@ test("Restore Prepare and Apply use a one-time Main-owned recovery plan", async 
     );
     assert.equal(prepared.ok, true);
     assert.equal(prepared.result.operation, "restore");
+    assert.equal(value.logBegins.at(-1).profileId, profile.profileId);
+    assert.equal(value.logBegins.at(-1).profileRevision, profile.profileRevision);
     const apply = createCoreRequestEnvelope(
       "applyRestore",
       { schemaVersion: 1, planId: prepared.result.planId },
@@ -430,6 +474,48 @@ test("Maintenance owns Watch IDs and keeps Prune available during recovery", asy
   } finally { value.cleanup(); }
 });
 
+test("profile-scoped Watch status routes to the requested profile instead of another owned Watch", async () => {
+  const otherProfile = { profileId: "other", profileRevision: "r2" };
+  const value = harness({
+    profileList: [
+      { id: "default", name: "Default", revision: "r1", codexHomeConfigured: true, sqliteHomeConfigured: false },
+      { id: "other", name: "Other", revision: "r2", codexHomeConfigured: true, sqliteHomeConfigured: false }
+    ]
+  });
+  try {
+    const started = await value.handlers.get(DESKTOP_IPC_CHANNELS.coreMaintenance)(
+      value.event,
+      createCoreRequestEnvelope("startWatch", { profile, includeStateDb: true }, "watch-scope-start")
+    );
+    assert.equal(started.ok, true);
+    const status = await value.handlers.get(DESKTOP_IPC_CHANNELS.coreMaintenance)(
+      value.event,
+      createCoreRequestEnvelope("getWatchStatus", { profile: otherProfile }, "watch-scope-status")
+    );
+    assert.equal(status.ok, true);
+    assert.deepEqual(value.calls.at(-1).profile, otherProfile);
+  } finally { value.cleanup(); }
+});
+
+test("shared Watch aliases retain the first starter's profile and log ownership", async () => {
+  const value = harness();
+  const otherProfile = { profileId: "alias", profileRevision: "alias-revision" };
+  try {
+    const call = (method, payload, id) => value.handlers.get(DESKTOP_IPC_CHANNELS.coreMaintenance)(
+      value.event, createCoreRequestEnvelope(method, payload, id)
+    );
+    const first = await call("startWatch", { profile }, "first-start");
+    const alias = await call("startWatch", { profile: otherProfile }, "alias-start");
+    assert.equal(alias.result.watchId, first.result.watchId);
+    assert.equal(value.activeWatchCounts.at(-1), 1);
+    const stopped = await call("stopWatch", { watchId: alias.result.watchId }, "shared-stop");
+    assert.equal(stopped.ok, true);
+    assert.deepEqual(value.calls.at(-1).profile, profile);
+    assert.equal(value.logBegins.at(-1).profileId, profile.profileId);
+    assert.equal(value.logBegins.at(-1).profileRevision, profile.profileRevision);
+  } finally { value.cleanup(); }
+});
+
 test("Watch status reconciliation removes an autonomously stopped Watch from Main ownership", async () => {
   const value = harness();
   try {
@@ -469,6 +555,62 @@ test("Watch status reconciliation removes an autonomously stopped Watch from Mai
     );
     assert.equal(staleStop.ok, false);
     assert.equal(staleStop.error.code, "INVALID_INPUT");
+  } finally { value.cleanup(); }
+});
+
+test("Watch terminal event clears Main ownership and pushes the stopped snapshot without polling", async () => {
+  const value = harness();
+  try {
+    const started = await value.handlers.get(DESKTOP_IPC_CHANNELS.coreMaintenance)(
+      value.event,
+      createCoreRequestEnvelope("startWatch", { profile, includeStateDb: true }, "watch-terminal-start")
+    );
+    assert.equal(started.ok, true);
+    const callCount = value.calls.length;
+    const terminal = {
+      generation: 1,
+      profileId: profile.profileId,
+      profileRevision: profile.profileRevision,
+      watch: {
+        schemaVersion: 1,
+        watchId: started.result.watchId,
+        status: "stopped",
+        startedAt: "2026-08-26T00:00:00.000Z",
+        stoppedAt: "2026-08-26T00:01:00.000Z",
+        stopReason: "recovery-required",
+        includeStateDb: true,
+        once: false
+      }
+    };
+    for (const listener of value.watchStoppedListeners) listener(terminal);
+    assert.equal(value.activeWatchCounts.at(-1), 0);
+    assert.equal(value.calls.length, callCount);
+    assert.deepEqual(value.sent.at(-1), {
+      channel: DESKTOP_IPC_CHANNELS.watchStoppedEvent,
+      value: terminal
+    });
+    for (const listener of value.watchStoppedListeners) listener(terminal);
+    assert.equal(value.sent.filter((item) => item.channel === DESKTOP_IPC_CHANNELS.watchStoppedEvent).length, 1);
+  } finally { value.cleanup(); }
+});
+
+test("a terminal Watch event that beats start response does not resurrect ownership", async () => {
+  const value = harness({ emitTerminalDuringStart: true });
+  try {
+    const started = await value.handlers.get(DESKTOP_IPC_CHANNELS.coreMaintenance)(
+      value.event,
+      createCoreRequestEnvelope("startWatch", { profile, includeStateDb: true }, "watch-terminal-race")
+    );
+    assert.equal(started.ok, true);
+    const staleStop = await value.handlers.get(DESKTOP_IPC_CHANNELS.coreMaintenance)(
+      value.event,
+      createCoreRequestEnvelope("stopWatch", { watchId: started.result.watchId }, "watch-terminal-race-stop")
+    );
+    assert.equal(staleStop.ok, false);
+    assert.equal(staleStop.error.code, "INVALID_INPUT");
+    const events = value.sent.filter((item) => item.channel === DESKTOP_IPC_CHANNELS.watchStoppedEvent);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].value.watch.watchId, started.result.watchId);
   } finally { value.cleanup(); }
 });
 
@@ -799,6 +941,39 @@ test("cancel IPC is fixed-schema and sender-bound", async () => {
     });
     assert.deepEqual(malformed, { accepted: false });
     assert.equal(value.cancellations.length, 0);
+  } finally { value.cleanup(); }
+});
+
+test("clipboard is write-only, validated, trusted and does not reach Core or logs", async () => {
+  const copied = [];
+  const value = harness({ writeClipboardText: (text) => copied.push(text) });
+  const invoke = value.handlers.get(DESKTOP_IPC_CHANNELS.clipboardWriteText);
+  const request = { schemaVersion: 1, text: "codex resume 11111111-2222-4333-8444-555555555555" };
+  try {
+    assert.deepEqual(await invoke(value.event, request), { copied: true });
+    assert.deepEqual(copied, [request.text]);
+    for (const bad of [null, [], "text", { ...request, schemaVersion: 2 }, { ...request, text: 5 },
+      { ...request, path: "ignored" }, { ...request, text: "a\0b" },
+      { ...request, text: "中".repeat(23000) }, { ...request, text: "\n".repeat(33000) }]) {
+      assert.throws(() => invoke(value.event, bad), /Invalid clipboard request/);
+    }
+    for (const event of [
+      { ...value.event, sender: { id: 999 } },
+      { ...value.event, senderFrame: { url: "cps-app://app/index.html" } }
+    ]) assert.throws(() => invoke(event, request), /clipboard request rejected/);
+    assert.equal(copied.length, 1);
+    assert.equal(value.calls.length, 0);
+    assert.equal(value.logCounter, 0);
+  } finally { value.cleanup(); }
+});
+
+test("clipboard native failure returns no payload and no success", async () => {
+  const value = harness({ writeClipboardText: () => { throw new Error("private native details"); } });
+  try {
+    assert.deepEqual(await value.handlers.get(DESKTOP_IPC_CHANNELS.clipboardWriteText)(value.event, {
+      schemaVersion: 1, text: "synthetic"
+    }), { copied: false });
+    assert.equal(value.logCounter, 0);
   } finally { value.cleanup(); }
 });
 

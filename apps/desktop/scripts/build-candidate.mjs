@@ -5,6 +5,7 @@ import { DESKTOP_CANDIDATE_TARGETS } from "./resolve-candidate-build.mjs";
 
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = path.resolve(desktopRoot, "../..");
+const outputRoot = path.join(repositoryRoot, "dist-desktop");
 const VERSION_PATTERN = /^1\.0\.0-(?:alpha|beta|rc)\.\d+$/;
 const BUILD_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 
@@ -63,7 +64,18 @@ runNpm([
   "--config",
   "electron-builder.yml",
   ...(config.configOverrides || []),
+  `--config.directories.output=${outputRoot}`,
   `--config.extraMetadata.version=${version}`
 ], { cwd: desktopRoot, env: buildEnvironment });
+
+if (target === "windows-x64") {
+  const sizeCheck = spawnSync(process.execPath, [
+    path.join(desktopRoot, "scripts/verify-size-budget.mjs"),
+    "--output", outputRoot,
+    "--version", version
+  ], { cwd: desktopRoot, env: buildEnvironment, stdio: "inherit", windowsHide: true });
+  if (sizeCheck.error) throw sizeCheck.error;
+  if (sizeCheck.status !== 0) throw new Error(`Windows candidate size budget failed with exit code ${sizeCheck.status}.`);
+}
 
 process.stdout.write(`Desktop candidate built: ${target} ${version} ${buildId}\n`);

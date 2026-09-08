@@ -2,6 +2,7 @@ import type {
   ApplyPlanInput,
   BackupList,
   DiagnosticsSnapshot,
+  FileUpdateTiming,
   GetDiagnosticsInput,
   GetHistorySessionInput,
   GetStatusInput,
@@ -38,6 +39,36 @@ export type ProfileResolver = (
   selector: ProfileSelector
 ) => ResolvedProfile | Promise<ResolvedProfile>;
 
+export interface WatchActivityEvent {
+  schemaVersion: 1;
+  event: "started" | "finished";
+  activityId: string;
+  watchId: string;
+  profileId: string;
+  profileRevision?: string;
+  backupId?: string;
+  failedStage?: string;
+  failureCode?: string;
+  partialReason?: string;
+  retryRecommended?: boolean;
+  startedAt?: string;
+  finishedAt?: string;
+  reason?: string;
+  outcome?: "completed" | "partial" | "failed";
+  errorCode?: string;
+  changedSessionFiles?: number;
+  sqliteRowsUpdated?: number;
+  skippedLockedRolloutFiles?: number;
+  fileUpdateTiming?: FileUpdateTiming;
+}
+
+/** @internal Trusted host lifecycle event. Never accepted from product input. */
+export interface WatchStoppedEvent {
+  profileId: string;
+  profileRevision: string;
+  watch: WatchSnapshot & { status: "stopped"; stoppedAt: string; stopReason: string };
+}
+
 /** @internal Trusted host control. Never expose this object to HTTP, IPC, or Renderer input. */
 export interface CoreHostOperationControl {
   signal?: AbortSignal;
@@ -54,7 +85,7 @@ export interface CoreFacade {
   applySync(input: ApplyPlanInput, control?: CoreHostOperationControl): Promise<OperationResult>;
   prepareSwitch(input: PrepareSwitchInput): Promise<PlanSummary>;
   applySwitch(input: ApplyPlanInput, control?: CoreHostOperationControl): Promise<OperationResult>;
-  prepareRepair(input: PrepareRepairInput): Promise<PlanSummary>;
+  prepareRepair(input: PrepareRepairInput, control?: CoreHostOperationControl): Promise<PlanSummary>;
   applyRepair(input: ApplyPlanInput, control?: CoreHostOperationControl): Promise<OperationResult>;
   listBackups(input: ListBackupsInput): Promise<BackupList>;
   prepareRestore(input: PrepareRestoreInput): Promise<PlanSummary>;
@@ -65,7 +96,7 @@ export interface CoreFacade {
   startWatch(input: StartWatchInput): Promise<WatchSnapshot>;
   stopWatch(input: WatchReferenceInput): Promise<WatchSnapshot>;
   getWatchStatus(input?: GetWatchStatusInput): Promise<WatchSnapshot | WatchStatusList>;
-  getDiagnostics(input: GetDiagnosticsInput): Promise<DiagnosticsSnapshot>;
+  getDiagnostics(input: GetDiagnosticsInput, control?: CoreHostOperationControl): Promise<DiagnosticsSnapshot>;
 }
 
-export function createCoreFacade(options: { resolveProfile: ProfileResolver }): CoreFacade;
+export function createCoreFacade(options: { resolveProfile: ProfileResolver; /** Trusted local Desktop host only; never accepted from product input. */ includeLocalDisplayPaths?: boolean; onWatchActivity?(event: WatchActivityEvent): void | Promise<void>; onWatchStopped?(event: WatchStoppedEvent): void | Promise<void> }): CoreFacade;

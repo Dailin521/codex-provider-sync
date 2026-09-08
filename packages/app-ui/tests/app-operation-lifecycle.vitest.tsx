@@ -19,6 +19,50 @@ const preferences = {
 };
 
 describe("App operation lifecycle", () => {
+  it("keeps a locally edited repair preview visible but prevents applying it after a failed re-prepare", async () => {
+    const repairPlan = (planId: string): PlanSummary => ({
+      ...syncPlanFor("profile-r1", planId),
+      operation: "repair",
+      target: { provider: "openai", targets: ["models"], scope: "all" },
+      impact: {
+        rolloutFilesToChange: 1,
+        sqliteRowsToChange: 1,
+        backupExpected: true,
+        repairPreview: [{ sessionId: "session-1", changes: [{ target: "models", before: "old-model", after: "new-model" }] }],
+        repairPreviewTotal: 1,
+        repairPreviewTruncated: false
+      }
+    } as PlanSummary);
+    const dismissOperationPlan = vi.fn(async () => {});
+    const prepareRepair = vi.fn()
+      .mockResolvedValueOnce(repairPlan("repair-old"))
+      .mockRejectedValueOnce({ code: "INTERNAL_ERROR" });
+    const applyRepair = vi.fn();
+    const user = userEvent.setup();
+    render(<AppUi surface="desktop" core={new MockCoreClient({ getStatus: async () => statusFor(), prepareRepair, applyRepair })} host={{ dismissOperationPlan, listProfiles: async () => [{ id: "default", name: "Default", revision: "profile-r1" }] }} initialLocale="en" initialTheme="system" preferences={preferences} />);
+
+    await screen.findByRole("button", { name: "Advanced features", exact: true });
+    await user.click(screen.getByRole("button", { name: "Advanced features", exact: true }));
+    await user.click(screen.getByText("Advanced adjustments", { exact: true }));
+    await user.click(screen.getByRole("checkbox", { name: "Unify historical model names" }));
+    await user.click(screen.getByRole("button", { name: "Preview adjustment" }));
+    await screen.findByRole("dialog", { name: "Confirm repair" });
+
+    await user.click(screen.getByRole("radio", { name: "Selected chats" }));
+    await user.click(screen.getByRole("checkbox", { name: "Select chat session-1" }));
+    expect(screen.getByRole("button", { name: "Confirm repair" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Update repair preview" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("The earlier preview has been dismissed");
+    expect(screen.getByRole("dialog", { name: "Confirm repair" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Confirm repair" })).toBeDisabled();
+    expect(dismissOperationPlan).toHaveBeenCalledWith("repair-old");
+    // Returning the draft to its old scope must not revive a dismissed plan.
+    await user.click(screen.getByRole("radio", { name: "Whole profile" }));
+    expect(screen.getByRole("button", { name: "Confirm repair" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Update repair preview" })).toBeEnabled();
+    expect(applyRepair).not.toHaveBeenCalled();
+  });
+
   it("refreshes a profile that changes while preparing and retries with the new revision", async () => {
     let profileRevision = "profile-r1";
     let prepareAttempts = 0;
@@ -51,8 +95,8 @@ describe("App operation lifecycle", () => {
       />
     );
 
-    await user.click(await screen.findByRole("button", { name: "Sync", exact: true }));
-    const prepareButton = await screen.findByRole("button", { name: "Prepare sync" });
+    await screen.findByRole("button", { name: "Preview sync" });
+    const prepareButton = await screen.findByRole("button", { name: "Preview sync" });
     await waitFor(() => expect(prepareButton).toBeEnabled());
     await user.click(prepareButton);
 
@@ -61,7 +105,7 @@ describe("App operation lifecycle", () => {
     await waitFor(() => expect(prepareButton).toBeEnabled());
     await user.click(prepareButton);
 
-    expect(await screen.findByRole("dialog", { name: "Review plan" })).toBeVisible();
+    expect(await screen.findByRole("dialog", { name: "Confirm sync" })).toBeVisible();
     expect(preparedRevisions).toEqual(["profile-r1", "profile-r2"]);
   });
 
@@ -96,8 +140,8 @@ describe("App operation lifecycle", () => {
 
     expect(await screen.findByText("Profile changed.", {}, { timeout: 4000 })).toBeVisible();
     await waitFor(() => expect(host.listProfiles).toHaveBeenCalledTimes(2));
-    await user.click(screen.getByRole("button", { name: "Sync", exact: true }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Prepare sync" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "Overview", exact: true }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Preview sync" })).toBeEnabled());
     expect(statusRevisions.at(-1)).toBe("profile-r2");
   });
 
@@ -137,22 +181,22 @@ describe("App operation lifecycle", () => {
       />
     );
 
-    await user.click(await screen.findByRole("button", { name: "Sync", exact: true }));
-    const prepareButton = await screen.findByRole("button", { name: "Prepare sync" });
+    await screen.findByRole("button", { name: "Preview sync" });
+    const prepareButton = await screen.findByRole("button", { name: "Preview sync" });
     await waitFor(() => expect(prepareButton).toBeEnabled());
     await user.click(prepareButton);
-    await user.click(await screen.findByRole("button", { name: "Confirm and apply" }));
+    await user.click(await screen.findByRole("button", { name: "Confirm sync" }));
 
     expect(await screen.findByText("Profile changed.")).toBeVisible();
-    expect(screen.getByText("Review the current profile and prepare the operation again.")).toBeVisible();
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Review plan" })).not.toBeInTheDocument());
+    expect(screen.getByText("Review the selected storage location and try again.")).toBeVisible();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Confirm sync" })).not.toBeInTheDocument());
     await waitFor(() => expect(prepareButton).toHaveFocus());
     expect(host.listProfiles).toHaveBeenCalledTimes(2);
     expect(listedRevisions).toEqual(["profile-r1", "profile-r2"]);
 
     await waitFor(() => expect(prepareButton).toBeEnabled());
     await user.click(prepareButton);
-    expect(await screen.findByRole("dialog", { name: "Review plan" })).toBeVisible();
+    expect(await screen.findByRole("dialog", { name: "Confirm sync" })).toBeVisible();
     expect(preparedRevisions).toEqual(["profile-r1", "profile-r2"]);
   });
 
@@ -189,15 +233,15 @@ describe("App operation lifecycle", () => {
       />
     );
 
-    await user.click(await screen.findByRole("button", { name: "Sync", exact: true }));
-    const prepareButton = await screen.findByRole("button", { name: "Prepare sync" });
+    await screen.findByRole("button", { name: "Preview sync" });
+    const prepareButton = await screen.findByRole("button", { name: "Preview sync" });
     await waitFor(() => expect(prepareButton).toBeEnabled());
     await user.click(prepareButton);
-    await user.click(await screen.findByRole("button", { name: "Confirm and apply" }));
+    await user.click(await screen.findByRole("button", { name: "Confirm sync" }));
 
-    const dialog = await screen.findByRole("dialog", { name: "Review plan" });
-    expect(await within(dialog).findByText(operationId)).toBeVisible();
-    expect(within(dialog).getByText("Create managed backup · In progress · 1")).toBeVisible();
+    const dialog = await screen.findByRole("dialog", { name: "Confirm sync" });
+    expect(within(dialog).queryByText(operationId)).not.toBeInTheDocument();
+    expect(within(dialog).getByText("Create backup · In progress · 1")).toBeVisible();
     expect(within(dialog).getByRole("progressbar", { name: "Operation progress" })).toHaveValue(0.5);
 
     await user.click(within(dialog).getByRole("button", { name: "Cancel operation" }));
@@ -210,7 +254,7 @@ describe("App operation lifecycle", () => {
       await applyPending.catch(() => undefined);
     });
     expect(await screen.findByText("Operation cancelled.")).toBeVisible();
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Review plan" })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Confirm sync" })).not.toBeInTheDocument());
     expect(screen.queryByRole("dialog", { name: "Operation result" })).not.toBeInTheDocument();
     await waitFor(() => expect(prepareButton).toHaveFocus());
   });

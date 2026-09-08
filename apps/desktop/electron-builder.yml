@@ -1,10 +1,15 @@
 appId: com.dailin521.codex-provider-sync
 productName: Codex Provider Sync
+compression: maximum
+electronLanguages:
+  - en-US
+  - zh-CN
+afterPack: ./scripts/after-pack.cjs
 asar:
   smartUnpack: false
 asarUnpack:
   - node_modules/better-sqlite3/prebuilds/${platform}-${arch}.node
-npmRebuild: true
+npmRebuild: false
 buildDependenciesFromSource: false
 removePackageScripts: true
 includePdb: false

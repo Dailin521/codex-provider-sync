@@ -4,16 +4,39 @@
 // application/ and storage adapters live in infrastructure/.
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { publicFileUpdateTiming } from "../../contracts/dist/index.js";
 
 import { createCoreApplication } from "./application/core-application.js";
 import { toPublicProgress } from "./progress.js";
-import { CoreError } from "./infrastructure/node-core-ports.js";
+import { CoreError, publicHistoryIntegrity } from "./infrastructure/node-core-ports.js";
 
 /** @typedef {{profileId: string, profileRevision?: string}} ProfileSelector */
 /** @typedef {{id: string, revision: string, codexHome: string, sqliteHome?: string}} ResolvedProfile */
 /** @typedef {(selector: ProfileSelector) => ResolvedProfile | Promise<ResolvedProfile>} ProfileResolver */
 /** @typedef {Record<string, unknown>} JsonRecord */
 /** @typedef {{stage: string, status: string, progress?: number, count?: number}} PublicProgress */
+/** @typedef {{
+ * schemaVersion: 1,
+ * event: "started" | "finished",
+ * activityId: string,
+ * watchId: string,
+ * profileRevision?: string,
+ * backupId?: string,
+ * failedStage?: string,
+ * failureCode?: string,
+ * partialReason?: string,
+ * retryRecommended?: boolean,
+ * startedAt?: string,
+ * finishedAt?: string,
+ * reason?: string,
+ * outcome?: "completed" | "partial" | "failed",
+ * errorCode?: string,
+ * changedSessionFiles?: number,
+ * sqliteRowsUpdated?: number,
+ * skippedLockedRolloutFiles?: number
+ * fileUpdateTiming?: import("../../contracts/dist/index.js").FileUpdateTiming
+ * }} WatchActivityEvent */
+/** @typedef {{schemaVersion: 1, watchId: string, status: "stopped", startedAt: string, stoppedAt: string, stopReason: string, includeStateDb: boolean, once: boolean}} WatchStoppedSnapshot */
 /** @typedef {{
  * signal?: AbortSignal,
  * onOperationStarted?: (value: {operationId: string, operation: "sync" | "switch" | "repair" | "restore"}) => void | Promise<void>,
@@ -25,7 +48,7 @@ import { CoreError } from "./infrastructure/node-core-ports.js";
  * applySync: (input: JsonRecord, control?: CoreHostOperationControl) => Promise<unknown>,
  * prepareSwitch: (input: JsonRecord) => Promise<unknown>,
  * applySwitch: (input: JsonRecord, control?: CoreHostOperationControl) => Promise<unknown>,
- * prepareRepair: (input: JsonRecord) => Promise<unknown>,
+ * prepareRepair: (input: JsonRecord, control?: CoreHostOperationControl) => Promise<unknown>,
  * applyRepair: (input: JsonRecord, control?: CoreHostOperationControl) => Promise<unknown>,
  * listBackups: (input: JsonRecord) => Promise<unknown>,
  * prepareRestore: (input: JsonRecord) => Promise<unknown>,
@@ -36,7 +59,7 @@ import { CoreError } from "./infrastructure/node-core-ports.js";
  * startWatch: (input: JsonRecord) => Promise<unknown>,
  * stopWatch: (input: JsonRecord) => Promise<unknown>,
  * getWatchStatus: (input?: JsonRecord) => Promise<unknown>,
- * getDiagnostics: (input: JsonRecord) => Promise<unknown>
+ * getDiagnostics: (input: JsonRecord, control?: CoreHostOperationControl) => Promise<unknown>
  * }} CoreFacade */
 
 const PROFILE_ID_PATTERN = /^[A-Za-z0-9._-]{1,80}$/;
@@ -233,8 +256,8 @@ function diagnosticOperationState(value) {
   return result;
 }
 
-/** @param {unknown} value */
-function publicStatus(value) {
+/** @param {unknown} value @param {boolean} [includeLocalDisplayPaths] */
+function publicStatus(value, includeLocalDisplayPaths = false) {
   if (!isRecord(value)) return value;
   const rolloutCounts = isRecord(value.rolloutCounts) ? value.rolloutCounts : {};
   const sqliteCounts = value.sqliteCounts ?? {};
@@ -285,6 +308,14 @@ function publicStatus(value) {
     storageRevision,
     profile: value.profile,
     currentProvider: provider,
+    ...(isRecord(value.sessionActivity) ? { sessionActivity: publicSessionActivity(value.sessionActivity) } : {}),
+    ...(isRecord(value.syncSessionUsage) ? {
+      syncSessionUsage: value.syncSessionUsage.state === "checked"
+        && typeof value.syncSessionUsage.count === "number"
+        && Number.isSafeInteger(value.syncSessionUsage.count) && value.syncSessionUsage.count >= 0
+        ? { state: "checked", count: value.syncSessionUsage.count }
+        : { state: value.syncSessionUsage.state === "unsupported" ? "unsupported" : "unavailable", count: null }
+    } : {}),
     ...(typeof value.currentModel === "string" || value.currentModel === null
       ? { currentModel: value.currentModel }
       : {}),
@@ -300,6 +331,17 @@ function publicStatus(value) {
     sqliteHomeSource: typeof value.sqliteHomeSource === "string" && value.sqliteHomeSource
       ? value.sqliteHomeSource
       : "unknown",
+    // Local desktop display only: use the same completed snapshot as the counts.
+    // This trusted factory option is never part of a Renderer request.
+    ...(includeLocalDisplayPaths && typeof value.codexHome === "string" && typeof value.sqliteHome === "string"
+      ? { displayPaths: {
+          codexHome: value.codexHome,
+          sqliteHome: value.sqliteHome,
+          stateDbPath: isRecord(value.stateDbLocation) && typeof value.stateDbLocation.path === "string"
+            ? value.stateDbLocation.path
+            : null
+        } }
+      : {}),
     backupSummary: {
       count: Number.isSafeInteger(backupSummary.count) ? backupSummary.count : 0,
       totalBytes: Number.isSafeInteger(backupSummary.totalBytes) ? backupSummary.totalBytes : 0
@@ -330,13 +372,22 @@ function publicStatus(value) {
 }
 
 /** @param {unknown} value */
+function publicSessionActivity(value) {
+  if (!isRecord(value)) return undefined;
+  return value.state === "checked" && typeof value.count === "number"
+    && Number.isSafeInteger(value.count) && value.count >= 0
+    ? { state: "checked", count: value.count }
+    : { state: value.state === "unsupported" ? "unsupported" : "unavailable", count: null };
+}
+
+/** @param {unknown} value */
 function publicPlan(value) {
   if (!isRecord(value)) return value;
   const target = isRecord(value.target) ? value.target : {};
   const impact = isRecord(value.impact) ? value.impact : {};
   /** @type {Record<string, unknown>} */
   const publicTarget = {};
-  for (const key of ["provider", "model", "modelMode", "backupId"]) {
+  for (const key of ["provider", "model", "modelMode", "previousProvider", "previousRootModel", "backupId"]) {
     const candidate = target[key];
     if (typeof candidate === "string" || candidate === null) publicTarget[key] = candidate;
   }
@@ -349,8 +400,15 @@ function publicPlan(value) {
       && ["models", "cwd", "userEvent", "workspaceRoots"].includes(entry)
     ));
   }
+  if (value.operation === "repair") {
+    if (target.scope === "all" || target.scope === "selected") publicTarget.scope = target.scope;
+    if (Array.isArray(target.sessionIds)) {
+      publicTarget.sessionIds = target.sessionIds.filter((id) => typeof id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(id)).slice(0, 100);
+    }
+  }
   /** @type {Record<string, unknown>} */
   const publicImpact = {};
+  if (isRecord(impact.sessionActivity)) publicImpact.sessionActivity = publicSessionActivity(impact.sessionActivity);
   for (const [key, candidate] of Object.entries(impact)) {
     if (typeof candidate === "boolean" || (Number.isSafeInteger(candidate) && Number(candidate) >= 0)) {
       publicImpact[key] = candidate;
@@ -360,6 +418,22 @@ function publicPlan(value) {
     publicImpact.lockedRolloutFiles = impact.lockedRolloutFiles
       .filter((entry) => typeof entry === "string")
       .map((entry) => path.basename(entry));
+  }
+  if (value.operation === "repair" && Array.isArray(impact.workspaceSettingsChangeKinds)) {
+    const allowed = ["savedRoots", "projectOrder", "activeRoots", "labels", "openTargets", "settingsBackup"];
+    const changeKinds = impact.workspaceSettingsChangeKinds;
+    publicImpact.workspaceSettingsChangeKinds = allowed.filter((kind) => changeKinds.includes(kind));
+  }
+  if (value.operation === "repair" && Array.isArray(impact.repairPreview)) {
+    publicImpact.repairPreview = impact.repairPreview.filter(isRecord).slice(0, 100).flatMap((entry) => {
+      if (typeof entry.sessionId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(entry.sessionId)) return [];
+      const changes = Array.isArray(entry.changes) ? entry.changes.filter(isRecord).filter((change) => (
+        ["models", "cwd", "userEvent"].includes(String(change.target))
+        && typeof change.before === "string" && /^[A-Za-z0-9._:/-]{1,160}$/.test(change.before)
+        && typeof change.after === "string" && /^[A-Za-z0-9._:/-]{1,160}$/.test(change.after)
+      )).slice(0, 3).map((change) => ({ target: change.target, before: change.before, after: change.after })) : [];
+      return [{ sessionId: entry.sessionId, changes }];
+    });
   }
   return {
     schemaVersion: 1,
@@ -389,6 +463,8 @@ function publicOperationResult(value) {
   const source = isRecord(value.result) ? value.result : {};
   /** @type {Record<string, unknown>} */
   const result = {};
+  const fileUpdateTiming = publicFileUpdateTiming(source.fileUpdateTiming);
+  if (fileUpdateTiming) result.fileUpdateTiming = fileUpdateTiming;
   for (const key of [
     "targetProvider",
     "targetModel",
@@ -448,6 +524,15 @@ function publicOperationResult(value) {
       && ["models", "cwd", "userEvent", "workspaceRoots"].includes(entry)
     ));
   }
+  if (value.operation === "repair" && isRecord(source.verification)) {
+    const verification = source.verification;
+    result.verification = {
+      status: ["verified", "remaining", "unavailable"].includes(String(verification.status)) ? verification.status : "unavailable",
+      ...Object.fromEntries(["remainingRolloutFiles", "remainingSqliteRows", "remainingWorkspaceRoots", "skippedSessions"].map((key) => [
+        key, Number.isSafeInteger(verification[key]) && Number(verification[key]) >= 0 ? verification[key] : 0
+      ]))
+    };
+  }
   return {
     schemaVersion: 1,
     operationId: value.operationId,
@@ -490,12 +575,42 @@ function publicBackupMetadata(value) {
   return result;
 }
 
+/** Display-only grouping from recorded metadata; never resolve or follow a directory.
+ * @param {unknown} cwd
+ */
+function publicHistoryProject(cwd) {
+  if (typeof cwd !== "string" || !cwd || /[\x00-\x1f\x7f]/.test(cwd)) return null;
+  const windows = /^[A-Za-z]:[\\/]/.test(cwd) || /^\\\\/.test(cwd);
+  const paths = windows ? path.win32 : path.posix;
+  if (!paths.isAbsolute(cwd)) return null;
+  const normalized = paths.normalize(cwd);
+  const root = paths.parse(normalized).root;
+  const directory = normalized.length > root.length ? normalized.replace(/[\\/]+$/, "") : normalized;
+  const name = (paths.basename(directory) || root.replace(/[\\/]/g, "") || "/").slice(0, 160);
+  return { id: compositeRevision(`${windows ? "win" : "posix"}:${windows ? directory.toLowerCase() : directory}`), name };
+}
+
 /** @param {unknown} value */
 function publicHistorySummary(value) {
   if (!isRecord(value)) return value;
+  const recordedProject = isRecord(value.project)
+    && typeof value.project.id === "string" && (/^[a-f0-9]{64}$/.test(value.project.id) || ["unassigned", "orphans"].includes(value.project.id))
+    && typeof value.project.name === "string" && value.project.name.length > 0
+    && value.project.name.length <= 160 && !/[\x00-\x1f\x7f]/.test(value.project.name)
+    ? { id: value.project.id, name: value.project.name }
+    : null;
   return {
     id: value.id,
     title: value.title,
+    project: recordedProject ?? publicHistoryProject(value.cwd),
+    ...(value.nativeSessionId === undefined ? {} : { nativeSessionId: value.nativeSessionId }),
+    ...(value.parentSessionId === undefined ? {} : { parentSessionId: value.parentSessionId }),
+    ...(value.sessionKind === undefined ? {} : { sessionKind: value.sessionKind }),
+    ...(typeof value.childCount === "number" && Number.isSafeInteger(value.childCount) && value.childCount >= 0
+      ? { childCount: value.childCount }
+      : {}),
+    ...(value.fileModifiedAt === undefined ? {} : { fileModifiedAt: value.fileModifiedAt }),
+    ...(typeof value.subagentName === "string" ? { subagentName: value.subagentName } : {}),
     provider: value.provider,
     ...(value.model === undefined ? {} : { model: value.model }),
     archived: value.archived,
@@ -516,9 +631,14 @@ function compositeRevision(value) {
 /**
  * Create the shared Core facade for a trusted host. The resolver is the only
  * component allowed to translate product profile identifiers into paths.
- * @param {{resolveProfile: ProfileResolver}} options
+ * @param {{
+ * resolveProfile: ProfileResolver,
+ * includeLocalDisplayPaths?: boolean,
+ * onWatchActivity?: (event: WatchActivityEvent & {profileId: string}) => void | Promise<void>,
+ * onWatchStopped?: (event: {profileId: string, profileRevision: string, watch: WatchStoppedSnapshot}) => void | Promise<void>
+ * }} options
  */
-export function createCoreFacade({ resolveProfile }) {
+export function createCoreFacade({ resolveProfile, onWatchActivity, onWatchStopped, includeLocalDisplayPaths = false }) {
   if (typeof resolveProfile !== "function") {
     throw new TypeError("createCoreFacade requires a trusted resolveProfile function.");
   }
@@ -580,7 +700,7 @@ export function createCoreFacade({ resolveProfile }) {
           rolloutScanMode: "metadata"
         }),
         trusted.profile
-      ));
+      ), includeLocalDisplayPaths === true);
     },
 
     async prepareSync(input) {
@@ -624,7 +744,7 @@ export function createCoreFacade({ resolveProfile }) {
       return publicOperationResult(await application.applySwitch(input, trustedOperationControl(control)));
     },
 
-    async prepareRepair(input) {
+    async prepareRepair(input, control) {
       const trusted = await trustedInput(input);
       const targets = trusted.input.targets;
       if (!Array.isArray(targets)
@@ -635,9 +755,18 @@ export function createCoreFacade({ resolveProfile }) {
           || new Set(targets).size !== targets.length) {
         throw new CoreError("INVALID_INPUT", "The Repair targets are invalid.");
       }
+      const sessionIds = trusted.input.sessionIds;
+      if (sessionIds !== undefined && (!Array.isArray(sessionIds)
+          || sessionIds.length < 1 || sessionIds.length > 100
+          || sessionIds.some((id) => typeof id !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(id))
+          || new Set(sessionIds).size !== sessionIds.length || targets.includes("workspaceRoots"))) {
+        throw new CoreError("INVALID_INPUT", "The Repair session selection is invalid.");
+      }
       const plan = await application.prepareRepair({
         ...rootProfileInput(trusted.profile),
+        requestControl: trustedOperationControl(control),
         targets,
+        ...(sessionIds === undefined ? {} : { sessionIds }),
         ...(trusted.input.keepCount === undefined ? {} : { keepCount: trusted.input.keepCount }),
         profileResolver: currentProfileResolver()
       });
@@ -739,12 +868,24 @@ export function createCoreFacade({ resolveProfile }) {
 
     async listHistory(input) {
       const trusted = await trustedInput(input);
-      const { profile: _profile, ...options } = trusted.input;
-      const resultValue = await application.listHistory(trusted.profile.codexHome, options);
+      const { profile: _profile, sqliteHome: _untrustedSqliteHome, ...options } = trusted.input;
+      const resultValue = await application.listHistory(trusted.profile.codexHome, {
+        ...options,
+        ...(trusted.profile.sqliteHome ? { sqliteHome: trusted.profile.sqliteHome } : {})
+      });
       if (!isRecord(resultValue)) return resultValue;
+      const projects = "projects" in resultValue && Array.isArray(resultValue.projects)
+        ? resultValue.projects.map((entry) => ({
+            id: entry?.id,
+            name: entry?.name,
+            kind: entry?.kind,
+            total: entry?.total
+          }))
+        : null;
       return {
         ...resultValue,
-        sessions: Array.isArray(resultValue.sessions) ? resultValue.sessions.map(publicHistorySummary) : []
+        sessions: Array.isArray(resultValue.sessions) ? resultValue.sessions.map(publicHistorySummary) : [],
+        ...(projects ? { projects } : {})
       };
     },
 
@@ -753,15 +894,33 @@ export function createCoreFacade({ resolveProfile }) {
       if (typeof trusted.input.sessionId !== "string" || !trusted.input.sessionId) {
         throw new CoreError("INVALID_INPUT", "sessionId is required.");
       }
+      const metadataOnly = trusted.input.metadataOnly;
+      const messageLimit = trusted.input.messageLimit;
+      if (metadataOnly !== undefined && typeof metadataOnly !== "boolean") {
+        throw new CoreError("INVALID_INPUT", "metadataOnly must be a boolean.");
+      }
+      if (messageLimit !== undefined
+          && (typeof messageLimit !== "number" || !Number.isSafeInteger(messageLimit) || messageLimit < 1)) {
+        throw new CoreError("INVALID_INPUT", "messageLimit must be a positive integer.");
+      }
       const resultValue = await application.getHistorySession(
         trusted.profile.codexHome,
         trusted.input.sessionId,
-        trusted.input.messageLimit === undefined
-          ? {}
-          : { messageLimit: trusted.input.messageLimit }
+        {
+          ...(typeof metadataOnly === "boolean" ? { metadataOnly } : {}),
+          ...(typeof messageLimit === "number" ? { messageLimit } : {}),
+          ...(trusted.profile.sqliteHome ? { sqliteHome: trusted.profile.sqliteHome } : {})
+        }
       );
       if (!isRecord(resultValue)) return resultValue;
-      return { ...resultValue, session: publicHistorySummary(resultValue.session) };
+      const session = resultValue.session;
+      return {
+        ...resultValue,
+        session: publicHistorySummary(session),
+        ...(includeLocalDisplayPaths && isRecord(session)
+          && typeof session.rolloutPath === "string" && typeof session.cwd === "string"
+          ? { storage: { cwd: session.cwd, rolloutPath: session.rolloutPath } } : {})
+      };
     },
 
     async startWatch(input) {
@@ -770,7 +929,16 @@ export function createCoreFacade({ resolveProfile }) {
         ...rootProfileInput(trusted.profile),
         ...(trusted.input.includeStateDb === undefined ? {} : { includeStateDb: trusted.input.includeStateDb }),
         ...(trusted.input.debounceMs === undefined ? {} : { debounceMs: trusted.input.debounceMs }),
-        ...(trusted.input.once === undefined ? {} : { once: trusted.input.once })
+        ...(trusted.input.once === undefined ? {} : { once: trusted.input.once }),
+        ...(trusted.input.keepCount === undefined ? {} : { keepCount: trusted.input.keepCount }),
+        ...(typeof onWatchActivity === "function" ? {
+          onActivity: /** @param {WatchActivityEvent} event */ (event) =>
+            onWatchActivity({ ...event, profileId: trusted.profile.id, profileRevision: trusted.profile.revision })
+        } : {}),
+        ...(typeof onWatchStopped === "function" ? {
+          onStopped: /** @param {WatchStoppedSnapshot} watch */ (watch) =>
+            onWatchStopped({ profileId: trusted.profile.id, profileRevision: trusted.profile.revision, watch })
+        } : {})
       });
     },
 
@@ -779,17 +947,31 @@ export function createCoreFacade({ resolveProfile }) {
     },
 
     async getWatchStatus(input = {}) {
-      if (input.watchId !== undefined && typeof input.watchId !== "string") {
-        throw new CoreError("INVALID_INPUT", "watchId must be a string.");
+      if (!isRecord(input)
+          || Object.keys(input).some((key) => key !== "profile" && key !== "watchId")
+          || (input.watchId !== undefined && typeof input.watchId !== "string")
+          || (input.profile !== undefined && input.watchId !== undefined)) {
+        throw new CoreError("INVALID_INPUT", "Expected {}, { watchId }, or { profile } for Watch status.");
       }
-      return typeof input.watchId === "string"
-        ? application.getWatchStatus({ watchId: input.watchId })
-        : application.getWatchStatus();
+      if (typeof input.watchId === "string") {
+        return application.getWatchStatus({ watchId: input.watchId });
+      }
+      if (input.profile !== undefined) {
+        const trusted = await trustedInput(input);
+        return application.getWatchStatus({
+          profileId: trusted.profile.id,
+          profileRevision: trusted.profile.revision
+        });
+      }
+      return application.getWatchStatus();
     },
 
-    async getDiagnostics(input) {
+    async getDiagnostics(input, control) {
       const trusted = await trustedInput(input);
-      const value = await application.getDiagnostics(rootProfileInput(trusted.profile));
+      const value = await application.getDiagnostics({
+        ...rootProfileInput(trusted.profile),
+        requestControl: trustedOperationControl(control)
+      });
       if (!isRecord(value)) return value;
       const runtime = /** @type {Record<string, unknown>} */ (isRecord(value.runtime) ? value.runtime : {});
       const storage = /** @type {Record<string, unknown>} */ (isRecord(value.storage) ? value.storage : {});
@@ -810,6 +992,7 @@ export function createCoreFacade({ resolveProfile }) {
           };
       return {
         schemaVersion: 1,
+        ...(value.historyIntegrity ? { historyIntegrity: publicHistoryIntegrity(value.historyIntegrity) } : {}),
         generatedAt: typeof value.generatedAt === "string"
           && Number.isFinite(Date.parse(value.generatedAt))
           ? new Date(value.generatedAt).toISOString()

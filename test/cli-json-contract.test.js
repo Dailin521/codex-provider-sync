@@ -22,6 +22,39 @@ const ENVELOPE_KEYS = [
   "error"
 ];
 
+for (const reason of ["state-changed-during-status", "revision-unverifiable", "codex-home-lock"]) {
+  test(`CLI status preserves ${reason} without inventing healthy data`, async () => {
+    const blocked = {
+      schemaVersion: 1, snapshotAt: "2026-09-07T00:00:00Z", codexHome: "synthetic-home",
+      operationInProgress: reason === "codex-home-lock" ? { operation: "sync", actor: "external" } : null,
+      statusReadBlocked: { reason, unsafeDetail: "SECRET_DIAGNOSTIC_TEXT" },
+      rolloutScanComplete: false, pendingRecovery: false
+    };
+    for (const json of [false, true]) {
+      let stdout = "";
+      let stderr = "";
+      const code = await runCli(["status", ...(json ? ["--json"] : [])], {
+        stdout: { write: (text) => { stdout += text; } },
+        stderr: { write: (text) => { stderr += text; } },
+        loadCoreImpl: async () => ({ getStatus: async () => blocked })
+      });
+      assert.equal(code, 0, stderr);
+      assert.equal(stderr, "");
+      assert.doesNotMatch(stdout, /SECRET_DIAGNOSTIC_TEXT|undefined|Current provider:|Backups:/);
+      if (json) {
+        const envelope = parseSingleEnvelope(stdout);
+        assert.equal(envelope.ok, true, "read succeeded; this is not an Apply outcome or a verified alignment verdict");
+        assert.equal(envelope.result.rolloutScanComplete, false);
+        assert.deepEqual(envelope.result.statusReadBlocked, { reason });
+        if (reason !== "codex-home-lock") assert.equal(envelope.result.operationInProgress, null);
+      } else {
+        assert.match(stdout, reason === "codex-home-lock" ? /Status: operation in progress/ : /Status: refresh needed/);
+        if (reason !== "codex-home-lock") assert.doesNotMatch(stdout, /operation in progress|lock unverified/);
+      }
+    }
+  });
+}
+
 async function runNode(scriptPath, args, { scenario, env = {} } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [scriptPath, ...args], {
@@ -70,6 +103,25 @@ test("real CLI emits schema help JSON and keeps Human help unchanged", async () 
   assert.equal(human.stderr, "");
   assert.match(human.stdout, /^codex-provider\r?\n\r?\nUsage:/);
   assert.doesNotMatch(human.stdout, /"schemaVersion"/);
+});
+
+test("real CLI Sync rejects missing custom Provider with safe reason and JSON exit 2", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cps-cli-provider-validation-"));
+  try {
+    await fs.mkdir(path.join(root, "sessions"));
+    const config = "model_provider = 'dal' # not defined\n";
+    await fs.writeFile(path.join(root, "config.toml"), config);
+    const result = await runNode(cliPath, ["sync", "--json", "--codex-home", root], { env: { CODEX_SQLITE_HOME: "" } });
+    assert.equal(result.code, 2, result.stderr);
+    const envelope = parseSingleEnvelope(result.stdout);
+    assert.equal(envelope.error.code, "INVALID_INPUT");
+    assert.equal(envelope.error.details.reason, "provider-not-configured");
+    assert.equal(envelope.result, null);
+    assert.equal(await fs.readFile(path.join(root, "config.toml"), "utf8"), config);
+    await assert.rejects(fs.stat(path.join(root, "backups_state")), { code: "ENOENT" });
+    const human = await runNode(cliPath, ["sync", "--codex-home", root], { env: { CODEX_SQLITE_HOME: "" } });
+    assert.equal(human.code, 1);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 
 test("real CLI JSON input failures use one stdout document and exit 2", async () => {
@@ -176,6 +228,22 @@ test("JSON sync progress goes only to stderr and redacts the backup path", async
   assert.match(result.stderr, /Backup created in 25 ms/);
   assert.doesNotMatch(result.stderr, /secret-backup-path/);
   assert.doesNotMatch(result.stdout, /\[1\/6\]|secret-backup-path/);
+});
+
+test("Repair progress has its own seventh stage without changing Sync's six-stage contract", async () => {
+  const output = [];
+  const code = await runCli(["repair", "models"], {
+    stdout: { write(value) { output.push(value); } },
+    stderr: { write() {} },
+    loadCoreImpl: async () => ({ runRepair: async ({ onProgress }) => {
+      onProgress({ stage: "scan_rollout_files", status: "start" });
+      onProgress({ stage: "verify_repair", status: "start" });
+      return { repairTargets: ["models"], changedSessionFiles: 0, sqliteRowsUpdated: 0, skippedLockedRolloutFiles: [] };
+    } })
+  });
+  assert.equal(code, 0);
+  assert.match(output.join(""), /\[1\/7\] Scanning rollout files/);
+  assert.match(output.join(""), /\[7\/7\] Verifying selected repair targets/);
 });
 
 test("JSON subprocess exit matrix covers partial and canonical failures", async () => {
@@ -329,6 +397,7 @@ test("JSON terminal writer handles asynchronous EPIPE without a second write", a
 test("JSON progress stream failures cannot change the operation result", async () => {
   const stdoutChunks = [];
   const stderr = new EventEmitter();
+  let receivedKeepCount = null;
   let stderrWrites = 0;
   stderr.write = (_document, callback) => {
     stderrWrites += 1;
@@ -349,7 +418,8 @@ test("JSON progress stream failures cannot change the operation result", async (
     loadCoreImpl: async () => ({
       readConfigText: async () => "",
       readRootModelFromConfigText: () => null,
-      runSync: async ({ onProgress }) => {
+      runSync: async ({ keepCount, onProgress }) => {
+        receivedKeepCount = keepCount;
         onProgress({ stage: "scan_rollout_files", status: "start" });
         return { targetProvider: "openai", skippedLockedRolloutFiles: [] };
       }
@@ -357,6 +427,7 @@ test("JSON progress stream failures cannot change the operation result", async (
   });
 
   assert.equal(exitCode, 0);
+  assert.equal(receivedKeepCount, 2);
   assert.equal(stderrWrites, 1);
   const envelope = parseSingleEnvelope(stdoutChunks.join(""));
   assert.equal(envelope.ok, true);

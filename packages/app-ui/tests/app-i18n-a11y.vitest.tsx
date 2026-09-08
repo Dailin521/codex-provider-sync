@@ -30,16 +30,15 @@ describe("App localization and keyboard navigation", () => {
     );
 
     await screen.findByRole("button", { name: "Overview", exact: true });
-    expect(screen.getByText("V1 primary desktop candidate · .NET post-handoff Legacy target")).toBeVisible();
+    expect(screen.getByText("Manage Codex Providers and local session history")).toBeVisible();
     await user.tab();
     const skipLink = screen.getByRole("link", { name: "Skip to content" });
     expect(skipLink).toHaveFocus();
     await user.keyboard("{Enter}");
     expect(document.getElementById("main-content")).toHaveFocus();
 
-    const syncRoute = screen.getByRole("button", { name: "Sync", exact: true });
+    const syncRoute = screen.getByRole("button", { name: "Overview", exact: true });
     syncRoute.focus();
-    await user.keyboard("{Enter}");
     expect(await screen.findByRole("heading", { name: "Sync current Provider" })).toBeVisible();
     expect(syncRoute).toHaveAttribute("aria-current", "page");
 
@@ -74,11 +73,11 @@ describe("App localization and keyboard navigation", () => {
       />
     );
 
-    expect(await screen.findByText("Local Web companion")).toBeVisible();
+    expect(await screen.findByText("Local Web management interface")).toBeVisible();
     expect(screen.queryByText(/Legacy fallback/)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Settings", exact: true }));
-    expect(await screen.findByText("Language and theme preferences stay in this browser; pairing remains managed by the local Web Host.")).toBeVisible();
+    expect(await screen.findByText("Manage appearance and browser settings. Preferences stay in this browser.")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Profiles", exact: true }));
-    expect(await screen.findByText("Storage paths are retained by the local Web Host.")).toBeVisible();
+    expect(await screen.findByText("The folder location is stored by the local Web app.")).toBeVisible();
   });
 });

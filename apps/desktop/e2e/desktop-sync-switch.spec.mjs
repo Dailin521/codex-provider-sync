@@ -29,20 +29,18 @@ async function launchDesktop(fixture, extraEnv = {}) {
 }
 
 async function openSyncPlan(page) {
-  await page.getByRole("button", { name: "Sync" }).click();
-  await page.getByRole("button", { name: "Prepare sync" }).click();
-  const dialog = page.getByRole("dialog", { name: "Review plan" });
+  await page.getByRole("button", { name: "Preview sync" }).click();
+  const dialog = page.getByRole("dialog", { name: "Confirm sync" });
   await expect(dialog).toBeVisible();
   return dialog;
 }
 
 async function openSwitchPlan(page, { provider = "relay", mode = "provider-default", model } = {}) {
-  await page.getByRole("button", { name: "Switch Provider" }).click();
   await page.getByLabel("Provider ID").fill(provider);
   await page.getByLabel("Model handling").selectOption(mode);
   if (mode === "explicit") await page.getByLabel("Model name").fill(model);
-  await page.getByRole("button", { name: "Prepare switch" }).click();
-  const dialog = page.getByRole("dialog", { name: "Review plan" });
+  await page.getByRole("button", { name: "Preview switch" }).click();
+  const dialog = page.getByRole("dialog", { name: "Confirm Provider switch" });
   await expect(dialog).toBeVisible();
   return dialog;
 }
@@ -58,8 +56,8 @@ async function waitForGate(markerPath, expectedPoint, timeout = 10_000) {
   }, { timeout }).toBe(expectedPoint);
 }
 
-function notificationWithCode(page, code) {
-  return page.getByRole("listitem").filter({ hasText: `(${code})` }).last();
+function latestNotification(page) {
+  return page.getByRole("listitem").last();
 }
 
 async function prepareSyncDirect(page, requestId) {
@@ -164,12 +162,12 @@ async function findWslDistro() {
   return null;
 }
 
-async function confirmPlan(page, returnFocus) {
-  const dialog = page.getByRole("dialog", { name: "Review plan" });
+async function confirmPlan(page, returnFocus, { dialogName = "Confirm sync", confirmName = "Confirm sync" } = {}) {
+  const dialog = page.getByRole("dialog", { name: dialogName });
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByText("Target", { exact: true })).toBeVisible();
-  await expect(dialog.getByText("Impact", { exact: true })).toBeVisible();
-  await dialog.getByRole("button", { name: "Confirm and apply" }).click();
+  await expect(dialog.getByText("Selected changes", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Expected changes", { exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: confirmName }).click();
   await expect(dialog).toHaveCount(0);
   const resultDialog = page.getByRole("dialog", { name: "Operation result" });
   await expect(resultDialog).toBeVisible();
@@ -179,13 +177,12 @@ async function confirmPlan(page, returnFocus) {
 }
 
 async function switchProvider(page, { provider, mode, model }) {
-  await page.getByRole("button", { name: "Switch Provider" }).click();
   await page.getByLabel("Provider ID").fill(provider);
   await page.getByLabel("Model handling").selectOption(mode);
   if (mode === "explicit") await page.getByLabel("Model name").fill(model);
-  const prepare = page.getByRole("button", { name: "Prepare switch" });
+  const prepare = page.getByRole("button", { name: "Preview switch" });
   await prepare.click();
-  await confirmPlan(page, prepare);
+  await confirmPlan(page, prepare, { dialogName: "Confirm Provider switch", confirmName: "Confirm switch" });
 }
 
 test("hidden Electron test build forces the native fallback through Status, Sync, Restore, and the narrow C8 bridge", async () => {
@@ -218,8 +215,15 @@ test("hidden Electron test build forces the native fallback through Status, Sync
       });
     });
 
-    await page.getByRole("button", { name: "Sync" }).click();
-    const prepareSync = page.getByRole("button", { name: "Prepare sync" });
+    await page.getByRole("button", { name: "Backups / Restore" }).click();
+    await page.getByLabel("Backups to retain").fill("5");
+    await page.getByRole("button", { name: "Save backup settings" }).click();
+    await expect(page.getByText("Backup settings saved. No backups were deleted.")).toBeVisible();
+    expect((await fixture.inspect()).backupIds).toHaveLength(0);
+    await page.getByRole("button", { name: "Overview" }).click();
+    await expect(page.getByRole("spinbutton")).toHaveCount(0);
+
+    const prepareSync = page.getByRole("button", { name: "Preview sync" });
     await prepareSync.click();
     await confirmPlan(page, prepareSync);
     await expect.poll(async () => (await fixture.inspect()).sqlite.provider).toBe("openai");
@@ -257,9 +261,9 @@ test("hidden Electron test build forces the native fallback through Status, Sync
     await page.getByRole("button", { name: "Backups / Restore" }).click();
     await page.getByRole("button", { name: new RegExp(syncBackupId) }).click();
     const beforeRestore = await fixture.snapshotTargets();
-    const prepareRestore = page.getByRole("button", { name: "Prepare restore" });
+    const prepareRestore = page.getByRole("button", { name: "Preview restore" });
     await prepareRestore.click();
-    await confirmPlan(page, prepareRestore);
+    await confirmPlan(page, prepareRestore, { dialogName: "Confirm restore", confirmName: "Confirm restore" });
     const restored = await fixture.snapshotTargets();
     // The selected backup came from Sync, so it intentionally captured only
     // rollout and SQLite mutations. Restore must not rewind the config later
@@ -271,21 +275,29 @@ test("hidden Electron test build forces the native fallback through Status, Sync
     expect(restored.archivedSessions).toEqual(baseline.archivedSessions);
     expect(restored.sqlite).toEqual(baseline.sqlite);
 
-    await page.getByLabel("Keep newest backups").fill("2");
-    await page.getByRole("button", { name: "Prune older backups" }).click();
+    await page.getByLabel("Backups to retain").fill("2");
+    await page.getByRole("button", { name: "Save backup settings" }).click();
+    await expect(page.getByText("Backup settings saved. No backups were deleted.")).toBeVisible();
+    const backupsBeforeCleanup = (await fixture.inspect()).backupIds;
+    await page.getByRole("button", { name: "Delete older backups" }).click();
+    const cleanup = page.getByRole("dialog", { name: "Confirm backup cleanup" });
+    await expect(cleanup).toBeVisible();
+    expect((await fixture.inspect()).backupIds).toEqual(backupsBeforeCleanup);
+    await cleanup.getByRole("button", { name: "Confirm cleanup" }).click();
     await expect(page.getByText("Operation completed.", { exact: true }).last()).toBeVisible();
+    await expect.poll(async () => (await fixture.inspect()).backupIds.length).toBe(2);
 
-    await page.getByRole("button", { name: "Settings" }).click();
-    await page.getByRole("button", { name: "Start watch" }).click();
-    await expect(page.getByRole("button", { name: "Stop watch" })).toBeVisible();
-    await page.getByRole("button", { name: "Stop watch" }).click();
-    await expect(page.getByRole("button", { name: "Start watch" })).toBeVisible();
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page.getByRole("button", { name: "Enable automatic sync" }).click();
+    await expect(page.getByRole("button", { name: "Disable automatic sync" })).toBeVisible();
+    await page.getByRole("button", { name: "Disable automatic sync" }).click();
+    await expect(page.getByRole("button", { name: "Enable automatic sync" })).toBeVisible();
     await expect(page.getByText("Updates", { exact: true })).toBeVisible();
-    await expect(page.getByText("Update checks are available only in a packaged build.", { exact: true })).toBeVisible();
+    await expect(page.getByText("This installation does not support in-app updates.", { exact: true })).toBeVisible();
 
-    await page.getByRole("button", { name: "Diagnostics" }).click();
-    await page.getByRole("button", { name: "Run full scan" }).click();
-    await expect(page.getByText("Detected issues", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Advanced features" }).click();
+    await page.getByRole("button", { name: "Start diagnostics" }).click();
+    await expect(page.getByText("Check results", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Export redacted bundle" }).click();
     await expect(page.getByText("Redacted diagnostics bundle created.", { exact: true })).toBeVisible();
     const diagnostics = await fs.readFile(diagnosticsTarget);
@@ -294,6 +306,23 @@ test("hidden Electron test build forces the native fallback through Status, Sync
 
     const eventsAfterRestore = await page.evaluate(() => globalThis.__c7OperationEvents);
     expect(eventsAfterRestore.filter((event) => event.event === "operation-started")).toHaveLength(5);
+
+    // Exercise the real bundled Preload DTO validator, not only the Main service.
+    const logs = await page.evaluate(() => window.codexProvider.operationLogs.list({ schemaVersion: 1, page: 1, pageSize: 50 }));
+    const syncLog = logs.entries.find((entry) => entry.operation === "sync" && entry.status === "completed");
+    expect(syncLog.profileRevision).toBe(profile.revision);
+    expect(syncLog.backupId).toBe(syncBackupId);
+    expect(syncLog.activeDurationMs).toBeGreaterThanOrEqual(0);
+    expect(syncLog.wallDurationMs).toBeGreaterThanOrEqual(syncLog.activeDurationMs);
+    const detail = await page.evaluate((id) => window.codexProvider.operationLogs.get({ schemaVersion: 1, id }), syncLog.id);
+    expect(detail.planId).toBeTruthy();
+    expect(detail.stages.length).toBeGreaterThan(0);
+    await page.getByRole("button", { name: "Operation logs", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Operation logs", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: /^Sync Completed/ }).first().click();
+    await expect(page.getByText("Processing time", { exact: true })).toBeVisible();
+    await expect(page.getByText(syncLog.planId, { exact: true })).toBeVisible();
+    await expect(page.getByRole("alert")).toHaveCount(0);
   } finally {
     await electronApp?.close();
     await fixture.close();
@@ -312,23 +341,24 @@ test("hidden Electron runs diagnostics explicitly and applies a targeted model R
     const beforeState = await fixture.inspect();
     const beforeBytes = await fs.readFile(fixture.rolloutPath);
 
-    await page.getByRole("button", { name: "Diagnostics" }).click();
-    await expect(page.getByText("Diagnostics have not been scanned", { exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "Run full scan" }).click();
-    await expect(page.getByText("Detected issues", { exact: true })).toBeVisible();
-    await page.getByLabel("Historical models").check();
-    await page.getByRole("button", { name: "Prepare repair" }).click();
+    await page.getByRole("button", { name: "Advanced features" }).click();
+    await expect(page.getByText("Diagnostics have not been run", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Start diagnostics" }).click();
+    await expect(page.getByText("Check results", { exact: true })).toBeVisible();
+    await page.getByText("Advanced adjustments", { exact: true }).click();
+    await page.getByLabel("Unify historical model names").check();
+    await page.getByRole("button", { name: "Preview adjustment" }).click();
 
-    const plan = page.getByRole("dialog", { name: "Review plan" });
-    await expect(plan.getByText("Repair metadata", { exact: false })).toBeVisible();
-    await expect(plan.getByText("Historical models", { exact: true })).toBeVisible();
-    await plan.getByRole("button", { name: "Confirm and apply" }).click();
+    const plan = page.getByRole("dialog", { name: "Confirm repair" });
+    await expect(plan.getByText("Repair chat information", { exact: false })).toBeVisible();
+    await expect(plan.getByText("Unify historical model names", { exact: true })).toBeVisible();
+    await plan.getByRole("button", { name: "Confirm repair" }).click();
     await expect(page.getByText("Operation completed.", { exact: true })).toBeVisible();
 
     const result = page.getByRole("dialog", { name: "Operation result" });
     await expect(result.getByText("Repair targets", { exact: true })).toBeVisible();
-    await expect(result.getByText("models", { exact: true })).toBeVisible();
-    await expect(result.getByText("Model rows updated", { exact: true })).toBeVisible();
+    await expect(result.getByText("Unify historical model names", { exact: true })).toBeVisible();
+    await expect(result.getByText("Model records updated", { exact: true })).toBeVisible();
     const afterState = await fixture.inspect();
     const afterBytes = await fs.readFile(fixture.rolloutPath);
     expect(afterState.configText).toBe(beforeState.configText);
@@ -353,9 +383,9 @@ test("Electron rejects a stale confirmed plan before backup or mutation", async 
     const dialog = await openSyncPlan(page);
     await fixture.appendConfigDrift();
     const expected = await fixture.snapshotProtected();
-    await dialog.getByRole("button", { name: "Confirm and apply" }).click();
-    await expect(notificationWithCode(page, "STALE_STATE")).toContainText(
-      "The protected state changed. Prepare the operation again."
+    await dialog.getByRole("button", { name: "Confirm sync" }).click();
+    await expect(latestNotification(page)).toContainText(
+      "The data changed. Review the operation again before continuing."
     );
     await expect(dialog).toHaveCount(0);
     expect((await fixture.snapshotProtected()).hash).toBe(expected.hash);
@@ -374,14 +404,13 @@ test("Electron rejects an unconfigured custom Provider before plan or backup cre
     electronApp = await launchDesktop(fixture);
     const page = await electronApp.firstWindow();
     await expect(page.getByText("openai", { exact: true }).first()).toBeVisible();
-    await page.getByRole("button", { name: "Switch Provider" }).click();
     await page.getByLabel("Provider ID").fill("missing-provider");
     await page.getByLabel("Model handling").selectOption("provider-default");
-    const prepareSwitch = page.getByRole("button", { name: "Prepare switch" });
+    const prepareSwitch = page.getByRole("button", { name: "Preview switch" });
     await expect(prepareSwitch).toBeEnabled();
     await prepareSwitch.click();
-    await expect(notificationWithCode(page, "INVALID_INPUT")).toBeVisible();
-    await expect(page.getByRole("dialog", { name: "Review plan" })).toHaveCount(0);
+    await expect(latestNotification(page)).toContainText("Check the information you entered and try again.");
+    await expect(page.getByRole("dialog", { name: "Confirm Provider switch" })).toHaveCount(0);
     expect((await fixture.snapshotProtected()).hash).toBe(baseline.hash);
     expect((await fixture.inspect()).backupIds).toHaveLength(0);
   } finally {
@@ -441,9 +470,9 @@ test("Electron reports a real SQLite writer as busy before creating a backup", a
     const page = await electronApp.firstWindow();
     const dialog = await openSyncPlan(page);
     sqliteLock = fixture.holdSqliteWriteLock();
-    await dialog.getByRole("button", { name: "Confirm and apply" }).click();
-    await expect(notificationWithCode(page, "SQLITE_BUSY")).toContainText(
-      "The state database is busy. Close Codex processes and retry."
+    await dialog.getByRole("button", { name: "Confirm sync" }).click();
+    await expect(latestNotification(page)).toContainText(
+      "The local chat index is in use. Close Codex and try again."
     );
     sqliteLock.release();
     sqliteLock = undefined;
@@ -467,11 +496,8 @@ test("Electron reports a locked rollout as partial without rewriting the locked 
     electronApp = await launchDesktop(fixture);
     const page = await electronApp.firstWindow();
     const dialog = await openSyncPlan(page);
-    await dialog.getByRole("button", { name: "Confirm and apply" }).click();
-    await expect(page.getByText(
-      "Partially completed. Retry the same operation to converge.",
-      { exact: true }
-    )).toBeVisible();
+    await dialog.getByRole("button", { name: "Confirm sync" }).click();
+    await expect(page.getByRole("dialog", { name: "Operation result" }).getByRole("heading", { name: "Partially completed" })).toBeVisible();
     await releaseChild(lockProcess);
     lockProcess = undefined;
     const state = await fixture.inspect();
@@ -498,7 +524,7 @@ test("Electron Cancel before backup leaves every protected target unchanged", as
     });
     const page = await electronApp.firstWindow();
     const dialog = await openSyncPlan(page);
-    await dialog.getByRole("button", { name: "Confirm and apply" }).click();
+    await dialog.getByRole("button", { name: "Confirm sync" }).click();
     await waitForGate(fixture.gateMarkerPath, "before_backup");
     await dialog.getByRole("button", { name: "Cancel operation" }).click();
     await expect(page.getByText("Operation cancelled.", { exact: true })).toBeVisible();
@@ -521,13 +547,13 @@ test("Electron Cancel after config mutation returns partial and a retry converge
     });
     const page = await electronApp.firstWindow();
     const dialog = await openSwitchPlan(page, { provider: "relay", mode: "provider-default" });
-    await dialog.getByRole("button", { name: "Confirm and apply" }).click();
+    await dialog.getByRole("button", { name: "Confirm switch" }).click();
     await waitForGate(fixture.gateMarkerPath, "after_config_mutation_before_applied");
     expect((await fixture.inspect()).configText).toMatch(/^model_provider = "relay"/m);
     await dialog.getByRole("button", { name: "Cancel operation" }).click();
     const partial = page.getByRole("dialog", { name: "Operation result" });
     await expect(partial.getByText("Partially completed", { exact: true })).toBeVisible();
-    await expect(partial.getByText("Retry recommended", { exact: true })).toBeVisible();
+    await expect(partial.getByText("Review the operation again and retry.", { exact: true })).toBeVisible();
     await expect(dialog).toHaveCount(0);
     let state = await fixture.inspect();
     expect(state.configText).toMatch(/^model_provider = "relay"/m);
@@ -570,14 +596,14 @@ for (const scenario of [
       const dialog = scenario.operation === "switch"
         ? await openSwitchPlan(page, { provider: "relay", mode: "provider-default" })
         : await openSyncPlan(page);
-      await dialog.getByRole("button", { name: "Confirm and apply" }).click();
+      await dialog.getByRole("button", { name: scenario.operation === "switch" ? "Confirm switch" : "Confirm sync" }).click();
       await waitForGate(fixture.gateMarkerPath, scenario.point);
       const beforeCrash = await electronApp.evaluate(
         () => globalThis.__CPS_DESKTOP_TEST__.runtime()
       );
       expect((await page.evaluate(() => window.codexProvider.test.crashRuntime())).crashed).toBe(true);
-      await expect(notificationWithCode(page, "CORE_RUNTIME_CRASHED")).toContainText(
-        "The Core runtime stopped unexpectedly."
+      await expect(latestNotification(page)).toContainText(
+        "The background service stopped unexpectedly. It will restart automatically when possible."
       );
       // The renderer refreshes Status after the failed write and the query
       // layer may retry a transient first recovery probe. Assert the safety
@@ -655,19 +681,17 @@ test("Windows WSL UNC storage is rejected with every protected hash unchanged", 
     electronApp = await launchDesktop(fixture, { CPS_DESKTOP_SQLITE_HOME: uncRoot });
     const page = await electronApp.firstWindow();
 
-    await page.getByRole("button", { name: "Sync" }).click();
-    await page.getByRole("button", { name: "Prepare sync" }).click();
-    await expect(notificationWithCode(page, "SQLITE_UNSUPPORTED_PATH")).toContainText(
-      "The selected SQLite path is not supported by this runtime."
+    await page.getByRole("button", { name: "Preview sync" }).click();
+    await expect(latestNotification(page)).toContainText(
+      "This chat index location cannot be used on the current platform."
     );
-    await expect(page.getByRole("dialog", { name: "Review plan" })).toHaveCount(0);
+    await expect(page.getByRole("dialog", { name: "Confirm sync" })).toHaveCount(0);
 
-    await page.getByRole("button", { name: "Switch Provider" }).click();
     await page.getByLabel("Provider ID").fill("relay");
     await page.getByLabel("Model handling").selectOption("provider-default");
-    await page.getByRole("button", { name: "Prepare switch" }).click();
-    await expect(notificationWithCode(page, "SQLITE_UNSUPPORTED_PATH")).toContainText(
-      "The selected SQLite path is not supported by this runtime."
+    await page.getByRole("button", { name: "Preview switch" }).click();
+    await expect(latestNotification(page)).toContainText(
+      "This chat index location cannot be used on the current platform."
     );
 
     expect((await fixture.snapshotProtected()).hash).toBe(baseline.hash);

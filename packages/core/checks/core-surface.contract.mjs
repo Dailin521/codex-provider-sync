@@ -132,6 +132,67 @@ test("profile resolution fails closed before a Core path can be selected", async
   assert.equal(calls, 1);
 });
 
+test("profile-scoped Watch status never selects another profile's Watch", async () => {
+  const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "provider-sync-core-watch-scope-"));
+  const homes = {
+    alpha: path.join(testRoot, "alpha"),
+    beta: path.join(testRoot, "beta")
+  };
+  const selectors = {
+    alpha: { profileId: "alpha", profileRevision: "alpha-r1" },
+    beta: { profileId: "beta", profileRevision: "beta-r1" }
+  };
+  let facade;
+  let alphaWatch;
+  let betaWatch;
+  try {
+    for (const home of Object.values(homes)) {
+      await fs.mkdir(path.join(home, "sessions"), { recursive: true });
+      await fs.mkdir(path.join(home, "archived_sessions"), { recursive: true });
+      await fs.writeFile(path.join(home, "config.toml"), 'model_provider = "openai"\n');
+    }
+    facade = core.createCoreFacade({
+      resolveProfile: async (selector) => ({
+        id: selector.profileId,
+        revision: `${selector.profileId}-r1`,
+        codexHome: homes[selector.profileId]
+      })
+    });
+    alphaWatch = await facade.startWatch({ profile: selectors.alpha, includeStateDb: false });
+    betaWatch = await facade.startWatch({ profile: selectors.beta, includeStateDb: false });
+    assert.deepEqual(
+      (await facade.getWatchStatus({ profile: selectors.alpha })).watches.map((watch) => watch.watchId),
+      [alphaWatch.watchId]
+    );
+    await facade.stopWatch({ watchId: betaWatch.watchId });
+    const alphaStatus = await facade.getWatchStatus({ profile: selectors.alpha });
+    const betaStatus = await facade.getWatchStatus({ profile: selectors.beta });
+    assert.equal(alphaStatus.watches[0].status, "running");
+    assert.equal(betaStatus.watches[0].watchId, betaWatch.watchId);
+    assert.equal(betaStatus.watches[0].status, "stopped");
+    // An explicitly enabled profile alias shares the physical Home watcher,
+    // and subsequent profile-scoped reads must agree with startWatch.
+    homes.alias = homes.alpha;
+    const alias = { profileId: "alias", profileRevision: "alias-r1" };
+    assert.deepEqual((await facade.getWatchStatus({ profile: alias })).watches, []);
+    const aliasWatch = await facade.startWatch({ profile: alias, includeStateDb: false });
+    assert.equal(aliasWatch.watchId, alphaWatch.watchId);
+    assert.equal((await facade.getWatchStatus({ profile: alias })).watches[0].watchId, alphaWatch.watchId);
+    await facade.stopWatch({ watchId: aliasWatch.watchId });
+    assert.equal((await facade.getWatchStatus({ profile: selectors.alpha })).watches[0].status, "stopped");
+    await assert.rejects(
+      facade.getWatchStatus({ profile: selectors.alpha, watchId: alphaWatch.watchId }),
+      (error) => error?.code === "INVALID_INPUT"
+    );
+  } finally {
+    await Promise.allSettled([
+      ...(alphaWatch ? [facade.stopWatch({ watchId: alphaWatch.watchId })] : []),
+      ...(betaWatch ? [facade.stopWatch({ watchId: betaWatch.watchId })] : [])
+    ]);
+    await fs.rm(testRoot, { recursive: true, force: true });
+  }
+});
+
 test("trusted profile selection never falls back to the process default Codex Home", async () => {
   const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "provider-sync-core-facade-"));
   const defaultHome = path.join(testRoot, "default-home");

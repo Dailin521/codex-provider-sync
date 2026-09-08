@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { trackScanFiles } from "./scan-progress.js";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -151,10 +152,10 @@ async function listJsonlFiles(rootDir) {
   return files;
 }
 
-async function readFirstLineRecord(filePath, { maxBytes = Number.POSITIVE_INFINITY } = {}) {
+async function readFirstLineRecord(filePath, { maxBytes = Number.POSITIVE_INFINITY, fsImpl = fsp, wrapBusyErrors = true } = {}) {
   let handle;
   try {
-    handle = await fsp.open(filePath, "r");
+    handle = await fsImpl.open(filePath, "r");
     let position = 0;
     let collected = Buffer.alloc(0);
     while (true) {
@@ -188,7 +189,7 @@ async function readFirstLineRecord(filePath, { maxBytes = Number.POSITIVE_INFINI
       offset: collected.length
     };
   } catch (error) {
-    throw wrapRolloutFileBusyError(error, filePath, "read");
+    throw wrapBusyErrors ? wrapRolloutFileBusyError(error, filePath, "read") : error;
   } finally {
     await handle?.close();
   }
@@ -766,6 +767,40 @@ ${WINDOWS_PROVIDER_BYTES_SOURCE}
     [Console]::Out.Flush()
   }
 
+  function New-RewriteTiming() {
+    return [ordered]@{ workerMs = 0.0; sourceOpenMs = 0.0; readHeaderMs = 0.0; tempCreateMs = 0.0; copyTailMs = 0.0; flushMs = 0.0; replaceMs = 0.0; cleanupMs = 0.0; restoreMtimeMs = 0.0 }
+  }
+
+  function Complete-RewriteChange($result, $timing, $total) {
+    $timing.workerMs = [Math]::Max(0.0, $total.Elapsed.TotalMilliseconds)
+    return [ordered]@{ result = $result; timing = $timing }
+  }
+
+  function Remove-RewriteArtifact($artifactPath) {
+    if (-not [ProviderByteFile]::TryDelete($artifactPath)) {
+      # Preserve Remove-Item -Force semantics for readonly/hidden cleanup.
+      Remove-Item -LiteralPath $artifactPath -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  function Add-NativeTiming($timing, $native) {
+    if ($null -eq $native) { return }
+    $timing.readHeaderMs += [double]$native.readHeaderMs
+    $timing.flushMs += [double]$native.flushMs
+    $timing.restoreMtimeMs += [double]$native.restoreMtimeMs
+  }
+
+  function Find-NativeFailureTiming($exception) {
+    # PowerShell wraps static method errors in MethodInvocationException.
+    # Read only the bounded exception chain; never serialize the exception.
+    for ($depth = 0; $null -ne $exception -and $depth -lt 8; $depth++) {
+      $native = $exception.Data["providerSyncNativeTiming"]
+      if ($null -ne $native) { return $native }
+      $exception = $exception.InnerException
+    }
+    return $null
+  }
+
   function Read-FirstLineRecord([System.IO.FileStream]$stream) {
     $stream.Seek(0, [System.IO.SeekOrigin]::Begin) | Out-Null
     $buffer = New-Object byte[] (64 * 1024)
@@ -806,35 +841,49 @@ ${WINDOWS_PROVIDER_BYTES_SOURCE}
     $encoding = [System.Text.UTF8Encoding]::new($false)
     $source = $null
     $writer = $null
+    $timing = New-RewriteTiming
+    $total = [System.Diagnostics.Stopwatch]::StartNew()
 
     try {
       try {
+        $sourceOpen = [System.Diagnostics.Stopwatch]::StartNew()
         $source = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        $timing.sourceOpenMs += $sourceOpen.Elapsed.TotalMilliseconds
       } catch {
+        $timing.sourceOpenMs += $sourceOpen.Elapsed.TotalMilliseconds
         if (Test-Path -LiteralPath $path) {
-          return "SKIP_BUSY"
+          return Complete-RewriteChange "SKIP_BUSY" $timing $total
         }
-        return "SKIP_CHANGED"
+        return Complete-RewriteChange "SKIP_CHANGED" $timing $total
       }
 
       if ($null -ne $change.inPlaceMutation) {
         $m = $change.inPlaceMutation
         $header = $encoding.GetBytes([string]$change.originalFirstLine + [string]$change.originalSeparator)
-        return [ProviderByteFile]::Apply($source, $header,
-          [Convert]::FromBase64String([string]$m.originalBase64),
-          [Convert]::FromBase64String([string]$m.replacementBase64),
-          [int]$m.byteOffset, [long]$m.originalSize, [double]$m.originalMtimeMs,
-          [string]$m.originalDev, [string]$m.originalIno, [bool]$change.restoreProviderBytes)
+        try {
+          $native = [ProviderByteFile]::ApplyWithTiming($source, $header,
+            [Convert]::FromBase64String([string]$m.originalBase64),
+            [Convert]::FromBase64String([string]$m.replacementBase64),
+            [int]$m.byteOffset, [long]$m.originalSize, [double]$m.originalMtimeMs,
+            [string]$m.originalDev, [string]$m.originalIno, [bool]$change.restoreProviderBytes)
+          Add-NativeTiming $timing $native.Timing
+        } catch {
+          Add-NativeTiming $timing (Find-NativeFailureTiming $_.Exception)
+          throw
+        }
+        return Complete-RewriteChange ([string]$native.Result) $timing $total
       }
 
       if ([bool]$change.requireOriginalMatch) {
         if ($source.Length -ne [int64]$change.originalSize) {
-          return "SKIP_CHANGED"
+          return Complete-RewriteChange "SKIP_CHANGED" $timing $total
         }
 
-        $record = Read-FirstLineRecord $source
+        $readHeader = [System.Diagnostics.Stopwatch]::StartNew()
+        try { $record = Read-FirstLineRecord $source }
+        finally { $timing.readHeaderMs += $readHeader.Elapsed.TotalMilliseconds }
         if ($record.firstLine -ne [string]$change.originalFirstLine -or $record.offset -ne [int]$change.originalOffset) {
-          return "SKIP_CHANGED"
+          return Complete-RewriteChange "SKIP_CHANGED" $timing $total
         }
 
         $separator = [string]$change.originalSeparator
@@ -842,13 +891,17 @@ ${WINDOWS_PROVIDER_BYTES_SOURCE}
         $headerOnly = $sourceOffset -ge [int64]$change.originalSize
 
       } else {
-        $record = Read-FirstLineRecord $source
+        $readHeader = [System.Diagnostics.Stopwatch]::StartNew()
+        try { $record = Read-FirstLineRecord $source }
+        finally { $timing.readHeaderMs += $readHeader.Elapsed.TotalMilliseconds }
         $separator = [string]$change.separator
         $sourceOffset = [int64]$record.offset
         $headerOnly = $record.offset -ge $source.Length
       }
 
-      $writer = [System.IO.File]::Open($tmpPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+      $tempCreate = [System.Diagnostics.Stopwatch]::StartNew()
+      try { $writer = [System.IO.File]::Open($tmpPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None) }
+      finally { $timing.tempCreateMs += $tempCreate.Elapsed.TotalMilliseconds }
       $firstLineBytes = $encoding.GetBytes([string]$change.updatedFirstLine)
       $writer.Write($firstLineBytes, 0, $firstLineBytes.Length)
 
@@ -859,25 +912,36 @@ ${WINDOWS_PROVIDER_BYTES_SOURCE}
 
       if (-not $headerOnly) {
         $source.Seek($sourceOffset, [System.IO.SeekOrigin]::Begin) | Out-Null
-        $source.CopyTo($writer)
+        $copyTail = [System.Diagnostics.Stopwatch]::StartNew()
+        try { $source.CopyTo($writer) }
+        finally { $timing.copyTailMs += $copyTail.Elapsed.TotalMilliseconds }
       }
 
-      $writer.Flush($true)
+      $flush = [System.Diagnostics.Stopwatch]::StartNew()
+      try { $writer.Flush($true) }
+      finally { $timing.flushMs += $flush.Elapsed.TotalMilliseconds }
       $writer.Dispose()
       $writer = $null
 
       $source.Dispose()
       $source = $null
       try {
+        $replace = [System.Diagnostics.Stopwatch]::StartNew()
         [System.IO.File]::Replace($tmpPath, $path, $replaceBackupPath, $true)
+        $timing.replaceMs += $replace.Elapsed.TotalMilliseconds
       } catch {
+        $timing.replaceMs += $replace.Elapsed.TotalMilliseconds
         if (Test-Path -LiteralPath $path) {
-          return "SKIP_BUSY"
+          return Complete-RewriteChange "SKIP_BUSY" $timing $total
         }
-        return "SKIP_CHANGED"
+        return Complete-RewriteChange "SKIP_CHANGED" $timing $total
       }
 
-      return "APPLIED"
+      return Complete-RewriteChange "APPLIED" $timing $total
+    } catch {
+      $timing.workerMs = [Math]::Max(0.0, $total.Elapsed.TotalMilliseconds)
+      $_.Exception.Data["providerSyncTiming"] = $timing
+      throw
     } finally {
       if ($writer) {
         $writer.Dispose()
@@ -885,8 +949,11 @@ ${WINDOWS_PROVIDER_BYTES_SOURCE}
       if ($source) {
         $source.Dispose()
       }
-      Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue
-      Remove-Item -LiteralPath $replaceBackupPath -Force -ErrorAction SilentlyContinue
+      $cleanup = [System.Diagnostics.Stopwatch]::StartNew()
+      Remove-RewriteArtifact $tmpPath
+      Remove-RewriteArtifact $replaceBackupPath
+      $timing.cleanupMs += $cleanup.Elapsed.TotalMilliseconds
+      $timing.workerMs = [Math]::Max(0.0, $total.Elapsed.TotalMilliseconds)
     }
   }
 
@@ -912,13 +979,14 @@ ${WINDOWS_PROVIDER_BYTES_SOURCE}
         throw [System.InvalidOperationException]::new("Invalid Windows rewrite worker request.")
       }
 
-      $result = Invoke-RewriteChange $request
+      $rewrite = Invoke-RewriteChange $request
       Write-ProtocolMessage ([ordered]@{
         protocolVersion = 1
         type = "result"
         id = $request.id
         path = $requestPath
-        result = $result
+        result = $rewrite.result
+        timing = $rewrite.timing
       })
     } catch {
       [Console]::Error.WriteLine($_.Exception.ToString())
@@ -929,12 +997,14 @@ ${WINDOWS_PROVIDER_BYTES_SOURCE}
         $errorId = $request.id
         $errorPath = [string]$request.path
       }
+      $failureTiming = $_.Exception.Data["providerSyncTiming"]
       Write-ProtocolMessage ([ordered]@{
         protocolVersion = 1
         type = "error"
         id = $errorId
         path = $errorPath
         message = $_.Exception.Message
+        timing = $failureTiming
       })
       exit 1
     }
@@ -988,6 +1058,7 @@ export async function createWindowsExclusiveRewriteWorker(options = {}) {
   let inFlight = false;
   let nextRequestId = 1;
   let stdinError = null;
+  let lastTiming = null;
   const stdoutLines = readline.createInterface({
     input: child.stdout,
     crlfDelay: Infinity
@@ -1080,6 +1151,7 @@ export async function createWindowsExclusiveRewriteWorker(options = {}) {
       const id = nextRequestId;
       nextRequestId += 1;
       inFlight = true;
+      lastTiming = null;
       try {
         await writeWorkerRequest(child.stdin, {
           ...change,
@@ -1089,6 +1161,12 @@ export async function createWindowsExclusiveRewriteWorker(options = {}) {
           requireOriginalMatch: Boolean(requireOriginalMatch)
         });
         const response = await readProtocolMessage();
+        const timing = response?.timing === undefined ? null : readWindowsRewriteTiming(response.timing);
+        // Timing is optional diagnostic coverage. A legacy or malformed timing
+        // payload must never turn an otherwise valid rewrite into a failure.
+        if (response?.type === "result" || response?.type === "error") {
+          lastTiming = timing ? { timing, complete: response.type === "result" } : null;
+        }
         if (response?.protocolVersion !== WINDOWS_REWRITE_PROTOCOL_VERSION
             || response?.type !== "result"
             || response?.id !== id
@@ -1115,6 +1193,11 @@ export async function createWindowsExclusiveRewriteWorker(options = {}) {
       } finally {
         inFlight = false;
       }
+    },
+    takeTiming() {
+      const timing = lastTiming;
+      lastTiming = null;
+      return timing;
     },
     async close() {
       if (closed) {
@@ -1466,7 +1549,7 @@ async function findLockedFilesOnWindows(filePaths) {
       "-Command",
       script,
       manifestPath
-    ]);
+    ], { timeout: 10_000, windowsHide: true });
     return stdout
       .split(/\r?\n/)
       .map((line) => line.trim())
@@ -1486,6 +1569,7 @@ export async function collectStatusRolloutMetadata(codexHome, options = {}) {
   const { skipLockedReads = false } = options;
   const lockedPaths = [];
   const incompletePaths = [];
+  const providerChangeCandidates = [];
   const providerCounts = {
     sessions: new Map(),
     archived_sessions: new Map()
@@ -1520,6 +1604,9 @@ export async function collectStatusRolloutMetadata(codexHome, options = {}) {
         continue;
       }
       const currentProvider = parsed.payload.model_provider ?? "(missing)";
+      if (typeof options.targetProvider === "string" && parsed.payload.model_provider !== options.targetProvider) {
+        providerChangeCandidates.push({ path: rolloutPath });
+      }
       providerCounts[dirName].set(
         currentProvider,
         (providerCounts[dirName].get(currentProvider) ?? 0) + 1
@@ -1527,10 +1614,10 @@ export async function collectStatusRolloutMetadata(codexHome, options = {}) {
     }
   }
 
-  return { incompletePaths, lockedPaths, providerCounts };
+  return { incompletePaths, lockedPaths, providerCounts, providerChangeCandidates };
 }
 
-export async function collectSessionChanges(codexHome, targetProvider, options = {}) {
+export async function collectSessionChanges(codexHome, targetProvider, options = {}, preparationRecords = null) {
   const {
     skipLockedReads = false,
     targetModel = null,
@@ -1539,8 +1626,10 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
     includeEncryptedContent = true,
     includeCwd = true,
     maxSessionMetaBytes = Number.POSITIVE_INFINITY,
-    rejectInvalidMetadata = false
+    rejectInvalidMetadata = false,
+    sessionIds = null
   } = options;
+  const selectedSessionIds = sessionIds instanceof Set ? sessionIds : null;
   if (targetModel !== null && (!includeModels || typeof targetModel !== "string" || !targetModel)) {
     throw new CoreError(
       "INVALID_INPUT",
@@ -1556,21 +1645,33 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
   const encryptedContentCounts = includeEncryptedContent ? emptyEncryptedContentCounts() : null;
   const userEventThreadIds = includeUserEvent ? new Set() : null;
   const threadCwdById = includeCwd ? new Map() : null;
+  const nativeSessionIds = new Set();
 
   for (const dirName of SESSION_DIRS) {
     const rootDir = path.join(codexHome, dirName);
-    try {
-      await fsp.access(rootDir);
-    } catch {
-      continue;
+    if (!preparationRecords) {
+      try {
+        await fsp.access(rootDir);
+      } catch {
+        continue;
+      }
     }
-    const rolloutPaths = await listJsonlFiles(rootDir);
-    for (const rolloutPath of rolloutPaths) {
+    const rolloutPaths = preparationRecords
+      ? [...preparationRecords.keys()].filter(filePath => path.relative(codexHome, filePath).split(path.sep)[0] === dirName)
+      : await listJsonlFiles(rootDir);
+    const trackedPaths = options.onProgress || options.signal
+      ? trackScanFiles(rolloutPaths, { ...options, stage: `scan_${dirName}` }) : rolloutPaths;
+    for (const rolloutPath of trackedPaths) {
+      const prepared = preparationRecords?.get(rolloutPath);
+      if (prepared?.locked) {
+        lockedPaths.push(rolloutPath);
+        continue;
+      }
       let record;
       let scanStart;
       try {
-        scanStart = await getFileSnapshot(rolloutPath);
-        record = await readFirstLineRecord(rolloutPath, {
+        scanStart = prepared?.beforeSnapshot ?? await getFileSnapshot(rolloutPath);
+        record = prepared?.record ?? await readFirstLineRecord(rolloutPath, {
           maxBytes: maxSessionMetaBytes
         });
       } catch (error) {
@@ -1598,6 +1699,10 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
         continue;
       }
       const currentProvider = parsed.payload.model_provider ?? "(missing)";
+      if (typeof parsed.payload.id === "string" && parsed.payload.id) nativeSessionIds.add(parsed.payload.id);
+      // Selected repair work is addressed by Codex's native session id, never
+      // by a rollout filename/path. Files without that identity stay out.
+      if (selectedSessionIds && !selectedSessionIds.has(parsed.payload.id)) continue;
       providerCounts[dirName].set(currentProvider, (providerCounts[dirName].get(currentProvider) ?? 0) + 1);
       if (includeCwd && typeof parsed.payload.id === "string"
           && parsed.payload.id
@@ -1644,7 +1749,7 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
         && currentModels.some((currentModel) => currentModel !== targetModel);
 
       if (providerChanged || modelChanged) {
-        const snapshot = await getFileSnapshot(rolloutPath);
+        const snapshot = prepared?.afterSnapshot ?? await getFileSnapshot(rolloutPath);
         if (snapshot.size !== scanStart.size || snapshot.mtimeMs !== scanStart.mtimeMs
             || snapshot.dev !== scanStart.dev || snapshot.ino !== scanStart.ino) {
           lockedPaths.push(rolloutPath);
@@ -1679,10 +1784,85 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
     }
   }
 
-  return { changes: summaries, lockedPaths, providerCounts, encryptedContentCounts, userEventThreadIds, threadCwdById };
+  return { changes: summaries, lockedPaths, providerCounts, encryptedContentCounts, userEventThreadIds, threadCwdById, nativeSessionIds };
 }
 
-export async function collectProviderChanges(codexHome, targetProvider, options = {}) {
+const WINDOWS_FIRST_LINE_TIMING_FIELDS = [
+  "workerMs",
+  "sourceOpenMs",
+  "readHeaderMs",
+  "tempCreateMs",
+  "copyTailMs",
+  "flushMs",
+  "replaceMs",
+  "cleanupMs",
+  "restoreMtimeMs"
+];
+
+function timingNow() {
+  return process.hrtime.bigint();
+}
+
+function elapsedTimingMs(start) {
+  return Number(process.hrtime.bigint() - start) / 1e6;
+}
+
+function createWindowsFirstLineTiming() {
+  return {
+    schemaVersion: 1,
+    scope: "windows-first-line",
+    attemptedFiles: 0,
+    measuredFiles: 0,
+    inPlaceFiles: 0,
+    rewrittenFiles: 0,
+    skippedFiles: 0,
+    totalMs: 0,
+    workerStartupMs: 0,
+    workerCloseMs: 0,
+    requestRoundTripMs: 0,
+    workerMs: 0,
+    sourceOpenMs: 0,
+    readHeaderMs: 0,
+    tempCreateMs: 0,
+    copyTailMs: 0,
+    flushMs: 0,
+    replaceMs: 0,
+    cleanupMs: 0,
+    restoreMtimeMs: 0
+  };
+}
+
+function readWindowsRewriteTiming(value) {
+  if (!value || typeof value !== "object") return null;
+  const timing = {};
+  for (const field of WINDOWS_FIRST_LINE_TIMING_FIELDS) {
+    const number = value[field];
+    if (!Number.isFinite(number) || number < 0) return null;
+    timing[field] = number;
+  }
+  return timing;
+}
+
+function addWindowsRewriteTiming(target, source) {
+  const timing = readWindowsRewriteTiming(source);
+  if (!timing) return false;
+  for (const field of WINDOWS_FIRST_LINE_TIMING_FIELDS) {
+    target[field] += timing[field];
+  }
+  return true;
+}
+
+// Internal storage read used by Provider plan revisions. Reuse the bounded
+// header reader; never open a body stream or expose this through the Facade.
+export async function readProviderRevisionHeader(filePath, { fsImpl = fsp } = {}) {
+  return readFirstLineRecord(filePath, {
+    maxBytes: PROVIDER_SESSION_META_MAX_BYTES, fsImpl, wrapBusyErrors: false
+  });
+}
+
+// Fourth argument is an internal, call-local Prepare seam. It is never an
+// options/Facade field and must not be passed to an Apply or retained in a plan.
+export async function collectProviderChanges(codexHome, targetProvider, options = {}, preparationRecords = null) {
   return collectSessionChanges(codexHome, targetProvider, {
     skipLockedReads: options.skipLockedReads,
     includeModels: false,
@@ -1691,7 +1871,7 @@ export async function collectProviderChanges(codexHome, targetProvider, options 
     includeCwd: false,
     maxSessionMetaBytes: PROVIDER_SESSION_META_MAX_BYTES,
     rejectInvalidMetadata: true
-  });
+  }, preparationRecords);
 }
 
 export async function collectRepairChanges(codexHome, targets, options = {}) {
@@ -1704,6 +1884,9 @@ export async function collectRepairChanges(codexHome, targets, options = {}) {
     includeUserEvent: selected.has("userEvent"),
     includeEncryptedContent: false,
     includeCwd: selected.has("cwd") || selected.has("workspaceRoots"),
+    sessionIds: options.sessionIds,
+    onProgress: options.onProgress,
+    signal: options.signal,
     maxSessionMetaBytes: PROVIDER_SESSION_META_MAX_BYTES,
     rejectInvalidMetadata: false
   });
@@ -1713,6 +1896,8 @@ export async function collectDiagnosticsFacts(codexHome, options = {}) {
   return collectSessionChanges(codexHome, "__status_only__", {
     skipLockedReads: options.skipLockedReads,
     targetModel: options.targetModel ?? null,
+    onProgress: options.onProgress,
+    signal: options.signal,
     includeModels: true,
     includeUserEvent: true,
     includeEncryptedContent: true,
@@ -1783,6 +1968,7 @@ export async function applySessionChanges(changes, options = {}) {
     onMutation,
     onApplied,
     onSkipped,
+    onTiming,
     windowsRewriteWorkerFactory = createWindowsExclusiveRewriteWorker,
     inPlaceWrite,
     inPlaceRestoreWrite,
@@ -1810,20 +1996,45 @@ export async function applySessionChanges(changes, options = {}) {
 
   if (process.platform === "win32") {
     // Keep one PowerShell process alive, but send exactly one target at a time.
-    // The coordinator persists applying/applied around each awaited request, so
-    // an abrupt exit can never mutate a later rollout that has no journal entry.
+    // One in-flight request preserves per-file mutation acknowledgement and order;
+    // an abrupt exit cannot advance to a later rollout before its result is known.
     let worker = null;
     let primaryError = null;
+    const timing = firstLineChanges.length > 0 ? createWindowsFirstLineTiming() : null;
+    const totalStart = timing ? timingNow() : null;
     try {
       if (firstLineChanges.length > 0) {
-        worker = await windowsRewriteWorkerFactory();
+        const workerStartupStart = timingNow();
+        try {
+          worker = await windowsRewriteWorkerFactory();
+        } finally {
+          timing.workerStartupMs += elapsedTimingMs(workerStartupStart);
+        }
       }
       for (const change of firstLineChanges) {
         await onBeforeApply?.(change);
-        const result = await worker.rewrite(change, { requireOriginalMatch: true });
+        timing.attemptedFiles += 1;
+        const requestStart = timingNow();
+        let result;
+        try {
+          result = await worker.rewrite(change, { requireOriginalMatch: true });
+        } finally {
+          timing.requestRoundTripMs += elapsedTimingMs(requestStart);
+          let observedTiming = null;
+          try {
+            observedTiming = worker?.takeTiming?.() ?? null;
+          } catch {
+            // Timing coverage cannot change the rewrite outcome.
+          }
+          const fileTiming = observedTiming?.timing ?? observedTiming;
+          const timingComplete = observedTiming?.complete ?? true;
+          if (addWindowsRewriteTiming(timing, fileTiming) && timingComplete) timing.measuredFiles += 1;
+        }
         if (result === "APPLIED" || result === "APPLIED_IN_PLACE") {
           appliedChanges += 1;
           inPlaceChanges += result === "APPLIED_IN_PLACE" ? 1 : 0;
+          if (result === "APPLIED_IN_PLACE") timing.inPlaceFiles += 1;
+          else timing.rewrittenFiles += 1;
           appliedPaths.push(change.path);
           await onMutation?.(change, { stage: "firstLine", result });
           if (change.modelRewriteRequired) {
@@ -1834,9 +2045,14 @@ export async function applySessionChanges(changes, options = {}) {
               await onMutation?.(change, { stage: "model", result: "APPLIED" });
             }
           }
-          if (result !== "APPLIED_IN_PLACE") await restoreOriginalMtime(change.path, change.originalMtimeMs);
+          if (result !== "APPLIED_IN_PLACE") {
+            const restoreMtimeStart = timingNow();
+            await restoreOriginalMtime(change.path, change.originalMtimeMs);
+            timing.restoreMtimeMs += elapsedTimingMs(restoreMtimeStart);
+          }
           await onApplied?.(change);
         } else {
+          timing.skippedFiles += 1;
           skippedPaths.push(change.path);
           if (result === "SKIP_BUSY") skippedLockedPaths.push(change.path);
           else skippedChangedPaths.push(change.path);
@@ -1847,15 +2063,28 @@ export async function applySessionChanges(changes, options = {}) {
       primaryError = error;
       throw error;
     } finally {
+      let closeFailure = null;
       if (worker) {
+        const workerCloseStart = timingNow();
         try {
           await worker.close();
+          timing.workerCloseMs += elapsedTimingMs(workerCloseStart);
         } catch (closeError) {
+          timing.workerCloseMs += elapsedTimingMs(workerCloseStart);
           if (!primaryError) {
-            throw closeError;
+            closeFailure = closeError;
           }
         }
       }
+      if (timing) {
+        timing.totalMs = elapsedTimingMs(totalStart);
+        try {
+          await onTiming?.(timing);
+        } catch {
+          // Timing is an optional observer and cannot alter write outcomes.
+        }
+      }
+      if (closeFailure) throw closeFailure;
     }
   } else {
     for (const change of firstLineChanges) {

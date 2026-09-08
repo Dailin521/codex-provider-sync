@@ -1,11 +1,13 @@
 import type {
   CoreOperationEventEnvelope,
+  CoreRequestProgressEnvelope,
   CoreMethodName,
   CoreRequestEnvelope,
   CoreResponseEnvelope
 } from "@codex-provider-sync/contracts";
 import {
   assertCoreOperationEventEnvelope,
+  assertCoreRequestProgressEnvelope,
   assertCoreMethodOutput,
   assertCoreResponseEnvelope,
   createCoreFailureEnvelope,
@@ -18,6 +20,10 @@ import {
   type CoreTransport,
   type RequestIdFactory
 } from "./client.js";
+
+function isRequestProgressMethod(method: CoreMethodName): boolean {
+  return method === "prepareRepair" || method === "getDiagnostics";
+}
 
 export const MAX_CORE_REQUEST_BYTES = 64 * 1024;
 export const MAX_CORE_STREAM_BYTES = 16 * 1024 * 1024;
@@ -78,6 +84,7 @@ export class HttpCoreTransport implements CoreTransport {
       || envelope.method === "applySwitch"
       || envelope.method === "applyRepair"
       || envelope.method === "applyRestore";
+    const isRequestProgress = isRequestProgressMethod(envelope.method);
     if (options.signal?.aborted) {
       if (isApply) {
         return createCoreFailureEnvelope(
@@ -106,7 +113,7 @@ export class HttpCoreTransport implements CoreTransport {
         })
       }).catch(() => undefined);
     };
-    const onAbort = isApply ? requestCancellation : undefined;
+    const onAbort = (isApply || isRequestProgress) ? requestCancellation : undefined;
     if (onAbort) options.signal?.addEventListener("abort", onAbort, { once: true });
     let response: Response;
     try {
@@ -120,7 +127,7 @@ export class HttpCoreTransport implements CoreTransport {
           ...this.#headers
         },
         body,
-        signal: isApply ? undefined : options.signal
+        signal: (isApply || isRequestProgress) ? undefined : options.signal
       });
     } catch {
       if (onAbort) options.signal?.removeEventListener("abort", onAbort);
@@ -188,6 +195,7 @@ export class HttpCoreTransport implements CoreTransport {
       || request.method === "applySwitch"
       || request.method === "applyRepair"
       || request.method === "applyRestore";
+    const isRequestProgress = isRequestProgressMethod(request.method);
     const expectedOperation = request.method === "applySync"
       ? "sync"
       : request.method === "applySwitch"
@@ -211,6 +219,19 @@ export class HttpCoreTransport implements CoreTransport {
       try { value = JSON.parse(line); }
       catch { throw new CoreTransportError("Core HTTP stream contained invalid JSON.", response.status); }
       if (value !== null && typeof value === "object" && !Array.isArray(value) && "event" in value) {
+        if (value.event === "request-progress") {
+          if (!isRequestProgress) {
+            throw new CoreTransportError("Core HTTP stream contained request progress for an unsupported method.", response.status);
+          }
+          try {
+            assertCoreRequestProgressEnvelope(value, request.requestId);
+          } catch {
+            throw new CoreTransportError("Core HTTP stream contained invalid request progress.", response.status);
+          }
+          safeNotify(options.onRequestProgress, value as CoreRequestProgressEnvelope);
+          if (cancellation.cancellationRequested) cancellation.requestCancellation();
+          return;
+        }
         if (!isApply) {
           throw new CoreTransportError("Core HTTP read stream contained an operation event.", response.status);
         }

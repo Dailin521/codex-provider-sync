@@ -20,12 +20,10 @@ async function readRepositoryFile(relativePath) {
 }
 
 function assertNoDeepCoreImports(source, filePath) {
+  const imports = [...source.matchAll(/(?:from|import)\s*\(?["']([^"']+)["']/g)]
+    .map((match) => match[1].replaceAll("\\", "/").split("/").at(-1));
   for (const internalModule of coreInternalModules) {
-    assert.doesNotMatch(
-      source,
-      new RegExp("(?:from|import)\\s*\\(?[\\\"'][^\\\"']*" + internalModule.replace(".", "\\.") + "[\\\"']"),
-      filePath + " must use src/public-api.js instead of " + internalModule
-    );
+    assert.equal(imports.includes(internalModule), false, filePath + " must use src/public-api.js instead of " + internalModule);
   }
 }
 

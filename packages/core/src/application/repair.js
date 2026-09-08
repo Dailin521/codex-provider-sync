@@ -10,7 +10,8 @@ import {
 } from "../infrastructure/node-core-ports.js";
 import { executeOrdinaryWrite } from "./ordinary-write-runtime.js";
 import { preparePlanContext } from "./plan-context.js";
-import { normalizeRepairTargets, repairSqliteRowsToChange } from "./repair-targets.js";
+import { emitProgress, throwIfAborted } from "./runtime-support.js";
+import { normalizeRepairSessionIds, normalizeRepairTargets, repairSqliteRowsToChange } from "./repair-targets.js";
 import { operationRuntime, sqliteTransaction } from "./runtime-context.js";
 
 const {
@@ -42,7 +43,32 @@ function emptySqliteMutationResult(databasePresent) {
   };
 }
 
-function repairResult({ context, state, current, targets, targetModel, scan, initiallySkipped, workspaceStats, outcome, error }) {
+const SAFE_MODEL_ID = /^[A-Za-z0-9._:/-]{1,160}$/;
+function buildRepairPreview({ scan, sqliteStats, targets, targetModel }) {
+  const byId = new Map();
+  const affectedIds = new Set(sqliteStats?.affectedSessionIds ?? []);
+  const add = (id, change) => {
+    if (typeof id !== "string" || !id) return;
+    const entry = byId.get(id) ?? { sessionId: id, changes: [] };
+    if (!entry.changes.some((item) => item.target === change.target)) entry.changes.push(change);
+    byId.set(id, entry);
+  };
+  if (targets.includes("models")) for (const change of scan.changes) {
+    if (change.modelRewriteRequired) {
+      affectedIds.add(change.threadId);
+      add(change.threadId, { target: "models", before: SAFE_MODEL_ID.test(change.originalModel ?? "") ? change.originalModel : "different", after: SAFE_MODEL_ID.test(targetModel ?? "") ? targetModel : "target-config-model" });
+    }
+  }
+  for (const row of sqliteStats?.previewRows ?? []) {
+    if (targets.includes("models") && Object.hasOwn(row, "model") && typeof targetModel === "string" && row.model !== targetModel) add(row.id, { target: "models", before: SAFE_MODEL_ID.test(row.model ?? "") ? row.model : "different", after: SAFE_MODEL_ID.test(targetModel) ? targetModel : "target-config-model" });
+    if (targets.includes("userEvent") && Object.hasOwn(row, "has_user_event") && scan.userEventThreadIds?.has(row.id) && Number(row.has_user_event) !== 1) add(row.id, { target: "userEvent", before: "false", after: "true" });
+    if (targets.includes("cwd") && Object.hasOwn(row, "cwd") && scan.threadCwdById?.has(row.id) && row.cwd !== scan.threadCwdById.get(row.id)) add(row.id, { target: "cwd", before: "different", after: "rollout-cwd" });
+  }
+  const entries = [...byId.values()].sort((a, b) => a.sessionId.localeCompare(b.sessionId));
+  return { entries: entries.slice(0, 100), total: affectedIds.size, truncated: affectedIds.size > 100 };
+}
+
+async function repairResult({ context, state, current, targets, targetModel, scan, initiallySkipped, workspaceStats, outcome, error, sessionIds }) {
   const applyResult = state.outputs.rollout ?? {
     appliedChanges: 0,
     inPlaceChanges: 0,
@@ -61,12 +87,14 @@ function repairResult({ context, state, current, targets, targetModel, scan, ini
   const skippedChangedRolloutFiles = sortedUnique(applyResult.skippedChangedPaths ?? []);
   const partialFromSessions = skippedLockedRolloutFiles.length > 0 || skippedChangedRolloutFiles.length > 0;
   const partialFailure = outcome === "partial";
-  return {
+  const result = {
     codexHome: context.codexHome,
     sqliteHome: context.storage.sqliteHome,
     sqliteHomeSource: context.storage.sqliteHomeSource,
     targetProvider: current.provider ?? DEFAULT_PROVIDER,
     repairTargets: targets,
+    scope: sessionIds ? "selected" : "all",
+    ...(sessionIds ? { sessionIds: [...sessionIds] } : {}),
     targetModel,
     previousProvider: current.provider,
     backupDir: state.backupDir,
@@ -105,9 +133,40 @@ function repairResult({ context, state, current, targets, targetModel, scan, ini
     backupInventoryWarning: state.backupInventoryWarning,
     autoPruneWarning: state.autoPruneWarning
   };
+  context.emitProgress({ stage: "verify_repair", status: "start" });
+  try {
+    const verifyScan = await collectRepairChanges(context.codexHome, targets, { skipLockedReads: true, targetModel, sessionIds });
+    const verifyStats = context.storage.stateDbLocation ? await readSqliteRepairStats(context.storage, {
+      targetModel, userEventThreadIds: verifyScan.userEventThreadIds, threadCwdById: verifyScan.threadCwdById, sessionIds
+    }) : null;
+    const remainingRolloutFiles = verifyScan.changes.length;
+    const remainingSqliteRows = repairSqliteRowsToChange(verifyStats, targets);
+    const remainingWorkspaceRoots = targets.includes("workspaceRoots")
+      ? (await readWorkspaceRootRepairStats(context.storage, { cwdStats: cwdStatsFromThreadCwdMap(verifyScan.threadCwdById) }))?.workspaceRootsNeedingRepair ?? 0
+      : 0;
+    const skippedSessions = new Set([...initiallySkipped, ...(applyResult.skippedLockedPaths ?? []), ...(applyResult.skippedChangedPaths ?? []), ...verifyScan.lockedPaths]).size;
+    const verifiedSessionIds = new Set([...(verifyScan.nativeSessionIds ?? []), ...(verifyStats?.selectedSessionIdsFound ?? [])]);
+    const missingSelectedSession = sessionIds && [...sessionIds].some((id) => !verifiedSessionIds.has(id));
+    result.verification = {
+      status: verifyStats?.unreadable || missingSelectedSession ? "unavailable" : (remainingRolloutFiles || remainingSqliteRows || remainingWorkspaceRoots || skippedSessions ? "remaining" : "verified"),
+      remainingRolloutFiles, remainingSqliteRows, remainingWorkspaceRoots, skippedSessions
+    };
+    if (result.verification.status !== "verified") {
+      result.partial = true;
+      result.retryRecommended = true;
+      result.partialReason ??= result.verification.status === "unavailable" ? "verification-unavailable" : "verification-remaining";
+    }
+  } catch {
+    result.verification = { status: "unavailable", remainingRolloutFiles: 0, remainingSqliteRows: 0, remainingWorkspaceRoots: 0, skippedSessions: 0 };
+    result.partial = true;
+    result.retryRecommended = true;
+    result.partialReason ??= "verification-unavailable";
+  }
+  context.emitProgress({ stage: "verify_repair", status: "complete" });
+  return result;
 }
 
-export async function buildRepairWriteProgram(context, targets) {
+export async function buildRepairWriteProgram(context, targets, sessionIds = null) {
   const current = readCurrentProviderFromConfigText(context.configText);
   const targetModel = targets.includes("models")
     ? readRootModelFromConfigText(context.configText)
@@ -118,7 +177,8 @@ export async function buildRepairWriteProgram(context, targets) {
   context.emitProgress({ stage: "scan_rollout_files", status: "start" });
   const scan = await collectRepairChanges(context.codexHome, targets, {
     skipLockedReads: true,
-    targetModel
+    targetModel,
+    sessionIds
   });
   context.emitProgress({ stage: "check_locked_rollout_files", status: "start" });
   const { writableChanges, lockedChanges } = await splitLockedSessionChanges(scan.changes);
@@ -143,10 +203,16 @@ export async function buildRepairWriteProgram(context, targets) {
     ? await readSqliteRepairStats(context.storage, {
         targetModel,
         userEventThreadIds: scan.userEventThreadIds,
-        threadCwdById: scan.threadCwdById
+        threadCwdById: scan.threadCwdById,
+        sessionIds
       })
     : null;
   const sqliteRowsToWrite = repairSqliteRowsToChange(sqliteStats, targets);
+  if (sessionIds) {
+    const found = new Set([...(scan.nativeSessionIds ?? []), ...(sqliteStats?.selectedSessionIdsFound ?? [])]);
+    const missing = [...sessionIds].filter((id) => !found.has(id));
+    if (missing.length) throw new CoreError("INVALID_INPUT", "One or more selected native session IDs no longer exist.");
+  }
   const cwdStats = cwdStatsFromThreadCwdMap(scan.threadCwdById);
   const workspaceStats = targets.includes("workspaceRoots")
     ? await readWorkspaceRootRepairStats(context.storage, { cwdStats })
@@ -173,6 +239,8 @@ export async function buildRepairWriteProgram(context, targets) {
       sqliteHomeSource: context.storage.sqliteHomeSource,
       targetProvider: current.provider ?? DEFAULT_PROVIDER,
       repairTargets: targets,
+      scope: sessionIds ? "selected" : "all",
+      ...(sessionIds ? { sessionIds: [...sessionIds] } : {}),
       targetModel,
       previousProvider: current.provider,
       backupDir: null,
@@ -194,6 +262,13 @@ export async function buildRepairWriteProgram(context, targets) {
       updatedWorkspaceRoots: 0,
       savedWorkspaceRootCount: workspaceStats?.savedWorkspaceRootCount ?? 0,
       sqlitePresent: Boolean(context.storage.stateDbLocation),
+      verification: {
+        status: sqliteRowsToWrite || writableChanges.length || workspaceMutationExpected || initiallySkipped.length ? "remaining" : "verified",
+        remainingRolloutFiles: writableChanges.length,
+        remainingSqliteRows: sqliteRowsToWrite,
+        remainingWorkspaceRoots: workspaceStats?.workspaceRootsNeedingRepair ?? 0,
+        skippedSessions: initiallySkipped.length
+      },
       rolloutCountsBefore: summarizeProviderCounts(scan.providerCounts),
       autoPruneResult: null,
       autoPruneWarning: null
@@ -253,6 +328,7 @@ export async function buildRepairWriteProgram(context, targets) {
                   targetModel,
                   userEventThreadIds: scan.userEventThreadIds,
                   threadCwdById: scan.threadCwdById,
+                  sessionIds,
                   onCommitAttempt: () => writeContext.markMutation(),
                   afterCommit: () => writeContext.faultInjector?.({
                     point: "after_sqlite_commit_before_ack",
@@ -279,13 +355,22 @@ export async function buildRepairWriteProgram(context, targets) {
       initiallySkipped,
       workspaceStats,
       outcome,
-      error
+      error,
+      sessionIds
     })
   };
 }
 
 export async function prepareRepairPlan(options) {
+  // Request observers/signals are never retained in the subsequent Apply plan.
+  const { onProgress, signal } = options.requestControl ?? {};
+  const stage = (name) => {
+    throwIfAborted(signal);
+    emitProgress(onProgress, { stage: name, status: "running" });
+  };
+  stage("prepare_repair_context");
   const targets = normalizeRepairTargets(options.targets);
+  const sessionIds = normalizeRepairSessionIds(options.sessionIds, targets);
   const keepCount = options.keepCount ?? DEFAULT_BACKUP_RETENTION_COUNT;
   if (!Number.isInteger(keepCount) || keepCount < 1) {
     throw new CoreError("INVALID_INPUT", "Repair keepCount must be an integer greater than or equal to 1.");
@@ -308,8 +393,12 @@ export async function prepareRepairPlan(options) {
   }
   const scan = await collectRepairChanges(context.codexHome, targets, {
     skipLockedReads: true,
-    targetModel
+    targetModel,
+    sessionIds,
+    onProgress,
+    signal
   });
+  stage("inspect_repair_sqlite");
   const { writableChanges, lockedChanges } = await splitLockedSessionChanges(scan.changes);
   const lockedCount = new Set([
     ...scan.lockedPaths,
@@ -319,9 +408,17 @@ export async function prepareRepairPlan(options) {
     ? await readSqliteRepairStats(context.storage, {
         targetModel,
         userEventThreadIds: scan.userEventThreadIds,
-        threadCwdById: scan.threadCwdById
+        threadCwdById: scan.threadCwdById,
+        sessionIds
       })
     : null;
+  if (sessionIds) {
+    const found = new Set([...(scan.nativeSessionIds ?? []), ...(sqliteStats?.selectedSessionIdsFound ?? [])]);
+    if ([...sessionIds].some((id) => !found.has(id))) {
+      throw new CoreError("INVALID_INPUT", "One or more selected native session IDs no longer exist.");
+    }
+  }
+  stage("inspect_workspace_roots");
   const workspaceStats = targets.includes("workspaceRoots")
     ? await readWorkspaceRootRepairStats(context.storage, {
         cwdStats: cwdStatsFromThreadCwdMap(scan.threadCwdById)
@@ -332,6 +429,8 @@ export async function prepareRepairPlan(options) {
     : [];
   const sqliteRowsToChange = repairSqliteRowsToChange(sqliteStats, targets);
   const workspaceRootsToChange = workspaceStats?.workspaceRootsNeedingRepair ?? 0;
+  stage("build_repair_preview");
+  const preview = buildRepairPreview({ scan, sqliteStats, targets, targetModel });
   const summary = {
     profile: { id: context.profile.id, revision: context.profile.revision },
     storageRevision: context.revisions.storageRevision,
@@ -340,19 +439,31 @@ export async function prepareRepairPlan(options) {
     stateDbRevision: context.revisions.stateDbRevision,
     target: {
       targets,
+      scope: sessionIds ? "selected" : "all",
+      ...(sessionIds ? { sessionIds: [...sessionIds] } : {}),
       ...(targetModel ? { model: targetModel } : {})
     },
     impact: {
       rolloutFilesToChange: targets.includes("models") ? writableChanges.length : 0,
       sqliteRowsToChange,
+      ...(targets.includes("models") ? { sqliteModelRowsToChange: sqliteStats?.modelRowsNeedingRepair ?? 0 } : {}),
+      ...(targets.includes("cwd") ? { sqliteCwdRowsToChange: sqliteStats?.cwdRowsNeedingRepair ?? 0 } : {}),
+      ...(targets.includes("userEvent") ? { sqliteUserEventRowsToChange: sqliteStats?.userEventRowsNeedingRepair ?? 0 } : {}),
       workspaceRootsToChange,
+      ...(workspaceStats ? { workspaceSettingsChangeKinds: workspaceStats.workspaceSettingsChangeKinds ?? [] } : {}),
       lockedRolloutFiles: lockedCount,
+      repairPreview: preview.entries,
+      repairPreviewTotal: preview.total,
+      repairPreviewTruncated: preview.truncated,
       backupExpected: writableChanges.length > 0
         || sqliteRowsToChange > 0
         || workspaceRootsToChange > 0
     },
     warnings
   };
+  throwIfAborted(signal);
+  emitProgress(onProgress, { stage: "build_repair_preview", status: "completed" });
+  throwIfAborted(signal);
   return operationRuntime.issuePreparedPlan("repair", summary, {
     codexHome: context.codexHome,
     platform: options.platform,
@@ -361,6 +472,7 @@ export async function prepareRepairPlan(options) {
       codexHome: context.codexHome,
       ...(context.sqliteHome ? { sqliteHome: context.sqliteHome } : {}),
       targets,
+      ...(sessionIds ? { sessionIds: [...sessionIds] } : {}),
       keepCount,
       sqliteBusyTimeoutMs: options.sqliteBusyTimeoutMs,
       onProgress: options.onProgress,
@@ -391,9 +503,10 @@ export async function prepareRepair(options = {}) {
 
 export async function executeRepair({ targets, ...options } = {}) {
   const normalizedTargets = normalizeRepairTargets(targets);
+  const sessionIds = normalizeRepairSessionIds(options.sessionIds, normalizedTargets);
   return executeOrdinaryWrite(
     { ...options, operationKind: "repair" },
-    (context) => buildRepairWriteProgram(context, normalizedTargets)
+    (context) => buildRepairWriteProgram(context, normalizedTargets, sessionIds)
   );
 }
 

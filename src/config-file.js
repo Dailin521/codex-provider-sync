@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import { writeFileAtomic } from "./atomic-file.js";
 
 import { DEFAULT_PROVIDER } from "./constants.js";
+import { CoreError } from "./core-error.js";
 
 function splitLines(text) {
   return text.split(/\r?\n/);
@@ -58,6 +59,8 @@ export async function readConfigText(configPath) {
 }
 
 export function readCurrentProviderFromConfigText(configText) {
+  const provider = readRootStringFromConfigText(configText, "model_provider");
+  if (provider !== null && provider.length > 0) return { provider, implicit: false };
   const lines = splitLines(configText);
   for (const line of lines) {
     const trimmed = line.trim();
@@ -67,9 +70,8 @@ export function readCurrentProviderFromConfigText(configText) {
     if (trimmed.startsWith("[")) {
       break;
     }
-    const match = trimmed.match(/^model_provider\s*=\s*"([^"]+)"\s*$/);
-    if (match) {
-      return { provider: match[1], implicit: false };
+    if (/^model_provider\s*=/.test(trimmed)) {
+      throw new CoreError("INVALID_INPUT", "model_provider must be a non-empty TOML string.", { details: { reason: "config" } });
     }
   }
   return { provider: DEFAULT_PROVIDER, implicit: true };
@@ -111,11 +113,17 @@ export function readRootModelFromConfigText(configText) {
 
 export function listConfiguredProviderIds(configText) {
   const providerIds = new Set([DEFAULT_PROVIDER]);
-  const regex = /^\[model_providers\.([A-Za-z0-9_.-]+)]\s*$/gm;
-  for (const match of configText.matchAll(regex)) {
-    providerIds.add(match[1]);
+  for (const line of splitLines(configText)) {
+    const provider = providerSectionId(line);
+    if (provider !== null) providerIds.add(provider);
   }
   return [...providerIds].sort();
+}
+
+function providerSectionId(line) {
+  const match = line.trim().match(/^\[\s*model_providers\s*\.\s*(?:([A-Za-z0-9_-]+)|"((?:\\.|[^"\\])*)"|'([^']*)')\s*]\s*(?:#.*)?$/);
+  if (!match) return null;
+  return match[1] ?? (match[2] !== undefined ? decodeTomlBasicString(match[2]) : match[3]);
 }
 
 export function configDeclaresProvider(configText, provider) {
@@ -127,7 +135,7 @@ function locateProviderSection(configText, provider) {
   const startRegex = new RegExp(`^\\[model_providers\\.${provider.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}\\]\\s*$`);
   let sectionStart = -1;
   for (let index = 0; index < lines.length; index += 1) {
-    if (startRegex.test(lines[index].trim())) {
+    if (providerSectionId(lines[index]) === provider || startRegex.test(lines[index].trim())) {
       sectionStart = index;
       break;
     }

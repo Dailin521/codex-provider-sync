@@ -26,7 +26,7 @@ async function fixture(t, line = header, suffix = tail) {
   await fs.mkdir(path.join(codexHome, "sessions"), { recursive: true });
   const file = path.join(codexHome, "sessions", "rollout-fixture.jsonl");
   const configPath = path.join(codexHome, "config.toml");
-  await fs.writeFile(configPath, 'model_provider = "prov_a"\n');
+  await fs.writeFile(configPath, 'model_provider = "prov_a"\n[model_providers.prov_a]\nname = "fixture"\n');
   await fs.writeFile(file, line + suffix);
   const mtime = new Date("2026-01-02T03:04:05Z");
   await fs.utimes(file, mtime, mtime);

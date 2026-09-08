@@ -8,6 +8,7 @@
     "types": ["node"]
   },
   "include": [
-    "src/**/*.js"
+    "src/**/*.js",
+    "checks/storage-types.ts"
   ]
 }

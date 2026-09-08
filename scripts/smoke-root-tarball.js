@@ -214,15 +214,15 @@ async function smokeInstalledWeb(tempRoot, codexHome) {
 const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codex-provider-sync-pack-smoke-"));
 let tarballPath = null;
 try {
-  const packed = run(process.execPath, [npmCliPath, "pack", "--json", "--ignore-scripts"]);
+  const packed = run(process.execPath, [npmCliPath, "pack", "--json", "--ignore-scripts", "--pack-destination", tempRoot]);
   const packResult = JSON.parse(packed.stdout);
   if (!Array.isArray(packResult) || packResult.length !== 1) {
     throw new Error("npm pack did not return exactly one root package.");
   }
   const tarballCandidates = [
-    path.resolve(repositoryRoot, packResult[0].filename),
+    path.join(tempRoot, path.basename(packResult[0].filename)),
     path.join(
-      repositoryRoot,
+      tempRoot,
       `${packResult[0].name.replace(/^@/, "").replaceAll("/", "-")}-${packResult[0].version}.tgz`
     )
   ];

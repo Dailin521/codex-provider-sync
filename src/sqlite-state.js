@@ -8,6 +8,8 @@ import { openDatabase } from "./sqlite.js";
 import { resolveStorageLayout } from "./storage-layout.js";
 
 const DEFAULT_BUSY_TIMEOUT_MS = 0;
+const SQLITE_TITLE_QUERY_CHUNK_SIZE = 500;
+const SQLITE_TITLE_MAX_CHARS = 1024;
 
 export function stateDbPath(codexHome) {
   return path.join(codexHome, SQLITE_DIR_BASENAME, DB_FILE_BASENAME);
@@ -171,6 +173,55 @@ export async function existingStateDbPath(storageOrLocation) {
   return (await resolveStateDbLocation(storageOrLocation))?.path ?? null;
 }
 
+// History titles are explicit Codex metadata. Keep this lookup narrowly scoped
+// to the selected state DB's threads.id/title columns: in particular, never
+// fall back to first_user_message or any message-content column.
+export async function readSqliteThreadTitles(storageOrLocation, threadIds) {
+  const ids = [...new Set((Array.isArray(threadIds) ? threadIds : []).filter(
+    (value) => typeof value === "string" && value.length > 0 && value.length <= 512
+  ))];
+  if (ids.length === 0) return new Map();
+
+  let db;
+  try {
+    const dbPath = await existingStateDbPath(storageOrLocation);
+    if (!dbPath) return new Map();
+    db = await openDatabase(dbPath, { readOnly: true });
+    if (!tableHasColumn(db, "threads", "id") || !tableHasColumn(db, "threads", "title")) {
+      return new Map();
+    }
+
+    const titles = new Map();
+    for (let offset = 0; offset < ids.length; offset += SQLITE_TITLE_QUERY_CHUNK_SIZE) {
+      const chunk = ids.slice(offset, offset + SQLITE_TITLE_QUERY_CHUNK_SIZE);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const rows = db.prepare(`
+        SELECT id, substr(title, 1, ?) AS title
+        FROM threads
+        WHERE id IN (${placeholders})
+          AND typeof(title) = 'text'
+          AND length(title) > 0
+      `).all(SQLITE_TITLE_MAX_CHARS, ...chunk);
+      for (const row of rows) {
+        if (typeof row.id === "string" && typeof row.title === "string") {
+          titles.set(row.id, row.title.slice(0, SQLITE_TITLE_MAX_CHARS));
+        }
+      }
+    }
+    return titles;
+  } catch {
+    // History remains available from rollout metadata when an optional title
+    // index is missing, busy, malformed, or otherwise unreadable.
+    return new Map();
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // Optional read-only title metadata must not make History unavailable.
+    }
+  }
+}
+
 function tableHasColumn(db, tableName, columnName) {
   return db
     .prepare(`PRAGMA table_info(${JSON.stringify(tableName)})`)
@@ -302,6 +353,33 @@ export async function readSqliteProviderCounts(storageOrLocation) {
   }
 }
 
+// A Provider plan depends on row identity / Provider, not message previews,
+// activity timestamps, or the physical WAL/SHM representation. One read
+// transaction binds the schema and rows to the same SQLite snapshot.
+export async function readSqliteProviderRevisionState(dbPath) {
+  let db;
+  try {
+    db = await openDatabase(dbPath, { readOnly: true });
+    db.exec("BEGIN");
+    const schema = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'threads'").get()?.sql;
+    if (!schema || !tableHasColumn(db, "threads", "model_provider")) {
+      throw new CoreError("SQLITE_UNREADABLE", "The thread index does not support Provider synchronization.");
+    }
+    const key = tableHasColumn(db, "threads", "id") ? "id" : "rowid";
+    const rows = db.prepare(`SELECT ${key} AS id, model_provider FROM threads ORDER BY ${key}`).all();
+    db.exec("COMMIT");
+    return { schema, rows };
+  } catch (error) {
+    if (isSqliteBusyError(error)) throw wrapSqliteBusyError(error, "read Provider revision");
+    if (error instanceof CoreError) throw error;
+    throw new CoreError("SQLITE_UNREADABLE", "state_5.sqlite is malformed or unreadable.", {
+      cause: error, details: sqliteErrorDetails(error)
+    });
+  } finally {
+    db?.close();
+  }
+}
+
 export async function readSqliteRepairStats(storageOrLocation, options = {}) {
   const dbPath = await existingStateDbPath(storageOrLocation);
   if (!dbPath) {
@@ -311,37 +389,77 @@ export async function readSqliteRepairStats(storageOrLocation, options = {}) {
   let db;
   try {
     db = await openDatabase(dbPath, { readOnly: true });
+    const selectedSessionIds = options.sessionIds instanceof Set ? options.sessionIds : null;
+    const selectedIds = selectedSessionIds ? [...selectedSessionIds] : null;
+    const rowById = new Map();
+    const affectedSessionIds = new Set();
+    const selectedSessionIdsFound = new Set();
+    const noteFoundRow = (row) => {
+      if (!row || typeof row.id !== "string") return;
+      selectedSessionIdsFound.add(row.id);
+    };
+    const noteAffectedRow = (row) => {
+      if (!row || typeof row.id !== "string") return;
+      affectedSessionIds.add(row.id);
+      if (rowById.size < 100) rowById.set(row.id, row);
+    };
+    const hasModel = tableHasColumn(db, "threads", "model");
+    const hasCwd = tableHasColumn(db, "threads", "cwd");
+    const hasUserEvent = tableHasColumn(db, "threads", "has_user_event");
+    const selectColumns = ["id", ...(hasModel ? ["model"] : []), ...(hasCwd ? ["cwd"] : []), ...(hasUserEvent ? ["has_user_event"] : [])];
+    if (selectedIds?.length) {
+      const statement = db.prepare(`SELECT ${selectColumns.join(", ")} FROM threads WHERE id = ?`);
+      for (const id of selectedIds) noteFoundRow(statement.get(id));
+    }
     let modelRowsNeedingRepair = 0;
     if (typeof options.targetModel === "string"
         && options.targetModel
-        && tableHasColumn(db, "threads", "model")) {
-      modelRowsNeedingRepair = Number(db.prepare(`
+        && hasModel) {
+      const sql = selectedIds?.length
+        ? "SELECT COUNT(*) AS count FROM threads WHERE id IN (" + selectedIds.map(() => "?").join(",") + ") AND COALESCE(model, '') <> ?"
+        : `
         SELECT COUNT(*) AS count
         FROM threads
         WHERE COALESCE(model, '') <> ?
-      `).get(options.targetModel)?.count) || 0;
+      `;
+      modelRowsNeedingRepair = Number(db.prepare(sql).get(...(selectedIds ?? []), options.targetModel)?.count) || 0;
+      if (!selectedIds) {
+        const preview = db.prepare(`SELECT ${selectColumns.join(", ")} FROM threads WHERE COALESCE(model, '') <> ? ORDER BY id`).iterate(options.targetModel);
+        for (const row of preview) noteAffectedRow(row);
+      }
+      if (selectedIds) {
+        const stmt = db.prepare(`SELECT ${selectColumns.join(", ")} FROM threads WHERE id = ?`);
+        for (const id of selectedIds) {
+          const row = stmt.get(id);
+          if (row && row.model !== options.targetModel) noteAffectedRow(row);
+        }
+      }
     }
     let userEventRowsNeedingRepair = 0;
-    if (tableHasColumn(db, "threads", "has_user_event") && options.userEventThreadIds?.size) {
-      const stmt = db.prepare("SELECT has_user_event FROM threads WHERE id = ?");
+    if (hasUserEvent && options.userEventThreadIds?.size) {
+      const stmt = db.prepare(`SELECT ${selectColumns.join(", ")} FROM threads WHERE id = ?`);
       for (const threadId of options.userEventThreadIds) {
         const row = stmt.get(threadId);
+        noteFoundRow(row);
         if (row && Number(row.has_user_event) !== 1) {
           userEventRowsNeedingRepair += 1;
+          noteAffectedRow(row);
         }
       }
     }
 
     let cwdRowsNeedingRepair = 0;
-    if (tableHasColumn(db, "threads", "cwd") && options.threadCwdById?.size) {
-      const stmt = db.prepare("SELECT cwd FROM threads WHERE id = ?");
+    if (hasCwd && options.threadCwdById?.size) {
+      const stmt = db.prepare(`SELECT ${selectColumns.join(", ")} FROM threads WHERE id = ?`);
       for (const [threadId, cwd] of options.threadCwdById) {
         if (typeof threadId !== "string" || !threadId || typeof cwd !== "string" || !cwd.trim()) {
           continue;
         }
         const row = stmt.get(threadId);
+        noteFoundRow(row);
         if (row && row.cwd !== cwd) {
           cwdRowsNeedingRepair += 1;
+          noteAffectedRow(row);
         }
       }
     }
@@ -349,7 +467,10 @@ export async function readSqliteRepairStats(storageOrLocation, options = {}) {
     return {
       modelRowsNeedingRepair,
       userEventRowsNeedingRepair,
-      cwdRowsNeedingRepair
+      cwdRowsNeedingRepair,
+      selectedSessionIdsFound,
+      affectedSessionIds,
+      previewRows: [...rowById.values()]
     };
   } catch (error) {
     throw wrapSqliteMalformedError(
@@ -407,11 +528,15 @@ export async function applySqliteRepairs(storageOrLocation, afterUpdateOrOptions
 
     let modelRowsUpdated = 0;
     if (targets.has("models") && tableHasColumn(db, "threads", "model")) {
-      modelRowsUpdated = db.prepare(`
+      const selectedIds = options.sessionIds instanceof Set ? [...options.sessionIds] : null;
+      const modelSql = selectedIds?.length
+        ? "UPDATE threads SET model = ? WHERE id IN (" + selectedIds.map(() => "?").join(",") + ") AND COALESCE(model, '') <> ?"
+        : `
         UPDATE threads
         SET model = ?
         WHERE COALESCE(model, '') <> ?
-      `).run(targetModel, targetModel).changes ?? 0;
+      `;
+      modelRowsUpdated = db.prepare(modelSql).run(targetModel, ...(selectedIds ?? []), targetModel).changes ?? 0;
     }
 
     let userEventRowsUpdated = 0;
@@ -424,6 +549,7 @@ export async function applySqliteRepairs(storageOrLocation, afterUpdateOrOptions
         WHERE id = ? AND COALESCE(has_user_event, 0) <> 1
       `);
       for (const threadId of options.userEventThreadIds) {
+        if (options.sessionIds instanceof Set && !options.sessionIds.has(threadId)) continue;
         userEventRowsUpdated += statement.run(threadId).changes ?? 0;
       }
     }
@@ -438,6 +564,7 @@ export async function applySqliteRepairs(storageOrLocation, afterUpdateOrOptions
         WHERE id = ? AND COALESCE(cwd, '') <> ?
       `);
       for (const [threadId, cwd] of options.threadCwdById) {
+        if (options.sessionIds instanceof Set && !options.sessionIds.has(threadId)) continue;
         if (typeof threadId !== "string" || !threadId || typeof cwd !== "string" || !cwd.trim()) continue;
         cwdRowsUpdated += statement.run(cwd, threadId, cwd).changes ?? 0;
       }

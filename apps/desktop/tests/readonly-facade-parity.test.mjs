@@ -15,7 +15,14 @@ import { DesktopProfileRepository } from "../dist/profiles/repository.js";
 import { createDesktopRuntimeHost } from "../dist/runtime/host.js";
 
 function normalized(method, value) {
-  if (method === "getStatus") return { ...value, snapshotAt: "<snapshot-at>" };
+  if (method === "getHistorySession") {
+    const { storage, ...shared } = value;
+    return shared;
+  }
+  if (method === "getStatus") {
+    const { displayPaths, ...shared } = value;
+    return { ...shared, snapshotAt: "<snapshot-at>" };
+  }
   if (method === "getDiagnostics") return { ...value, generatedAt: "<generated-at>" };
   return value;
 }
@@ -96,9 +103,27 @@ test("Desktop Utility host read-only methods match the standalone Core facade", 
       const request = createCoreRequestEnvelope(method, payload, `parity-${method}`);
       const response = await host.dispatch(request);
       assert.equal(response.ok, true, `${method} should succeed through the Utility host`);
+      if (method === "getStatus") {
+        assert.equal(expected.displayPaths, undefined, "Web/default facade remains pathless");
+        assert.deepEqual(response.result.displayPaths, {
+          codexHome: value.codexHome,
+          sqliteHome: path.join(value.codexHome, "sqlite"),
+          stateDbPath: null
+        });
+      }
+      if (method === "getHistorySession") {
+        assert.equal(expected.storage, undefined, "Default Core/Web History stays pathless");
+        assert.equal(response.result.storage.cwd, path.join(value.root, "private-project"));
+        assert.match(response.result.storage.rolloutPath, /rollout-parity\.jsonl$/);
+      }
       assert.deepEqual(normalized(method, response.result), normalized(method, expected));
       if (method !== "getHistorySession") {
-        assert.doesNotMatch(JSON.stringify(response), /body-visible-only|ciphertext-must-not-leak|tool-secret-must-not-leak|private-project/i);
+        assert.doesNotMatch(JSON.stringify(response), /body-visible-only|ciphertext-must-not-leak|tool-secret-must-not-leak/i);
+        if (method === "listHistory") {
+          assert.equal(response.result.sessions[0].project.name, "private-project");
+          assert.equal("cwd" in response.result.sessions[0], false);
+          assert.equal(JSON.stringify(response).includes(JSON.stringify(path.join(value.root, "private-project")).slice(1, -1)), false);
+        } else assert.doesNotMatch(JSON.stringify(response), /private-project/i);
       }
     }
 

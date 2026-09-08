@@ -1,11 +1,27 @@
 using System;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 
 // Loaded by the existing exclusive PowerShell worker, not a second sync engine.
 public static class ProviderByteFile
 {
+    [Serializable]
+    public sealed class ApplyTiming
+    {
+        public double workerMs;
+        public double readHeaderMs;
+        public double flushMs;
+        public double restoreMtimeMs;
+    }
+
+    public sealed class ApplyResult
+    {
+        public string Result;
+        public ApplyTiming Timing;
+    }
+
     [StructLayout(LayoutKind.Sequential, Pack = 4)]
     struct Info
     {
@@ -37,17 +53,25 @@ public static class ProviderByteFile
         return info;
     }
 
-    static byte[] Read(FileStream stream, int count)
+    static byte[] Read(FileStream stream, int count, ApplyTiming timing = null)
     {
-        var bytes = new byte[count];
-        stream.Position = 0;
-        for (int offset = 0; offset < count;)
+        var stopwatch = timing == null ? null : Stopwatch.StartNew();
+        try
         {
-            int n = stream.Read(bytes, offset, count - offset);
-            if (n == 0) throw new IOException("Rollout header was truncated.");
-            offset += n;
+            var bytes = new byte[count];
+            stream.Position = 0;
+            for (int offset = 0; offset < count;)
+            {
+                int n = stream.Read(bytes, offset, count - offset);
+                if (n == 0) throw new IOException("Rollout header was truncated.");
+                offset += n;
+            }
+            return bytes;
         }
-        return bytes;
+        finally
+        {
+            if (stopwatch != null) timing.readHeaderMs += stopwatch.Elapsed.TotalMilliseconds;
+        }
     }
 
     static bool Equal(byte[] a, byte[] b)
@@ -82,58 +106,71 @@ public static class ProviderByteFile
     }
 
     static void Write(FileStream stream, byte[] bytes, int offset, byte[] expected,
-                      long size, string dev, string ino, long mtime)
+                      long size, string dev, string ino, long mtime, ApplyTiming timing)
     {
         stream.Position = offset;
         stream.Write(bytes, 0, bytes.Length);
-        stream.Flush(true);
-        if (stream.Length < size || !Equal(Read(stream, expected.Length), expected))
+        var flush = Stopwatch.StartNew();
+        try { stream.Flush(true); }
+        finally { timing.flushMs += flush.Elapsed.TotalMilliseconds; }
+        if (stream.Length < size || !Equal(Read(stream, expected.Length, timing), expected))
             throw new IOException("Provider byte write verification failed.");
         Inspect(stream, dev, ino);
-        if (!SetFileTime(stream.SafeFileHandle.DangerousGetHandle(), IntPtr.Zero, IntPtr.Zero, ref mtime))
-            throw new Win32Exception(Marshal.GetLastWin32Error());
-        stream.Flush(true);
+        var restoreMtime = Stopwatch.StartNew();
+        try
+        {
+            if (!SetFileTime(stream.SafeFileHandle.DangerousGetHandle(), IntPtr.Zero, IntPtr.Zero, ref mtime))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        finally { timing.restoreMtimeMs += restoreMtime.Elapsed.TotalMilliseconds; }
+        flush.Restart();
+        try { stream.Flush(true); }
+        finally { timing.flushMs += flush.Elapsed.TotalMilliseconds; }
     }
 
-    public static string Apply(FileStream stream, byte[] header, byte[] oldBytes, byte[] newBytes,
-                               int offset, long size, double mtimeMs, string dev, string ino, bool restore)
+    public static ApplyResult ApplyWithTiming(FileStream stream, byte[] header, byte[] oldBytes, byte[] newBytes,
+                                              int offset, long size, double mtimeMs, string dev, string ino, bool restore)
     {
+        var total = Stopwatch.StartNew();
+        var timing = new ApplyTiming();
+        try
+        {
         var before = Inspect(stream, dev, ino, false);
         if (!Matches(before, dev, ino) || stream.Length < Math.Max(size, header.Length))
         {
-            if (!restore) return "SKIP_CHANGED";
+            if (!restore) return Complete("SKIP_CHANGED", timing, total);
             throw new IOException("Rollout identity changed or file truncated before provider recovery.");
         }
-        var current = Read(stream, header.Length);
+        var current = Read(stream, header.Length, timing);
         var expected = (byte[])header.Clone();
         Array.Copy(newBytes, 0, expected, offset, newBytes.Length);
         // FILETIME and libuv's Unix timestamp have different epochs.
         double currentMs = (before.WriteTime - 116444736000000000L) / 10000.0;
         if (!restore && (stream.Length != size || Math.Abs(currentMs - mtimeMs) > 0.001
-                         || !Equal(current, header))) return "SKIP_CHANGED";
+                         || !Equal(current, header))) return Complete("SKIP_CHANGED", timing, total);
         if (restore)
         {
             if (!Recoverable(current, header, oldBytes, newBytes, offset))
                 throw new IOException("Unknown rollout bytes during provider recovery.");
             if (Equal(current, header) && (stream.Length != size || Math.Abs(currentMs - mtimeMs) <= 0.001))
-                return "APPLIED_IN_PLACE";
+                return Complete("APPLIED_IN_PLACE", timing, total);
             long restoreTime = stream.Length == size
                 ? 116444736000000000L + (long)Math.Round(mtimeMs * 10000.0) : before.WriteTime;
-            Write(stream, oldBytes, offset, header, size, dev, ino, restoreTime);
-            return "APPLIED_IN_PLACE";
+            Write(stream, oldBytes, offset, header, size, dev, ino, restoreTime, timing);
+            return Complete("APPLIED_IN_PLACE", timing, total);
         }
         try
         {
-            Write(stream, newBytes, offset, expected, size, dev, ino, before.WriteTime);
+            Write(stream, newBytes, offset, expected, size, dev, ino, before.WriteTime, timing);
         }
         catch (Exception failure)
         {
             try
             {
                 Inspect(stream, dev, ino);
-                if (stream.Length < size || !Recoverable(Read(stream, header.Length), header, oldBytes, newBytes, offset))
+                if (stream.Length < size || !Recoverable(Read(stream, header.Length, timing), header, oldBytes, newBytes, offset))
                     throw new IOException("Cannot verify bytes for immediate provider recovery.");
-                Write(stream, oldBytes, offset, header, size, dev, ino, before.WriteTime);
+                Write(stream, oldBytes, offset, header, size, dev, ino, before.WriteTime, timing);
             }
             catch (Exception recovery)
             {
@@ -141,6 +178,41 @@ public static class ProviderByteFile
             }
             throw;
         }
-        return "APPLIED_IN_PLACE";
+        return Complete("APPLIED_IN_PLACE", timing, total);
+        }
+        catch (Exception failure)
+        {
+            timing.workerMs = total.Elapsed.TotalMilliseconds;
+            // Diagnostic attachment must never replace the original failure.
+            try { failure.Data["providerSyncNativeTiming"] = timing; } catch { }
+            throw;
+        }
+    }
+
+    static ApplyResult Complete(string result, ApplyTiming timing, Stopwatch total)
+    {
+        timing.workerMs = total.Elapsed.TotalMilliseconds;
+        return new ApplyResult { Result = result, Timing = timing };
+    }
+
+    // File.Delete avoids PowerShell provider enumeration for the normal temporary-file
+    // cleanup path. Callers retain Remove-Item -Force as the readonly/hidden fallback.
+    public static bool TryDelete(string path)
+    {
+        try
+        {
+            File.Delete(path);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public static string Apply(FileStream stream, byte[] header, byte[] oldBytes, byte[] newBytes,
+                               int offset, long size, double mtimeMs, string dev, string ino, bool restore)
+    {
+        return ApplyWithTiming(stream, header, oldBytes, newBytes, offset, size, mtimeMs, dev, ino, restore).Result;
     }
 }

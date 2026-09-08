@@ -149,6 +149,7 @@ test("electron-vite emits a CJS sandbox preload and keeps source maps disabled",
   assert.match(config, /entryFileNames: "\[name\]\.cjs"/);
   assert.match(config, /inlineDynamicImports: true/);
   assert.equal((config.match(/sourcemap: false/g) ?? []).length, 3);
+  assert.equal((config.match(/minify: "esbuild"/g) ?? []).length, 3);
   assert.match(config, /external: \["electron"\]/);
   assert.match(config, /__CPS_DESKTOP_TEST_BUILD__:\s*JSON\.stringify\(mode === "test"\)/);
   assert.match(config, /__CPS_DESKTOP_FORCE_BETTER_SQLITE3__:\s*JSON\.stringify\(mode === "test"\)/);
@@ -162,6 +163,6 @@ test("packaging always replaces test output with a verified production bundle", 
   const packageDocument = JSON.parse(await read("package.json"));
   assert.equal(
     packageDocument.scripts["pack:dir"],
-    "npm run build && npm run build:electron && npm run verify:production-bundle && electron-builder --dir --config electron-builder.yml"
+    "npm run build && npm run build:electron && npm run verify:production-bundle && electron-builder --dir --config electron-builder.yml && node scripts/verify-size-budget.mjs --directory"
   );
 });

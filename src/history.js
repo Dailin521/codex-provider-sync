@@ -4,7 +4,11 @@ import fsSync from "node:fs";
 import path from "node:path";
 
 import { SESSION_DIRS } from "./constants.js";
+import { readConfigText } from "./config-file.js";
 import { CoreError } from "./core-error.js";
+import { resolveStorageLayout } from "./storage-layout.js";
+import { detectStateDb, readSqliteThreadTitles } from "./sqlite-state.js";
+import { listHistoryProjects } from "./history-projects.js";
 
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 100;
@@ -17,6 +21,14 @@ const HISTORY_CWD_MAX_CHARS = 32 * 1024;
 const HISTORY_PROVIDER_MAX_CHARS = 512;
 const HISTORY_MODEL_MAX_CHARS = 512;
 const HISTORY_TIMESTAMP_MAX_CHARS = 128;
+const HISTORY_LOOKUP_CACHE_TTL_MS = 15_000;
+const HISTORY_LOOKUP_CACHE_MAX_HOMES = 8;
+const HISTORY_LOOKUP_CACHE_MAX_CANDIDATES = 8_192;
+
+// This is deliberately an in-process lookup aid, not a History data cache.
+// It retains only locators plus file identities, not titles or message bodies.
+// A list call always replaces its Home entry.
+const historyLookupCache = new Map();
 
 function historyFileError(error, action) {
   if (error?.code === "EACCES" || error?.code === "EPERM") {
@@ -107,6 +119,63 @@ function sameFileIdentity(left, right) {
     && left.ctimeNs === right.ctimeNs;
 }
 
+function historyLookupCacheKey(physicalHome) {
+  return pathKey(physicalHome);
+}
+
+function historyCandidateKey(candidate, archived) {
+  return `${archived ? "archived" : "active"}:${normalizedRolloutPath(candidate.filePath)}`;
+}
+
+function sameHistoryCandidateSignature(left, right) {
+  return Boolean(left && right)
+    && left.archived === right.archived
+    && pathKey(left.lexicalRoot) === pathKey(right.lexicalRoot)
+    && pathKey(left.physicalRoot) === pathKey(right.physicalRoot)
+    && pathKey(left.physicalPath) === pathKey(right.physicalPath)
+    && sameFileIdentity(left.fileIdentity, right.fileIdentity);
+}
+
+function evictExpiredHistoryLookups(now = Date.now()) {
+  for (const [key, entry] of historyLookupCache) {
+    if (entry.expiresAt <= now) historyLookupCache.delete(key);
+  }
+}
+
+async function invalidateHistoryLookup(codexHome) {
+  try {
+    const physicalHome = path.resolve(await fs.realpath(path.resolve(codexHome)));
+    historyLookupCache.delete(historyLookupCacheKey(physicalHome));
+  } catch {
+    // The following full list scan owns the user-visible failure semantics.
+  }
+}
+
+function storeHistoryLookup(lookup, sessions) {
+  if (!lookup || lookup.candidates.length > HISTORY_LOOKUP_CACHE_MAX_CANDIDATES) return;
+  const now = Date.now();
+  evictExpiredHistoryLookups(now);
+  const key = historyLookupCacheKey(lookup.physicalHome);
+  historyLookupCache.delete(key);
+  while (historyLookupCache.size >= HISTORY_LOOKUP_CACHE_MAX_HOMES) {
+    historyLookupCache.delete(historyLookupCache.keys().next().value);
+  }
+  historyLookupCache.set(key, {
+    physicalHome: lookup.physicalHome,
+    expiresAt: now + HISTORY_LOOKUP_CACHE_TTL_MS,
+    candidates: lookup.candidates,
+    summaries: new Map(sessions.map((session) => [session.id, {
+      id: session.id,
+      archived: session.archived,
+      filePath: session.filePath,
+      lexicalRoot: session.lexicalRoot,
+      physicalRoot: session.physicalRoot,
+      physicalPath: session.physicalPath,
+      fileIdentity: session.fileIdentity
+    }]))
+  });
+}
+
 function staleHistoryError(cause) {
   return new CoreError(
     "STALE_STATE",
@@ -115,18 +184,49 @@ function staleHistoryError(cause) {
   );
 }
 
+function subagentDisplayName(payload) {
+  const spawn = payload.source?.subagent?.thread_spawn;
+  if (!isSubagentPayload(payload)) return "";
+  for (const value of [spawn?.agent_path, payload.agent_path]) {
+    const agentPath = firstBoundedText(1024, value);
+    const name = agentPath.split("/").filter(Boolean).at(-1);
+    if (name && name !== "." && name !== ".." && !/[\\\x00-\x1f]/.test(name)) return name.slice(0, 160);
+  }
+  const nickname = firstBoundedText(160, spawn?.agent_nickname, payload.agent_nickname);
+  return /[\\/\x00-\x1f]/.test(nickname) ? "" : nickname;
+}
+
+function isSubagentPayload(payload) {
+  return Boolean(payload.source?.subagent)
+    || Boolean(firstBoundedText(HISTORY_THREAD_ID_MAX_CHARS, payload.parent_thread_id));
+}
+
+function parentSessionId(payload) {
+  return firstBoundedText(
+    HISTORY_THREAD_ID_MAX_CHARS,
+    payload.source?.subagent?.thread_spawn?.parent_thread_id,
+    payload.parent_thread_id
+  ) || null;
+}
+
 function sessionMetaFromRecord(record) {
   if (record?.type !== "session_meta" || !record.payload || typeof record.payload !== "object") {
     return null;
   }
   const payload = record.payload;
   const timestamp = record.timestamp ?? payload.timestamp ?? null;
+  const subagentName = subagentDisplayName(payload);
+  const threadId = typeof payload.id === "string"
+    && payload.id.length > 0
+    && payload.id.length <= HISTORY_THREAD_ID_MAX_CHARS
+    ? payload.id
+    : null;
   return {
-    threadId: typeof payload.id === "string"
-      && payload.id.length > 0
-      && payload.id.length <= HISTORY_THREAD_ID_MAX_CHARS
-      ? payload.id
-      : null,
+    ...(subagentName ? { subagentName } : {}),
+    threadId,
+    nativeSessionId: threadId,
+    sessionKind: isSubagentPayload(payload) ? "subagent" : "main",
+    parentSessionId: parentSessionId(payload),
     title: firstBoundedText(HISTORY_TITLE_MAX_CHARS, payload.title, payload.name),
     cwd: firstBoundedText(HISTORY_CWD_MAX_CHARS, payload.cwd),
     provider: firstBoundedText(HISTORY_PROVIDER_MAX_CHARS, payload.model_provider) || "(missing)",
@@ -135,6 +235,99 @@ function sessionMetaFromRecord(record) {
       ? timestamp
       : null
   };
+}
+
+async function resolveHistoryTitleStateDb(codexHome, sqliteHome) {
+  let configText = "";
+  try {
+    configText = await readConfigText(path.join(codexHome, "config.toml"));
+  } catch (error) {
+    // Missing config keeps the default/env layout. An unreadable config must
+    // not silently select another database when its configured path is unknown.
+    if (error?.code !== "ENOENT" && !sqliteHome) return null;
+  }
+  try {
+    const storage = resolveStorageLayout({ codexHome, sqliteHome, configText });
+    if (storage.sqliteAccess.supported === false) return null;
+    const stateDbLocation = await detectStateDb(storage);
+    return stateDbLocation ? { ...storage, stateDbLocation } : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readIndexedTitles(codexHome, ids) {
+  const titles = new Map();
+  if (ids.size === 0) return titles;
+  let handle;
+  try {
+    const lexicalRoot = path.resolve(codexHome);
+    const physicalRoot = await fs.realpath(lexicalRoot);
+    const candidate = { filePath: path.join(lexicalRoot, "session_index.jsonl"), lexicalRoot, physicalRoot };
+    const opened = await openRolloutCandidate(candidate);
+    handle = opened.handle;
+    // Snapshot the extent: an actively appended index cannot make this scan endless.
+    const { size } = await handle.stat();
+    const buffer = Buffer.allocUnsafe(16 * 1024);
+    let chunks = [];
+    let length = 0;
+    let oversized = false;
+    const consume = () => {
+      if (!oversized && length) {
+        try {
+          const row = JSON.parse(Buffer.concat(chunks, length).toString("utf8"));
+          if (ids.has(row.id) && typeof row.thread_name === "string") {
+            const title = normalizeText(row.thread_name).slice(0, HISTORY_TITLE_MAX_CHARS);
+            if (title) titles.set(row.id, title);
+          }
+        } catch { /* Ignore malformed or partially appended index records. */ }
+      }
+      chunks = [];
+      length = 0;
+      oversized = false;
+    };
+    for (let position = 0; position < size;) {
+      const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, size - position), position);
+      if (!bytesRead) break;
+      position += bytesRead;
+      let start = 0;
+      while (start < bytesRead) {
+        const newline = buffer.indexOf(10, start);
+        const end = newline >= 0 && newline < bytesRead ? newline : bytesRead;
+        if (!oversized) {
+          length += end - start;
+          if (length > HISTORY_METADATA_MAX_BYTES) {
+            oversized = true;
+            chunks = [];
+          } else chunks.push(Buffer.from(buffer.subarray(start, end)));
+        }
+        if (end < bytesRead) consume();
+        start = end + 1;
+      }
+    }
+    consume();
+    await validateOpenedRollout(candidate, handle, opened.physicalPath);
+    return titles;
+  } catch {
+    // The optional name index must never prevent read-only History browsing.
+    return new Map();
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+async function applyStoredTitles(sessions, stateDbLocation, codexHome) {
+  if (sessions.length === 0) return sessions;
+  const ids = sessions.map((session) => session.threadId).filter(Boolean);
+  const indexedTitles = await readIndexedTitles(codexHome, new Set(ids));
+  const titles = stateDbLocation ? await readSqliteThreadTitles(
+    stateDbLocation,
+    ids.filter((id) => !indexedTitles.has(id))
+  ) : new Map();
+  return sessions.map((session) => {
+    const title = firstBoundedText(HISTORY_TITLE_MAX_CHARS, indexedTitles.get(session.threadId), titles.get(session.threadId));
+    return title ? { ...session, title } : session;
+  });
 }
 
 async function openRolloutCandidate(candidate, expectedIdentity = null) {
@@ -333,6 +526,46 @@ async function listRolloutFiles(root, codexHomePhysical) {
   return result;
 }
 
+async function readHistoryCandidateSignature(candidate, archived, currentRootPhysical = null) {
+  const { filePath, lexicalRoot, physicalRoot } = candidate;
+  try {
+    const [resolvedRoot, namedStat, currentPhysicalPath] = await Promise.all([
+      currentRootPhysical ?? fs.realpath(lexicalRoot),
+      fs.lstat(filePath, { bigint: true }),
+      fs.realpath(filePath)
+    ]);
+    if (pathKey(resolvedRoot) !== pathKey(physicalRoot)
+        || namedStat.isSymbolicLink()
+        || !namedStat.isFile()
+        || !isWithinRoot(physicalRoot, currentPhysicalPath)) {
+      return null;
+    }
+    return {
+      key: historyCandidateKey(candidate, archived),
+      archived,
+      filePath,
+      lexicalRoot,
+      physicalRoot,
+      physicalPath: path.resolve(currentPhysicalPath),
+      fileIdentity: fileIdentity(namedStat)
+    };
+  } catch {
+    return null;
+  }
+}
+
+function historyCandidateSignatureFromSession(session) {
+  return {
+    key: historyCandidateKey(session, session.archived),
+    archived: session.archived,
+    filePath: session.filePath,
+    lexicalRoot: session.lexicalRoot,
+    physicalRoot: session.physicalRoot,
+    physicalPath: session.physicalPath,
+    fileIdentity: session.fileIdentity
+  };
+}
+
 async function readRolloutMetadata(candidate, archived) {
   const { filePath, lexicalRoot, physicalRoot } = candidate;
   let handle;
@@ -361,6 +594,7 @@ async function readRolloutMetadata(candidate, archived) {
       id: meta.threadId ?? fallbackSessionId(rolloutPath),
       rolloutPath,
       updatedAt: new Date(Number(finalStat.mtimeMs)).toISOString(),
+      fileModifiedAt: new Date(Number(finalStat.mtimeMs)).toISOString(),
       archived,
       messageCount: 0,
       messageCountKnown: false,
@@ -487,12 +721,14 @@ async function readRollout(
     .sort((left, right) => left.sequence - right.sequence)
     .at(-1);
   const rolloutPath = path.resolve(filePath);
+  const fileModifiedAt = new Date(Number(finalStat.mtimeMs)).toISOString();
   const updatedAt = lastVisible?.timestamp ?? new Date(Number(finalStat.mtimeMs)).toISOString();
   return {
     ...meta,
     id: meta.threadId ?? fallbackSessionId(rolloutPath),
     rolloutPath,
     updatedAt,
+    fileModifiedAt,
     archived,
     ...(includeMessages ? { messages: visibleMessages } : {}),
     messageCount,
@@ -509,26 +745,37 @@ async function readRollout(
 
 async function collectHistory(codexHome, options = {}) {
   const sessions = [];
+  const candidates = [];
+  let cacheable = true;
   let codexHomePhysical;
   try {
     codexHomePhysical = path.resolve(await fs.realpath(path.resolve(codexHome)));
   } catch (error) {
-    if (error?.code === "ENOENT") return [];
+    if (error?.code === "ENOENT") return { sessions, lookup: null };
     throw historyFileError(error, "resolving the Codex Home for history");
   }
   for (const dirName of SESSION_DIRS) {
     const files = await listRolloutFiles(path.join(codexHome, dirName), codexHomePhysical);
     for (const candidate of files) {
+      const archived = dirName === "archived_sessions";
       let session;
       try {
         session = options.metadataOnly
-          ? await readRolloutMetadata(candidate, dirName === "archived_sessions")
-          : await readRollout(candidate, dirName === "archived_sessions", options);
+          ? await readRolloutMetadata(candidate, archived)
+          : await readRollout(candidate, archived, options);
       } catch (error) {
-        if (error?.code === "ENOENT" || error?.code === "STALE_STATE") continue;
+        if (error?.code === "ENOENT" || error?.code === "STALE_STATE") {
+          cacheable = false;
+          continue;
+        }
         throw historyFileError(error, "reading a history rollout");
       }
       if (session) sessions.push(session);
+      const signature = session
+        ? historyCandidateSignatureFromSession(session)
+        : await readHistoryCandidateSignature(candidate, archived);
+      if (signature) candidates.push(signature);
+      else cacheable = false;
     }
   }
   const byId = new Map();
@@ -539,20 +786,100 @@ async function collectHistory(codexHome, options = {}) {
     const existing = byId.get(key);
     if (!existing || session.mtimeMs >= existing.mtimeMs) byId.set(key, session);
   }
-  return [...byId.values()].sort((a, b) => Date.parse(b.updatedAt || 0) - Date.parse(a.updatedAt || 0) || b.mtimeMs - a.mtimeMs);
+  return {
+    sessions: [...byId.values()].sort((a, b) => Date.parse(b.updatedAt || 0) - Date.parse(a.updatedAt || 0) || b.mtimeMs - a.mtimeMs),
+    lookup: cacheable ? { physicalHome: codexHomePhysical, candidates } : null
+  };
+}
+
+async function getValidatedCachedHistorySummary(codexHome, sessionId) {
+  let physicalHome;
+  try {
+    physicalHome = path.resolve(await fs.realpath(path.resolve(codexHome)));
+  } catch {
+    return null;
+  }
+  const key = historyLookupCacheKey(physicalHome);
+  const entry = historyLookupCache.get(key);
+  if (!entry || entry.expiresAt <= Date.now()) {
+    historyLookupCache.delete(key);
+    return null;
+  }
+  const selected = entry.summaries.get(sessionId);
+  if (!selected) return null;
+
+  const currentCandidates = [];
+  for (const dirName of SESSION_DIRS) {
+    const archived = dirName === "archived_sessions";
+    const files = await listRolloutFiles(path.join(codexHome, dirName), physicalHome);
+    let currentRootPhysical = null;
+    if (files.length > 0) {
+      try {
+        currentRootPhysical = await fs.realpath(files[0].lexicalRoot);
+      } catch {
+        historyLookupCache.delete(key);
+        return null;
+      }
+    }
+    for (const candidate of files) {
+      const signature = await readHistoryCandidateSignature(candidate, archived, currentRootPhysical);
+      if (!signature) {
+        historyLookupCache.delete(key);
+        return null;
+      }
+      currentCandidates.push(signature);
+    }
+  }
+  if (currentCandidates.length !== entry.candidates.length) {
+    historyLookupCache.delete(key);
+    return null;
+  }
+  const expectedByKey = new Map(entry.candidates.map((candidate) => [candidate.key, candidate]));
+  if (expectedByKey.size !== currentCandidates.length
+      || currentCandidates.some((candidate) => !sameHistoryCandidateSignature(expectedByKey.get(candidate.key), candidate))) {
+    historyLookupCache.delete(key);
+    return null;
+  }
+
+  let refreshed;
+  try {
+    refreshed = await readRolloutMetadata({
+      filePath: selected.filePath,
+      lexicalRoot: selected.lexicalRoot,
+      physicalRoot: selected.physicalRoot
+    }, selected.archived);
+  } catch (error) {
+    if (error?.code !== "STALE_STATE" && error?.code !== "ENOENT") throw error;
+  }
+  if (!refreshed
+      || refreshed.id !== sessionId
+      || !sameFileIdentity(selected.fileIdentity, refreshed.fileIdentity)
+      || pathKey(selected.physicalPath) !== pathKey(refreshed.physicalPath)) {
+    historyLookupCache.delete(key);
+    return null;
+  }
+  entry.expiresAt = Date.now() + HISTORY_LOOKUP_CACHE_TTL_MS;
+  historyLookupCache.delete(key);
+  historyLookupCache.set(key, entry);
+  return refreshed;
 }
 
 function publicSession(session) {
   return {
     id: session.id,
+    nativeSessionId: session.nativeSessionId ?? null,
+    sessionKind: session.sessionKind,
+    parentSessionId: session.parentSessionId ?? null,
     rolloutPath: session.rolloutPath,
     title: session.title || "",
+    ...(session.subagentName ? { subagentName: session.subagentName } : {}),
     cwd: session.cwd,
     provider: session.provider,
     model: session.model,
     archived: session.archived,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
+    fileModifiedAt: session.fileModifiedAt,
     messageCount: session.messageCount,
     ...(typeof session.messageCountKnown === "boolean"
       ? { messageCountKnown: session.messageCountKnown }
@@ -576,24 +903,75 @@ export function validateHistoryPage(pageValue, pageSizeValue = DEFAULT_PAGE_SIZE
 }
 
 export async function listHistory(codexHome, options = {}) {
-  const { page, pageSize } = validateHistoryPage(options.page, options.pageSize ?? DEFAULT_PAGE_SIZE);
+  // A list call is the explicit refresh boundary. Do not serve it from, or
+  // leave it competing with, an older detail lookup.
+  await invalidateHistoryLookup(codexHome);
+  const view = options.view ?? "flat";
+  if (!["flat", "projects"].includes(view)) {
+    throw new CoreError("INVALID_INPUT", "view must be flat or projects.");
+  }
+  if (view === "projects" && options.projectId !== undefined
+      && !(typeof options.projectId === "string" && (/^[a-f0-9]{64}$/.test(options.projectId) || ["unassigned", "orphans"].includes(options.projectId)))) {
+    throw new CoreError("INVALID_INPUT", "projectId is invalid.");
+  }
+  if (view === "projects" && options.parentId !== undefined
+      && !(typeof options.parentId === "string" && options.parentId.length > 0 && options.parentId.length <= HISTORY_THREAD_ID_MAX_CHARS)) {
+    throw new CoreError("INVALID_INPUT", "parentId is invalid.");
+  }
+  const { page, pageSize } = validateHistoryPage(
+    options.page,
+    options.pageSize ?? (view === "projects" ? 10 : DEFAULT_PAGE_SIZE)
+  );
   const query = normalizeText(options.query).toLowerCase();
   const project = normalizeText(options.project).toLowerCase();
   const provider = normalizeText(options.provider);
   const archived = options.archived ?? "all";
+  const searchScope = options.searchScope ?? "content";
+  const sessionKind = options.sessionKind ?? "all";
   if (!["all", "active", "archived"].includes(archived)) {
     throw new CoreError("INVALID_INPUT", "archived must be all, active, or archived.");
   }
-  const sessions = await collectHistory(codexHome, {
+  if (!["metadata", "content"].includes(searchScope)) {
+    throw new CoreError("INVALID_INPUT", "searchScope must be metadata or content.");
+  }
+  if (!["all", "main", "subagent"].includes(sessionKind)) {
+    throw new CoreError("INVALID_INPUT", "sessionKind must be all, main, or subagent.");
+  }
+  const stateDbLocation = await resolveHistoryTitleStateDb(codexHome, options.sqliteHome);
+  const collection = await collectHistory(codexHome, {
     searchQuery: query,
-    metadataOnly: !query
+    metadataOnly: !query || searchScope === "metadata"
   });
+  const sessions = await applyStoredTitles(collection.sessions, stateDbLocation, codexHome);
+  storeHistoryLookup(collection.lookup, sessions);
+  if (view === "projects") {
+    const result = await listHistoryProjects(codexHome, sessions, {
+      page,
+      pageSize,
+      query,
+      projectText: project,
+      projectId: options.projectId,
+      parentId: options.parentId,
+      provider,
+      archived,
+      sessionKind
+    });
+    return { ...result, sessions: result.sessions.map((session) => ({ ...publicSession(session), project: session.project, childCount: session.childCount })) };
+  }
   const filtered = sessions.filter((session) => {
     if (provider && session.provider !== provider) return false;
     if (archived !== "all" && session.archived !== (archived === "archived")) return false;
+    if (sessionKind !== "all" && session.sessionKind !== sessionKind) return false;
     if (project && !session.cwd.toLowerCase().includes(project)) return false;
     if (query) {
-      const metadata = [session.title, session.cwd, session.provider].join("\n").toLowerCase();
+      const metadata = [
+        session.title,
+        session.id,
+        session.nativeSessionId,
+        session.cwd,
+        session.provider,
+        session.subagentName
+      ].filter(Boolean).join("\n").toLowerCase();
       if (!metadata.includes(query) && !session.messageQueryMatched) return false;
     }
     return true;
@@ -602,17 +980,35 @@ export async function listHistory(codexHome, options = {}) {
   return { page, pageSize, total: filtered.length, hasNextPage: start + pageSize < filtered.length, sessions: filtered.slice(start, start + pageSize).map(publicSession) };
 }
 
-export async function getHistorySession(codexHome, sessionId, { messageLimit = DEFAULT_MESSAGE_LIMIT } = {}) {
+export async function getHistorySession(
+  codexHome,
+  sessionId,
+  { messageLimit = DEFAULT_MESSAGE_LIMIT, sqliteHome, metadataOnly = false } = {}
+) {
   if (typeof sessionId !== "string" || !sessionId.trim()) {
     throw new CoreError("INVALID_INPUT", "sessionId is required.");
   }
-  const summaries = await collectHistory(codexHome, { metadataOnly: true });
-  const summary = summaries.find((item) => item.id === sessionId);
+  const stateDbLocation = await resolveHistoryTitleStateDb(codexHome, sqliteHome);
+  let summary = await getValidatedCachedHistorySummary(codexHome, sessionId);
+  if (!summary) {
+    const collection = await collectHistory(codexHome, { metadataOnly: true });
+    storeHistoryLookup(collection.lookup, collection.sessions);
+    summary = collection.sessions.find((item) => item.id === sessionId);
+  }
   if (!summary) {
     throw new CoreError(
       "INVALID_INPUT",
       "The selected session was not found in this Codex Home."
     );
+  }
+  [summary] = await applyStoredTitles([summary], stateDbLocation, codexHome);
+  if (metadataOnly === true) {
+    return {
+      session: publicSession(summary),
+      messages: [],
+      truncated: false,
+      returnedMessageCount: 0
+    };
   }
   const safeLimit = Number.isInteger(messageLimit) && messageLimit > 0
     ? Math.min(messageLimit, DEFAULT_MESSAGE_LIMIT)
@@ -637,6 +1033,7 @@ export async function getHistorySession(codexHome, sessionId, { messageLimit = D
       "The selected session changed before its messages could be read."
     );
   }
+  if (summary.title) session.title = summary.title;
   const messages = session.messages;
   return { session: publicSession(session), messages, truncated: messages.length < session.messageCount, returnedMessageCount: messages.length };
 }

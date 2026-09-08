@@ -18,6 +18,8 @@ V1 的 Node Public API 已实现 Canonical `CoreError`/DTO，CLI JSON Adapter �
 
 ## 2. 稳定边界
 
+ADR-0035 增量：`INVALID_INPUT` 可携带固定 `details.reason=provider-not-configured`，表示目标自定义 Provider 在 config 缺少定义，尚未业务写入。UI 可按此白名单原因提供配置后重试的说明，不回显原始 config。`STALE_STATE` 仍按 profile/config/storage/rollout/state-db 原因区分；Sync/Switch 的相关 revision 定义见 ADR-0035，Repair/Restore 不放宽。
+
 vNext Core 对外错误 DTO 采用以下语义：
 
 ```ts

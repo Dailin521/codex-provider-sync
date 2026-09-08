@@ -3,6 +3,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { CoreError } from "./core-error.js";
+import { collectProviderChanges, readProviderRevisionHeader } from "./session-files.js";
+import { readSqliteProviderRevisionState } from "./sqlite-state.js";
 
 const SESSION_SCOPES = ["sessions", "archived_sessions"];
 const LOCKED_FILE_CODES = new Set(["EACCES", "EBUSY", "EPERM", "ETXTBSY"]);
@@ -54,6 +56,57 @@ function sameStat(left, right) {
     && left.size === right.size
     && left.mtimeNs === right.mtimeNs
     && left.ctimeNs === right.ctimeNs;
+}
+
+async function physicalFileIdentity(filePath, fsImpl, reason) {
+  let stats;
+  try {
+    stats = await fsImpl.lstat(filePath, { bigint: true });
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    throw new CoreError("STALE_STATE", "A revision target disappeared.", { details: { reason } });
+  }
+  if (!stats.isFile() || stats.isSymbolicLink() || stats.ino === 0n) {
+    throw new CoreError("STALE_STATE", "The revision file identity cannot be verified.", { details: { reason } });
+  }
+  return {
+    identity: {
+      realPath: comparablePath(await fsImpl.realpath(filePath), process.platform),
+      dev: String(stats.dev), ino: String(stats.ino), nlink: String(stats.nlink)
+    },
+    size: String(stats.size),
+    snapshot: {
+      size: Number(stats.size), mtimeMs: Number(stats.mtimeNs) / 1e6,
+      mode: Number(stats.mode), nlink: Number(stats.nlink),
+      dev: String(stats.dev), ino: String(stats.ino)
+    }
+  };
+}
+
+async function captureProviderHeader(filePath, fsImpl, minimumSize, onProviderHeader) {
+  const before = await physicalFileIdentity(filePath, fsImpl, "rollout");
+  if (minimumSize !== undefined && BigInt(before.size) < BigInt(minimumSize)) {
+    throw new CoreError("STALE_STATE", "A planned rollout was truncated.", { details: { reason: "rollout" } });
+  }
+  let header;
+  let record;
+  try {
+    record = await readProviderRevisionHeader(filePath, { fsImpl });
+    header = { headerHash: sha256Revision(record.firstLine + record.separator) };
+  } catch (error) {
+    if (!LOCKED_FILE_CODES.has(error?.code)) throw error;
+    header = { locked: true, causeCode: error.code };
+  }
+  const after = await physicalFileIdentity(filePath, fsImpl, "rollout");
+  if (stableStringify(before.identity) !== stableStringify(after.identity)
+      || BigInt(after.size) < BigInt(before.size)) {
+    throw new CoreError("STALE_STATE", "A planned rollout was replaced or truncated.", { details: { reason: "rollout" } });
+  }
+  onProviderHeader?.(filePath, {
+    record, beforeSnapshot: before.snapshot, afterSnapshot: after.snapshot,
+    locked: header.locked === true
+  });
+  return { ...after.identity, ...header, observedSize: after.size };
 }
 
 async function captureStableFile(filePath, fsImpl, { allowLocked = false } = {}) {
@@ -154,20 +207,25 @@ async function listRolloutFiles(rootDir, fsImpl) {
   return files;
 }
 
-export async function captureRolloutRevision(codexHome, { fsImpl = fs, mode = "content" } = {}) {
-  if (mode !== "content" && mode !== "metadata") {
+export async function captureRolloutRevision(codexHome, { fsImpl = fs, mode = "content", minimumSizes = {} } = {}, onProviderHeader = undefined) {
+  if (!["content", "metadata", "provider"].includes(mode)) {
     throw new CoreError("INVALID_INPUT", "Unsupported rollout revision mode.");
   }
   const manifest = [];
   const lockedRolloutFiles = [];
+  const observedSizes = {};
   for (const scope of SESSION_SCOPES) {
     const scopeRoot = path.join(codexHome, scope);
     for (const filePath of await listRolloutFiles(scopeRoot, fsImpl)) {
       const relativePath = path.relative(codexHome, filePath).split(path.sep).join("/");
-      const revision = mode === "metadata"
+      const revision = mode === "provider"
+        ? await captureProviderHeader(filePath, fsImpl, minimumSizes[relativePath], onProviderHeader)
+        : mode === "metadata"
         ? await captureStableMetadata(filePath, fsImpl, { allowLocked: true })
         : await captureStableFile(filePath, fsImpl, { allowLocked: true });
-      manifest.push({ path: relativePath, ...revision });
+      const { observedSize, ...binding } = revision;
+      if (observedSize !== undefined) observedSizes[relativePath] = observedSize;
+      manifest.push({ path: relativePath, ...binding });
       if (revision.locked) lockedRolloutFiles.push(relativePath);
     }
   }
@@ -176,14 +234,44 @@ export async function captureRolloutRevision(codexHome, { fsImpl = fs, mode = "c
     revision: sha256Revision(stableStringify(manifest)),
     fileCount: manifest.length,
     rolloutScanComplete: lockedRolloutFiles.length === 0,
-    lockedRolloutFiles
+    lockedRolloutFiles,
+    ...(mode === "provider" ? { observedSizes } : {})
   };
 }
 
-export async function captureStateDbRevision(storage, { fsImpl = fs, platform = process.platform } = {}) {
+// Keep the revision reader/manifest authoritative. Its private callback lends
+// first-line facts to the existing Provider-only collector during this call.
+// No body read, persistent cache, new manifest algorithm or Apply descriptor.
+export async function collectProviderPreparationFacts(codexHome, targetProvider, { fsImpl = fs } = {}) {
+  const records = new Map();
+  try {
+    const rollout = await captureRolloutRevision(codexHome, { fsImpl, mode: "provider" },
+      (filePath, record) => records.set(filePath, record));
+    const scan = await collectProviderChanges(codexHome, targetProvider, { skipLockedReads: true }, records);
+    return { rollout, scan };
+  } catch (error) {
+    if (error?.name === "RolloutMetadataLimitError") {
+      throw new CoreError("ROLLOUT_CHANGED", "Provider sync requires a session metadata header no larger than 1 MiB.", { cause: error });
+    }
+    throw error;
+  } finally {
+    records.clear();
+  }
+}
+
+export async function captureStateDbRevision(storage, { fsImpl = fs, platform = process.platform, mode = "content" } = {}) {
   const stateDbPath = storage.stateDbLocation?.path ?? null;
   if (!stateDbPath) {
     return sha256Revision(stableStringify({ stateDb: null }));
+  }
+  if (mode === "provider") {
+    const before = await physicalFileIdentity(stateDbPath, fsImpl, "state-db");
+    const state = await readSqliteProviderRevisionState(stateDbPath);
+    const after = await physicalFileIdentity(stateDbPath, fsImpl, "state-db");
+    if (stableStringify(before.identity) !== stableStringify(after.identity)) {
+      throw new CoreError("STALE_STATE", "The planned State DB was replaced.", { details: { reason: "state-db" } });
+    }
+    return sha256Revision(stableStringify({ identity: after.identity, state }));
   }
   const manifest = [];
   for (const suffix of ["", "-wal", "-shm"]) {
@@ -263,13 +351,14 @@ export async function captureOperationRevisions({
   storage,
   backupDir = null,
   rolloutRevisionMode = "content",
+  minimumRolloutSizes = {},
   platform = process.platform,
   fsImpl = fs
-}) {
+}, preparedRollout = null) {
   const configRevision = captureConfigRevision(configText);
   const [rollout, stateDbRevision, backupRevision] = await Promise.all([
-    captureRolloutRevision(codexHome, { fsImpl, mode: rolloutRevisionMode }),
-    captureStateDbRevision(storage, { fsImpl, platform }),
+    preparedRollout ?? captureRolloutRevision(codexHome, { fsImpl, mode: rolloutRevisionMode, minimumSizes: minimumRolloutSizes }),
+    captureStateDbRevision(storage, { fsImpl, platform, mode: rolloutRevisionMode === "provider" ? "provider" : "content" }),
     backupDir ? captureBackupRevision(backupDir, { fsImpl }) : Promise.resolve(null)
   ]);
   return {
@@ -278,6 +367,7 @@ export async function captureOperationRevisions({
     storageRevision: captureStorageRevision({ profileRevision, configRevision, storage, platform }),
     rolloutRevision: rollout.revision,
     stateDbRevision,
+    ...(rollout.observedSizes ? { providerRolloutSizes: rollout.observedSizes } : {}),
     ...(backupRevision ? { backupRevision } : {}),
     rolloutScanComplete: rollout.rolloutScanComplete,
     lockedRolloutFiles: rollout.lockedRolloutFiles,

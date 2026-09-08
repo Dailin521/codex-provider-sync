@@ -10,6 +10,10 @@
 
 V1/ADR-0016 增量：Provider Sync 固定为首行 Provider-only 路径，目标只取自 `config.toml` 当前根级 `model_provider`。公开 `sync --provider`、`--fast`、`syncMode` 与 `FAST_MODE_UNSUPPORTED` 已移除。完整扫描改为用户主动执行的只读 `diagnostics`；模型、cwd、user-event 与 workspace roots 只由显式 `repair` 修改。详见 [ADR-0016](../../adr/0016-node-core-responsibility-boundaries-and-lightweight-writes.md)。
 
+当前实现映射、原地字节更新资格及回归入口见 [Node Core 当前架构](../NODE_CORE_ARCHITECTURE_ZH.md)。保留的 v0.5 章节是历史兼容范围，不覆盖已明确修订的 V1 默认值和普通写模型；代码意外偏离合同仍按 bug 处理。
+
+ADR-0033 状态反馈修订：`status` 读取漂移/失败的降级快照以 Human 的 `Status: refresh needed` 及手动重试说明展示，不虚构 busy、不打印缺失/旧计数。真实操作/无法验证的 Home 锁单独提示。JSON 保留 `statusReadBlocked.reason` 白名单（`write-operation/codex-home-lock/revision-unverifiable/state-changed-during-status`），未知原因降级为 `revision-unverifiable`，不附异常文本；`rolloutScanComplete:false` 不得当健康。成功读取降级状态仍退出 0、`ok:true`，这只表示查询完成，不表示已对齐。普通正常 Human 输出及 Apply 退出码不变。
+
 ## 1. 文档目的
 
 本文冻结 vNext 迁移开始时已经存在的 Node CLI 外部行为，防止提取 Node Core、增加 Electron、重组仓库或迁移到 TypeScript 时无意破坏现有用户和自动化脚本。
@@ -25,7 +29,7 @@ V1/ADR-0016 增量：Provider Sync 固定为首行 Provider-only 路径，目标
 
 ## 2. npm 与运行时入口
 
-### 2.1 v0.5 当前合同
+### 2.1 当前 V1 入口（保持根包兼容）
 
 | 项目 | 当前值 |
 | --- | --- |
@@ -42,8 +46,9 @@ V1/ADR-0016 增量：Provider Sync 固定为首行 Provider-only 路径，目标
 
 | 脚本 | 当前命令 |
 | --- | --- |
-| `npm test` | `node --test` |
-| `npm run web:build` | `vite build --config web/vite.config.js` |
+| `npm test` | `node scripts/run-root-tests.js` |
+| `npm run web:build` | 构建 workspace 后执行 Web workspace 的 Vite build |
+| `npm run architecture:check` | workspace 边界/类型/合同 + Provider I/O 回归 |
 | `npm run web:start` | `node src/cli.js web` |
 | `npm run publish:npm` | `node scripts/publish-npm.js` |
 
@@ -89,18 +94,18 @@ Windows 下的 `\\wsl.localhost\...` 和 `\\wsl$\...` SQLite Home 仅用于诊�
 
 ## 4. 命令总表
 
-### 4.1 v0.5 当前合同
+### 4.1 当前 V1 命令
 
 | 命令 | 主要作用 | 写入 | 关键默认值 |
 | --- | --- | --- | --- |
 | `status` | 检查 Provider、rollout、SQLite、备份与恢复状态 | 否 | 当前存储布局 |
-| `sync` | 将历史元数据同步到目标 Provider | 是 | 当前 Provider；保留 5 份备份 |
-| `switch` | 修改根级 Provider，并同步历史元数据 | 是 | 跟随目标 Provider 的 model；保留 5 份备份 |
+| `sync` | 将 rollout/SQLite Provider 对齐到 config | 是 | 当前 Provider；保留 2 份备份，noop 不备份 |
+| `switch` | 修改根级 Provider/model，再同步 Provider | 是 | 有 Provider model 则跟随，否则保留根模型；保留 2 份备份 |
 | `diagnostics` | 完整扫描 Provider 之外的元数据问题 | 否 | 只在用户主动执行时扫描一次 |
-| `repair` | 修复显式选择的非 Provider 元数据 | 是 | 至少一个目标；保留 5 份备份 |
+| `repair` | 修复显式选择的非 Provider 元数据 | 是 | 至少一个目标；保留 2 份备份 |
 | `watch` | 监听配置和 SQLite 变化并自动同步 | 是 | 750 ms；监听 state DB；持续运行 |
 | `web` | 启动本地 Web UI | Web 操作可写 | 端口 8791；自动打开浏览器 |
-| `prune-backups` | 清理较旧的托管备份 | 是，删除托管备份 | 保留 5 份 |
+| `prune-backups` | 清理较旧的托管备份 | 是，删除托管备份 | 保留 2 份 |
 | `restore` | 从托管备份恢复 | 是 | 恢复配置、数据库和 rollout |
 | `install-windows-launcher` | 安装 Windows 双击启动脚本 | 是 | 当前用户 Desktop |
 
@@ -172,7 +177,7 @@ codex-provider sync [--keep N] [--codex-home PATH] [--sqlite-home PATH]
 
 | 参数 | 当前含义 | 默认值 |
 | --- | --- | --- |
-| `--keep N` | 成功后保留最近 N 份托管备份 | `5` |
+| `--keep N` | 成功后保留最近 N 份托管备份 | `2` |
 | `--codex-home PATH` | 覆盖 Codex Home | 第 3 节规则 |
 | `--sqlite-home PATH` | 覆盖 SQLite Home | 第 3 节规则 |
 
@@ -182,8 +187,9 @@ codex-provider sync [--keep N] [--codex-home PATH] [--sqlite-home PATH]
 
 - 目标 Provider 始终取自 `config.toml` 根级 `model_provider`，缺失时为 `openai`；
 - `sync` 不修改根级 `model_provider`；
-- 每个 rollout 只读取首行 `session_meta`，不打开或解析聊天正文；
-- Provider JSON 字面量等长时只原地替换相应字节并保留文件身份、大小和正文 Hash；长度不同时流式生成临时文件并原子替换，正文逐字节不变；
+- ADR-0035：自定义当前 Provider 必须已在 config 定义，否则 `INVALID_INPUT` / `reason=provider-not-configured`，Human 退出 1、JSON 退出 2，未创建备份/修改业务数据；不会因缺失定义擅自切回 openai。Sync/Switch 只将 Provider 相关 revision 漂移视为 stale，正常聊天追加和非 Provider SQLite 列更新不单独令计划过期。
+- 每个 rollout 仅解析有界首行 `session_meta`，不打开全文正文扫描；底层允许有界块预读，变长替换允许原样复制尾部；
+- 满足 PIO-2 安全 ID、UTF-8 字节等长、唯一字面量与文件校验条件时必须原地覆盖，保留文件身份、大小和正文 Hash；不符合资格的有效首行流式替换，正文逐字节不变；原地写失败不能强制降级替换；
 - 不修改历史模型、cwd、user-event、workspace roots 或加密内容；
 - 写入前获取同一 Codex Home 的跨进程锁；
 - 旧 Sync/Switch journal 只作为诊断兼容信息，不阻止新的普通写操作；未解决 Restore journal 仍阻止写入；
@@ -199,6 +205,8 @@ codex-provider sync [--keep N] [--codex-home PATH] [--sqlite-home PATH]
 ### 6.4 成功时的进度输出
 
 CLI 使用以下六个编号阶段：
+
+这是 Sync 的兼容要求。专项 Repair 的 `verify_repair` 阶段不能进入 Sync 阶段分母；若实现输出 `[1/7]`，应修复阶段隔离，不能据此改写下面的合同或放宽断言。
 
 ```text
 [1/6] Scanning rollout files...
@@ -244,7 +252,7 @@ codex-provider switch <provider-id> [--model NAME] [--keep-root-model] [--keep N
 | `<provider-id>` | 目标 Provider | 必填 |
 | `--model NAME` | 显式设置根级 model；不修改历史线程模型 | 未设置 |
 | `--keep-root-model` | 保留现有根级 model | `false` |
-| `--keep N` | 成功后保留最近 N 份托管备份 | `5` |
+| `--keep N` | 成功后保留最近 N 份托管备份 | `2` |
 
 `--model` 与 `--keep-root-model` 互斥。`--model` 必须是非空字符串。
 
@@ -285,7 +293,7 @@ codex-provider repair <targets> [--json] [--keep N] [--codex-home PATH] [--sqlit
 
 `diagnostics` 每次调用执行一次完整流式只读扫描，报告历史模型、cwd、user-event、workspace roots 和加密内容问题；它不在后台或定时运行，也不修改任何目标。
 
-`repair` 的 `<targets>` 是逗号分隔、不可重复的 `models`、`cwd`、`userEvent`、`workspaceRoots`。至少选择一个目标；`workspaceRoots` 自动包含 `cwd`。`models` 使用 config 当前根模型，根模型缺失时 Prepare 失败。加密内容只诊断，不能作为 Repair 目标。Repair 仅扫描所选目标需要的数据，并在一次 SQLite 事务内提交数据库修改。
+`repair` 的 `<targets>` 是逗号分隔、不可重复的 `models`、`cwd`、`userEvent`、`workspaceRoots`。至少选择一个目标；`workspaceRoots` 自动包含 `cwd`。`models` 使用 config 当前根模型，根模型缺失时 Prepare 失败。加密内容只诊断，不能作为 Repair 目标。Repair 仅扫描所选目标需要的数据，并在一次 SQLite 事务内提交数据库修改。`--keep` 默认 `2`，且必须为大于等于 `1` 的整数。
 
 ## 9. `watch`
 
@@ -359,7 +367,7 @@ codex-provider prune-backups [--keep N] [--codex-home PATH]
 
 ### 11.2 当前行为
 
-- `--keep` 默认 `5`，必须是非负整数，允许 `0`；
+- `--keep` 默认 `2`，必须是非负整数，允许 `0`；
 - 只处理 `<Codex Home>/backups_state/provider-sync` 中具有本工具 metadata namespace 的托管备份；
 - 忽略不具有托管 metadata 的手工目录；
 - 永不删除未完成事务正在引用的恢复备份；
@@ -434,6 +442,8 @@ Human Mode 不采用 JSON 模式的 `2`、`3`、`4`、`5`、`130`；partial 仍�
 
 ### 14.2 vNext C2 JSON 合同
 
+ADR-0038：Windows Sync/Switch JSON 的 result 可选包含白名单 fileUpdateTiming 数值聚合，与 Core 合同一致；缺失不补零，字段含义/嵌套关系见对应 ADR。顶层键、Human 输出、进度 stderr 与 partial 退出码 3 不变。
+
 JSON Mode 的 stdout 必须恰好包含一个 UTF-8 JSON 文档和结尾换行；进度、运行时 warning 与诊断只能进入 stderr。顶层字段始终全部存在、顺序固定，且不得增加未版本化字段：
 
 ```json
@@ -475,6 +485,8 @@ JSON Mode 退出码固定为：
 | `130` | cancelled |
 
 CLI Exit Code 与 Error Code 是两层合同：多个 Canonical Error Code 可以映射到同一退出码。`--help --json` 返回 `ok:true` 的 schema v1 帮助结果；不存在稳定的 `--version` JSON 合同。
+
+当前有限 Sync/Switch/Repair/Restore CLI 分支未安装 SIGINT/SIGTERM 的受控取消入口，也未向用例传递终端信号。`130` 规定的是已经返回 cancelled 时的结果映射，不承诺用户按 Ctrl+C 会经过 Core 取消边界或输出终态 JSON；Watch/Web 的信号清理见其独立章节。此处澄清当前适配能力，不改变 Core 的可信 signal 合同。
 
 ### 14.3 后续变更规则
 
@@ -528,7 +540,7 @@ Phase 0 之后的 CLI 改造至少必须覆盖：
 - 帮助文本可运行且 exit `0`；
 - 未知命令和非法 `--keep` 的 stderr 与 exit `1`；
 - `status` 的顶层输出顺序；
-- `sync` 默认 Provider、默认 keep=5、六阶段进度、首行读取和两种写入策略；
+- `sync` 默认 Provider、默认 keep=2、六阶段进度、首行读取和两种写入策略；
 - 拒绝公开 `sync --provider`、`--fast` 与 `syncMode`；
 - `switch` 的三种 model 策略与互斥校验；
 - `diagnostics` 完整扫描一次、只读且不后台刷新；
@@ -547,6 +559,10 @@ Phase 0 之后的 CLI 改造至少必须覆盖：
 - Human Mode 的帮助、进度、partial 和 `0/1` 行为保持既有回归。
 
 ## 18. 变更控制
+
+ADR-0034：`diagnostics` 共用单次事实扫描，不因读取期间数据变化重复整轮扫描；JSON 的 `safety.rolloutScanComplete=false` 表示结果未完整核验。独立有界历史完整性检查继续运行，命令、退出码和输出包络不变。Repair Plan 分类字段仅为兼容摘要增量，不改变 CLI 写入范围或计数结果。
+
+V1 ADR-0021：`repair` Human 输出追加修后核验状态和分维度剩余计数；JSON result 追加 `verification`，核验残留或不可用为 partial、退出码仍为3。`diagnostics` 追加只读历史记录检查摘要，JSON 追加脱敏 `historyIntegrity`。索引不支持时明确标注未验证；不增加自动序号修复或索引重建命令。现有 `repair <targets>` 继续全 Profile，按会话交互由共享 UI 的 Prepare 输入提供；CLI 输入/输出包络及0/1 Human退出兼容保持。
 
 修改以下任一内容，必须同时更新本文、Contract Test 和发布说明：
 

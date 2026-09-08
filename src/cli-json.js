@@ -1,4 +1,6 @@
 import path from "node:path";
+import { publicFileUpdateTiming } from "../packages/contracts/dist/index.js";
+import { publicHistoryIntegrity } from "./history-integrity-dto.js";
 
 export const CLI_JSON_SCHEMA_VERSION = 1;
 
@@ -39,6 +41,7 @@ const SAFE_REASONS = new Set([
   "storage",
   "rollout",
   "state-db",
+  "provider-not-configured",
   "windows-wsl-unc"
 ]);
 const SQLITE_HOME_SOURCES = new Set(["cli", "config", "env", "default"]);
@@ -249,6 +252,7 @@ function sanitizeModelSync(value) {
 
 function sanitizeSyncResult(value) {
   const result = {};
+  put(result, "fileUpdateTiming", publicFileUpdateTiming(value.fileUpdateTiming));
   for (const key of ["codexHome", "sqliteHome", "backupDir"]) {
     put(result, key, safeString(value[key], 32768));
   }
@@ -270,7 +274,7 @@ function sanitizeSyncResult(value) {
   put(result, "sqlitePresent", safeBoolean(value.sqlitePresent));
   put(result, "partial", safeBoolean(value.partial));
   putNullable(result, "partialReason", value.partialReason, (entry) => (
-    ["locked-session", "rollout-changed", "mutation-failed"].includes(entry) ? entry : undefined
+    ["locked-session", "rollout-changed", "mutation-failed", "verification-remaining", "verification-unavailable"].includes(entry) ? entry : undefined
   ));
   putNullable(result, "failedStage", value.failedStage, (entry) => (
     PARTIAL_FAILURE_STAGES.has(entry) ? entry : undefined
@@ -302,6 +306,15 @@ function sanitizeRepairResult(value) {
     result.repairTargets = value.repairTargets.filter((entry) => targets.has(entry));
   }
   putNullable(result, "targetModel", value.targetModel, (entry) => safeString(entry, 512, { allowEmpty: true }));
+  if (value.verification && typeof value.verification === "object") {
+    const verification = value.verification;
+    result.verification = {
+      status: ["verified", "remaining", "unavailable"].includes(verification.status) ? verification.status : "unavailable",
+      ...Object.fromEntries(["remainingRolloutFiles", "remainingSqliteRows", "remainingWorkspaceRoots", "skippedSessions"].map((key) => [key,
+        safeNumber(verification[key], { integer: true, minimum: 0 }) ?? 0
+      ]))
+    };
+  }
   for (const key of [
     "sqliteModelRowsUpdated",
     "sqliteUserEventRowsUpdated",
@@ -433,6 +446,12 @@ function sanitizeStatusResult(value) {
   } else if (value.operationInProgress === null) {
     result.operationInProgress = null;
   }
+  if (value.statusReadBlocked && typeof value.statusReadBlocked === "object") {
+    const reasons = new Set(["write-operation", "codex-home-lock", "revision-unverifiable", "state-changed-during-status"]);
+    result.statusReadBlocked = {
+      reason: reasons.has(value.statusReadBlocked.reason) ? value.statusReadBlocked.reason : "revision-unverifiable"
+    };
+  }
   put(result, "rolloutScanComplete", safeBoolean(value.rolloutScanComplete));
   return result;
 }
@@ -527,6 +546,7 @@ function sanitizeDiagnosticsResult(value) {
     "encryptedContentFiles"
   ]) put(issues, key, safeNumber(sourceIssues[key], { integer: true, minimum: 0 }));
   result.issues = issues;
+  put(result, "historyIntegrity", publicHistoryIntegrity(value.historyIntegrity));
   const safety = value.safety && typeof value.safety === "object" && !Array.isArray(value.safety)
     ? value.safety
     : {};

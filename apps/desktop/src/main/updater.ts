@@ -29,6 +29,15 @@ export interface DesktopUpdaterPort {
 export type DesktopRecoveryVerification = "clear" | "blocked" | "unverifiable";
 
 export interface DesktopUpdateControllerOptions {
+  claimStartupCheck?(): Promise<boolean>;
+  runStartupCheck?(check: () => Promise<DesktopUpdateStatus>): Promise<DesktopUpdateStatus>;
+  onStartupUpdateAvailable?(status: DesktopUpdateStatus): Promise<void>;
+  manualUpdates?: {
+    force?: boolean;
+    check(): Promise<{ version: string } | null>;
+    openDownloadPage(): Promise<void>;
+  };
+  onStatus?(status: DesktopUpdateStatus): void;
   isPackaged: boolean;
   platform: NodeJS.Platform;
   arch: string;
@@ -89,6 +98,13 @@ export async function createProductionUpdaterPort(options: {
 }
 
 export class DesktopUpdateController {
+  readonly #claimStartupCheck: DesktopUpdateControllerOptions["claimStartupCheck"];
+  readonly #runStartupCheck: DesktopUpdateControllerOptions["runStartupCheck"];
+  readonly #onStartupUpdateAvailable: DesktopUpdateControllerOptions["onStartupUpdateAvailable"];
+  #startupScheduled = false;
+  readonly #appVersion: string;
+  readonly #manualUpdates: DesktopUpdateControllerOptions["manualUpdates"];
+  readonly #onStatus: DesktopUpdateControllerOptions["onStatus"];
   readonly #supervisor: Pick<CoreRuntimeSupervisor, "snapshot" | "tryBeginRestartInstall">;
   readonly #hasActiveWatches: () => boolean;
   readonly #verifyNoActiveWatches: () => Promise<boolean>;
@@ -114,6 +130,11 @@ export class DesktopUpdateController {
   #disposed = false;
 
   constructor(options: DesktopUpdateControllerOptions) {
+    this.#claimStartupCheck = options.claimStartupCheck;
+    this.#runStartupCheck = options.runStartupCheck;
+    this.#onStartupUpdateAvailable = options.onStartupUpdateAvailable;
+    this.#appVersion = options.appVersion;
+    this.#onStatus = options.onStatus;
     this.#supervisor = options.supervisor;
     this.#hasActiveWatches = options.hasActiveWatches;
     this.#verifyNoActiveWatches = options.verifyNoActiveWatches;
@@ -124,7 +145,10 @@ export class DesktopUpdateController {
     }));
     this.#setTimeout = options.setTimeoutImpl ?? setTimeout;
     this.#clearTimeout = options.clearTimeoutImpl ?? clearTimeout;
-    this.#unavailableReason = getDesktopUpdateUnavailableReason(options);
+    const unavailable = getDesktopUpdateUnavailableReason(options);
+    this.#manualUpdates = options.manualUpdates && unavailable !== "not-packaged" && unavailable !== "unsupported-target"
+      && (options.manualUpdates.force || unavailable !== null) ? options.manualUpdates : undefined;
+    this.#unavailableReason = this.#manualUpdates ? null : unavailable;
     this.#state = this.#unavailableReason ? "disabled" : "idle";
     this.#reason = this.#unavailableReason ?? undefined;
   }
@@ -136,6 +160,8 @@ export class DesktopUpdateController {
   get status(): DesktopUpdateStatus {
     const status: DesktopUpdateStatus = {
       schemaVersion: 2,
+      currentVersion: this.#appVersion,
+      ...(this.#manualUpdates ? { mode: "manual" as const } : {}),
       state: this.#state,
       installAllowed: false,
       ...(this.#reason ? { reason: this.#reason } : {}),
@@ -158,14 +184,27 @@ export class DesktopUpdateController {
   }
 
   scheduleInitialCheck(delayMs = 15_000): void {
-    if (this.#disposed || this.#unavailableReason || this.#initialCheckTimer) return;
+    if (this.#disposed || this.#unavailableReason || !this.#claimStartupCheck || this.#startupScheduled) return;
+    this.#startupScheduled = true;
     const timer = this.#setTimeout(() => {
       if (this.#initialCheckTimer !== timer) return;
       this.#initialCheckTimer = null;
-      void this.check();
+      void this.#checkAtStartup();
     }, Math.max(0, delayMs));
     timer.unref?.();
     this.#initialCheckTimer = timer;
+  }
+
+  async #checkAtStartup(): Promise<void> {
+    try {
+      if (!await this.#claimStartupCheck?.() || this.#disposed) return;
+      const result = await (this.#runStartupCheck ? this.#runStartupCheck(() => this.check()) : this.check());
+      if (!this.#disposed && result.state === "available" && result.version) {
+        await this.#onStartupUpdateAvailable?.(result);
+      }
+    } catch {
+      // Startup checks and notification failures never interrupt normal app use.
+    }
   }
 
   async check(): Promise<DesktopUpdateStatus> {
@@ -180,7 +219,15 @@ export class DesktopUpdateController {
       this.#version = undefined;
       this.#progressPercent = undefined;
       this.#recoveryVerification = "unknown";
+      this.#notify();
       try {
+        if (this.#manualUpdates) {
+          const release = await this.#manualUpdates.check();
+          this.#version = release?.version;
+          this.#state = release ? "available" : "not-available";
+          this.#notify();
+          return this.status;
+        }
         const port = await this.#ensurePort();
         const result = await port.checkForUpdates();
         if (this.#state === "checking") {
@@ -191,6 +238,7 @@ export class DesktopUpdateController {
           );
           this.#version = resultVersion;
           this.#state = resultVersion ? "available" : "not-available";
+          this.#notify();
         }
       } catch {
         this.#fail("check-failed");
@@ -212,6 +260,18 @@ export class DesktopUpdateController {
       this.#state = "downloading";
       this.#reason = undefined;
       this.#progressPercent = 0;
+      if (this.#manualUpdates) {
+        // A portable/local build can discover releases but never runs an installer.
+        this.#progressPercent = undefined;
+        this.#notify();
+        try {
+          await this.#manualUpdates.openDownloadPage();
+          this.#state = "available";
+          this.#notify();
+        } catch { this.#fail("download-failed"); }
+        return this.status;
+      }
+      this.#notify();
       try {
         const port = await this.#ensurePort();
         await port.downloadUpdate();
@@ -230,11 +290,12 @@ export class DesktopUpdateController {
       return await pending;
     } finally {
       if (this.#downloadPromise === pending) this.#downloadPromise = null;
+      this.#notify();
     }
   }
 
   async install(): Promise<DesktopUpdateStatus> {
-    if (this.#disposed || this.#state !== "downloaded") return this.status;
+    if (this.#disposed || this.#manualUpdates || this.#state !== "downloaded") return this.status;
     if (this.#installPromise) return this.#installPromise;
     const pending = (async () => {
       const restartLease = this.#supervisor.tryBeginRestartInstall();
@@ -259,6 +320,7 @@ export class DesktopUpdateController {
           return this.status;
         }
         this.#state = "installing";
+        this.#notify();
         const port = await this.#ensurePort();
         await this.#beforeInstall();
         if (this.#immediateInstallBlock()) {
@@ -283,6 +345,7 @@ export class DesktopUpdateController {
       return await pending;
     } finally {
       if (this.#installPromise === pending) this.#installPromise = null;
+      this.#notify();
     }
   }
 
@@ -321,6 +384,7 @@ export class DesktopUpdateController {
     } catch {
       this.#recoveryVerification = "unknown";
     }
+    this.#notify();
     return this.#recoveryVerification;
   }
 
@@ -343,8 +407,9 @@ export class DesktopUpdateController {
 
   #bindPort(port: DesktopUpdaterPort): void {
     const bind = (event: UpdaterEvent, listener: UpdaterListener) => {
-      this.#listeners.set(event, listener);
-      port.on(event, listener);
+      const publish: UpdaterListener = (value) => { listener(value); this.#notify(); };
+      this.#listeners.set(event, publish);
+      port.on(event, publish);
     };
     bind("checking-for-update", () => {
       if (!this.#restartPending) this.#state = "checking";
@@ -397,7 +462,13 @@ export class DesktopUpdateController {
   #fail(reason: DesktopUpdateReason): void {
     this.#state = "error";
     this.#reason = reason;
+    this.#version = undefined;
     this.#progressPercent = undefined;
     this.#recoveryVerification = "unknown";
+    this.#notify();
+  }
+
+  #notify(): void {
+    if (!this.#disposed) { try { this.#onStatus?.(this.status); } catch {} }
   }
 }

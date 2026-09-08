@@ -62,6 +62,11 @@ class MockCoreTransport implements CoreTransport {
           onProgress(event) {
             try { options.onProgress?.(event); } catch {}
           }
+        } : {}),
+        ...(options.onRequestProgress ? {
+          onRequestProgress(event) {
+            try { options.onRequestProgress?.(event); } catch {}
+          }
         } : {})
       });
     } catch (error) {

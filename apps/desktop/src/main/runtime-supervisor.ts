@@ -6,6 +6,7 @@ import {
   createPublicCoreErrorDto,
   type CoreErrorCode,
   type CoreOperationEventEnvelope,
+  type CoreRequestProgressEnvelope,
   type CoreRequestEnvelope,
   type CoreResponseEnvelope,
   type ProfileSelector,
@@ -29,12 +30,17 @@ import {
 import {
   assertRuntimeHelloFrame,
   assertRuntimeOperationEventFrame,
+  assertRuntimeRequestProgressFrame,
   assertRuntimeResponseFrame,
+  assertRuntimeWatchActivityFrame,
+  assertRuntimeWatchStoppedFrame,
   createRuntimeCancelFrame,
   createRuntimeRequestFrame,
   type ExpectedRuntimeIdentity,
   type RuntimeFrame,
-  type RuntimeHelloFrame
+  type RuntimeHelloFrame,
+  type RuntimeWatchActivity,
+  type RuntimeWatchStopped
 } from "../shared/runtime-protocol.js";
 
 export type RuntimeSupervisorState = "stopped" | "starting" | "ready" | "crashed" | "shutting-down";
@@ -60,6 +66,7 @@ export interface CoreRuntimeSupervisorOptions {
   spawnUtility: RuntimeUtilitySpawner;
   handshakeTimeoutMs?: number;
   requestTimeoutMs?: number;
+  diagnosticsRequestTimeoutMs?: number;
   writeRequestTimeoutMs?: number;
 }
 
@@ -100,17 +107,25 @@ function isApplyMethod(method: DesktopRuntimeMethod): boolean {
     || method === "applyRestore";
 }
 
+function isRequestProgressMethod(method: DesktopRuntimeMethod): boolean {
+  return method === "prepareRepair" || method === "getDiagnostics";
+}
+
 export class CoreRuntimeSupervisor {
   readonly #appVersion: string;
   readonly #spawnUtility: RuntimeUtilitySpawner;
   readonly #handshakeTimeoutMs: number;
   readonly #requestTimeoutMs: number;
+  readonly #diagnosticsRequestTimeoutMs: number;
   readonly #writeRequestTimeoutMs: number;
   readonly #pending = new Map<string, PendingRuntimeRequest>();
   readonly #dispatchByRequestId = new Map<string, string>();
   readonly #profilePreflights = new Map<string, Promise<void>>();
   readonly #recoveryByProfile = new Map<string, boolean>();
-  readonly #operationListeners = new Set<(event: CoreOperationEventEnvelope) => void>();
+  readonly #operationListeners = new Set<(event: CoreOperationEventEnvelope | CoreRequestProgressEnvelope) => void>();
+  readonly #stateListeners = new Set<(event: { previous: RuntimeSupervisorState; current: RuntimeSupervisorState; generation: number }) => void>();
+  readonly #watchActivityListeners = new Set<(event: RuntimeWatchActivity) => void>();
+  readonly #watchStoppedListeners = new Set<(event: RuntimeWatchStopped & { generation: number }) => void>();
   #state: RuntimeSupervisorState = "stopped";
   #generation = 0;
   #child: RuntimeUtilityHandle | null = null;
@@ -131,6 +146,7 @@ export class CoreRuntimeSupervisor {
     this.#spawnUtility = options.spawnUtility;
     this.#handshakeTimeoutMs = options.handshakeTimeoutMs ?? 10_000;
     this.#requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
+    this.#diagnosticsRequestTimeoutMs = options.diagnosticsRequestTimeoutMs ?? 15 * 60_000;
     this.#writeRequestTimeoutMs = options.writeRequestTimeoutMs ?? 15 * 60_000;
   }
 
@@ -171,9 +187,33 @@ export class CoreRuntimeSupervisor {
     });
   }
 
-  subscribeOperation(listener: (event: CoreOperationEventEnvelope) => void): () => void {
+  subscribeOperation(listener: (event: CoreOperationEventEnvelope | CoreRequestProgressEnvelope) => void): () => void {
     this.#operationListeners.add(listener);
     return () => this.#operationListeners.delete(listener);
+  }
+
+  subscribeState(listener: (event: { previous: RuntimeSupervisorState; current: RuntimeSupervisorState; generation: number }) => void): () => void {
+    this.#stateListeners.add(listener);
+    return () => this.#stateListeners.delete(listener);
+  }
+
+  subscribeWatchActivity(listener: (event: RuntimeWatchActivity) => void): () => void {
+    this.#watchActivityListeners.add(listener);
+    return () => this.#watchActivityListeners.delete(listener);
+  }
+
+  subscribeWatchStopped(listener: (event: RuntimeWatchStopped & { generation: number }) => void): () => void {
+    this.#watchStoppedListeners.add(listener);
+    return () => this.#watchStoppedListeners.delete(listener);
+  }
+
+  #setState(state: RuntimeSupervisorState): void {
+    const previous = this.#state;
+    this.#state = state;
+    if (previous === state) return;
+    for (const listener of this.#stateListeners) {
+      try { listener({ previous, current: state, generation: this.#generation }); } catch {}
+    }
   }
 
   async verifyProfilesSafeForRestart(
@@ -267,7 +307,7 @@ export class CoreRuntimeSupervisor {
   cancel(requestId: string, operationId?: string): boolean {
     const dispatchId = this.#dispatchByRequestId.get(requestId);
     const pending = dispatchId ? this.#pending.get(dispatchId) : undefined;
-    if (!pending || !pending.isWrite || !isApplyMethod(pending.request.method)) return false;
+    if (!pending || (!isApplyMethod(pending.request.method) && !isRequestProgressMethod(pending.request.method))) return false;
     if (operationId !== undefined && operationId !== pending.operationId) return false;
     const child = this.#child;
     if (!child || pending.generation !== this.#generation || this.#state !== "ready") return false;
@@ -306,13 +346,13 @@ export class CoreRuntimeSupervisor {
   }
 
   async #performShutdown(): Promise<void> {
-    this.#state = "shutting-down";
+    this.#setState("shutting-down");
     this.#helloReject?.(new RuntimeActivationError("INTERNAL_ERROR"));
     const child = this.#child;
     if (!child) {
       this.#failAllPending("INTERNAL_ERROR");
       this.#clearRuntimeCaches();
-      this.#state = "stopped";
+      this.#setState("stopped");
       return;
     }
     const exited = new Promise<void>((resolve) => {
@@ -346,7 +386,7 @@ export class CoreRuntimeSupervisor {
     this.#clearChild(child);
     this.#failAllPending("INTERNAL_ERROR");
     this.#clearRuntimeCaches();
-    this.#state = "stopped";
+    this.#setState("stopped");
   }
 
   #tryAdmitWrite(): (() => void) | null {
@@ -395,12 +435,12 @@ export class CoreRuntimeSupervisor {
       sessionNonce: randomBytes(32).toString("hex"),
       generation: this.#generation
     };
-    this.#state = "starting";
+    this.#setState("starting");
     let child: RuntimeUtilityHandle;
     try {
       child = this.#spawnUtility(identity);
     } catch {
-      this.#state = "crashed";
+      this.#setState("crashed");
       throw new RuntimeActivationError("CORE_RUNTIME_CRASHED");
     }
     const hello = new Promise<RuntimeHelloFrame>((resolve, reject) => {
@@ -419,7 +459,7 @@ export class CoreRuntimeSupervisor {
     } catch (error) {
       this.#clearChild(child);
       child.kill();
-      if (!this.#shutdownPromise) this.#state = "crashed";
+      if (!this.#shutdownPromise) this.#setState("crashed");
       throw error;
     } finally {
       clearTimeout(timeout);
@@ -429,7 +469,7 @@ export class CoreRuntimeSupervisor {
     if (this.#child !== child) throw new RuntimeActivationError("CORE_RUNTIME_CRASHED");
     this.#clearRuntimeCaches();
     this.#preflightReadsAfterCrash = restartedAfterCrash;
-    this.#state = "ready";
+    this.#setState("ready");
     this.#lastHandshakeAt = new Date().toISOString();
   }
 
@@ -502,7 +542,11 @@ export class CoreRuntimeSupervisor {
     }
     const dispatchId = randomUUID();
     return new Promise<CoreResponseEnvelope<M>>((resolve) => {
-      const timeoutMs = isWrite ? this.#writeRequestTimeoutMs : this.#requestTimeoutMs;
+      const timeoutMs = isWrite
+        ? this.#writeRequestTimeoutMs
+        : request.method === "getDiagnostics"
+          ? this.#diagnosticsRequestTimeoutMs
+          : this.#requestTimeoutMs;
       const timer = setTimeout(() => {
         this.#removePending(dispatchId);
         resolve(createCoreFailureEnvelope(
@@ -553,6 +597,27 @@ export class CoreRuntimeSupervisor {
         : undefined;
       if (kind === "operation-event") {
         this.#handleOperationEvent(frame);
+        return;
+      }
+      if (kind === "request-progress") {
+        this.#handleRequestProgress(frame);
+        return;
+      }
+      if (kind === "watch-activity") {
+        assertRuntimeWatchActivityFrame(frame);
+        if (frame.generation !== this.#generation) throw new Error("Stale Watch activity.");
+        for (const listener of this.#watchActivityListeners) {
+          try { listener(frame.activity); } catch {}
+        }
+        return;
+      }
+      if (kind === "watch-stopped") {
+        assertRuntimeWatchStoppedFrame(frame);
+        if (frame.generation !== this.#generation) throw new Error("Stale Watch stopped event.");
+        const stopped = { ...frame.stopped, generation: frame.generation };
+        for (const listener of this.#watchStoppedListeners) {
+          try { listener(stopped); } catch {}
+        }
         return;
       }
       assertRuntimeResponseFrame(frame);
@@ -623,6 +688,27 @@ export class CoreRuntimeSupervisor {
     }
   }
 
+  #handleRequestProgress(frame: unknown): void {
+    assertRuntimeRequestProgressFrame(frame);
+    if (frame.generation !== this.#generation) throw new Error("Stale runtime request progress.");
+    const pending = this.#pending.get(frame.dispatchId);
+    // A terminal response removes its pending record before the Utility's
+    // remaining queued notifications can arrive.  Such late, already-validated
+    // request progress is observational and must not crash a fresh Runtime.
+    if (!pending) return;
+    if (pending.generation !== frame.generation
+        || !isRequestProgressMethod(pending.request.method)) {
+      throw new Error("Unknown runtime request progress.");
+    }
+    assertRuntimeRequestProgressFrame(frame, {
+      dispatchId: pending.dispatchId,
+      requestId: pending.request.requestId
+    });
+    for (const listener of this.#operationListeners) {
+      try { listener(frame.envelope); } catch {}
+    }
+  }
+
   #removePending(dispatchId: string): PendingRuntimeRequest | undefined {
     const pending = this.#pending.get(dispatchId);
     if (!pending) return undefined;
@@ -641,7 +727,7 @@ export class CoreRuntimeSupervisor {
     this.#helloReject?.(new RuntimeActivationError("CORE_RUNTIME_CRASHED"));
     this.#failAllPending(shuttingDown ? "INTERNAL_ERROR" : "CORE_RUNTIME_CRASHED");
     this.#clearRuntimeCaches();
-    this.#state = shuttingDown ? "stopped" : "crashed";
+    this.#setState(shuttingDown ? "stopped" : "crashed");
   }
 
   #failRuntime(child: RuntimeUtilityHandle): void {
@@ -650,7 +736,7 @@ export class CoreRuntimeSupervisor {
     child.kill();
     this.#failAllPending("CORE_RUNTIME_CRASHED");
     this.#clearRuntimeCaches();
-    if (this.#state !== "shutting-down") this.#state = "crashed";
+    if (this.#state !== "shutting-down") this.#setState("crashed");
   }
 
   #failAllPending(code: CoreErrorCode): void {

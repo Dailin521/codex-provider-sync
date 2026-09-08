@@ -11,16 +11,24 @@ import {
 import { executeOrdinaryWrite } from "./ordinary-write-runtime.js";
 import { preparePlanContext } from "./plan-context.js";
 import { sqliteProviderRowsToChange } from "./provider-counts.js";
+import { inspectSessionUsage } from "./session-usage.js";
 import { operationRuntime, sqliteTransaction } from "./runtime-context.js";
 
 const {
   applySessionChanges,
   collectProviderChanges,
-  splitLockedSessionChanges,
   summarizeProviderCounts
 } = codexStorage.sessions;
-const { readCurrentProviderFromConfigText } = codexStorage.config;
+const { readCurrentProviderFromConfigText, configDeclaresProvider } = codexStorage.config;
 const { assertSqliteWritable, readSqliteProviderCounts } = codexStorage.stateDb;
+
+function assertConfiguredProvider(configText, provider) {
+  if (!configDeclaresProvider(configText, provider)) {
+    throw new CoreError("INVALID_INPUT", "The current Provider is not defined in config.toml. Configure it with your Provider tool before syncing.", {
+      details: { reason: "provider-not-configured" }
+    });
+  }
+}
 
 function emptySqliteMutationResult(databasePresent) {
   return {
@@ -60,6 +68,7 @@ function providerResult({ context, state, current, targetProvider, scan, initial
     previousProvider: current.provider,
     backupDir: state.backupDir,
     backupDurationMs: state.backupDurationMs,
+    ...(state.data.fileUpdateTiming ? { fileUpdateTiming: state.data.fileUpdateTiming } : {}),
     ...(partialFailure
       ? {
           partial: true,
@@ -106,14 +115,12 @@ export async function buildProviderWriteProgram(context, settings = {}) {
     ?? current.provider
     ?? DEFAULT_PROVIDER;
 
+  assertConfiguredProvider(context.configText, targetProvider);
+
   context.emitProgress({ stage: "scan_rollout_files", status: "start" });
   const scan = await collectProviderChanges(context.codexHome, targetProvider, { skipLockedReads: true });
   context.emitProgress({ stage: "check_locked_rollout_files", status: "start" });
-  const { writableChanges, lockedChanges } = await splitLockedSessionChanges(scan.changes);
-  const initiallySkipped = sortedUnique([
-    ...scan.lockedPaths,
-    ...lockedChanges.map((change) => change.path)
-  ]);
+  const { writableChanges, lockedPaths: initiallySkipped } = await inspectSessionUsage(scan);
   context.emitProgress({
     stage: "scan_rollout_files",
     status: "complete",
@@ -204,7 +211,8 @@ export async function buildProviderWriteProgram(context, settings = {}) {
                 appliedChanges: result.appliedChanges,
                 skippedChanges: result.skippedPaths.length
               }),
-              run: ({ context: writeContext }) => applySessionChanges(writableChanges, {
+              run: ({ context: writeContext, state }) => applySessionChanges(writableChanges, {
+                onTiming: (timing) => { state.data.fileUpdateTiming = timing; },
                 onBeforeApply: (change) => writeContext.faultInjector?.({ point: "before_rollout_apply", path: change.path }),
                 onMutation: (change, mutation) => {
                   writeContext.markMutation();
@@ -272,7 +280,13 @@ export async function prepareProviderPlan(operation, options, switchIntent = nul
       `Invalid automatic keep count: ${keepCount}. Expected an integer greater than or equal to 1.`
     );
   }
-  const context = await preparePlanContext({ ...options, rolloutScanMode: "metadata" }, operation);
+  const context = await preparePlanContext({ ...options, rolloutScanMode: "metadata" }, operation, {
+    resolveProviderTarget(configText) {
+      const provider = switchIntent?.provider ?? readCurrentProviderFromConfigText(configText).provider ?? DEFAULT_PROVIDER;
+      assertConfiguredProvider(configText, provider);
+      return provider;
+    }
+  });
   if (!context.storage.stateDbLocation && isConfiguredSqliteHome(context.storage)) {
     throw missingConfiguredStateDbError(context.storage);
   }
@@ -280,14 +294,10 @@ export async function prepareProviderPlan(operation, options, switchIntent = nul
   const targetProvider = switchIntent?.provider
     ?? current.provider
     ?? DEFAULT_PROVIDER;
-  const scan = await collectProviderChanges(context.codexHome, targetProvider, {
-    skipLockedReads: true
-  });
-  const { writableChanges, lockedChanges } = await splitLockedSessionChanges(scan.changes);
-  const lockedCount = new Set([
-    ...scan.lockedPaths,
-    ...lockedChanges.map((change) => change.path)
-  ]).size;
+  assertConfiguredProvider(context.configText, targetProvider);
+  const scan = context.providerScan;
+  const { writableChanges, lockedPaths } = await inspectSessionUsage(scan);
+  const lockedCount = lockedPaths.length;
   const warnings = [];
   if (lockedCount > 0) {
     warnings.push(`${lockedCount} rollout file(s) are currently locked and may produce a partial result.`);
@@ -304,13 +314,19 @@ export async function prepareProviderPlan(operation, options, switchIntent = nul
     target: {
       provider: targetProvider,
       ...(switchIntent
-        ? { model: switchIntent.rootModel, modelMode: switchIntent.modelMode }
+        ? {
+            model: switchIntent.rootModel,
+            modelMode: switchIntent.modelMode,
+            previousProvider: switchIntent.previousProvider,
+            previousRootModel: switchIntent.previousRootModel
+          }
         : {})
     },
     impact: {
       rolloutFilesToChange: writableChanges.length,
       sqliteRowsToChange,
       lockedRolloutFiles: lockedCount,
+      sessionActivity: context.status.sessionActivity,
       backupExpected: writableChanges.length > 0
         || sqliteRowsToChange > 0
         || switchIntent?.configMutationExpected === true
@@ -349,7 +365,7 @@ export async function prepareProviderPlan(operation, options, switchIntent = nul
       profile: context.profile,
       profileResolver: options.profileResolver,
       revisions: context.revisions,
-      rolloutRevisionMode: "metadata"
+      rolloutRevisionMode: context.rolloutRevisionMode
     },
     statusOptions: {
       codexHome: context.codexHome,

@@ -3,11 +3,13 @@ import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 import {
   assertCoreRequestEnvelope,
   assertCoreOperationEventEnvelope,
+  assertCoreRequestProgressEnvelope,
   createCoreFailureEnvelope,
   createPublicCoreErrorDto,
   type CoreRequestEnvelope,
   type CoreResponseEnvelope,
-  type CoreOperationEventEnvelope
+  type CoreOperationEventEnvelope,
+  type CoreRequestProgressEnvelope
 } from "@codex-provider-sync/contracts";
 import {
   isDesktopMaintenanceMethod,
@@ -22,16 +24,32 @@ import {
 } from "@codex-provider-sync/core-client";
 
 import type { DesktopBridgeApi } from "../shared/bridge.js";
+import { operationLogStatuses, validateOperationLogEntry } from "../shared/operation-log-validation.js";
+import { validateDesktopClipboardInput, validateDesktopClipboardResult } from "../shared/clipboard.js";
+import { assertDesktopWatchStoppedEvent } from "../shared/runtime-protocol.js";
 import {
   DESKTOP_IPC_CHANNELS,
   MAX_DESKTOP_IPC_BYTES
 } from "../shared/constants.js";
-import type { DesktopProfileListResponse } from "../shared/profile-types.js";
+import type {
+  DesktopDirectorySelectionResult,
+  DesktopProfileDeleteInput,
+  DesktopProfileDirectoryKind,
+  DesktopProfileListResponse,
+  DesktopProfileRevealInput,
+  DesktopProfileSaveInput,
+  DesktopProfileSummary
+} from "../shared/profile-types.js";
+import type { OperationLogDetailInput, OperationLogEntry, OperationLogListInput, OperationLogListResponse } from "../shared/operation-log-types.js";
 import type {
   DesktopDiagnosticsExportInput,
   DesktopDiagnosticsExportResult
 } from "../shared/diagnostics-types.js";
 import type { DesktopUpdateStatus } from "../shared/update-types.js";
+import {
+  validateDesktopHistoryRevealInput,
+  validateDesktopHistoryRevealResult
+} from "../shared/history-reveal.js";
 
 function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
@@ -73,6 +91,72 @@ function validateProfileList(value: unknown): DesktopProfileListResponse {
     }
   }
   return structuredClone(value) as DesktopProfileListResponse;
+}
+
+function validateProfileSummary(value: unknown): DesktopProfileSummary {
+  return validateProfileList({ schemaVersion: 1, profiles: [value] }).profiles[0]!;
+}
+
+function validateDirectoryKind(value: unknown): DesktopProfileDirectoryKind {
+  if (value !== "codex-home" && value !== "sqlite-home") {
+    throw new TypeError("Invalid desktop profile directory kind.");
+  }
+  return value;
+}
+
+function validateDirectorySelection(value: unknown): DesktopDirectorySelectionResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Invalid directory selection response.");
+  }
+  const result = value as Record<string, unknown>;
+  if (result.schemaVersion === 1 && result.status === "cancelled"
+      && Object.keys(result).sort().join(",") === "schemaVersion,status") {
+    return { schemaVersion: 1, status: "cancelled" };
+  }
+  if (result.schemaVersion === 1 && result.status === "selected"
+      && Object.keys(result).sort().join(",") === "displayName,schemaVersion,status,token"
+      && typeof result.token === "string" && /^[A-Za-z0-9_-]{32,128}$/.test(result.token)
+      && typeof result.displayName === "string" && result.displayName.length <= 260) {
+    return structuredClone(result) as unknown as DesktopDirectorySelectionResult;
+  }
+  throw new TypeError("Invalid directory selection response.");
+}
+
+function validateProfileSaveInput(value: DesktopProfileSaveInput): DesktopProfileSaveInput {
+  const allowed = new Set(["schemaVersion", "name", "profileId", "profileRevision", "codexHomeSelectionToken", "sqliteHomeMode", "sqliteHomeSelectionToken"]);
+  if (!value || typeof value !== "object" || Object.keys(value).some((key) => !allowed.has(key))
+      || value.schemaVersion !== 1 || typeof value.name !== "string" || value.name.trim().length < 1 || value.name.trim().length > 120
+      || (value.profileId !== undefined && !/^[A-Za-z0-9._-]{1,80}$/.test(value.profileId))
+      || (value.profileRevision !== undefined && (typeof value.profileRevision !== "string" || value.profileRevision.length > 512))
+      || (value.codexHomeSelectionToken !== undefined && !/^[A-Za-z0-9_-]{32,128}$/.test(value.codexHomeSelectionToken))
+      || !["preserve", "inherit", "selected"].includes(value.sqliteHomeMode)
+      || (value.sqliteHomeSelectionToken !== undefined && !/^[A-Za-z0-9_-]{32,128}$/.test(value.sqliteHomeSelectionToken))
+      || (value.sqliteHomeMode === "selected") !== Boolean(value.sqliteHomeSelectionToken)) {
+    throw new TypeError("Invalid desktop profile save request.");
+  }
+  return structuredClone(value);
+}
+
+function validateProfileDeleteInput(value: DesktopProfileDeleteInput): DesktopProfileDeleteInput {
+  if (!value || typeof value !== "object" || Object.keys(value).sort().join(",") !== "profileId,profileRevision,schemaVersion"
+      || value.schemaVersion !== 1 || !/^[A-Za-z0-9._-]{1,80}$/.test(value.profileId)
+      || typeof value.profileRevision !== "string" || value.profileRevision.length < 1 || value.profileRevision.length > 512) {
+    throw new TypeError("Invalid desktop profile delete request.");
+  }
+  return structuredClone(value);
+}
+
+function validateOperationLogListInput(value: OperationLogListInput): OperationLogListInput {
+    const allowed = new Set(["schemaVersion","page","pageSize","profileId","profileRevision","operation","status"]);
+    if (!value || typeof value !== "object" || Object.keys(value).some((key) => !allowed.has(key)) || value.schemaVersion !== 1 || !Number.isInteger(value.page) || value.page < 1 || !Number.isInteger(value.pageSize) || value.pageSize < 1 || value.pageSize > 100 || (value.profileId !== undefined && typeof value.profileId !== "string") || (value.profileRevision !== undefined && (typeof value.profileRevision !== "string" || value.profileRevision.length === 0 || value.profileRevision.length > 512)) || (value.operation !== undefined && typeof value.operation !== "string") || (value.status !== undefined && !operationLogStatuses.has(value.status))) throw new TypeError("Invalid operation log query.");
+  return structuredClone(value);
+}
+
+function validateOperationLogList(value: unknown): OperationLogListResponse {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new TypeError("Invalid operation log response.");
+  const result = value as Record<string, unknown>;
+  if (Object.keys(result).sort().join(",") !== "entries,hasNextPage,page,pageSize,schemaVersion,total" || result.schemaVersion !== 1 || !Number.isInteger(result.page) || !Number.isInteger(result.pageSize) || !Number.isInteger(result.total) || typeof result.hasNextPage !== "boolean" || !Array.isArray(result.entries)) throw new TypeError("Invalid operation log response.");
+  return { ...(structuredClone(result) as unknown as OperationLogListResponse), entries: result.entries.map(validateOperationLogEntry) };
 }
 
 async function requestReadOnly<M extends DesktopReadMethod>(
@@ -219,6 +303,8 @@ function validateUpdateStatus(value: unknown): DesktopUpdateStatus {
   const allowedKeys = new Set([
     "schemaVersion",
     "state",
+    "mode",
+    "currentVersion",
     "installAllowed",
     "reason",
     "version",
@@ -243,6 +329,11 @@ function validateUpdateStatus(value: unknown): DesktopUpdateStatus {
     throw new TypeError("Invalid update status response.");
   }
   const state = String(status.state);
+  if ((status.mode !== undefined && status.mode !== "manual")
+      || (status.currentVersion !== undefined && (typeof status.currentVersion !== "string" || !/^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/.test(status.currentVersion)))
+      || (status.mode === "manual" && (status.installAllowed || ["downloaded", "installing"].includes(state)))) {
+    throw new TypeError("Invalid update mode.");
+  }
   const disabledReasons = new Set([
     "not-packaged",
     "not-authorized",
@@ -288,11 +379,16 @@ function validateUpdateStatus(value: unknown): DesktopUpdateStatus {
 }
 
 function subscribeOperation(
-  listener: (event: CoreOperationEventEnvelope) => void
+  listener: (event: CoreOperationEventEnvelope | CoreRequestProgressEnvelope) => void
 ): () => void {
   const receive = (_event: IpcRendererEvent, value: unknown) => {
     try {
-      assertCoreOperationEventEnvelope(value);
+      if (value !== null && typeof value === "object" && !Array.isArray(value)
+          && (value as { event?: unknown }).event === "request-progress") {
+        assertCoreRequestProgressEnvelope(value);
+      } else {
+        assertCoreOperationEventEnvelope(value);
+      }
       listener(structuredClone(value));
     } catch {
       // Main is trusted, but malformed lifecycle data must fail closed at the
@@ -301,6 +397,21 @@ function subscribeOperation(
   };
   ipcRenderer.on(DESKTOP_IPC_CHANNELS.operationEvent, receive);
   return () => ipcRenderer.removeListener(DESKTOP_IPC_CHANNELS.operationEvent, receive);
+}
+
+function subscribeWatchStopped(listener: Parameters<DesktopBridgeApi["watch"]["subscribeStopped"]>[0]): () => void {
+  if (typeof listener !== "function") throw new TypeError("Invalid Watch stopped listener.");
+  const receive = (_event: IpcRendererEvent, value: unknown) => {
+    try {
+      assertDesktopWatchStoppedEvent(value);
+      listener(structuredClone(value));
+    } catch {
+      // The event is only an immediate cache convergence hint. Malformed
+      // data must not influence the renderer's Watch state.
+    }
+  };
+  ipcRenderer.on(DESKTOP_IPC_CHANNELS.watchStoppedEvent, receive);
+  return () => ipcRenderer.removeListener(DESKTOP_IPC_CHANNELS.watchStoppedEvent, receive);
 }
 
 async function cancelOperation(input: DesktopCancelOperationInput): Promise<{ accepted: boolean }> {
@@ -338,12 +449,79 @@ const api: DesktopBridgeApi = {
     subscribeOperation,
     cancelOperation
   },
+  watch: {
+    subscribeStopped: subscribeWatchStopped
+  },
   profiles: {
     async list() {
       return validateProfileList(await ipcRenderer.invoke(
         DESKTOP_IPC_CHANNELS.profilesList,
         null
       ));
+    },
+    async selectDirectory(kind) {
+      return validateDirectorySelection(await ipcRenderer.invoke(
+        DESKTOP_IPC_CHANNELS.profilesSelectDirectory,
+        validateDirectoryKind(kind)
+      ));
+    },
+    async save(input) {
+      return validateProfileSummary(await ipcRenderer.invoke(
+        DESKTOP_IPC_CHANNELS.profilesSave,
+        validateProfileSaveInput(input)
+      ));
+    },
+    async delete(input) {
+      const validated = validateProfileDeleteInput(input);
+      const value: unknown = await ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.profilesDelete, validated);
+      if (!value || typeof value !== "object" || Array.isArray(value)
+          || Object.keys(value).join(",") !== "deleted" || typeof (value as { deleted?: unknown }).deleted !== "boolean") {
+        throw new TypeError("Invalid desktop profile delete response.");
+      }
+      return { deleted: (value as { deleted: boolean }).deleted };
+    },
+    async reveal(input) {
+      const source = input as DesktopProfileRevealInput;
+      const base = validateProfileDeleteInput({ schemaVersion: source.schemaVersion, profileId: source.profileId, profileRevision: source.profileRevision });
+      if (source.target !== "codex-home" && source.target !== "sqlite-home") throw new TypeError("Invalid desktop profile reveal request.");
+      const value: unknown = await ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.profilesReveal, { ...base, target: source.target });
+      if (!value || typeof value !== "object" || Array.isArray(value)
+          || Object.keys(value).join(",") !== "revealed" || typeof (value as { revealed?: unknown }).revealed !== "boolean") {
+        throw new TypeError("Invalid desktop profile reveal response.");
+      }
+      return { revealed: (value as { revealed: boolean }).revealed };
+    }
+  },
+  history: {
+    async reveal(input) {
+      const validated = validateDesktopHistoryRevealInput(input);
+      return validateDesktopHistoryRevealResult(await ipcRenderer.invoke(
+        DESKTOP_IPC_CHANNELS.historyReveal,
+        validated
+      ));
+    }
+  },
+  clipboard: {
+    async writeText(input) {
+      return validateDesktopClipboardResult(await ipcRenderer.invoke(
+        DESKTOP_IPC_CHANNELS.clipboardWriteText,
+        validateDesktopClipboardInput(input)
+      ));
+    }
+  },
+  operationLogs: {
+    async list(input) {
+      return validateOperationLogList(await ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.operationLogsList, validateOperationLogListInput(input)));
+    },
+    async get(input) {
+      if (!input || input.schemaVersion !== 1 || typeof input.id !== "string" || Object.keys(input).sort().join(",") !== "id,schemaVersion") throw new TypeError("Invalid operation log detail request.");
+      const value: unknown = await ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.operationLogsGet, structuredClone(input as OperationLogDetailInput));
+      return value === null ? null : validateOperationLogEntry(value);
+    },
+    async dismissPlan(planId) {
+      if (typeof planId !== "string" || !/^[A-Za-z0-9_-]{32,128}$/.test(planId)) return { dismissed: false };
+      const value: unknown = await ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.operationLogsDismissPlan, { schemaVersion: 1, planId });
+      return value !== null && typeof value === "object" && !Array.isArray(value) && Object.keys(value).sort().join(",") === "dismissed" && typeof (value as { dismissed?: unknown }).dismissed === "boolean" ? value as { dismissed: boolean } : { dismissed: false };
     }
   },
   diagnostics: {
@@ -356,6 +534,14 @@ const api: DesktopBridgeApi = {
     }
   },
   updates: {
+    subscribe(listener) {
+      if (typeof listener !== "function") throw new TypeError("Invalid update listener.");
+      const receive = (_event: unknown, value: unknown) => {
+        try { listener(validateUpdateStatus(value)); } catch {}
+      };
+      ipcRenderer.on(DESKTOP_IPC_CHANNELS.updateEvent, receive);
+      return () => { ipcRenderer.removeListener(DESKTOP_IPC_CHANNELS.updateEvent, receive); };
+    },
     async getStatus() {
       return validateUpdateStatus(await ipcRenderer.invoke(
         DESKTOP_IPC_CHANNELS.updateStatus,

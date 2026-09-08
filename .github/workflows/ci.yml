@@ -53,7 +53,8 @@ jobs:
           node-version: "24"
           cache: "npm"
       - run: npm ci
-      - run: npm run workspaces:check
+      - name: Verify architecture boundaries and Provider byte I/O
+        run: npm run architecture:check
 
   root-package-compat:
     runs-on: ${{ matrix.os }}

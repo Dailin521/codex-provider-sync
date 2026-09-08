@@ -25,10 +25,11 @@ async function launchDesktop(fixture) {
   });
 }
 
-async function confirmPlan(page) {
-  const dialog = page.getByRole("dialog", { name: "Review plan" });
+async function confirmPlan(page, operation = "sync") {
+  const title = operation === "restore" ? "Confirm restore" : "Confirm sync";
+  const dialog = page.getByRole("dialog", { name: title });
   await expect(dialog).toBeVisible();
-  await dialog.getByRole("button", { name: "Confirm and apply" }).click();
+  await dialog.getByRole("button", { name: title }).click();
   await expect(dialog).toHaveCount(0);
   const resultDialog = page.getByRole("dialog", { name: "Operation result" });
   await expect(resultDialog).toBeVisible();
@@ -49,8 +50,7 @@ test("hidden Electron restores only the State DB into an explicit relocation tar
     const page = await electronApp.firstWindow();
     await expect(page.getByText("openai", { exact: true }).first()).toBeVisible();
 
-    await page.getByRole("button", { name: "Sync" }).click();
-    await page.getByRole("button", { name: "Prepare sync" }).click();
+    await page.getByRole("button", { name: "Preview sync" }).click();
     await confirmPlan(page);
     await expect.poll(async () => (await fixture.inspect()).sqlite.provider).toBe("openai");
     const sourceAfterSync = await fixture.snapshotTargets();
@@ -59,19 +59,19 @@ test("hidden Electron restores only the State DB into an explicit relocation tar
 
     await page.getByRole("button", { name: "Backups / Restore" }).click();
     await page.getByRole("button", { name: new RegExp(backupId) }).click();
-    await page.getByLabel("Restore config.toml").uncheck();
-    await page.getByLabel("Restore rollout files").uncheck();
-    await expect(page.getByLabel("Restore State DB")).toBeChecked();
-    await page.getByLabel("Confirm SQLite Home relocation").check();
-    await page.getByLabel("Relocation target profile").selectOption("relocation-target");
-    await page.getByRole("button", { name: "Prepare restore" }).click();
+    await page.getByLabel("Restore Codex configuration").uncheck();
+    await page.getByLabel("Restore session files").uncheck();
+    await expect(page.getByLabel("Restore local chat index")).toBeChecked();
+    await page.getByLabel("Restore to another storage profile").check();
+    await page.getByLabel("Destination storage profile").selectOption("relocation-target");
+    await page.getByRole("button", { name: "Preview restore" }).click();
 
-    const dialog = page.getByRole("dialog", { name: "Review plan" });
-    await expect(dialog).toContainText("Restore config.toml");
-    await expect(dialog).toContainText("Restore State DB");
-    await expect(dialog).toContainText("Restore rollout files");
-    await expect(dialog).toContainText("SQLite Home relocation");
-    await confirmPlan(page);
+    const dialog = page.getByRole("dialog", { name: "Confirm restore" });
+    await expect(dialog).toContainText("Restore Codex configuration");
+    await expect(dialog).toContainText("Restore local chat index");
+    await expect(dialog).toContainText("Restore session files");
+    await expect(dialog).toContainText("Restore to another storage profile");
+    await confirmPlan(page, "restore");
 
     expect((await fixture.snapshotTargets()).hash).toBe(sourceAfterSync.hash);
     const relocated = await fixture.snapshotSqlite(fixture.targetStateDbPath);

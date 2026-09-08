@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   createCoreOperationStartedEnvelope,
   createCoreProgressEnvelope,
+  createCoreRequestProgressEnvelope,
   createCoreRequestEnvelope,
   createCoreSuccessEnvelope
 } from "@codex-provider-sync/contracts";
@@ -18,11 +19,17 @@ import {
 import {
   assertRuntimeHelloFrame,
   assertRuntimeOperationEventFrame,
+  assertRuntimeRequestProgressFrame,
   assertRuntimeRequestFrame,
   assertRuntimeResponseFrame,
+  assertRuntimeWatchActivityFrame,
+  assertRuntimeWatchStoppedFrame,
   createRuntimeOperationEventFrame,
+  createRuntimeRequestProgressFrame,
   createRuntimeRequestFrame,
-  createRuntimeResponseFrame
+  createRuntimeResponseFrame,
+  createRuntimeWatchActivityFrame,
+  createRuntimeWatchStoppedFrame
 } from "../dist/shared/runtime-protocol.js";
 
 const dispatchId = "22222222-2222-4222-8222-222222222222";
@@ -83,6 +90,82 @@ test("runtime operation events accept only strict pathless shared envelopes", ()
       ...progress.envelope,
       progress: { ...progress.envelope.progress, backupDir: "C:/private" }
     }
+  }));
+});
+
+test("runtime request progress remains request-correlated without an operation lifecycle", () => {
+  const frame = createRuntimeRequestProgressFrame(
+    1,
+    dispatchId,
+    createCoreRequestProgressEnvelope("request-1", { stage: "scan", status: "start" })
+  );
+  assert.doesNotThrow(() => assertRuntimeRequestProgressFrame(frame, {
+    dispatchId,
+    requestId: "request-1"
+  }));
+  assert.throws(() => assertRuntimeRequestProgressFrame({
+    ...frame,
+    envelope: { ...frame.envelope, operationId }
+  }));
+  assert.throws(() => assertRuntimeRequestProgressFrame(frame, {
+    dispatchId,
+    requestId: "other-request"
+  }));
+});
+
+test("runtime Watch activity is structured, bounded, and pathless", () => {
+  const frame = createRuntimeWatchActivityFrame(1, {
+    schemaVersion: 1,
+    event: "started",
+    activityId: "activity-1",
+    watchId: "watch-1",
+    profileId: "default",
+    startedAt: new Date().toISOString(),
+    reason: "config.toml"
+  });
+  assert.doesNotThrow(() => assertRuntimeWatchActivityFrame(frame));
+  const partial = { ...frame, activity: {
+    ...frame.activity, startedAt: undefined, event: "finished", outcome: "partial", finishedAt: new Date().toISOString(),
+    profileRevision: "r1", backupId: "managed-backup", failedStage: "update_sqlite",
+    failureCode: "SQLITE_BUSY", partialReason: "mutation-failed", retryRecommended: true
+  } };
+  assert.doesNotThrow(() => assertRuntimeWatchActivityFrame(partial));
+  for (const extra of [{ backupId: "C:/private" }, { retryRecommended: "yes" }, { failureCode: "x".repeat(257) }]) {
+    assert.throws(() => assertRuntimeWatchActivityFrame({ ...partial, activity: { ...partial.activity, ...extra } }));
+  }
+  assert.throws(() => assertRuntimeWatchActivityFrame({
+    ...frame,
+    activity: { ...frame.activity, codexHome: "C:/private" }
+  }));
+  assert.throws(() => assertRuntimeWatchActivityFrame({
+    ...frame,
+    activity: { ...frame.activity, event: "finished" }
+  }));
+});
+
+test("runtime Watch stopped snapshot is exact, terminal, and pathless", () => {
+  const frame = createRuntimeWatchStoppedFrame(1, {
+    profileId: "default",
+    profileRevision: "r1",
+    watch: {
+      schemaVersion: 1,
+      watchId: "watch-1",
+      status: "stopped",
+      startedAt: "2026-09-07T00:00:00.000Z",
+      stoppedAt: "2026-09-07T00:01:00.000Z",
+      stopReason: "once-mode-complete",
+      includeStateDb: true,
+      once: true
+    }
+  });
+  assert.doesNotThrow(() => assertRuntimeWatchStoppedFrame(frame));
+  assert.throws(() => assertRuntimeWatchStoppedFrame({
+    ...frame,
+    stopped: { ...frame.stopped, watch: { ...frame.stopped.watch, status: "running" } }
+  }));
+  assert.throws(() => assertRuntimeWatchStoppedFrame({
+    ...frame,
+    stopped: { ...frame.stopped, codexHome: "C:/private" }
   }));
 });
 

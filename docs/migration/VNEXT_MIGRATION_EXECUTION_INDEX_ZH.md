@@ -10,18 +10,37 @@
 
 ## 1. 索引职责
 
+2026-09-08 维护者确认 Windows Electron 首发范围：[ADR-0039](../adr/0039-windows-first-electron-release.md) 与[发布操作说明](../WINDOWS_ELECTRON_RELEASE_ZH.md) 规定整理推送 V1、最终 CI/合并后复验、仅 Windows 公开产物，以及安装/更新证据未闭合时先 RC。本轮不发布 npm、其他桌面平台或 Legacy .NET。该授权不使下表阶段自动完成，历史“本地修改不授权发布”描述保留为当时范围；实际 tag/Release 和验证结果另行记录。
+
+2026-09-08 本地性能与日志增量：[ADR-0037](../adr/0037-switch-history-and-provider-preparation-facts.md) 固定切换历史和 Prepare 首行事实复用；[ADR-0038](../adr/0038-windows-cleanup-and-file-update-timing.md) 固定 Windows 清理快路径/Force 回退与可选分项计时，保留 Provider I/O、Flush 和时间戳恢复。当前指南同步整理了入口、备份、日志、模型策略和兼容边界；本地测试/合成基准及文档修订不改变下表阶段状态，不授权公开发布。
+
+2026-09-07 本地同步修复：[ADR-0035](../adr/0035-provider-plan-semantic-revisions-and-sync-validation.md) 规定 Provider 相关 revision、配置有效性检查和同步失败日志。测试证据独立记录，不改变 Phase 状态或发布边界。
+
+2026-09-07 本地修复预览/诊断增量：[ADR-0034](../adr/0034-repair-preview-counts-and-single-diagnostic-scan.md) 固定字段累计/去重会话/设置类别、全局只读明细及单次诊断事实扫描。此项不改变下表 Phase 状态，不授权执行真实修复或发布。
+
+当前开发入口：[Node Core 当前架构与开发约束](../architecture/NODE_CORE_ARCHITECTURE_ZH.md)。[ADR-0023](../adr/0023-current-core-invariants-and-drift-gate.md) 固定文档职责与 Provider I/O 门禁；本地通过或文档修订均不推进下表 Phase 状态，不授权发布。
+
+2026-09-07 实测前本地优化：[ADR-0028](../adr/0028-pretest-feedback-and-validation.md) 固定日志校验/轮转、Watch 终态通知、History 定位复用、类型检查边界和手动 npm 兼容门禁。仅本地实现与验证；不更新 PR、不改变 Phase 状态，当前机器证据与最终跨平台发布证据分开。
+
+2026-09-07 会话数量修正：[ADR-0030](../adr/0030-writer-owned-session-count.md) 将 Codex writer 持有会话与本次同步受阻目标分开；取代 [ADR-0029](../adr/0029-overview-preview-session-usage.md) 的首页展示口径，保留实际写入检查。只读观测、无轮询、不改变 Provider I/O 或阶段/发布状态。
+
+V1 本地手测增量：[ADR-0017 本地路径展示与保存标题](../adr/0017-local-storage-display-and-saved-history-titles.md)。该增量不改变阶段/发布状态，证据见对应 Core、Desktop 和 packaged fixtures。
+
+下一批会话操作：[ADR-0018 History 会话操作与轻量搜索](../adr/0018-history-session-actions.md)。仅本地实现与验证，不代表发布门禁或 Phase 完成。
+
+项目主会话/子任务与独立分页、本地项目显示名增量：[ADR-0022](../adr/0022-history-project-roots-and-child-pagination.md)。替代当前页 cwd 分组，仅本地验证，不更新 PR 或阶段完成状态。
+
+日常/高级分层：[ADR-0019 日常同步与高级修复](../adr/0019-everyday-sync-and-advanced-repair.md)。现有Diagnostics/Repair进入高级功能；会话序号与显示索引修复仍为独立待实现能力，不推进阶段或发布状态。
+
 本文是迁移工作的执行入口，用于记录阶段状态、PR 依赖、进入条件和退出门槛。它不复制架构正文，也不把目标设计描述成已经实现。
 
-权威顺序：
+权威职责与冲突裁决：
 
-1. 已发布兼容行为、当前代码与测试；
-2. vNext 架构基线；
-3. Accepted ADR；
-4. [Core 外部行为合同](../architecture/contracts/CORE_EXTERNAL_BEHAVIOR_ZH.md)、[CLI 合同](../architecture/contracts/CLI_CONTRACT_ZH.md)和 [Error Code 合同](../architecture/contracts/ERROR_CODES_ZH.md)；
-5. [行为兼容 Fixture 清单](BEHAVIOR_FIXTURES_ZH.md)；
-6. 本执行索引中的阶段状态。
-
-发生冲突时必须先登记差异并裁决，不能让后提交的新实现自动成为权威。ADR-0011 的 V1 合并拓扑例外只改变 checkpoint 的承载方式，不改变本权威顺序。
+1. 已发布兼容行为不能被目标文案静默改变；V1 的有意增量由明确范围的 Accepted ADR、合同与测试共同裁决。
+2. 总体架构定义路线，当前 Core 约束记录实际模块及不变量；后续 ADR 明示取代的旧段落只作历史依据，不要求恢复旧行为。
+3. [Core 合同](../architecture/contracts/CORE_EXTERNAL_BEHAVIOR_ZH.md)、[CLI 合同](../architecture/contracts/CLI_CONTRACT_ZH.md)和 [Error Code 合同](../architecture/contracts/ERROR_CODES_ZH.md)定义外部语义；[Fixture 清单](BEHAVIOR_FIXTURES_ZH.md)和测试提供证据。
+4. 当前代码是现状事实，不自动成为合法新合同。发生冲突先登记差异，决定修 bug 还是修改裁决，不能降低测试要求掩盖退化。
+5. 本索引独立记录阶段/发布状态；README、目标架构、单项测试通过都不能替代最终合入与发布证据。ADR-0011 只改变 checkpoint 的承载方式。
 
 ## 2. 总体状态
 
@@ -37,6 +56,8 @@
 | 7 | 清理 Legacy | Pending | 移出重复 .NET 业务代码，保留历史标签、分支和迁移说明 |
 
 状态只能按 `Pending → In Progress → Completed` 前进。V1 的 `C0`～`C10` 仅是内部 checkpoint：可记录“已验证”或“合入后 Completed”，但在最终 PR 合入受保护分支前，Phase 1～7 仍为 Pending 或 In Progress，不能标记 Completed。
+
+界面定位与公开替代分开：V1 分支使用面向用户的 Electron 主桌面界面文案，.NET 在该分支说明中作为 Legacy fallback 保留；这不表示 Phase 6 Completed，也不表示已公开替代旧下载、签名或启用更新通道。README 必须同时注明本地代码与实际 Release 资产的区别，不对未验证平台宣称发布成功。
 
 ## 2.1 V1 单最终 PR checkpoint 治理
 

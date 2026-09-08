@@ -14,6 +14,8 @@
 
 import {
   CoreError,
+  publicFileUpdateTiming,
+  DEFAULT_BACKUP_RETENTION_COUNT,
   operationCoordinator as sharedOperationCoordinator,
   assertSqliteAccessSupported,
   isConfiguredSqliteHome,
@@ -91,6 +93,7 @@ export async function runWatch({
   debounceMs = defaultDebounceMs(),
   includeStateDb = true,
   once = false,
+  keepCount = DEFAULT_BACKUP_RETENTION_COUNT,
   onSync,
   onLog,
   onShutdown,
@@ -99,12 +102,20 @@ export async function runWatch({
   sleepImpl,
   platform,
   manualOperationWaiter,
+  watchId,
+  onActivity,
   accessImpl = fsp.access
 } = {}) {
   if (!Number.isInteger(debounceMs) || debounceMs < 0) {
     throw new CoreError(
       "INVALID_INPUT",
       `Invalid --debounce-ms value: ${debounceMs}. Expected a non-negative integer.`
+    );
+  }
+  if (!Number.isSafeInteger(keepCount) || keepCount < 1) {
+    throw new CoreError(
+      "INVALID_INPUT",
+      `Invalid Watch retention count: ${keepCount}. Expected an integer greater than or equal to 1.`
     );
   }
 
@@ -153,6 +164,13 @@ export async function runWatch({
     assertSqliteAccessSupported(layout, "watch");
     return withStateDbLocation(layout, await detectStateDb(layout));
   };
+  const activity = (event) => {
+    if (typeof onActivity !== "function") return;
+    try {
+      const result = onActivity(event);
+      if (result && typeof result.catch === "function") void result.catch(() => {});
+    } catch {}
+  };
 
   const invokeSync = async (reason, reasons, storage) => {
     if (typeof onSync === "function") {
@@ -164,6 +182,7 @@ export async function runWatch({
     const plan = await prepareWatchProviderSync({
       codexHome,
       storage,
+      keepCount,
       onProgress: (event) => {
         if (event?.stage && event.status === "start") {
           log(`  · ${event.stage}`);
@@ -247,6 +266,8 @@ export async function runWatch({
     pendingReasons.clear();
     rerunRequested = false;
     const reason = reasons.includes("config.toml") ? "config.toml" : reasons[0];
+    const activityId = randomUUID();
+    activity({ schemaVersion: 1, event: "started", activityId, watchId, startedAt: new Date().toISOString(), reason });
     log(`[${new Date().toISOString()}] Detected change (${reason}); running sync...`);
     const task = (async () => {
       try {
@@ -257,11 +278,37 @@ export async function runWatch({
           activeStorage = nextStorage;
         }
         if (!nextStorage.stateDbLocation && isConfiguredSqliteHome(nextStorage)) {
+          activity({
+            schemaVersion: 1,
+            event: "finished",
+            activityId,
+            watchId,
+            outcome: "failed",
+            errorCode: "STATE_DB_NOT_FOUND",
+            finishedAt: new Date().toISOString()
+          });
           log(`[${new Date().toISOString()}] Sync paused: ${missingConfiguredStateDbError(nextStorage).message} Waiting for config.toml to be fixed.`);
           consecutiveNonBusyFailures = 0;
           return;
         }
         const result = await invokeSync(reason, reasons, nextStorage);
+        activity({
+          schemaVersion: 1,
+          event: "finished",
+          activityId,
+          watchId,
+          outcome: result.partial === true || result.skippedLockedRolloutFiles?.length || result.skippedChangedRolloutFiles?.length ? "partial" : "completed",
+          ...(typeof result.backupDir === "string" ? { backupId: path.basename(result.backupDir) } : {}),
+          ...(typeof result.failedStage === "string" ? { failedStage: result.failedStage } : {}),
+          ...(typeof result.failureCode === "string" ? { failureCode: result.failureCode } : {}),
+          ...(typeof result.partialReason === "string" ? { partialReason: result.partialReason } : {}),
+          ...(typeof result.retryRecommended === "boolean" ? { retryRecommended: result.retryRecommended } : {}),
+          changedSessionFiles: Number(result.changedSessionFiles) || 0,
+          ...(publicFileUpdateTiming(result.fileUpdateTiming) ? { fileUpdateTiming: publicFileUpdateTiming(result.fileUpdateTiming) } : {}),
+          sqliteRowsUpdated: Number(result.sqliteRowsUpdated) || 0,
+          skippedLockedRolloutFiles: Number(result.skippedLockedRolloutFiles?.length) || 0,
+          finishedAt: new Date().toISOString()
+        });
         log(`[${new Date().toISOString()}] Sync complete: provider=${result.targetProvider}, rollout_files=${result.changedSessionFiles}, sqlite_rows=${result.sqliteRowsUpdated}${result.skippedLockedRolloutFiles?.length ? `, skipped_locked=${result.skippedLockedRolloutFiles.length}` : ""}`);
         // A successful sync resets the consecutive-failure counter
         // so a transient error followed by recovery does not
@@ -271,6 +318,7 @@ export async function runWatch({
           await shutdown("once-mode-complete", task);
         }
       } catch (error) {
+        activity({ schemaVersion: 1, event: "finished", activityId, watchId, outcome: "failed", errorCode: typeof error?.code === "string" ? error.code : "INTERNAL_ERROR", finishedAt: new Date().toISOString() });
         const message = error instanceof Error ? error.message : String(error);
         const isRecoveryBlocked = error?.code === "RECOVERY_REQUIRED"
           || error?.code === "PENDING_TRANSACTION";
@@ -569,31 +617,45 @@ function watchSnapshot(entry) {
   };
 }
 
+function bindWatchProfile(entry, options) {
+  if (typeof options.profileId === "string") {
+    entry.profiles.set(options.profileId, options.profileRevision ?? null);
+  }
+  return watchSnapshot(entry);
+}
+
 export async function startWatch(options = {}) {
   const scopeKey = await physicalWatchScope(options);
   const active = activeWatchByScope.get(scopeKey);
-  if (active && active.status !== "stopped") return watchSnapshot(active);
+  if (active && active.status !== "stopped") return bindWatchProfile(active, options);
   const pending = pendingWatchStartByScope.get(scopeKey);
-  if (pending) return pending;
+  if (pending) {
+    const snapshot = await pending;
+    return bindWatchProfile(watchRegistry.get(snapshot.watchId), options);
+  }
   const start = (async () => {
     const current = activeWatchByScope.get(scopeKey);
-    if (current && current.status !== "stopped") return watchSnapshot(current);
-    const handle = await runWatch(options);
+    if (current && current.status !== "stopped") return bindWatchProfile(current, options);
+    const watchId = randomUUID();
+    const handle = await runWatch({ ...options, watchId });
     const entry = {
-      watchId: randomUUID(),
+      watchId,
       status: "running",
       startedAt: new Date().toISOString(),
       stoppedAt: null,
       stopReason: null,
       includeStateDb: options.includeStateDb !== false,
       once: Boolean(options.once),
+      profiles: new Map(),
       scopeKey,
-      handle
+      handle,
+      onStopped: typeof options.onStopped === "function" ? options.onStopped : null,
+      stoppedNotified: false
     };
     watchRegistry.set(entry.watchId, entry);
     activeWatchByScope.set(scopeKey, entry);
     void handle.done.then((reason) => finalizeWatch(entry, reason));
-    return watchSnapshot(entry);
+    return bindWatchProfile(entry, options);
   })();
   pendingWatchStartByScope.set(scopeKey, start);
   try {
@@ -606,15 +668,22 @@ export async function startWatch(options = {}) {
 }
 
 function finalizeWatch(entry, reason) {
-  if (entry.status !== "stopped") {
-    entry.status = "stopped";
-    entry.stoppedAt = new Date().toISOString();
-    entry.stopReason = typeof reason === "string" ? reason : "unknown";
-  }
+  if (entry.status === "stopped") return false;
+  entry.status = "stopped";
+  entry.stoppedAt = new Date().toISOString();
+  entry.stopReason = typeof reason === "string" ? reason : "unknown";
   if (activeWatchByScope.get(entry.scopeKey) === entry) {
     activeWatchByScope.delete(entry.scopeKey);
   }
   pruneWatchHistory();
+  if (!entry.stoppedNotified) {
+    entry.stoppedNotified = true;
+    try {
+      const result = entry.onStopped?.(watchSnapshot(entry));
+      if (result && typeof result.catch === "function") void result.catch(() => {});
+    } catch {}
+  }
+  return true;
 }
 
 function requireWatchEntry(input) {
@@ -641,12 +710,23 @@ export async function stopWatch(input) {
   return watchSnapshot(entry);
 }
 
-/** @param {{watchId: string} | null} [input] */
+/** @param {{watchId: string} | {profileId: string, profileRevision?: string} | null} [input] */
 export function getWatchStatus(input = null) {
   if (input === null || input === undefined) {
     return {
       schemaVersion: 1,
       watches: [...watchRegistry.values()].map(watchSnapshot)
+    };
+  }
+  if (input && typeof input === "object" && !Array.isArray(input)
+      && Object.keys(input).every((key) => key === "profileId" || key === "profileRevision")
+      && typeof input.profileId === "string") {
+    return {
+      schemaVersion: 1,
+      watches: [...watchRegistry.values()]
+        .filter((entry) => entry.profiles.has(input.profileId)
+          && (input.profileRevision === undefined || entry.profiles.get(input.profileId) === input.profileRevision))
+        .map(watchSnapshot)
     };
   }
   return watchSnapshot(requireWatchEntry(input));

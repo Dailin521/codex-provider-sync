@@ -294,17 +294,17 @@ test("applySync rejects config drift under the write locks before backup", async
   }
 });
 
-test("applySync rejects rollout and State DB drift before backup", async () => {
+test("applySync rejects rollout header and State DB Provider drift before backup", async () => {
   for (const drift of ["rollout", "state-db"]) {
     const value = await makeFixture();
     try {
       const plan = await prepareSync({ codexHome: value.codexHome });
       if (drift === "rollout") {
-        await fs.appendFile(value.rolloutPath, '{"type":"event_msg"}\n', "utf8");
+        await fs.writeFile(value.rolloutPath, (await fs.readFile(value.rolloutPath, "utf8")).replace('"custom"', '"other"'));
       } else {
         const db = await openDatabase(value.stateDbPath);
         try {
-          db.prepare("UPDATE threads SET first_user_message = ? WHERE id = ?").run("changed", "thread-a");
+          db.prepare("UPDATE threads SET model_provider = ? WHERE id = ?").run("changed", "thread-a");
         } finally {
           db.close();
         }
@@ -319,6 +319,77 @@ test("applySync rejects rollout and State DB drift before backup", async () => {
       await fs.rm(value.root, { recursive: true, force: true });
     }
   }
+});
+
+test("Sync and Switch allow body appends and non-Provider WAL updates between preview and apply", async (t) => {
+  for (const operation of ["sync", "switch"]) {
+    const value = await makeFixture();
+    t.after(() => fs.rm(value.root, { recursive: true, force: true }));
+    await fs.appendFile(path.join(value.codexHome, "config.toml"), '[model_providers.prov_a]\nname = "fixture"\n');
+    const db = await openDatabase(value.stateDbPath);
+    try {
+      db.exec("PRAGMA journal_mode=WAL");
+      const plan = operation === "sync"
+        ? await prepareSync({ codexHome: value.codexHome })
+        : await prepareSwitch({ codexHome: value.codexHome, provider: "prov_a", keepRootModel: true });
+      const body = '{"type":"event_msg","payload":{"type":"user_message","message":"synthetic append"}}\n';
+      await fs.appendFile(value.rolloutPath, body);
+      db.prepare("UPDATE threads SET first_user_message = ? WHERE id = ?").run("synthetic update", "thread-a");
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+      const result = await (operation === "sync" ? applySync : applySwitch)({ schemaVersion: 1, planId: plan.planId });
+      assert.equal(result.outcome, "completed");
+      const bytes = await fs.readFile(value.rolloutPath, "utf8");
+      assert.equal(bytes.slice(bytes.indexOf("\n") + 1), body);
+      const row = db.prepare("SELECT * FROM threads WHERE id = ?").get("thread-a");
+      assert.equal(row.model_provider, operation === "sync" ? "openai" : "prov_a");
+      assert.equal(row.first_user_message, "synthetic update");
+      assert.equal(row.model, "old-model");
+    } finally { db.close(); }
+  }
+});
+
+test("Provider plans still reject replacement, truncation, inventory and schema changes before backup", async (t) => {
+  for (const drift of ["replace", "truncate", "new-rollout", "new-row", "schema"]) {
+    const value = await makeFixture();
+    t.after(() => fs.rm(value.root, { recursive: true, force: true }));
+    await fs.appendFile(value.rolloutPath, '{"type":"event_msg"}\n');
+    const plan = await prepareSync({ codexHome: value.codexHome });
+    if (drift === "replace") {
+      const bytes = await fs.readFile(value.rolloutPath);
+      await fs.rename(value.rolloutPath, `${value.rolloutPath}.old`);
+      await fs.writeFile(value.rolloutPath, bytes);
+    } else if (drift === "truncate") {
+      await fs.truncate(value.rolloutPath, Number((await fs.stat(value.rolloutPath)).size) - 1);
+    } else if (drift === "new-rollout") {
+      await fs.copyFile(value.rolloutPath, path.join(path.dirname(value.rolloutPath), "rollout-new.jsonl"));
+    } else {
+      const db = await openDatabase(value.stateDbPath);
+      try {
+        db.exec(drift === "schema" ? "ALTER TABLE threads ADD COLUMN extra TEXT" : "INSERT INTO threads (id, model_provider) VALUES ('thread-b', 'custom')");
+      } finally { db.close(); }
+    }
+    await assert.rejects(applySync({ schemaVersion: 1, planId: plan.planId }), (error) => error.code === "STALE_STATE", drift);
+    assert.equal(await backupCount(value.codexHome), 0, drift);
+  }
+});
+
+test("Sync rejects an undefined config Provider with no backup or mutation, then succeeds once configured", async (t) => {
+  const value = await makeFixture();
+  t.after(() => fs.rm(value.root, { recursive: true, force: true }));
+  const configPath = path.join(value.codexHome, "config.toml");
+  const config = "model_provider = 'dal' # selected elsewhere\n";
+  await fs.writeFile(configPath, config);
+  const before = await fs.readFile(value.rolloutPath);
+  const databaseBefore = await fs.readFile(value.stateDbPath);
+  await assert.rejects(prepareSync({ codexHome: value.codexHome }), (error) => error.code === "INVALID_INPUT" && error.details.reason === "provider-not-configured");
+  assert.equal(await backupCount(value.codexHome), 0);
+  assert.deepEqual(await fs.readFile(value.rolloutPath), before);
+  assert.deepEqual(await fs.readFile(value.stateDbPath), databaseBefore);
+  assert.equal(await fs.readFile(configPath, "utf8"), config);
+  await fs.appendFile(configPath, "[model_providers.'dal'] # configured\nname = 'fixture'\n");
+  const plan = await prepareSync({ codexHome: value.codexHome });
+  assert.equal(plan.target.provider, "dal");
+  assert.equal((await applySync({ schemaVersion: 1, planId: plan.planId })).outcome, "completed");
 });
 
 test("profile revision drift is checked after preparation and consumes the plan", async () => {
@@ -474,6 +545,10 @@ test("prepareSwitch/applySwitch preserves all three model-mode intents in consum
       });
       assert.equal(plan.operation, "switch");
       assert.equal(plan.target.modelMode, fixture.expectedMode);
+      assert.equal(plan.target.previousProvider, "openai");
+      assert.equal(plan.target.previousRootModel, "gpt-5");
+      assert.equal(plan.target.provider, "relay");
+      assert.equal(plan.target.model, fixture.expectedModel);
       const applied = await applySwitch({ schemaVersion: 1, planId: plan.planId });
       assert.equal(applied.outcome, "completed");
       const configText = await fs.readFile(path.join(value.codexHome, "config.toml"), "utf8");

@@ -8,7 +8,7 @@ export const DB_FILE_BASENAME = "state_5.sqlite";
 export const SQLITE_DIR_BASENAME = "sqlite";
 export const GLOBAL_STATE_FILE_BASENAME = ".codex-global-state.json";
 export const GLOBAL_STATE_BACKUP_FILE_BASENAME = ".codex-global-state.json.bak";
-export const DEFAULT_BACKUP_RETENTION_COUNT = 5;
+export const DEFAULT_BACKUP_RETENTION_COUNT = 2;
 export const SESSION_DIRS = ["sessions", "archived_sessions"];
 
 export function defaultCodexHome() {

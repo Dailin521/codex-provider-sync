@@ -8,6 +8,7 @@ import path from "node:path";
 import test, { afterEach } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { createCoreFacade } from "../packages/core/src/index.js";
 import { getDiagnostics } from "../src/diagnostics.js";
 import {
   applySync,
@@ -20,6 +21,7 @@ import {
 } from "../src/service.js";
 import { openDatabase } from "../src/sqlite.js";
 import { TransactionJournal, findPendingTransactions } from "../src/transaction-journal.js";
+import { isFileUpdateTiming } from "../packages/contracts/dist/index.js";
 
 delete process.env.CODEX_SQLITE_HOME;
 
@@ -48,6 +50,7 @@ async function fixture({ rolloutProvider = "openai", configProvider = "openai", 
   const cwd = process.platform === "win32" ? "D:\\workspace\\test" : "/workspace/test";
   const header = JSON.stringify({
     type: "session_meta",
+    ordinal: 42,
     payload: { id: "test", cwd, model_provider: rolloutProvider }
   });
   const body = [
@@ -86,6 +89,31 @@ function hashBytes(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+test("Provider result preserves batch timing through Facade, partial and noop paths", { skip: process.platform !== "win32" }, async () => {
+  const value = await fixture({ configProvider: "provider_long" });
+  const facade = createCoreFacade({ resolveProfile: () => ({ id: "fixture", revision: "r1", codexHome: value.home }) });
+  const plan = await facade.prepareSync({ profile: { profileId: "fixture" } });
+  const result = await facade.applySync({ schemaVersion: 1, planId: plan.planId });
+  assert.equal(result.outcome, "completed");
+  assert.ok(isFileUpdateTiming(result.result.fileUpdateTiming));
+  assert.equal(result.result.fileUpdateTiming.rewrittenFiles, 1);
+  assert.equal(result.result.fileUpdateTiming.measuredFiles, 1);
+  assert.ok(result.result.fileUpdateTiming.restoreMtimeMs > 0);
+  const noop = await runSync({ codexHome: value.home });
+  assert.equal(noop.fileUpdateTiming, undefined);
+  await fs.writeFile(value.file, `${value.header}\n${value.body}`);
+  const partial = await runSync({ codexHome: value.home, faultInjector: ({ point }) => {
+    if (point === "after_rollout_apply") throw new Error("synthetic failure after mutation");
+  } });
+  assert.equal(partial.partial, true);
+  assert.equal(partial.failedStage, "rewrite_rollout_files");
+  assert.ok(isFileUpdateTiming(partial.fileUpdateTiming));
+  assert.equal(partial.fileUpdateTiming.rewrittenFiles, 1);
+  assert.ok(partial.backupDir);
+  await runRestore({ backupDir: partial.backupDir, codexHome: value.home });
+  assert.equal(await fs.readFile(value.file, "utf8"), `${value.header}\n${value.body}`);
+});
+
 test("Provider Switch reads only session metadata and preserves every non-Provider field", async () => {
   const value = await fixture();
   const beforeRow = await row(value);
@@ -121,6 +149,62 @@ test("Provider Switch reads only session metadata and preserves every non-Provid
   assert.match(config, /model = "root-model"/);
 });
 
+test("Core Facade Sync keeps equal-length Provider writes in place without a full-body read or stream", async () => {
+  const value = await fixture({ rolloutProvider: "openai", configProvider: "prov_a" });
+  const beforeHeader = JSON.parse(value.header);
+  const beforeBody = await bodyBytes(value.file);
+  const beforeBodyHash = hashBytes(beforeBody);
+  const beforeRow = await row(value);
+  const fixedTime = new Date("2025-01-02T03:04:05.000Z");
+  await fs.utimes(value.file, fixedTime, fixedTime);
+  const beforeStat = await fs.stat(value.file, { bigint: true });
+  const originalReadFile = fs.readFile;
+  const originalCreateReadStream = fsSync.createReadStream;
+  let guarded = true;
+  let rolloutStreams = 0;
+  fs.readFile = async function (file, ...args) {
+    if (guarded) assert.notEqual(path.resolve(String(file)), path.resolve(value.file));
+    return originalReadFile.call(this, file, ...args);
+  };
+  fsSync.createReadStream = function (file, ...args) {
+    if (guarded && path.resolve(String(file)) === path.resolve(value.file)) rolloutStreams += 1;
+    return originalCreateReadStream.call(this, file, ...args);
+  };
+  cleanups.push(() => {
+    fs.readFile = originalReadFile;
+    fsSync.createReadStream = originalCreateReadStream;
+  });
+
+  const facade = createCoreFacade({
+    resolveProfile: async () => ({ id: "default", revision: "r1", codexHome: value.home })
+  });
+  const status = await facade.getStatus({ profile: { profileId: "default", profileRevision: "r1" } });
+  assert.deepEqual(status.sessionActivity, process.platform === "win32"
+    ? { state: "unavailable", count: null } : { state: "unsupported", count: null });
+  assert.equal(status.backupSummary.count, 0);
+  const plan = await facade.prepareSync({ profile: { profileId: "default", profileRevision: "r1" } });
+  const applied = await facade.applySync({ schemaVersion: 1, planId: plan.planId });
+  guarded = false;
+
+  const afterStat = await fs.stat(value.file, { bigint: true });
+  const afterHeader = JSON.parse((await fs.readFile(value.file, "utf8")).split(/\r?\n/, 1)[0]);
+  const afterRow = await row(value);
+  assert.equal(applied.outcome, "completed");
+  assert.equal(applied.result.inPlaceSessionFiles, 1);
+  assert.equal(applied.result.rewrittenSessionFiles, 0);
+  assert.equal(rolloutStreams, 0, "equal-length Provider Sync must not scan or copy the body");
+  assert.equal(afterStat.ino, beforeStat.ino);
+  assert.equal(afterStat.size, beforeStat.size);
+  assert.equal(Math.round(Number(afterStat.mtimeNs) / 1e6), Math.round(Number(beforeStat.mtimeNs) / 1e6));
+  assert.equal(hashBytes(await bodyBytes(value.file)), beforeBodyHash);
+  assert.deepEqual(
+    { ...afterHeader.payload, model_provider: beforeHeader.payload.model_provider },
+    beforeHeader.payload
+  );
+  assert.equal(afterHeader.ordinal, beforeHeader.ordinal);
+  assert.deepEqual(afterRow, { ...beforeRow, model_provider: "prov_a" });
+});
+
 test("32 MiB equal-length Provider update keeps file identity, size, and body hash", async () => {
   const value = await fixture();
   const handle = await fs.open(value.file, "a");
@@ -145,13 +229,33 @@ test("32 MiB equal-length Provider update keeps file identity, size, and body ha
 test("unequal-length Provider update streams a replacement while preserving body bytes", async () => {
   const value = await fixture();
   const beforeBody = await bodyBytes(value.file);
+  const originalReadFile = fs.readFile;
+  const originalCreateReadStream = fsSync.createReadStream;
+  let guarded = true;
+  let rolloutStreams = 0;
+  fs.readFile = async function (file, ...args) {
+    if (guarded) assert.notEqual(path.resolve(String(file)), path.resolve(value.file));
+    return originalReadFile.call(this, file, ...args);
+  };
+  fsSync.createReadStream = function (file, ...args) {
+    if (guarded && path.resolve(String(file)) === path.resolve(value.file)) rolloutStreams += 1;
+    return originalCreateReadStream.call(this, file, ...args);
+  };
+  cleanups.push(() => {
+    fs.readFile = originalReadFile;
+    fsSync.createReadStream = originalCreateReadStream;
+  });
   const result = await runSwitch({
     codexHome: value.home,
     provider: "provider_long",
     keepRootModel: true
   });
+  guarded = false;
   assert.equal(result.inPlaceSessionFiles, 0);
   assert.equal(result.rewrittenSessionFiles, 1);
+  if (process.platform !== "win32") {
+    assert.equal(rolloutStreams, 1, "unequal-length replacement must stream the body once");
+  }
   assert.deepEqual(await bodyBytes(value.file), beforeBody);
   assert.match((await fs.readFile(value.file, "utf8")).split(/\r?\n/, 1)[0], /"model_provider":"provider_long"/);
 });
@@ -477,6 +581,8 @@ test("post-mutation failure returns partial with backup evidence and retry conve
 
 test("rollout changed during Apply is reported separately and a fresh retry converges", async () => {
   const value = await fixture({ rolloutProvider: "prov_a", configProvider: "openai" });
+  const before = await fs.stat(value.file, { bigint: true });
+  const beforeBytes = await fs.readFile(value.file);
   const plan = await prepareSync({
     codexHome: value.home,
     async faultInjector({ point, path: targetPath }) {
@@ -491,6 +597,11 @@ test("rollout changed during Apply is reported separately and a fresh retry conv
   assert.equal(partial.result.retryRecommended, true);
   assert.deepEqual(partial.result.skippedLockedRolloutFiles, []);
   assert.deepEqual(partial.result.skippedChangedRolloutFiles, [value.file]);
+  assert.equal((await fs.stat(value.file, { bigint: true })).ino, before.ino);
+  assert.deepEqual(
+    await fs.readFile(value.file),
+    Buffer.concat([beforeBytes, Buffer.from('{"type":"event_msg","payload":{"type":"assistant_message","message":"later"}}\n')])
+  );
   assert.equal((await row(value)).model_provider, "openai");
 
   const retryPlan = await prepareSync({ codexHome: value.home });

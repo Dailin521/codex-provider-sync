@@ -3,6 +3,25 @@
 import { CoreError } from "../infrastructure/node-core-ports.js";
 
 export const REPAIR_TARGET_ORDER = ["models", "cwd", "userEvent", "workspaceRoots"];
+const SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+export function normalizeRepairSessionIds(sessionIds, targets) {
+  if (sessionIds === undefined) return null;
+  if (!Array.isArray(sessionIds) || sessionIds.length === 0 || sessionIds.length > 100) {
+    throw new CoreError("INVALID_INPUT", "Repair sessionIds must contain 1 to 100 native session IDs.");
+  }
+  if (targets.includes("workspaceRoots")) {
+    throw new CoreError("INVALID_INPUT", "workspaceRoots repair is whole-profile only.");
+  }
+  const result = new Set();
+  for (const id of sessionIds) {
+    if (typeof id !== "string" || !SESSION_ID.test(id) || result.has(id)) {
+      throw new CoreError("INVALID_INPUT", "Repair sessionIds must be unique native session IDs.");
+    }
+    result.add(id);
+  }
+  return result;
+}
 
 export function normalizeRepairTargets(targets) {
   if (!Array.isArray(targets) || targets.length === 0) {

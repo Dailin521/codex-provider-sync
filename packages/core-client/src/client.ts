@@ -13,6 +13,7 @@ import {
   type CoreRequestEnvelope,
   type CoreOperationStartedEnvelope,
   type CoreProgressEnvelope,
+  type CoreRequestProgressEnvelope,
   type DiagnosticsSnapshot,
   type GetDiagnosticsInput,
   type GetHistorySessionInput,
@@ -43,11 +44,12 @@ export interface CoreCallOptions {
   requestId?: string;
   onOperationStarted?(event: CoreOperationStartedEnvelope): void;
   onProgress?(event: CoreProgressEnvelope): void;
+  onRequestProgress?(event: CoreRequestProgressEnvelope): void;
 }
 
 export type CoreTransportCallOptions = Pick<
   CoreCallOptions,
-  "signal" | "onOperationStarted" | "onProgress"
+  "signal" | "onOperationStarted" | "onProgress" | "onRequestProgress"
 >;
 
 export interface CoreTransport {
@@ -124,7 +126,8 @@ export class TransportCoreClient implements CoreClient {
     const response = await this.#transport.request(request, {
       signal: options.signal,
       onOperationStarted: options.onOperationStarted,
-      onProgress: options.onProgress
+      onProgress: options.onProgress,
+      onRequestProgress: options.onRequestProgress
     });
     try {
       assertCoreResponseEnvelope<M>(response, requestId);

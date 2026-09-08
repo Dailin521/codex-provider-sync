@@ -1,0 +1,198 @@
+name: prepare Electron Windows release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_ref:
+        description: Existing version tag, exactly refs/tags/v1.0.0-rc.N
+        required: true
+        type: string
+      release_version:
+        description: Matching candidate version, for example 1.0.0-rc.42
+        required: true
+        type: string
+      expected_sha:
+        description: Full 40-character commit SHA resolved by the existing tag
+        required: true
+        type: string
+      create_draft_release:
+        description: Create only a prerelease Draft GitHub Release (the repository environment decides approval); never publish stable/latest
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: publish-v${{ inputs.release_version }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify-input:
+    runs-on: ubuntu-latest
+    outputs:
+      release_ref: ${{ steps.prepare.outputs.release_ref }}
+      release_tag: ${{ steps.prepare.outputs.release_tag }}
+      version: ${{ steps.prepare.outputs.version }}
+      commit: ${{ steps.prepare.outputs.commit }}
+      build_id: ${{ steps.prepare.outputs.build_id }}
+      ci_run_id: ${{ steps.ci_gate.outputs.ci_run_id }}
+    steps:
+      - name: Require dispatch from main
+        shell: bash
+        run: test "$GITHUB_REF" = refs/heads/main
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+      - name: Validate immutable Electron release inputs
+        id: prepare
+        env:
+          CPS_RELEASE_REF: ${{ inputs.release_ref }}
+          CPS_RELEASE_VERSION: ${{ inputs.release_version }}
+          CPS_EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: node apps/desktop/scripts/prepare-electron-windows-release.mjs
+      - name: Verify existing tag resolves to the exact main-contained commit
+        shell: bash
+        env:
+          CPS_RELEASE_REF: ${{ steps.prepare.outputs.release_ref }}
+          CPS_EXPECTED_SHA: ${{ steps.prepare.outputs.commit }}
+        run: |
+          git fetch --force --no-tags origin "+${CPS_RELEASE_REF}:${CPS_RELEASE_REF}"
+          git fetch --force --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          tag_commit="$(git rev-parse "${CPS_RELEASE_REF}^{commit}")"
+          test "$tag_commit" = "$CPS_EXPECTED_SHA"
+          git merge-base --is-ancestor "$CPS_EXPECTED_SHA" refs/remotes/origin/main
+      - name: Require a successful exact push ci-gate
+        id: ci_gate
+        env:
+          CPS_EXPECTED_SHA: ${{ steps.prepare.outputs.commit }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node apps/desktop/scripts/verify-exact-ci-gate.mjs
+
+  build-windows-candidate:
+    needs: verify-input
+    runs-on: windows-latest
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify-input.outputs.release_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify checked out release commit
+        shell: pwsh
+        env:
+          CPS_EXPECTED_SHA: ${{ needs.verify-input.outputs.commit }}
+        run: |
+          $actual = (git rev-parse HEAD).ToLowerInvariant()
+          if ($actual -ne $env:CPS_EXPECTED_SHA) {
+            throw "Checked out commit does not match the verified release SHA."
+          }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - name: Build unsigned Windows x64 candidate without publishing
+        env:
+          CPS_CANDIDATE_TARGET: windows-x64
+          CPS_DESKTOP_VERSION: ${{ needs.verify-input.outputs.version }}
+          CPS_DESKTOP_BUILD_ID: ${{ needs.verify-input.outputs.build_id }}
+        run: npm run desktop:pack:candidate
+      - name: Audit, create SBOM, and stage the exact Windows containers
+        env:
+          CPS_CANDIDATE_TARGET: windows-x64
+          CPS_DESKTOP_VERSION: ${{ needs.verify-input.outputs.version }}
+          CPS_DESKTOP_BUILD_ID: ${{ needs.verify-input.outputs.build_id }}
+          CPS_CANDIDATE_SHA: ${{ needs.verify-input.outputs.commit }}
+        run: npm run desktop:stage:candidate
+      - name: Smoke final NSIS and portable ZIP containers
+        env:
+          CPS_CANDIDATE_TARGET: windows-x64
+          CPS_DESKTOP_VERSION: ${{ needs.verify-input.outputs.version }}
+        run: npm run desktop:smoke:candidate:artifacts
+      - name: Upload audited Windows-only release preparation allowlist
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: electron-windows-release-${{ needs.verify-input.outputs.version }}-${{ needs.verify-input.outputs.commit }}
+          path: |
+            artifacts/c9/windows-x64/assets/CodexProviderSync-${{ needs.verify-input.outputs.version }}-windows-x64-setup.exe
+            artifacts/c9/windows-x64/assets/CodexProviderSync-${{ needs.verify-input.outputs.version }}-windows-x64-portable.zip
+            artifacts/c9/windows-x64/metadata/audit-report.v1.json
+            artifacts/c9/windows-x64/metadata/sbom.cyclonedx.json
+            artifacts/c9/windows-x64/metadata/candidate-staging.v1.json
+            artifacts/c9/windows-x64/metadata/container-verification.v1.json
+            artifacts/c9/windows-x64/metadata/release-manifest.v1.json
+            artifacts/c9/windows-x64/metadata/SHA256SUMS.txt
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 30
+
+  draft-release:
+    needs:
+      - verify-input
+      - build-windows-candidate
+    if: ${{ inputs.create_draft_release }}
+    runs-on: ubuntu-latest
+    environment: electron-windows-release
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify-input.outputs.release_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+      - name: Recheck existing tag resolves to the exact main-contained commit
+        shell: bash
+        env:
+          CPS_RELEASE_REF: ${{ needs.verify-input.outputs.release_ref }}
+          CPS_EXPECTED_SHA: ${{ needs.verify-input.outputs.commit }}
+        run: |
+          git fetch --force --no-tags origin "+${CPS_RELEASE_REF}:${CPS_RELEASE_REF}"
+          git fetch --force --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          tag_commit="$(git rev-parse "${CPS_RELEASE_REF}^{commit}")"
+          test "$tag_commit" = "$CPS_EXPECTED_SHA"
+          git merge-base --is-ancestor "$CPS_EXPECTED_SHA" refs/remotes/origin/main
+      - name: Recheck exact push ci-gate and refuse an existing Release
+        env:
+          CPS_EXPECTED_SHA: ${{ needs.verify-input.outputs.commit }}
+          CPS_RELEASE_TAG: ${{ needs.verify-input.outputs.release_tag }}
+          CPS_REQUIRE_NO_RELEASE: "true"
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node apps/desktop/scripts/verify-exact-ci-gate.mjs
+      - name: Download only the audited Windows release preparation artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: electron-windows-release-${{ needs.verify-input.outputs.version }}-${{ needs.verify-input.outputs.commit }}
+          path: artifacts/release
+      - name: Create a Windows-only prerelease draft through the environment gate
+        shell: bash
+        working-directory: artifacts/release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CPS_RELEASE_TAG: ${{ needs.verify-input.outputs.release_tag }}
+          CPS_RELEASE_VERSION: ${{ needs.verify-input.outputs.version }}
+          CPS_EXPECTED_SHA: ${{ needs.verify-input.outputs.commit }}
+        run: |
+          sha256sum --check metadata/SHA256SUMS.txt
+          gh release create "$CPS_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --target "$CPS_EXPECTED_SHA" --draft --prerelease --latest=false \
+            --title "Codex Provider Sync Electron $CPS_RELEASE_VERSION (Windows x64 RC)" \
+            --notes "Windows x64 Electron RC. Unsigned; manual installation only. Not stable/latest. Signing and online upgrade acceptance remain unverified. Legacy .NET users must install or fully extract Electron; the old single-EXE updater is incompatible. Source: $CPS_EXPECTED_SHA." \
+            "assets/CodexProviderSync-$CPS_RELEASE_VERSION-windows-x64-setup.exe" \
+            "assets/CodexProviderSync-$CPS_RELEASE_VERSION-windows-x64-portable.zip" \
+            metadata/SHA256SUMS.txt metadata/sbom.cyclonedx.json \
+            metadata/audit-report.v1.json metadata/candidate-staging.v1.json \
+            metadata/container-verification.v1.json metadata/release-manifest.v1.json

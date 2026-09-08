@@ -5,6 +5,7 @@ import {
   assertCoreRequestEnvelope,
   createCoreOperationStartedEnvelope,
   createCoreProgressEnvelope,
+  createCoreRequestProgressEnvelope,
   createCoreFailureEnvelope,
   createCoreSuccessEnvelope,
   createPublicCoreErrorDto,
@@ -23,6 +24,10 @@ const CONFLICT_CODES = new Set([
   "RECOVERY_REQUIRED",
   "OPERATION_BUSY"
 ]);
+
+function supportsRequestProgress(method) {
+  return method === "prepareRepair" || method === "getDiagnostics";
+}
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -114,6 +119,7 @@ export async function dispatchWebCoreRequest(coreFacade, value, control = {}) {
       : request.method === "applyRestore"
         ? "restore"
         : null;
+  const requestProgress = supportsRequestProgress(request.method);
   const notify = (observer, event) => {
     if (typeof observer !== "function") return;
     try { observer(event); } catch {}
@@ -129,7 +135,7 @@ export async function dispatchWebCoreRequest(coreFacade, value, control = {}) {
     }
     const result = await handler.call(coreFacade, request.payload, {
       ...(control.signal ? { signal: control.signal } : {}),
-      ...(operation ? {
+      ...(operation || requestProgress ? {
         onOperationStarted(event) {
           const operationId = safeString(event?.operationId);
           if (!operationId) return;
@@ -140,11 +146,18 @@ export async function dispatchWebCoreRequest(coreFacade, value, control = {}) {
           );
         },
         onProgress(event) {
-          if (!observedOperationId) return;
-          notify(
-            control.onProgress,
-            createCoreProgressEnvelope(request.requestId, observedOperationId, event)
-          );
+          if (operation) {
+            if (!observedOperationId) return;
+            notify(
+              control.onProgress,
+              createCoreProgressEnvelope(request.requestId, observedOperationId, event)
+            );
+          } else {
+            notify(
+              control.onRequestProgress,
+              createCoreRequestProgressEnvelope(request.requestId, event)
+            );
+          }
         }
       } : {})
     });

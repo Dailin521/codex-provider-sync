@@ -31,6 +31,7 @@ export default defineConfig(({ mode }) => ({
     },
     build: {
       outDir: path.resolve(root, "out/main"),
+      minify: "esbuild",
       sourcemap: false,
       externalizeDeps: {
         exclude: [
@@ -59,6 +60,7 @@ export default defineConfig(({ mode }) => ({
     },
     build: {
       outDir: path.resolve(root, "out/preload"),
+      minify: "esbuild",
       sourcemap: false,
       externalizeDeps: {
         exclude: [
@@ -85,6 +87,7 @@ export default defineConfig(({ mode }) => ({
     plugins: [react(), tailwindcss()],
     build: {
       outDir: path.resolve(root, "out/renderer"),
+      minify: "esbuild",
       emptyOutDir: true,
       sourcemap: false,
       target: "es2022"

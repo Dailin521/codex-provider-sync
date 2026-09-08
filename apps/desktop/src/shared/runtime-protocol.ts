@@ -1,11 +1,16 @@
 import {
   assertCoreOperationEventEnvelope,
+  assertCoreRequestProgressEnvelope,
   assertCoreRequestEnvelope,
   assertCoreResponseEnvelope,
+  isFileUpdateTiming,
+  type FileUpdateTiming,
   type CoreMethodName,
   type CoreOperationEventEnvelope,
+  type CoreRequestProgressEnvelope,
   type CoreRequestEnvelope,
-  type CoreResponseEnvelope
+  type CoreResponseEnvelope,
+  type WatchSnapshot
 } from "@codex-provider-sync/contracts";
 import {
   DESKTOP_RUNTIME_METHODS,
@@ -54,6 +59,59 @@ export interface RuntimeOperationEventFrame {
   envelope: CoreOperationEventEnvelope;
 }
 
+export interface RuntimeRequestProgressFrame {
+  kind: "request-progress";
+  runtimeProtocolVersion: typeof DESKTOP_RUNTIME_PROTOCOL_VERSION;
+  generation: number;
+  dispatchId: string;
+  envelope: CoreRequestProgressEnvelope;
+}
+
+export interface RuntimeWatchActivity {
+  schemaVersion: 1;
+  event: "started" | "finished";
+  activityId: string;
+  watchId: string;
+  profileId: string;
+  profileRevision?: string;
+  backupId?: string;
+  failedStage?: string;
+  failureCode?: string;
+  partialReason?: string;
+  retryRecommended?: boolean;
+  startedAt?: string;
+  finishedAt?: string;
+  reason?: string;
+  outcome?: "completed" | "partial" | "failed";
+  errorCode?: string;
+  changedSessionFiles?: number;
+  sqliteRowsUpdated?: number;
+  skippedLockedRolloutFiles?: number;
+  fileUpdateTiming?: FileUpdateTiming;
+}
+
+export interface RuntimeWatchActivityFrame {
+  kind: "watch-activity";
+  runtimeProtocolVersion: typeof DESKTOP_RUNTIME_PROTOCOL_VERSION;
+  generation: number;
+  activity: RuntimeWatchActivity;
+}
+
+export interface RuntimeWatchStopped {
+  profileId: string;
+  profileRevision: string;
+  watch: WatchSnapshot & { status: "stopped"; stoppedAt: string; stopReason: string };
+}
+
+export interface RuntimeWatchStoppedFrame {
+  kind: "watch-stopped";
+  runtimeProtocolVersion: typeof DESKTOP_RUNTIME_PROTOCOL_VERSION;
+  generation: number;
+  stopped: RuntimeWatchStopped;
+}
+
+export type DesktopWatchStoppedEvent = RuntimeWatchStopped & { generation: number };
+
 export interface RuntimeCancelFrame {
   kind: "cancel";
   runtimeProtocolVersion: typeof DESKTOP_RUNTIME_PROTOCOL_VERSION;
@@ -74,6 +132,9 @@ export type RuntimeFrame =
   | RuntimeRequestFrame
   | RuntimeResponseFrame
   | RuntimeOperationEventFrame
+  | RuntimeRequestProgressFrame
+  | RuntimeWatchActivityFrame
+  | RuntimeWatchStoppedFrame
   | RuntimeCancelFrame
   | RuntimeShutdownFrame;
 
@@ -194,6 +255,96 @@ export function assertRuntimeOperationEventFrame(
   assertCoreOperationEventEnvelope(value.envelope, expected?.requestId, expected?.operationId);
 }
 
+export function assertRuntimeRequestProgressFrame(
+  value: unknown,
+  expected?: { dispatchId?: string; requestId?: string }
+): asserts value is RuntimeRequestProgressFrame {
+  if (!isRecord(value)
+      || !hasExactKeys(value, ["kind", "runtimeProtocolVersion", "generation", "dispatchId", "envelope"])
+      || value.kind !== "request-progress"
+      || value.runtimeProtocolVersion !== DESKTOP_RUNTIME_PROTOCOL_VERSION) {
+    throw new TypeError("Invalid desktop runtime request progress frame.");
+  }
+  assertGeneration(value.generation);
+  assertDispatchId(value.dispatchId);
+  if (expected?.dispatchId !== undefined && value.dispatchId !== expected.dispatchId) {
+    throw new TypeError("Desktop runtime request progress dispatchId mismatch.");
+  }
+  assertCoreRequestProgressEnvelope(value.envelope, expected?.requestId);
+}
+
+export function assertRuntimeWatchActivityFrame(value: unknown): asserts value is RuntimeWatchActivityFrame {
+  if (!isRecord(value)
+      || !hasExactKeys(value, ["kind", "runtimeProtocolVersion", "generation", "activity"])
+      || value.kind !== "watch-activity"
+      || value.runtimeProtocolVersion !== DESKTOP_RUNTIME_PROTOCOL_VERSION
+      || !isRecord(value.activity)) throw new TypeError("Invalid desktop Watch activity frame.");
+  assertGeneration(value.generation);
+  const activity = value.activity;
+  const allowed = ["schemaVersion", "event", "activityId", "watchId", "profileId", "profileRevision", "backupId", "failedStage", "failureCode", "partialReason", "retryRecommended", "startedAt", "finishedAt", "reason", "outcome", "errorCode", "changedSessionFiles", "sqliteRowsUpdated", "skippedLockedRolloutFiles", "fileUpdateTiming"];
+  if (activity.fileUpdateTiming !== undefined && (activity.event !== "finished" || !isFileUpdateTiming(activity.fileUpdateTiming))) throw new Error("Invalid file update timing.");
+  if (Object.keys(activity).some((key) => !allowed.includes(key)) || activity.schemaVersion !== 1
+      || (activity.event !== "started" && activity.event !== "finished")
+      || !isBoundedString(activity.activityId, 128) || !isBoundedString(activity.watchId, 128)
+      || !isBoundedString(activity.profileId, 80)
+      || [activity.profileRevision, activity.backupId, activity.failedStage, activity.failureCode, activity.partialReason].some((field) => field !== undefined && (!isBoundedString(field, 256) || /[\\/]/.test(String(field))))
+      || (activity.retryRecommended !== undefined && typeof activity.retryRecommended !== "boolean")
+      || (activity.startedAt !== undefined && (typeof activity.startedAt !== "string" || !Number.isFinite(Date.parse(activity.startedAt))))
+      || (activity.finishedAt !== undefined && (typeof activity.finishedAt !== "string" || !Number.isFinite(Date.parse(activity.finishedAt))))
+      || (activity.reason !== undefined && !isBoundedString(activity.reason, 120))
+      || (activity.outcome !== undefined && !["completed", "partial", "failed"].includes(String(activity.outcome)))
+      || (activity.errorCode !== undefined && !isBoundedString(activity.errorCode, 120))
+      || [activity.changedSessionFiles, activity.sqliteRowsUpdated, activity.skippedLockedRolloutFiles].some((count) => count !== undefined && (!Number.isSafeInteger(count) || Number(count) < 0))) {
+    throw new TypeError("Invalid desktop Watch activity.");
+  }
+  if ((activity.event === "started") !== (activity.startedAt !== undefined)
+      || (activity.event === "finished") !== (activity.finishedAt !== undefined && activity.outcome !== undefined)) {
+    throw new TypeError("Incomplete desktop Watch activity.");
+  }
+}
+
+export function assertRuntimeWatchStoppedFrame(value: unknown): asserts value is RuntimeWatchStoppedFrame {
+  if (!isRecord(value)
+      || !hasExactKeys(value, ["kind", "runtimeProtocolVersion", "generation", "stopped"])
+      || value.kind !== "watch-stopped"
+      || value.runtimeProtocolVersion !== DESKTOP_RUNTIME_PROTOCOL_VERSION
+      || !isRecord(value.stopped)) throw new TypeError("Invalid desktop Watch stopped frame.");
+  assertGeneration(value.generation);
+  const stopped = value.stopped;
+  const watch = stopped.watch;
+  if (!hasExactKeys(stopped, ["profileId", "profileRevision", "watch"])
+      || !isBoundedString(stopped.profileId, 80)
+      || !isBoundedString(stopped.profileRevision, 256)
+      || /[\\/]/.test(stopped.profileRevision)
+      || !isRecord(watch)
+      || !hasExactKeys(watch, ["schemaVersion", "watchId", "status", "startedAt", "stoppedAt", "stopReason", "includeStateDb", "once"])
+      || watch.schemaVersion !== 1
+      || !isBoundedString(watch.watchId, 128)
+      || watch.status !== "stopped"
+      || [watch.startedAt, watch.stoppedAt].some((field) => typeof field !== "string" || !Number.isFinite(Date.parse(field)))
+      || !isBoundedString(watch.stopReason, 120)
+      || typeof watch.includeStateDb !== "boolean"
+      || typeof watch.once !== "boolean") {
+    throw new TypeError("Invalid desktop Watch stopped event.");
+  }
+}
+
+export function assertDesktopWatchStoppedEvent(value: unknown): asserts value is DesktopWatchStoppedEvent {
+  if (!isRecord(value) || !hasExactKeys(value, ["generation", "profileId", "profileRevision", "watch"])) {
+    throw new TypeError("Invalid desktop Watch stopped event.");
+  }
+  assertRuntimeWatchStoppedFrame({
+    kind: "watch-stopped",
+    runtimeProtocolVersion: DESKTOP_RUNTIME_PROTOCOL_VERSION,
+    generation: value.generation,
+    stopped: {
+      profileId: value.profileId,
+      profileRevision: value.profileRevision,
+      watch: value.watch
+    }
+  });
+}
+
 export function assertRuntimeCancelFrame(value: unknown): asserts value is RuntimeCancelFrame {
   if (!isRecord(value)
       || !hasExactKeys(value, [
@@ -267,6 +418,50 @@ export function createRuntimeOperationEventFrame(
     envelope
   };
   assertRuntimeOperationEventFrame(frame);
+  return frame;
+}
+
+export function createRuntimeRequestProgressFrame(
+  generation: number,
+  dispatchId: string,
+  envelope: CoreRequestProgressEnvelope
+): RuntimeRequestProgressFrame {
+  const frame: RuntimeRequestProgressFrame = {
+    kind: "request-progress",
+    runtimeProtocolVersion: DESKTOP_RUNTIME_PROTOCOL_VERSION,
+    generation,
+    dispatchId,
+    envelope
+  };
+  assertRuntimeRequestProgressFrame(frame);
+  return frame;
+}
+
+export function createRuntimeWatchActivityFrame(
+  generation: number,
+  activity: RuntimeWatchActivity
+): RuntimeWatchActivityFrame {
+  const frame: RuntimeWatchActivityFrame = {
+    kind: "watch-activity",
+    runtimeProtocolVersion: DESKTOP_RUNTIME_PROTOCOL_VERSION,
+    generation,
+    activity
+  };
+  assertRuntimeWatchActivityFrame(frame);
+  return frame;
+}
+
+export function createRuntimeWatchStoppedFrame(
+  generation: number,
+  stopped: RuntimeWatchStopped
+): RuntimeWatchStoppedFrame {
+  const frame: RuntimeWatchStoppedFrame = {
+    kind: "watch-stopped",
+    runtimeProtocolVersion: DESKTOP_RUNTIME_PROTOCOL_VERSION,
+    generation,
+    stopped
+  };
+  assertRuntimeWatchStoppedFrame(frame);
   return frame;
 }
 

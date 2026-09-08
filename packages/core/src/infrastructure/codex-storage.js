@@ -19,8 +19,9 @@ import { createStateDbStore } from "./state-db-store.js";
  * Compose the four low-level Codex storage ports without adding orchestration
  * or business rules. Concrete adapters are injected by the application host.
  *
- * @param {CodexStorage} ports
- * @returns {Readonly<CodexStorage>}
+ * @template {CodexStorage} T
+ * @param {T} ports
+ * @returns {Readonly<{config: Readonly<T['config']>, sessions: Readonly<T['sessions']>, stateDb: Readonly<T['stateDb']>, globalState: Readonly<T['globalState']>}>}
  */
 export function createCodexStorage(ports) {
   if (!ports || typeof ports !== "object") {

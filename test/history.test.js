@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { getHistorySession, listHistory } from "../src/history.js";
+import { openDatabase } from "../src/sqlite.js";
 
 test("history public inputs fail with typed invalid-input errors", async () => {
   await assert.rejects(
@@ -52,6 +53,28 @@ async function fixture() {
   ];
   await fs.writeFile(file, lines.map((line) => JSON.stringify(line)).join("\n") + "\n", "utf8");
   return { home, file };
+}
+
+async function writeTitleStateDb(dbPath, rows) {
+  await fs.mkdir(path.dirname(dbPath), { recursive: true });
+  const db = await openDatabase(dbPath);
+  try {
+    db.exec(`
+      CREATE TABLE threads (
+        id TEXT PRIMARY KEY,
+        title TEXT,
+        first_user_message TEXT NOT NULL DEFAULT ''
+      )
+    `);
+    const statement = db.prepare(
+      "INSERT INTO threads (id, title, first_user_message) VALUES (?, ?, ?)"
+    );
+    for (const row of rows) {
+      statement.run(row.id, row.title, row.firstUserMessage ?? "must not become a title");
+    }
+  } finally {
+    db.close();
+  }
 }
 
 function trackHistoryReadBytes() {
@@ -115,6 +138,91 @@ test("history list without a query reads only bounded rollout metadata", async (
     assert.doesNotMatch(JSON.stringify(result), /private-body/);
   } finally {
     tracker.restore();
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test("history projects explicit SQLite thread titles without reading message bodies", async () => {
+  const { home } = await fixture();
+  const configuredSqliteHome = path.join(home, "configured-sqlite");
+  const defaultDb = path.join(home, "sqlite", "state_5.sqlite");
+  const configuredDb = path.join(configuredSqliteHome, "state_5.sqlite");
+  try {
+    await fs.writeFile(
+      path.join(home, "config.toml"),
+      `sqlite_home = "${configuredSqliteHome.replaceAll("\\", "\\\\")}"\n`,
+      "utf8"
+    );
+    await writeTitleStateDb(defaultDb, [{
+      id: "thread-one",
+      title: "Wrong default database title",
+      firstUserMessage: "wrong default message body"
+    }]);
+    await writeTitleStateDb(configuredDb, [{
+      id: "thread-one",
+      title: "Saved Codex title",
+      firstUserMessage: "private message body must not be used"
+    }]);
+
+    const list = await listHistory(home, { page: 1, pageSize: 50 });
+    assert.equal(list.sessions[0].title, "Saved Codex title");
+    assert.doesNotMatch(JSON.stringify(list), /private message body|wrong default message body/);
+
+    const detail = await getHistorySession(home, "thread-one");
+    assert.equal(detail.session.title, "Saved Codex title");
+    assert.doesNotMatch(JSON.stringify(detail.session), /private message body/);
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test("history trusted SQLite Home override wins over config and ignores missing title schema", async () => {
+  const { home } = await fixture();
+  const configSqliteHome = path.join(home, "config-sqlite");
+  const profileSqliteHome = path.join(home, "profile-sqlite");
+  try {
+    await fs.writeFile(
+      path.join(home, "config.toml"),
+      `sqlite_home = "${configSqliteHome.replaceAll("\\", "\\\\")}"\n`,
+      "utf8"
+    );
+    await writeTitleStateDb(path.join(configSqliteHome, "state_5.sqlite"), [{
+      id: "thread-one",
+      title: "Config title"
+    }]);
+    await fs.mkdir(profileSqliteHome, { recursive: true });
+    const profileDb = await openDatabase(path.join(profileSqliteHome, "state_5.sqlite"));
+    try {
+      profileDb.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT)");
+      profileDb.prepare("INSERT INTO threads (id, title) VALUES (?, ?)").run("thread-one", "Profile title");
+    } finally {
+      profileDb.close();
+    }
+
+    const overridden = await listHistory(home, {
+      page: 1,
+      pageSize: 50,
+      sqliteHome: profileSqliteHome
+    });
+    assert.equal(overridden.sessions[0].title, "Profile title");
+
+    const noTitleSqliteHome = path.join(home, "no-title");
+    await fs.mkdir(noTitleSqliteHome, { recursive: true });
+    const noTitleColumnDb = await openDatabase(path.join(noTitleSqliteHome, "state_5.sqlite"));
+    try {
+      noTitleColumnDb.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, first_user_message TEXT)");
+      noTitleColumnDb.prepare("INSERT INTO threads (id, first_user_message) VALUES (?, ?)")
+        .run("thread-one", "must not become a title");
+    } finally {
+      noTitleColumnDb.close();
+    }
+    const noTitleColumn = await listHistory(home, {
+      page: 1,
+      pageSize: 50,
+      sqliteHome: noTitleSqliteHome
+    });
+    assert.equal(noTitleColumn.sessions[0].title, "测试会话");
+  } finally {
     await fs.rm(home, { recursive: true, force: true });
   }
 });

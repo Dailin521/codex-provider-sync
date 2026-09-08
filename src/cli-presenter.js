@@ -19,6 +19,19 @@ export function formatBytes(bytes) {
 }
 
 export function renderStatus(status) {
+  if (status.statusReadBlocked || status.operationInProgress) {
+    const message = status.operationInProgress
+      ? "Another operation is using this storage, or its lock cannot be verified."
+      : status.statusReadBlocked.reason === "state-changed-during-status"
+        ? "Data changed while checking. Run status again to refresh."
+        : "The current status could not be fully checked. Run status again to refresh.";
+    return [
+      `Codex home: ${status.codexHome}`,
+      status.operationInProgress ? "Status: operation in progress or lock unverified" : "Status: refresh needed",
+      message,
+      ...(status.pendingRecovery ? ["Recovery required: inspect managed Restore backups before writing."] : [])
+    ].join("\n");
+  }
   const lines = [
     `Codex home: ${status.codexHome}`,
     `SQLite home: ${status.sqliteHome} (source: ${status.sqliteHomeSource})`,

@@ -59,3 +59,30 @@ test("desktop profile document rejects relative and duplicate trusted paths", as
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+test("named profiles are Main-generated, revision-checked, editable and removable", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cps-profile-crud-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const repository = new DesktopProfileRepository({
+    filePath: path.join(root, "profiles.v1.json"),
+    defaultCodexHome: path.join(root, "default")
+  });
+  await repository.initialize();
+  const created = await repository.save({ name: "Work", codexHome: path.join(root, "work") });
+  assert.match(created.id, /^profile-[0-9a-f]{24}$/);
+  assert.equal(created.sqliteHomeConfigured, false);
+  const updated = await repository.save({
+    profileId: created.id,
+    profileRevision: created.revision,
+    name: "Work 2",
+    sqliteHome: path.join(root, "sqlite")
+  });
+  assert.equal(updated.sqliteHomeConfigured, true);
+  await assert.rejects(
+    repository.save({ profileId: created.id, profileRevision: created.revision, name: "stale" }),
+    (error) => error?.code === "PROFILE_CHANGED"
+  );
+  await repository.delete(updated.id, updated.revision);
+  assert.equal(repository.list().length, 1);
+  await assert.rejects(repository.delete("default", repository.list()[0].revision), (error) => error?.code === "INVALID_INPUT");
+});
