@@ -13,6 +13,7 @@ import {
 } from "../scripts/release-audit.mjs";
 import { prepareElectronWindowsRelease } from "../scripts/prepare-electron-windows-release.mjs";
 import { assertDesktopArtifactVersion } from "../scripts/desktop-artifact-version.mjs";
+import { readReleaseMetadata } from "../../../scripts/read-release-metadata.js";
 import { resolveCandidateBuild } from "../scripts/resolve-candidate-build.mjs";
 import {
   hasSuccessfulCiGateJob,
@@ -27,6 +28,14 @@ const repositoryRoot = path.resolve(desktopRoot, "../..");
 async function read(relativePath) {
   return fs.readFile(path.join(repositoryRoot, ...relativePath.split("/")), "utf8");
 }
+
+test("stable Windows announcement satisfies the repository release metadata contract", () => {
+  const metadata = readReleaseMetadata({ rootDir: repositoryRoot, tag: "v1.0.0" });
+  assert.equal(metadata.title, "v1.0.0 - Windows Electron 正式版");
+  assert.match(metadata.body, /未签名/);
+  assert.match(metadata.body, /手动安装/);
+  assert.match(metadata.body, /更新按钮不能完成迁移/);
+});
 
 test("candidate identity is injected without mutating the source package version", async () => {
   assert.deepEqual(resolveCandidateBuild({

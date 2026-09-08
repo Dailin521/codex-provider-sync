@@ -48,4 +48,8 @@
 
 公告列明：版本、源 SHA、仅 Windows x64、主要变化、备份默认 2、Legacy 首次安装方式、未验证事项与下载文件 hash。最新发布状态以 GitHub 为准，不能提前更新迁移阶段或写成已发布。
 
+公开 Draft 前再次核对 tag 解析到已验收 main SHA，Release 的 tag、版本与源码一致。下载 Draft 的全部 8 个资产至新的隔离目录，确认仅有 NSIS、ZIP 和工作流所列 6 个审核文件；核验 GitHub asset digest、SHA256SUMS 中所有文件以及 release/staging manifest 的 SHA、版本、容器 smoke 结果。重新取得同 SHA 的最新成功 main `ci-gate`，任何缺项/不符都停止。
+
+正式版公告先通过 `node scripts/read-release-metadata.js --tag v1.0.0`，然后按明确授权执行 `gh release edit v1.0.0 --draft=false --prerelease=false --latest=true --notes-file docs/release-notes/v1.0.0-zh.md`。公开后再次检查 `/releases/latest`、tag SHA、8 个下载资产与哈希。RC 只公开 prerelease，不使用正式版命令，也不设 latest。
+
 规则依据：[ADR-0039](adr/0039-windows-first-electron-release.md)、[Core 不变量](architecture/NODE_CORE_ARCHITECTURE_ZH.md)、[迁移执行索引](migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md)。
