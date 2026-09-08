@@ -700,7 +700,10 @@ test("production or unpacked desktop completes real Sync and Restore through Uti
     const restoreDialog = page.getByRole("dialog", { name: "Confirm restore" });
     await expect(restoreDialog).toBeVisible();
     await restoreDialog.getByRole("button", { name: "Confirm restore" }).click();
-    await expect(page.getByText("Operation completed.", { exact: true }).last()).toBeVisible({
+    // An earlier operation's toast may still be visible. Wait for this
+    // confirmation to close and its new result, before opening the fixture DB.
+    await expect(restoreDialog).toBeHidden({ timeout: PRODUCTION_OPERATION_TIMEOUT_MS });
+    await expect(page.getByRole("dialog", { name: "Operation result" }).getByRole("heading", { name: "Completed", exact: true })).toBeVisible({
       timeout: PRODUCTION_OPERATION_TIMEOUT_MS
     });
     await expect.poll(
@@ -726,9 +729,11 @@ test("production or unpacked desktop completes real Sync and Restore through Uti
     const repairResult = page.getByRole("dialog", { name: "Operation result" });
     await expect(repairResult.getByText("The selected repair targets were verified after the write.", { exact: true })).toBeVisible({ timeout: PRODUCTION_OPERATION_TIMEOUT_MS });
     await repairResult.getByRole("button", { name: "Open restore preview", exact: true }).click();
+    await expect(repairResult).toBeHidden();
     await page.getByRole("button", { name: "Preview restore", exact: true }).click();
     await restoreDialog.getByRole("button", { name: "Confirm restore", exact: true }).click();
-    await expect(page.getByText("Operation completed.", { exact: true }).last()).toBeVisible({ timeout: PRODUCTION_OPERATION_TIMEOUT_MS });
+    await expect(restoreDialog).toBeHidden({ timeout: PRODUCTION_OPERATION_TIMEOUT_MS });
+    await expect(page.getByRole("dialog", { name: "Operation result" }).getByRole("heading", { name: "Completed", exact: true })).toBeVisible({ timeout: PRODUCTION_OPERATION_TIMEOUT_MS });
     await expect.poll(async () => (await fixture.snapshotTargets()).hash, { timeout: PRODUCTION_OPERATION_TIMEOUT_MS }).toBe(baseline.hash);
 
     const events = await page.evaluate(() => globalThis.__productionOperationEvents);

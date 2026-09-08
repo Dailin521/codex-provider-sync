@@ -73,3 +73,7 @@ Windows Electron E2E 的未配置 Provider 场景仍期待旧的通用错误文�
 本地隐藏生产包测试曾分别遇到元素截图的 10 秒与整项 180 秒超时；这些失败记录保留，不当作通过。改用当前固定视口截图，避免元素截图驱动隐藏窗口表面调整；只允许同一路径的一次截图超时重试，断言失败、其他异常和第二次截图失败仍然失败。200% 等效视口、横向边界、确认按钮可见性及所有业务断言保留。四项生产包 E2E 再次全部通过（34.3 秒），检查了真实生成的 200% 预览截图；桌面单元/合同测试为 156 项：155 passed、1 本机环境 skip、0 failed。最终 hosted CI 必须在包含这些修改的新 head 上全部完成。
 
 同一 hosted run 的 Windows Electron integration 有两项总时限超时（文件锁 partial 为 45 秒，rollout 写后崩溃重试为 90 秒），原日志不足以定位等待阶段，不能直接判定为业务缺陷或通过。相同未修改的 integration 在本地隐藏模式复核为 16 passed、1 真实 WSL 环境 skip，4.7 分钟；为避免测试锁在业务断言之前自动过期，将合成文件锁从固定 30 秒改为显式释放，并限定锁启动/退出时间。为这两类场景增加不含数据的阶段名称，原业务断言和总时限不放宽。修改后文件锁及四个 crash matrix 场景共 5 passed，29.7 秒；生产 Core/Runtime 代码未为未经证实的原因改动。hosted run `34206036370` 最终失败（连带严格 evidence/ci-gate 失败），不能用于合并。
+
+## 生产包恢复完成条件
+
+source `9a4bc746f4731a1f8152a995835a84bd76e955c1` 的 run `34208423556` 已通过 Windows Node 16，但 Windows 生产包 E2E 在第二次 Restore 中错误地用全局历史 toast 判断完成。下载的 trace 显示确认后该可见性断言仅约 9 ms 就通过，随后开始读取仍在恢复中的数据库，先得到旧状态，约 3 秒后遇到 SQLite locked。修复两处测试等待：当前 Restore 确认框必须消失，且新的结果对话框必须显示 Completed，才能进行完整目标 hash 比较；从 Repair 跳转 Restore 时也确认旧结果框已关闭。没有捕获/忽略 SQLite busy，没有放宽 hash 或修改生产 Restore。隐藏生产包的完整 Sync→Restore→Repair→Restore 场景连续重复三次均通过（52.7 秒）。该失败 run 不用作合并证据，最终仍须新 source 的完整 CI。
