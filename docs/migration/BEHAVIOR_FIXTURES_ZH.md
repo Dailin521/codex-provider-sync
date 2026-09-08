@@ -265,7 +265,7 @@ SQLite live WAL、真实文件锁、跨进程 crash 和 WSL UNC 不能作为静�
 | --- | --- | --- |
 | unknown-status-is-not-zero | `packages/app-ui/tests/ux-polish.vitest.tsx` | 无快照/加载/失败不误报不对齐或零计数，旧快照刷新提示 |
 | writer-owned-session-activity | `test/session-activity.test.js`、`packages/app-ui/tests/overview-session-usage.vitest.tsx`、`plan-review.vitest.tsx`、Contracts、Desktop production E2E | ADR-0030：真实合成 OS owner 持有两个 writer 会话即计 2（同一进程、已对齐、等待输入、中文路径），释放后遗留文件为 0；非 Codex owner 不计；缺协议/未知/失败/超时不伪报零；Status/公开 Plan 同源且与实际写入 blocker 分离，原始数据不变 |
-| preview-write-blockers | `test/sync-service.test.js`、`test/provider-sync-lite.test.js` | 实际目标共享可读但占用不可写时预览将跳过；已对齐不进入写入集合。Apply 原检查和 PIO 门禁不变，不能以 sessionActivity 代替写许可 |
+| preview-write-blockers | `test/sync-service.test.js`、`test/provider-sync-lite.test.js`、`test/windows-lock-probe.test.js` | 实际目标共享可读但占用不可写时预览将跳过；已对齐不进入写入集合。Windows 私有探测返回完整计数和整数索引，不回传路径，中文文件名在 ASCII stdout 下仍可正确识别；协议缺失/损坏/越界均拒绝。Apply 原检查和 PIO 门禁不变，不能以 sessionActivity 代替写许可 |
 | overview-session-usage-product-copy | `packages/app-ui/tests/overview-session-usage.vitest.tsx` | 中英文卡片只显示标题和数字/“未知”，不常驻同步范围等开发注释；真实数据源另由 writer-owned-session-activity 用例验证 |
 | switch-target-current-provider | `packages/app-ui/tests/switch-provider-state.vitest.tsx` | 异步首读和手动刷新跟随当前 Provider，不以候选首项代替；保留手动目标、成功后重建默认基线；失败不重置，切换 Profile 重置草稿；卡片改名不改变 config 后同步的语义 |
 | prune-estimate-and-confirm | 同上、`provider-sync-mode.vitest.tsx` | 默认 2，上限估计、0 提示、确认/取消、列表或配置版本改变阻断 |

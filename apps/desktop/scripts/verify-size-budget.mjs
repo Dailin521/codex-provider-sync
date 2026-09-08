@@ -9,8 +9,8 @@ const desktopPackage = JSON.parse(await fs.readFile(path.join(desktopRoot, "pack
 const options = new Map();
 for (let index = 2; index < process.argv.length; index += 1) {
   const option = process.argv[index];
-  assert.ok(["--output", "--version", "--directory"].includes(option) && !options.has(option), `Unknown or repeated argument: ${option}`);
-  if (option === "--directory") options.set(option, true);
+  assert.ok(["--output", "--version", "--directory", "--native-host"].includes(option) && !options.has(option), `Unknown or repeated argument: ${option}`);
+  if (option === "--directory" || option === "--native-host") options.set(option, true);
   else {
     const value = process.argv[++index];
     assert.ok(value?.trim() && !value.startsWith("--"), `${option} needs a value.`);
@@ -20,6 +20,13 @@ for (let index = 2; index < process.argv.length; index += 1) {
 const outputRoot = options.has("--output") ? path.resolve(options.get("--output")) : path.resolve(desktopRoot, "../../dist-desktop");
 const version = options.get("--version") ?? desktopPackage.version;
 assert.match(version, /^\d+\.\d+\.\d+(?:-[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*)?$/, "Invalid artifact version.");
+
+// pack:dir is cross-platform; these budgets describe only native Windows output.
+// Explicit fixture/artifact verification without this flag remains host-independent.
+if (options.has("--native-host") && process.platform !== "win32") {
+  process.stdout.write(`${JSON.stringify({ schemaVersion: 1, budgetPlatform: "win32", hostPlatform: process.platform, outcome: "not-applicable" })}\n`);
+  process.exit(0);
+}
 
 async function bytesUnder(root) {
   let total = 0;

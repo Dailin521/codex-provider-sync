@@ -10,6 +10,7 @@ import { isDeepStrictEqual, promisify } from "node:util";
 import { SESSION_DIRS } from "./constants.js";
 import { syncDirectory } from "./atomic-file.js";
 import { CoreError } from "./core-error.js";
+import { WINDOWS_LOCK_PROBE_SCRIPT, parseWindowsLockProbeResult } from "./windows-lock-probe.js";
 
 const execFileAsync = promisify(execFile);
 const ROLLOUT_SCAN_CHUNK_BYTES = 1024 * 1024;
@@ -1525,21 +1526,6 @@ async function findLockedFilesOnWindows(filePaths) {
   }
   const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "codex-provider-locks-"));
   const manifestPath = path.join(tempDir, "paths.json");
-  const script = `
-& {
-  param([string]$manifestPath)
-  $paths = Get-Content -Raw -Encoding UTF8 -Path $manifestPath | ConvertFrom-Json
-  foreach ($path in $paths) {
-    try {
-      $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
-      $stream.Close()
-    } catch {
-      Write-Output $path
-    }
-  }
-}
-`.trim();
-
   try {
     await fsp.writeFile(manifestPath, JSON.stringify(filePaths), "utf8");
     const { stdout } = await execFileAsync("powershell.exe", [
@@ -1547,13 +1533,10 @@ async function findLockedFilesOnWindows(filePaths) {
       "-ExecutionPolicy",
       "Bypass",
       "-Command",
-      script,
+      WINDOWS_LOCK_PROBE_SCRIPT,
       manifestPath
     ], { timeout: 10_000, windowsHide: true });
-    return stdout
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
+    return parseWindowsLockProbeResult(stdout, filePaths);
   } catch (error) {
     throw new Error(`Unable to verify rollout file locks on Windows. ${error.message}`);
   } finally {

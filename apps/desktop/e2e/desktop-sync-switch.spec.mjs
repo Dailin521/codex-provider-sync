@@ -409,7 +409,8 @@ test("Electron rejects an unconfigured custom Provider before plan or backup cre
     const prepareSwitch = page.getByRole("button", { name: "Preview switch" });
     await expect(prepareSwitch).toBeEnabled();
     await prepareSwitch.click();
-    await expect(latestNotification(page)).toContainText("Check the information you entered and try again.");
+    await expect(latestNotification(page)).toContainText("The selected Provider is not defined in config.toml.");
+    await expect(latestNotification(page)).toContainText("No data was changed.");
     await expect(page.getByRole("dialog", { name: "Confirm Provider switch" })).toHaveCount(0);
     expect((await fixture.snapshotProtected()).hash).toBe(baseline.hash);
     expect((await fixture.inspect()).backupIds).toHaveLength(0);

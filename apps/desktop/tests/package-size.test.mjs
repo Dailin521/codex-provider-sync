@@ -64,6 +64,24 @@ function verify(...args) {
   return spawnSync(process.execPath, [verifier, ...args], { windowsHide: true, encoding: "utf8", timeout: 10_000 });
 }
 
+test("native pack applies Windows budgets only on Windows and never hides missing Windows output", async (t) => {
+  const root = await temporary(t);
+  const result = verify("--output", root, "--directory", "--native-host");
+  if (process.platform === "win32") {
+    assert.notEqual(result.status, 0, "Native Windows must reject missing output.");
+    const fixture = await sizeFixture(t);
+    assert.equal(verify("--output", fixture, "--directory", "--native-host").status, 0);
+    await fs.writeFile(path.join(fixture, "win-unpacked", "locales", "fr.pak"), "fixture");
+    assert.notEqual(verify("--output", fixture, "--directory", "--native-host").status, 0, "Native Windows still enforces the locale budget.");
+  } else {
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), { schemaVersion: 1, budgetPlatform: "win32", hostPlatform: process.platform, outcome: "not-applicable" });
+  }
+  assert.notEqual(verify("--output", root, "--directory").status, 0, "Explicit Windows verification cannot ignore missing output.");
+  const manifest = JSON.parse(await fs.readFile(new URL("../package.json", import.meta.url), "utf8"));
+  assert.match(manifest.scripts["pack:dir"], /verify-size-budget\.mjs --directory --native-host$/);
+});
+
 test("size verifier uses the requested candidate and version, not stale default output", async (t) => {
   const root = await sizeFixture(t);
   const version = "1.0.0-rc.456";

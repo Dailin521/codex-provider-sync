@@ -163,6 +163,6 @@ test("packaging always replaces test output with a verified production bundle", 
   const packageDocument = JSON.parse(await read("package.json"));
   assert.equal(
     packageDocument.scripts["pack:dir"],
-    "npm run build && npm run build:electron && npm run verify:production-bundle && electron-builder --dir --config electron-builder.yml && node scripts/verify-size-budget.mjs --directory"
+    "npm run build && npm run build:electron && npm run verify:production-bundle && electron-builder --dir --config electron-builder.yml && node scripts/verify-size-budget.mjs --directory --native-host"
   );
 });

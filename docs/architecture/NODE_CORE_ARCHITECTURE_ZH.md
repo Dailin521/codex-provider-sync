@@ -50,6 +50,8 @@ CLI → src/public-api.js 兼容适配器 ────→ 同一业务用例
 
 成熟的具体存储算法仍位于根 `src/config-file.js`、`session-files.js`、`sqlite-state.js`、`workspace-roots.js`、`backup.js`、`restore-v2.js` 等，通过 [node-core-ports.js](../../packages/core/src/infrastructure/node-core-ports.js) 静态接入；不要为目录整齐复制实现。实际文件名以代码为准，概念端口不等于必须建立同名大类。
 
+Windows 写目标占用探测的私有协议位于 `src/windows-lock-probe.js`：只返回已检查数量与被占用目标的整数索引，由调用方映射原路径；不得通过 stdout 的路径文本匹配，以免系统代码页导致中文路径漏报。缺失/损坏/不完整响应必须拒绝，不能冒充全部可写；不改变活动会话展示、公开 DTO 或实际写入句柄检查。
+
 `src/service.js`、`watch.js`、`diagnostics.js` 保留兼容转发；`service-runtime.js` 中的 `runSync/runSwitch/runRepair/runRestore` 在同进程连续 Prepare/Apply。CLI 和旧 Web 写路由尚有适配层，不应写成所有入口物理上都只调用 Facade。新 Web `/api/core`/IPC 必须使用 `createCoreFacade`，不得扩张兼容辅助函数为新产品 API。
 
 禁止：用例或 Storage 反调 Facade；Switch/Watch 再创建嵌套同步计划；Renderer/Main/CLI/Web 复制 Provider 算法；Core 引入 React/Electron；RestoreRecovery 重新覆盖所有普通写。高风险存储仍是 ESM JavaScript，不能夹带整体 TypeScript 翻译。

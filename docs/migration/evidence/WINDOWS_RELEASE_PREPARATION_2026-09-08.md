@@ -43,3 +43,15 @@
 - 旧 .NET 单 EXE 自更新不能直接接收 Electron。首次手动安装/完整解压，不伪造旧资产名。
 
 本文件不包含本地真实路径、认证信息、聊天正文、诊断包或性能样本正文。完整本地日志保留在忽略目录，公开证据由 CI 的明确清单生成。
+
+## 首轮 hosted CI 发现的打包接线问题
+
+PR source `2c90e112ab8eefb73b979e1cd188532b776f1432` 的 run `34203674254` 中，macOS/Linux 通用 `pack:dir` 完成构建后错误调用了 Windows 目录预算，尝试查找不存在的 `win-unpacked`。该 run 保留为失败证据，不能用于合并。
+
+修复将通用 `pack:dir` 的 Windows 预算调用显式标为 native-host：Windows 继续强制目录/ASAR/locale 预算并拒绝缺失资产，其他 host 明确输出此 Windows 预算不适用；非 Windows 的后续原生审核/E2E 不跳过。显式 Windows artifact/fixture 检查不传该选项，仍在任意 host 校验合成 Windows 目录，所有阈值保持不变。新增回归覆盖这两条路径；最终 hosted CI 以修复后 head 为准。
+
+同一 run 的 Windows Node 24 用例发现：可共享读取但禁止独占写的中文 rollout 文件名，经 PowerShell 默认代码页回传路径后无法匹配原路径，导致 Preview 写入受阻数量漏报。修复仅改内部探测响应为完整 JSON 计数/整数索引，拒绝损坏响应；新增真实 Windows 持锁、强制 ASCII stdout 的合成回归。Apply 原生句柄仍复核占用，Provider I/O、正文、时间戳、备份和公开 DTO 不变。
+
+Windows Electron E2E 的未配置 Provider 场景仍期待旧的通用错误文案，实际已按 ADR-0035 展示明确原因。修正断言以验证“Provider 未配置”和“零数据改动”；原文件 hash、无 Plan 对话框和无备份断言全部保留。以上失败均须由新 head 完整 CI 重新裁决，不采用旧 head 局部通过结果绕过门禁。
+
+上述修复的本地复核：根测试 540 项（486 passed、54 平台 skip、0 failed）；`architecture:check` 成功；包体/发布接线 18 passed；未配置 Provider 的隐藏 Electron E2E 1 passed；新探测三项测试在 Node 24 与 Node 16.20.2 均通过（Node 16 runner 汇总为一个文件）。测试夹具清理使用 Node 16 支持的 `afterEach`。

@@ -1682,6 +1682,7 @@ async function lockRolloutFile(filePath, shareMode = "None") {
   const script = `
 & {
   param([string]$path, [string]$shareMode)
+  $ErrorActionPreference = 'Stop'
   $share = [System.Enum]::Parse([System.IO.FileShare], $shareMode)
   $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, $share)
   try {
@@ -1703,6 +1704,7 @@ async function lockRolloutFile(filePath, shareMode = "None") {
     filePath,
     shareMode
   ], {
+    windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"]
   });
 
