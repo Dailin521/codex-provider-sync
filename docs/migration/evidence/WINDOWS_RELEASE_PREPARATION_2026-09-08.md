@@ -55,3 +55,11 @@ PR source `2c90e112ab8eefb73b979e1cd188532b776f1432` 的 run `34203674254` 中�
 Windows Electron E2E 的未配置 Provider 场景仍期待旧的通用错误文案，实际已按 ADR-0035 展示明确原因。修正断言以验证“Provider 未配置”和“零数据改动”；原文件 hash、无 Plan 对话框和无备份断言全部保留。以上失败均须由新 head 完整 CI 重新裁决，不采用旧 head 局部通过结果绕过门禁。
 
 上述修复的本地复核：根测试 540 项（486 passed、54 平台 skip、0 failed）；`architecture:check` 成功；包体/发布接线 18 passed；未配置 Provider 的隐藏 Electron E2E 1 passed；新探测三项测试在 Node 24 与 Node 16.20.2 均通过（Node 16 runner 汇总为一个文件）。测试夹具清理使用 Node 16 支持的 `afterEach`。
+
+## Node 16 完整测试夹具兼容
+
+首轮 Node 16 根测试长时间不退出，定位为 `status-coordination` 使用 Node 16 不存在的 `TestContext.mock`：HTTP 服务启动后注入抛错，finally 再次调用缺失 API，跳过了关闭 socket。另有 Plan/Watch/进度/首行事实测试使用 `TestContext.after`，History DTO 测试使用全局 `structuredClone`，这些测试 API 同样不支持 Node 16。
+
+修复仅限测试：改为已有 `afterEach` 清理队列、显式保存/恢复 fs 方法、JSON DTO 副本；原业务断言、故障注入与测试范围不删减，不修改生产 Web 服务或放宽 Node 16 兼容声明。已知失败/挂起的旧 run（`34203674254`、修复前的 `34205277322`）主动终止以避免持续占用 runner；它们不可用于合并。最终必须重新完成全部 CI。独立 Node 16 验收使用 D 盘隔离 checkout 和其生产依赖树，不借用 Node 24/Electron native ABI。
+
+独立 Node 16.20.2 / npm 8.19.4 生产依赖安装 43 项、审计 0 vulnerability；最终完整 `npm test` 的 Node 16 文件级汇总为 46 passed / 0 failed，53.89 秒正常退出（不把文件汇总中的 0 skip 冒充没有平台子测试 skip）。Node 24 复核仍为 540 tests / 486 passed / 54 平台 skip；架构门禁通过。

@@ -33,7 +33,7 @@ test("History groups recorded project metadata without paths, bodies or director
     const detail = await core.getHistorySession({ profile: { profileId: "default" }, sessionId: "session-0", metadataOnly: true });
     assert.deepEqual(detail.session.project, project(0));
     assert.deepEqual(detail.messages, []);
-    const invalid = structuredClone(result);
+    const invalid = JSON.parse(JSON.stringify(result));
     invalid.sessions[0].project.path = "C:\\private";
     assert.throws(() => assertCoreMethodOutput("listHistory", invalid));
   } finally {

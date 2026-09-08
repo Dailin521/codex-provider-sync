@@ -5,7 +5,7 @@ import { appendFileSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 
 import { openDatabase } from "../src/sqlite.js";
 import { createWebCoreFacade } from "../src/web-core-adapter.js";
@@ -14,6 +14,19 @@ import { createMemoryWebUiState } from "../src/web-state.js";
 import { getStatus } from "../packages/core/src/application/status.js";
 import { acquireLock } from "../src/locking.js";
 import { getDiagnostics } from "../packages/core/src/application/diagnostics.js";
+
+// Node 16 has afterEach, but no TestContext.mock. Keep these filesystem
+// injections test-local and restore them even when a tested assertion fails.
+const methodRestores = [];
+const methodMocks = {
+  method(object, key, implementation) {
+    const original = object[key];
+    methodRestores.push(() => { object[key] = original; });
+    object[key] = implementation;
+  },
+  restoreAll() { for (const restore of methodRestores.splice(0).reverse()) restore(); }
+};
+afterEach(() => methodMocks.restoreAll());
 
 async function request(origin, pathname, body, headers = {}) {
   return new Promise((resolve, reject) => {
@@ -285,7 +298,7 @@ test("Core and Web Status block on the Home lock and ignore legacy State DB reso
 function afterHeaderRead(t, fixture, callback) {
   const open = fs.open;
   let reads = 0;
-  t.mock.method(fs, "open", async (filePath, flags, ...args) => {
+  methodMocks.method(fs, "open", async (filePath, flags, ...args) => {
     const handle = await open(filePath, flags, ...args);
     if (filePath === fixture.rolloutPath && flags === "r") {
       const close = handle.close.bind(handle);
@@ -308,7 +321,7 @@ for (const locked of [false, true]) {
       let armed = false;
       let failed = false;
       const stat = fs.stat;
-      t.mock.method(fs, "stat", async (file, ...args) => {
+      methodMocks.method(fs, "stat", async (file, ...args) => {
         if (armed && !failed && file === fixture.rolloutPath) {
           failed = true;
           if (locked) release = await acquireLock(fixture.codexHome, "synthetic-sync");
@@ -327,7 +340,7 @@ for (const locked of [false, true]) {
         assert.equal(result.provider.rolloutCounts.sessions.openai, 1);
       }
     } finally {
-      t.mock.restoreAll();
+      methodMocks.restoreAll();
       await release?.();
       await fs.rm(fixture.root, { recursive: true, force: true });
     }
@@ -339,7 +352,7 @@ test("Explicit Diagnostics scans facts once and retains current findings on drif
   try {
     await getStatus({ codexHome: fixture.codexHome, includeSessionActivity: false });
     const readFile = fs.readFile;
-    t.mock.method(fs, "readFile", async (file, ...args) => {
+    methodMocks.method(fs, "readFile", async (file, ...args) => {
       assert.notEqual(file, fixture.rolloutPath, "diagnostic revision must not re-read/hash the rollout body");
       return readFile(file, ...args);
     });
@@ -358,7 +371,7 @@ test("Explicit Diagnostics scans facts once and retains current findings on drif
     assert.equal(diagnostics.provider.rolloutCounts.sessions.openai, 1);
     assert.equal(diagnostics.historyIntegrity.counts.filesScanned, 1);
   } finally {
-    t.mock.restoreAll();
+    methodMocks.restoreAll();
     await fs.rm(fixture.root, { recursive: true, force: true });
   }
 });
@@ -370,7 +383,7 @@ test("Diagnostic drift preserves findings but a real Home lock still takes prior
     await getStatus({ codexHome: fixture.codexHome, includeSessionActivity: false });
     const readFile = fs.readFile;
     let configReads = 0;
-    t.mock.method(fs, "readFile", async (file, ...args) => {
+    methodMocks.method(fs, "readFile", async (file, ...args) => {
       const value = await readFile(file, ...args);
       if (file === path.join(fixture.codexHome, "config.toml") && ++configReads === 2) {
         await syntheticAppend(fixture);
@@ -383,7 +396,7 @@ test("Diagnostic drift preserves findings but a real Home lock still takes prior
     assert.equal(result.safety.operationInProgress.lockState, "active");
     assert.equal(result.safety.rolloutScanComplete, false);
   } finally {
-    t.mock.restoreAll();
+    methodMocks.restoreAll();
     await release?.();
     await fs.rm(fixture.root, { recursive: true, force: true });
   }
@@ -407,7 +420,7 @@ for (const revision of ["config", "state-db"]) {
       assert.equal(status.rolloutScanComplete, false);
       assert.deepEqual(status.statusReadBlocked, { reason: "state-changed-during-status", revision });
     } finally {
-      t.mock.restoreAll();
+      methodMocks.restoreAll();
       await fs.rm(fixture.root, { recursive: true, force: true });
     }
   });
@@ -433,7 +446,7 @@ for (const cached of [false, true]) {
       } else {
         assert.equal(blocked.currentProvider, undefined, "no invented Provider before the first complete snapshot");
       }
-      t.mock.restoreAll();
+      methodMocks.restoreAll();
       const refreshed = await getStatus(options);
       assert.equal(refreshed.operationInProgress, null);
       assert.equal(refreshed.statusReadBlocked, undefined);
@@ -441,7 +454,7 @@ for (const cached of [false, true]) {
       assert.equal(refreshed.backupSummary.count, 0);
       assert.deepEqual(refreshed.rolloutCounts.sessions, { openai: 1 });
     } finally {
-      t.mock.restoreAll();
+      methodMocks.restoreAll();
       await fs.rm(fixture.root, { recursive: true, force: true });
     }
   });
@@ -457,7 +470,7 @@ test("Status's one retry can settle an ordinary append", async (t) => {
     assert.equal(status.statusReadBlocked, undefined);
     assert.equal(status.rolloutScanComplete, true);
   } finally {
-    t.mock.restoreAll();
+    methodMocks.restoreAll();
     await fs.rm(fixture.root, { recursive: true, force: true });
   }
 });
@@ -468,7 +481,7 @@ for (const phase of [0, 1, 2]) {
     try {
       const reads = afterHeaderRead(t, fixture, () => syntheticAppend(fixture));
       const stat = fs.stat;
-      t.mock.method(fs, "stat", async (filePath, ...args) => {
+      methodMocks.method(fs, "stat", async (filePath, ...args) => {
         if (filePath === fixture.rolloutPath && reads() >= phase) {
           throw Object.assign(new Error("synthetic revision failure"), { code: "EIO" });
         }
@@ -479,10 +492,10 @@ for (const phase of [0, 1, 2]) {
       assert.equal(status.operationInProgress, null);
       assert.equal(status.statusReadBlocked.reason, "revision-unverifiable");
       assert.equal(status.rolloutScanComplete, false);
-      t.mock.restoreAll();
+      methodMocks.restoreAll();
       assert.equal((await getStatus({ codexHome: fixture.codexHome, includeSessionActivity: false })).statusReadBlocked, undefined);
     } finally {
-      t.mock.restoreAll();
+      methodMocks.restoreAll();
       await fs.rm(fixture.root, { recursive: true, force: true });
     }
   });
@@ -501,7 +514,7 @@ test("A real Home lock acquired during the retry takes priority over revision dr
     assert.equal(status.operationInProgress.lockState, "active");
     assert.equal(status.operationInProgress.busyScope, "codex-home");
   } finally {
-    t.mock.restoreAll();
+    methodMocks.restoreAll();
     await release?.();
     await fs.rm(fixture.root, { recursive: true, force: true });
   }
@@ -518,10 +531,10 @@ test("Core facade and HTTP preserve the refresh-needed state without a busy oper
     assert.deepEqual(response.payload.status.statusReadBlocked, { reason: "state-changed-during-status" });
     assert.equal(response.payload.status.rolloutScanComplete, false);
     assert.equal(response.payload.status.alignment.aligned, false);
-    t.mock.restoreAll();
+    methodMocks.restoreAll();
     assert.equal((await web.status()).payload.status.statusReadBlocked, undefined);
   } finally {
-    t.mock.restoreAll();
+    methodMocks.restoreAll();
     await web.close();
     await fs.rm(fixture.root, { recursive: true, force: true });
   }

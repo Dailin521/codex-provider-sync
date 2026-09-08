@@ -2,13 +2,16 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import { createCoreFacade } from "../packages/core/src/index.js";
 import { trackScanFiles } from "../src/scan-progress.js";
 
+const cleanups = [];
+afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+
 async function fixture(t) {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "request-progress-"));
-  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  cleanups.push(() => fs.rm(home, { recursive: true, force: true }));
   await fs.mkdir(path.join(home, "sessions"));
   await fs.mkdir(path.join(home, "archived_sessions"));
   await fs.writeFile(path.join(home, "config.toml"), 'model = "target-model"\n');

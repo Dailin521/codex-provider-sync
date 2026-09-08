@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -12,6 +12,9 @@ import { OperationCoordinator } from "../src/operation-coordinator.js";
 delete process.env.CODEX_SQLITE_HOME;
 
 const testTempDir = process.platform === "win32" ? os.tmpdir() : "/tmp";
+
+const cleanups = [];
+afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
 async function makeTempCodexHome() {
   const root = await fs.mkdtemp(path.join(testTempDir, "codex-provider-sync-watch-"));
@@ -134,7 +137,7 @@ test("runWatch rejects when codex home or config.toml is missing", async () => {
 test("runWatch forwards keepCount to automatic Provider Sync retention", async (t) => {
   const { root, codexHome } = await makeTempCodexHome();
   let handle;
-  t.after(async () => { await handle?.stop(); await fs.rm(root, { recursive: true, force: true }); });
+  cleanups.push(async () => { await handle?.stop(); await fs.rm(root, { recursive: true, force: true }); });
   const { configPath, rolloutPath } = await writeWatchRetentionFixture(codexHome);
   handle = await runWatch({ codexHome, debounceMs:20, includeStateDb: false, keepCount: 1, onLog() {} });
 
@@ -146,7 +149,7 @@ test("runWatch forwards keepCount to automatic Provider Sync retention", async (
 test("runWatch keeps the default automatic backup retention at two", async (t) => {
   const { root, codexHome } = await makeTempCodexHome();
   let handle;
-  t.after(async () => { await handle?.stop(); await fs.rm(root, { recursive: true, force: true }); });
+  cleanups.push(async () => { await handle?.stop(); await fs.rm(root, { recursive: true, force: true }); });
   const { configPath, rolloutPath } = await writeWatchRetentionFixture(codexHome);
   handle = await runWatch({ codexHome, debounceMs: 20, includeStateDb: false, onLog() {} });
 
@@ -159,7 +162,7 @@ test("Watch activity preserves mutation partial details and only a backup ID", a
   const { root, codexHome } = await makeTempCodexHome();
   const events = [];
   let handle;
-  t.after(async () => { await handle?.stop(); await fs.rm(root, { recursive: true, force: true }); });
+  cleanups.push(async () => { await handle?.stop(); await fs.rm(root, { recursive: true, force: true }); });
   handle = await runWatch({
     codexHome, watchId: "fixture-watch", includeStateDb: false, debounceMs: 20, onLog() {},
     onActivity: (event) => events.push(event),

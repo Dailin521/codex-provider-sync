@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 
 import {
   applyRestore,
@@ -15,6 +15,9 @@ import {
 } from "../src/service.js";
 import { listBackups } from "../src/backup.js";
 import { openDatabase } from "../src/sqlite.js";
+
+const cleanups = [];
+afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
 async function makeFixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "provider-sync-plan-apply-"));
@@ -324,7 +327,7 @@ test("applySync rejects rollout header and State DB Provider drift before backup
 test("Sync and Switch allow body appends and non-Provider WAL updates between preview and apply", async (t) => {
   for (const operation of ["sync", "switch"]) {
     const value = await makeFixture();
-    t.after(() => fs.rm(value.root, { recursive: true, force: true }));
+    cleanups.push(() => fs.rm(value.root, { recursive: true, force: true }));
     await fs.appendFile(path.join(value.codexHome, "config.toml"), '[model_providers.prov_a]\nname = "fixture"\n');
     const db = await openDatabase(value.stateDbPath);
     try {
@@ -351,7 +354,7 @@ test("Sync and Switch allow body appends and non-Provider WAL updates between pr
 test("Provider plans still reject replacement, truncation, inventory and schema changes before backup", async (t) => {
   for (const drift of ["replace", "truncate", "new-rollout", "new-row", "schema"]) {
     const value = await makeFixture();
-    t.after(() => fs.rm(value.root, { recursive: true, force: true }));
+    cleanups.push(() => fs.rm(value.root, { recursive: true, force: true }));
     await fs.appendFile(value.rolloutPath, '{"type":"event_msg"}\n');
     const plan = await prepareSync({ codexHome: value.codexHome });
     if (drift === "replace") {
@@ -375,7 +378,7 @@ test("Provider plans still reject replacement, truncation, inventory and schema 
 
 test("Sync rejects an undefined config Provider with no backup or mutation, then succeeds once configured", async (t) => {
   const value = await makeFixture();
-  t.after(() => fs.rm(value.root, { recursive: true, force: true }));
+  cleanups.push(() => fs.rm(value.root, { recursive: true, force: true }));
   const configPath = path.join(value.codexHome, "config.toml");
   const config = "model_provider = 'dal' # selected elsewhere\n";
   await fs.writeFile(configPath, config);

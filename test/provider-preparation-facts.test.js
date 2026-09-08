@@ -3,14 +3,17 @@ import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import { captureRolloutRevision, collectProviderPreparationFacts } from "../src/operation-revision.js";
 import { collectProviderChanges, collectStatusRolloutMetadata } from "../src/session-files.js";
 import { prepareSync, prepareSwitch, applySync } from "../src/service.js";
 
+const cleanups = [];
+afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+
 async function fixture(t) {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "provider-prepare-facts-"));
-  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  cleanups.push(() => fs.rm(home, { recursive: true, force: true }));
   await fs.mkdir(path.join(home, "sessions"));
   await fs.mkdir(path.join(home, "archived_sessions"));
   await fs.writeFile(path.join(home, "config.toml"), 'model_provider="openai"\n[model_providers.prov_a]\nmodel="fixture-model"\n');
