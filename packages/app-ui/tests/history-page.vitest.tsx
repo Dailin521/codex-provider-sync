@@ -1,0 +1,143 @@
+import type { HistoryPage as HistoryPageDto, HistorySessionDetail } from "@codex-provider-sync/contracts";
+import type { CoreClient } from "@codex-provider-sync/core-client";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { I18nextProvider } from "react-i18next";
+import { describe, expect, it, vi } from "vitest";
+
+import { HistoryPage, HISTORY_PAGE_SIZE } from "../src/features/history/HistoryPage.js";
+import { createAppI18n } from "../src/i18n.js";
+import { historyProjectPage } from "./helpers/history-fixtures.js";
+
+const profile = { id: "fixture", name: "Fixture", revision: "rev-1" };
+
+function page(pageNumber: number, messageCountKnown = true): HistoryPageDto {
+  return {
+    ...historyProjectPage([]),
+    page: pageNumber,
+    pageSize: HISTORY_PAGE_SIZE,
+    total: 51,
+    hasNextPage: pageNumber === 1,
+    sessions: [{
+      id: `session-${pageNumber}`,
+      title: `Session ${pageNumber}`,
+      provider: "fixture-provider",
+      archived: false,
+      updatedAt: "2026-08-27T00:00:00.000Z",
+      messageCount: messageCountKnown ? 1 : 0,
+      messageCountKnown
+    }]
+  };
+}
+
+function detail(): HistorySessionDetail {
+  return {
+    session: page(2).sessions[0],
+    messages: [{
+      role: "user",
+      text: "history-body-marker",
+      timestamp: "2026-08-27T00:00:00.000Z",
+      sequence: 1
+    }, {
+      role: "assistant",
+      text: "## Answer\n\n```js\nconsole.log('ok')\n```",
+      timestamp: "2026-08-27T00:00:01.000Z",
+      sequence: 2
+    }],
+    truncated: false,
+    returnedMessageCount: 2
+  };
+}
+
+async function renderHistory({ messageCountKnown = true } = {}) {
+  const listHistory = vi.fn(async (input: { page: number }) => page(input.page, messageCountKnown));
+  const getHistorySession = vi.fn(async () => detail());
+  const core = { listHistory, getHistorySession } as unknown as CoreClient;
+  const i18n = await createAppI18n("en");
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } }
+  });
+  render(
+    <I18nextProvider i18n={i18n}>
+      <QueryClientProvider client={queryClient}>
+        <HistoryPage core={core} profile={profile} />
+      </QueryClientProvider>
+    </I18nextProvider>
+  );
+  return { getHistorySession, listHistory, queryClient };
+}
+
+describe("HistoryPage privacy and pagination", () => {
+  it("paginates summaries and only reads a body after explicit open", async () => {
+    const user = userEvent.setup();
+    const { getHistorySession, listHistory, queryClient } = await renderHistory();
+
+    expect(await screen.findByText("Session 1")).toBeVisible();
+    expect(getHistorySession).not.toHaveBeenCalled();
+    expect(listHistory).toHaveBeenLastCalledWith(
+      expect.objectContaining({ page: 1, pageSize: HISTORY_PAGE_SIZE }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    );
+
+    await user.click(screen.getByRole("button", { name: "Load more" }));
+    expect(await screen.findByText("Session 2")).toBeVisible();
+    expect(listHistory).toHaveBeenLastCalledWith(
+      expect.objectContaining({ page: 2, pageSize: HISTORY_PAGE_SIZE }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    );
+    expect(getHistorySession).not.toHaveBeenCalled();
+
+    const open = screen.getByRole("button", { name: /View chat: Session 2/ });
+    await user.click(open);
+    expect(await screen.findByText("history-body-marker")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Answer" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Copy" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Session 2" })).toHaveFocus();
+    expect(getHistorySession).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: "session-2", messageLimit: 200 }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    );
+    await waitFor(() => {
+      expect(JSON.stringify(queryClient.getQueryCache().getAll().map((query) => query.state.data)))
+        .not.toContain("history-body-marker");
+    });
+    await user.click(screen.getByRole("button", { name: "Back to chats" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /View chat: Session 2/ })).toHaveFocus());
+  });
+
+  it("loads once, ignores ambient refresh triggers, and refreshes only on request", async () => {
+    const user = userEvent.setup();
+    const { listHistory } = await renderHistory();
+
+    expect(await screen.findByText("Session 1")).toBeVisible();
+    expect(listHistory).toHaveBeenCalledTimes(1);
+    window.dispatchEvent(new Event("focus"));
+    window.dispatchEvent(new Event("online"));
+    await Promise.resolve();
+    expect(listHistory).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(listHistory).toHaveBeenCalledTimes(2));
+  });
+
+  it("does not present an unknown lightweight count as zero messages", async () => {
+    await renderHistory({ messageCountKnown: false });
+
+    expect(await screen.findByText("Session 1")).toBeVisible();
+    expect(screen.queryByText("0 messages")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "View chat: Session 1" })).toHaveAttribute("title", expect.stringContaining("fixture-provider"));
+  });
+
+  it("submits content search only on Enter or the search button", async () => {
+    const user = userEvent.setup();
+    const { listHistory } = await renderHistory();
+    await screen.findByText("Session 1");
+    const search = screen.getByRole("textbox", { name: "Search" });
+    await user.type(search, "marker");
+    expect(listHistory).toHaveBeenCalledTimes(1);
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(listHistory).toHaveBeenCalledTimes(2));
+    expect(listHistory).toHaveBeenLastCalledWith(expect.objectContaining({ query: "marker" }), expect.anything());
+  });
+});

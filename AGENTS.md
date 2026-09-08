@@ -4,9 +4,9 @@ This file is for AI assistants and automation working in this repository. User-f
 
 ## vNext architecture baseline
 
-The accepted target architecture and staged migration plan is [vNext Electron + Node architecture](docs/VNEXT_ELECTRON_NODE_ARCHITECTURE_ZH.md). Read it before any Electron, shared Node Core, repository restructuring, desktop replacement, or other vNext work.
+Read [Current Node Core architecture and invariants](docs/architecture/NODE_CORE_ARCHITECTURE_ZH.md) first for V1 development, then the [vNext Electron + Node architecture](docs/VNEXT_ELECTRON_NODE_ARCHITECTURE_ZH.md) for the overall target and staged migration. The current guide maps real modules, the CLI compatibility exception, and Provider I/O invariants PIO-1 through PIO-6.
 
-It defines the target, not the current implementation. Existing code, tests, and released compatibility contracts remain authoritative until the relevant migration-stage exit criteria pass. Do not delete the .NET implementation, break the CLI/Web contract, or perform a big-bang rewrite ahead of those gates.
+The current Core guide maps the V1 implementation and accepted invariants; the larger vNext baseline also contains target-state and historical migration sections. Do not treat a target as shipped evidence or a superseded contract as the current behavior. Do not delete the .NET implementation, break the CLI/Web contract, or perform a big-bang rewrite ahead of those gates.
 
 Phase 0 decisions and frozen behavior are indexed in the [vNext migration execution index](docs/migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md). Before changing an external behavior, read the applicable [Core behavior contract](docs/architecture/contracts/CORE_EXTERNAL_BEHAVIOR_ZH.md), [CLI contract](docs/architecture/contracts/CLI_CONTRACT_ZH.md), [error-code contract](docs/architecture/contracts/ERROR_CODES_ZH.md), and [behavior fixture catalog](docs/migration/BEHAVIOR_FIXTURES_ZH.md), plus the Accepted ADRs in `docs/adr/`.
 
@@ -39,8 +39,10 @@ Restore Codex session visibility after `model_provider` changes by keeping rollo
 - `switch <provider-id> --model <name>`: explicitly set the root `model`.
 - `restore <backup-dir>`: roll back a mistaken operation. Cross-SQLite-Home restore requires an explicit target, relocation confirmation, and no config restore.
 - `prune-backups --keep <n>`: remove only older managed backups.
+- `diagnostics`: explicitly requested full read-only scan; never run automatically after status or sync.
+- `repair`: explicitly selected non-Provider metadata repair; not part of sync or switch.
 
-`sync` uses the current root `model_provider`, falling back to `openai` when it is absent. Sync and switch create a backup before writing and prune only tool-managed backups according to retention.
+`sync` uses the current root `model_provider`, falling back to `openai` when it is absent. Sync and switch create an UndoBackup for actual write targets before mutation and prune only tool-managed backups (default retention: 2). A noop does not create a backup. Direct Sync still prepares and consumes a plan internally; the button click authorizes execution without a second confirmation dialog.
 
 ## Storage and path rules
 
@@ -57,16 +59,16 @@ On Windows, `\\wsl.localhost\...` and `\\wsl$\...` SQLite Homes are diagnostic-o
 
 ## Safety boundaries
 
-- Never read, copy, log, or modify `auth.json`, credentials, or tokens. Do not copy, log, modify, or expose message bodies outside the Web UI's explicit read-only History view.
+- Never read, copy, log, or modify `auth.json`, credentials, or tokens. Message display/content search requires explicit History interaction in Web/Desktop. Explicit Diagnostics and selected Repair may scan only the data required by their contract; never put bodies into logs, diagnostics exports, list DTOs or persistent caches. Provider Sync does not parse bodies; its unequal-length path may stream-copy unchanged tail bytes.
 - Do not change thread `updated_at` or reorder history to force visibility.
-- Preserve backup-first, locking, transaction, rollback, WSL, and path-boundary behavior.
+- Preserve Home locking, backup-first, native SQLite transactions, WSL and path boundaries. Ordinary Sync/Switch/Repair use retryable partial outcomes after mutation, not cross-file journals or automatic full rollback. Restore alone retains its durable recovery journal and compensation. Do not reintroduce a Node State DB resource lock.
 - Rollout/SQLite counts may differ briefly because of an active session; Provider distributions are the alignment signal.
 - Metadata synchronization restores visibility only. Another Provider/account may be unable to decrypt existing `encrypted_content`; advise the user to return to the original Provider/account or start a new session if continuation or compact fails.
 - Tests and reproduction scripts must use temporary directories or fixtures, never a real user Codex Home.
 
 ## Handle common outcomes
 
-- SQLite in use: stop before rollout mutation; ask the user to close Codex CLI, Codex App, app-server, and retry.
+- SQLite busy during preflight: stop before mutation. A later transaction can still become busy; after mutation report partial with backup and retry guidance, never falsely claim zero writes or full rollback.
 - Skipped locked rollout files: classify as partial success. List the skipped files and recommend another sync after the active session ends.
 - Missing custom Provider: define it in `config.toml` or switch with the user's normal Provider tool, then run `sync`.
 - Missing explicit SQLite database: keep the explicit path authoritative and report the error; do not use the legacy database.
@@ -74,12 +76,19 @@ On Windows, `\\wsl.localhost\...` and `\\wsl$\...` SQLite Homes are diagnostic-o
 
 ## Current implementation and migration direction
 
-- Node CLI and Web UI share the service layer in `src/`; do not duplicate sync logic in the browser.
-- vNext Electron, repository restructuring, and Core extraction work follows the accepted architecture baseline; the shared Node Core is the target single business authority.
-- .NET Core remains authoritative for current desktop behavior during the staged migration. Do not add new duplicate business capabilities; transfer authority only after the corresponding parity, safety, and release gates pass.
-- Windows GUI routes UI-independent work through the Application/controller layer; WinForms owns presentation and native platform interaction.
-- macOS currently calls Core directly. Do not document an Application-layer dependency that does not exist.
-- Add focused tests for behavior changes. Prefer controller tests over new reflection-based WinForms business tests.
+- The V1 Web `/api/core` entry and Electron Utility call CoreFacade; CLI and retained legacy Web write routes use `src/public-api.js` / service adapters into the same `packages/core/src/application` use cases. Do not describe every HTTP route as Facade-backed or expand the transitional adapter into another public API.
+- Switch and Watch call internal ProviderSync, never CoreFacade. Storage ports do not call business use cases. Main/Renderer must not implement SQL or rollout algorithms.
+- Mature storage algorithms remain in root `src/`, statically wired by Core infrastructure. Moving folders is not permission to rewrite high-risk JavaScript or duplicate it.
+- V1 Electron is the primary desktop interface in this branch. .NET Windows/macOS remain Legacy fallback implementations with their own supported behavior; preserve their build, do not port new Node business capabilities back into them. Public release and phase completion still require their independent gates.
+- Legacy Windows uses Application/controllers; Legacy macOS calls .NET Core directly. Do not claim both use an Application layer.
+
+## Mandatory Provider I/O regression gate
+
+- Follow PIO-1 through PIO-6 in the current Core guide. Sync reads bounded first-line metadata, not full chat streams. No public `sync --provider`, `--fast` or `syncMode`.
+- Eligible equal-byte-length JSON Provider literals must use the existing in-place descriptor/handle path. Preserve file identity, size and body hash; character-count equality alone is insufficient. Do not fall back to whole-file replacement after an in-place failure.
+- Ineligible but valid headers use streaming tail copy and atomic replacement with byte-identical bodies. Invalid/changed/locked targets must not be forcibly rewritten.
+- Run `npm run architecture:check` and `npm test` for Core changes; platform skips and failures must be reported. The first command reuses workspace boundary checks and Provider I/O tests, not a second rule engine.
+- Behavior changes require an explicit ADR/contract/fixture update and matching user docs. Do not weaken an invariant test to bless accidental drift. README is not a substitute for the current Core guide.
 
 ## Reporting
 

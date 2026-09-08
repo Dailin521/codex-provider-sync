@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { DB_FILE_BASENAME, defaultCodexHome } from "./constants.js";
+import { CoreError } from "./core-error.js";
 import { readSqliteHomeFromConfigText } from "./config-file.js";
 
 function resolvePath(value, cwd) {
@@ -82,8 +83,18 @@ export function resolveStorageLayout({
 }
 
 export async function ensureCodexHome(storage) {
-  await fs.access(storage.codexHome).catch(() => {
-    throw new Error(`Codex home not found at ${storage.codexHome}`);
+  await fs.access(storage.codexHome).catch((error) => {
+    const permissionDenied = error?.code === "EACCES" || error?.code === "EPERM";
+    throw new CoreError(
+      permissionDenied ? "PERMISSION_DENIED" : "CODEX_HOME_NOT_FOUND",
+      permissionDenied
+        ? `Permission denied while accessing Codex home at ${storage.codexHome}`
+        : `Codex home not found at ${storage.codexHome}`,
+      {
+        cause: error,
+        details: typeof error?.code === "string" ? { causeCode: error.code } : undefined
+      }
+    );
   });
 }
 
@@ -97,12 +108,16 @@ export function isConfiguredSqliteHome(storage) {
 
 export function assertSqliteAccessSupported(storage, operation) {
   if (storage.sqliteAccess?.supported === false) {
-    throw new Error(`Cannot ${operation}: ${storage.sqliteAccess.message}`);
+    throw new CoreError("SQLITE_UNSUPPORTED_PATH", `Cannot ${operation}: ${storage.sqliteAccess.message}`, {
+      details: storage.sqliteAccess.reason ? { reason: storage.sqliteAccess.reason } : undefined
+    });
   }
 }
 
 export function missingConfiguredStateDbError(storage) {
-  return new Error(
-    `state_5.sqlite not found in configured SQLite home ${storage.sqliteHome} (source: ${storage.sqliteHomeSource}).`
+  return new CoreError(
+    "STATE_DB_NOT_FOUND",
+    `state_5.sqlite not found in configured SQLite home ${storage.sqliteHome} (source: ${storage.sqliteHomeSource}).`,
+    { details: { sqliteHomeSource: storage.sqliteHomeSource } }
   );
 }

@@ -1,0 +1,30 @@
+{
+  "name": "@codex-provider-sync/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "test": "node --test checks/web-composition.contract.mjs",
+    "test:e2e": "playwright test"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@codex-provider-sync/app-ui": "0.0.0",
+    "@codex-provider-sync/core-client": "0.0.0",
+    "@codex-provider-sync/design-system": "0.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "@tailwindcss/vite": "4.3.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "@vitejs/plugin-react": "6.1.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "tailwindcss": "4.3.3",
+    "vite": "8.2.2"
+  }
+}

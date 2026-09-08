@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx"
+  ],
+  "references": [
+    { "path": "../../packages/contracts" },
+    { "path": "../../packages/core-client" },
+    { "path": "../../packages/design-system" },
+    { "path": "../../packages/app-ui" }
+  ]
+}

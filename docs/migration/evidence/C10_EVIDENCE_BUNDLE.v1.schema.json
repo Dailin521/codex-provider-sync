@@ -1,0 +1,352 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dailin521/codex-provider-sync/blob/main/docs/migration/evidence/C10_EVIDENCE_BUNDLE.v1.schema.json",
+  "title": "codex-provider-sync vNext C10 evidence bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "scope",
+    "outcome",
+    "evidenceForCommit",
+    "createdAt",
+    "repository",
+    "workflow",
+    "sourceVersions",
+    "checkpoints",
+    "ci",
+    "candidateSet",
+    "historicalFormalRelease",
+    "assertions",
+    "pending",
+    "release",
+    "redaction"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "scope": { "const": "vnext-c10-evidence" },
+    "outcome": { "const": "ci-verified-not-release" },
+    "evidenceForCommit": { "$ref": "#/$defs/sha" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "repository": { "const": "Dailin521/codex-provider-sync" },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "workflowSha256", "runId", "runAttempt", "event", "ref", "testedCommit", "sourceHeadCommit", "eventBaseCommit", "containsEventBase"],
+      "properties": {
+        "path": { "const": ".github/workflows/ci.yml" },
+        "workflowSha256": { "$ref": "#/$defs/hash" },
+        "runId": { "type": "string", "pattern": "^[0-9]+$" },
+        "runAttempt": { "type": "integer", "minimum": 1 },
+        "event": { "enum": ["pull_request", "push"] },
+        "ref": { "type": "string", "pattern": "^refs/[A-Za-z0-9._/-]+$" },
+        "testedCommit": { "$ref": "#/$defs/sha" },
+        "sourceHeadCommit": { "$ref": "#/$defs/sha" },
+        "eventBaseCommit": { "$ref": "#/$defs/sha" },
+        "containsEventBase": { "const": true }
+      }
+    },
+    "sourceVersions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rootPackage", "desktopPackage"],
+      "properties": {
+        "rootPackage": { "$ref": "#/$defs/version" },
+        "desktopPackage": { "$ref": "#/$defs/version" }
+      }
+    },
+    "checkpoints": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "prefixItems": [
+        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "type": "object", "properties": { "id": { "const": "C0" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "type": "object", "properties": { "id": { "const": "C1" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "type": "object", "properties": { "id": { "const": "C2" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "type": "object", "properties": { "id": { "const": "C3" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "type": "object", "properties": { "id": { "const": "C4" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "type": "object", "properties": { "id": { "const": "C5" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "type": "object", "properties": { "id": { "const": "C6" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "type": "object", "properties": { "id": { "const": "C7" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "type": "object", "properties": { "id": { "const": "C8" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "type": "object", "properties": { "id": { "const": "C9" } } }] }
+      ],
+      "items": false
+    },
+    "ci": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy", "requiredJobs"],
+      "properties": {
+        "policy": { "const": "all-applicable-jobs-must-succeed" },
+        "requiredJobs": {
+          "type": "array",
+          "minItems": 13,
+          "maxItems": 13,
+          "prefixItems": [
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "cross-runtime-fixtures" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "dependency-audit" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "desktop-linux-lock" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "desktop-macos" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "desktop-test" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "electron-candidate-set" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "electron-desktop" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "electron-release-candidate" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "root-package-compat" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "test" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "web-browser" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "web-build" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/job" }, { "type": "object", "properties": { "id": { "const": "workspace-contract" } } }] }
+          ],
+          "items": false
+        }
+      }
+    },
+    "candidateSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactName", "indexSha256", "version", "commit", "lockfileSha256", "targets"],
+      "properties": {
+        "artifactName": { "const": "electron-release-candidate-set" },
+        "indexSha256": { "$ref": "#/$defs/hash" },
+        "version": { "type": "string", "pattern": "^1\\.0\\.0-(alpha|beta|rc)\\.[0-9]+$" },
+        "commit": { "$ref": "#/$defs/sha" },
+        "lockfileSha256": { "$ref": "#/$defs/hash" },
+        "targets": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "prefixItems": [
+            { "allOf": [{ "$ref": "#/$defs/target" }, { "type": "object", "properties": { "target": { "const": "linux-x64" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/target" }, { "type": "object", "properties": { "target": { "const": "macos-arm64" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/target" }, { "type": "object", "properties": { "target": { "const": "macos-x64" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/target" }, { "type": "object", "properties": { "target": { "const": "windows-x64" } } }] }
+          ],
+          "items": false
+        }
+      }
+    },
+    "historicalFormalRelease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidenceSha256",
+        "artifactName",
+        "release",
+        "asset",
+        "binary",
+        "backup",
+        "syntheticOnly",
+        "currentNodeRestoreVerified"
+      ],
+      "properties": {
+        "evidenceSha256": { "$ref": "#/$defs/hash" },
+        "artifactName": { "const": "historical-formal-release-backup-evidence" },
+        "release": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "releaseId", "tag", "tagObjectSha", "commit", "publishedAt", "tagSigned"],
+          "properties": {
+            "repository": { "const": "Dailin521/codex-provider-sync" },
+            "releaseId": { "const": 366935386 },
+            "tag": { "const": "v0.4.1" },
+            "tagObjectSha": { "const": "1971fd52c8b9f9e24835dd2b4719137e73b36d77" },
+            "commit": { "const": "75f45756cf732333e7c52f45c8cd1b183291a029" },
+            "publishedAt": { "const": "2026-08-07T18:21:23Z" },
+            "tagSigned": { "const": false }
+          }
+        },
+        "asset": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "name", "size", "sha256", "checksumAssetSha256", "releaseChecksumsSha256"],
+          "properties": {
+            "id": { "const": 505502580 },
+            "name": { "const": "codex-provider-sync-v0.4.1-automation-win-x64.zip" },
+            "size": { "const": 33692001 },
+            "sha256": { "const": "6a8266a38567c56f9c8bb2662a84ac5a7b739c837a92cc4be0f4fdef76058616" },
+            "checksumAssetSha256": { "const": "8203a06a475e2d859717cd2072b82a5671fe557eca504aaf38b0080b4d98c2f3" },
+            "releaseChecksumsSha256": { "const": "2a1b0426667024f235a49a4dd3a2bd27b3ffa0e3995b6f03468e05f57608cc98" }
+          }
+        },
+        "binary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "size", "sha256", "authenticodeStatus"],
+          "properties": {
+            "name": { "const": "CodexProviderSync.Automation.exe" },
+            "size": { "const": 39029116 },
+            "sha256": { "const": "e1ed5a75018833ecc80cd2da90b185c9573efcf4d07e13baef2c206fb6b70c64" },
+            "authenticodeStatus": { "const": "NotSigned" }
+          }
+        },
+        "backup": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["metadataVersion", "metadataSha256", "producedTreeSha256"],
+          "properties": {
+            "metadataVersion": { "const": 2 },
+            "metadataSha256": { "$ref": "#/$defs/hash" },
+            "producedTreeSha256": { "$ref": "#/$defs/hash" }
+          }
+        },
+        "syntheticOnly": { "const": true },
+        "currentNodeRestoreVerified": { "const": true }
+      }
+    },
+    "assertions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "checkpointChainLinear",
+        "allEvidenceFilesHashed",
+        "workflowHeadMatchesEvidenceCommit",
+        "sourceHeadContainsEventBase",
+        "allRequiredJobsSucceeded",
+        "candidateSetComplete",
+        "candidateCommitMatchesEvidenceCommit",
+        "candidateReleaseUnauthorized",
+        "historicalFormalReleaseBackupVerified",
+        "redactionScanPassed"
+      ],
+      "properties": {
+        "checkpointChainLinear": { "const": true },
+        "allEvidenceFilesHashed": { "const": true },
+        "workflowHeadMatchesEvidenceCommit": { "const": true },
+        "sourceHeadContainsEventBase": { "const": true },
+        "allRequiredJobsSucceeded": { "const": true },
+        "candidateSetComplete": { "const": true },
+        "candidateCommitMatchesEvidenceCommit": { "const": true },
+        "candidateReleaseUnauthorized": { "const": true },
+        "historicalFormalReleaseBackupVerified": { "const": true },
+        "redactionScanPassed": { "const": true }
+      }
+    },
+    "pending": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "blocking", "reason", "requiredEvidence"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+          "blocking": { "type": "boolean" },
+          "reason": { "type": "string", "minLength": 1, "maxLength": 300 },
+          "requiredEvidence": { "type": "string", "minLength": 1, "maxLength": 300 }
+        }
+      }
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "releaseAuthorized",
+        "tagCreated",
+        "npmPublished",
+        "githubReleaseCreated",
+        "signed",
+        "notarized",
+        "updateMetadataPublished",
+        "crossVersionUpgradeVerified"
+      ],
+      "properties": {
+        "releaseAuthorized": { "const": false },
+        "tagCreated": { "const": false },
+        "npmPublished": { "const": false },
+        "githubReleaseCreated": { "const": false },
+        "signed": { "const": false },
+        "notarized": { "const": false },
+        "updateMetadataPublished": { "const": false },
+        "crossVersionUpgradeVerified": { "const": false }
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policyVersion", "secretScan", "forbiddenKeyClasses", "forbiddenValueClasses"],
+      "properties": {
+        "policyVersion": { "const": "c10-v1" },
+        "secretScan": { "const": "passed" },
+        "forbiddenKeyClasses": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z-]+$" },
+          "minItems": 4
+        },
+        "forbiddenValueClasses": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z-]+$" },
+          "minItems": 4
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$" },
+    "job": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "conclusion"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "conclusion": { "const": "success" }
+      }
+    },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "commit", "parentCommit", "evidenceCommit", "evidencePath", "evidenceSha256", "status"],
+      "properties": {
+        "id": { "enum": ["C0", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9"] },
+        "commit": { "$ref": "#/$defs/sha" },
+        "parentCommit": { "$ref": "#/$defs/sha" },
+        "evidenceCommit": { "$ref": "#/$defs/sha" },
+        "evidencePath": { "type": "string", "pattern": "^docs/migration/evidence/C[0-9]_[A-Z0-9_/-]+\\.md$" },
+        "evidenceSha256": { "$ref": "#/$defs/hash" },
+        "status": { "const": "candidate-evidence" }
+      }
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "sizeBytes", "sha256"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]+$" },
+        "sizeBytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/hash" }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "buildId", "manifestSha256", "toolVersions", "fusePolicy", "artifactAuditPolicy", "assets"],
+      "properties": {
+        "target": { "enum": ["windows-x64", "macos-x64", "macos-arm64", "linux-x64"] },
+        "buildId": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+        "manifestSha256": { "$ref": "#/$defs/hash" },
+        "toolVersions": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/version" }
+        },
+        "fusePolicy": { "const": "c9-v1" },
+        "artifactAuditPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schemaVersion", "sha256"],
+          "properties": {
+            "schemaVersion": { "const": 1 },
+            "sha256": { "$ref": "#/$defs/hash" }
+          }
+        },
+        "assets": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "$ref": "#/$defs/asset" }
+        }
+      }
+    }
+  }
+}

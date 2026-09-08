@@ -1,8 +1,10 @@
 # Codex Provider Sync GUI
 
+> 本文介绍保留的 .NET Windows 兼容版。V1 Electron 是面向用户的主桌面端；.NET 实现仍保持可构建、可测试，未删除或退役。
+
 ## 适用场景
 
-这是 Windows 用户可用的图形界面版本。
+这是 Windows 用户可用的 .NET 兼容版图形界面。
 
 如果你不想装 Node、不想打开 PowerShell，也不想记命令，直接下载发布页里的 `CodexProviderSync.exe` 双击运行即可。
 

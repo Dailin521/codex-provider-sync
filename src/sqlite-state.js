@@ -3,10 +3,13 @@ import path from "node:path";
 
 import { syncDirectory } from "./atomic-file.js";
 import { DB_FILE_BASENAME, SESSION_DIRS, SQLITE_DIR_BASENAME } from "./constants.js";
+import { CoreError } from "./core-error.js";
 import { openDatabase } from "./sqlite.js";
 import { resolveStorageLayout } from "./storage-layout.js";
 
-const DEFAULT_BUSY_TIMEOUT_MS = 5000;
+const DEFAULT_BUSY_TIMEOUT_MS = 0;
+const SQLITE_TITLE_QUERY_CHUNK_SIZE = 500;
+const SQLITE_TITLE_MAX_CHARS = 1024;
 
 export function stateDbPath(codexHome) {
   return path.join(codexHome, SQLITE_DIR_BASENAME, DB_FILE_BASENAME);
@@ -170,6 +173,55 @@ export async function existingStateDbPath(storageOrLocation) {
   return (await resolveStateDbLocation(storageOrLocation))?.path ?? null;
 }
 
+// History titles are explicit Codex metadata. Keep this lookup narrowly scoped
+// to the selected state DB's threads.id/title columns: in particular, never
+// fall back to first_user_message or any message-content column.
+export async function readSqliteThreadTitles(storageOrLocation, threadIds) {
+  const ids = [...new Set((Array.isArray(threadIds) ? threadIds : []).filter(
+    (value) => typeof value === "string" && value.length > 0 && value.length <= 512
+  ))];
+  if (ids.length === 0) return new Map();
+
+  let db;
+  try {
+    const dbPath = await existingStateDbPath(storageOrLocation);
+    if (!dbPath) return new Map();
+    db = await openDatabase(dbPath, { readOnly: true });
+    if (!tableHasColumn(db, "threads", "id") || !tableHasColumn(db, "threads", "title")) {
+      return new Map();
+    }
+
+    const titles = new Map();
+    for (let offset = 0; offset < ids.length; offset += SQLITE_TITLE_QUERY_CHUNK_SIZE) {
+      const chunk = ids.slice(offset, offset + SQLITE_TITLE_QUERY_CHUNK_SIZE);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const rows = db.prepare(`
+        SELECT id, substr(title, 1, ?) AS title
+        FROM threads
+        WHERE id IN (${placeholders})
+          AND typeof(title) = 'text'
+          AND length(title) > 0
+      `).all(SQLITE_TITLE_MAX_CHARS, ...chunk);
+      for (const row of rows) {
+        if (typeof row.id === "string" && typeof row.title === "string") {
+          titles.set(row.id, row.title.slice(0, SQLITE_TITLE_MAX_CHARS));
+        }
+      }
+    }
+    return titles;
+  } catch {
+    // History remains available from rollout metadata when an optional title
+    // index is missing, busy, malformed, or otherwise unreadable.
+    return new Map();
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // Optional read-only title metadata must not make History unavailable.
+    }
+  }
+}
+
 function tableHasColumn(db, tableName, columnName) {
   return db
     .prepare(`PRAGMA table_info(${JSON.stringify(tableName)})`)
@@ -196,25 +248,43 @@ export function configureSqliteWriteDurability(db) {
   return { synchronous: "full", value: synchronous };
 }
 
+function sqlitePrimaryResultCode(error) {
+  return Number.isInteger(error?.errcode) ? error.errcode & 0xff : null;
+}
+
 function isSqliteBusyError(error) {
-  const message = `${error?.code ?? ""} ${error?.message ?? ""}`.toLowerCase();
-  return message.includes("database is locked") || message.includes("sqlite_busy") || message.includes("busy");
+  if (error instanceof CoreError) return error.code === "SQLITE_BUSY";
+  const primaryCode = sqlitePrimaryResultCode(error);
+  return error?.code === "SQLITE_BUSY"
+    || error?.code === "SQLITE_LOCKED"
+    || (error?.code === "ERR_SQLITE_ERROR" && (primaryCode === 5 || primaryCode === 6));
 }
 
 function isSqliteMalformedError(error) {
-  const message = `${error?.code ?? ""} ${error?.message ?? ""}`.toLowerCase();
-  return message.includes("database disk image is malformed")
-    || message.includes("sqlite_corrupt")
-    || message.includes("malformed")
-    || message.includes("not a database");
+  if (error instanceof CoreError) return error.code === "SQLITE_UNREADABLE";
+  const primaryCode = sqlitePrimaryResultCode(error);
+  return error?.code === "SQLITE_CORRUPT"
+    || error?.code === "SQLITE_NOTADB"
+    || (error?.code === "ERR_SQLITE_ERROR" && (primaryCode === 11 || primaryCode === 26));
+}
+
+function sqliteErrorDetails(error) {
+  const primaryCode = sqlitePrimaryResultCode(error);
+  return {
+    ...(typeof error?.code === "string" ? { causeCode: error.code } : {}),
+    ...(primaryCode !== null ? { sqlitePrimaryCode: primaryCode } : {})
+  };
 }
 
 export function wrapSqliteBusyError(error, action) {
   if (!isSqliteBusyError(error)) {
     return error;
   }
-  return new Error(
-    `Unable to ${action} because state_5.sqlite is currently in use. Close Codex and the Codex app, then retry. Original error: ${error.message}`
+  if (error instanceof CoreError) return error;
+  return new CoreError(
+    "SQLITE_BUSY",
+    `Unable to ${action} because state_5.sqlite is currently in use. Close Codex and the Codex app, then retry. Original error: ${error.message}`,
+    { cause: error, details: sqliteErrorDetails(error) }
   );
 }
 
@@ -222,8 +292,11 @@ export function wrapSqliteMalformedError(error, action) {
   if (!isSqliteMalformedError(error)) {
     return error;
   }
-  return new Error(
-    `Unable to ${action} because state_5.sqlite is malformed or unreadable. Close Codex, back up or repair the database, then retry. Original error: ${error.message}`
+  if (error instanceof CoreError) return error;
+  return new CoreError(
+    "SQLITE_UNREADABLE",
+    `Unable to ${action} because state_5.sqlite is malformed or unreadable. Close Codex, back up or repair the database, then retry. Original error: ${error.message}`,
+    { cause: error, details: sqliteErrorDetails(error) }
   );
 }
 
@@ -280,6 +353,33 @@ export async function readSqliteProviderCounts(storageOrLocation) {
   }
 }
 
+// A Provider plan depends on row identity / Provider, not message previews,
+// activity timestamps, or the physical WAL/SHM representation. One read
+// transaction binds the schema and rows to the same SQLite snapshot.
+export async function readSqliteProviderRevisionState(dbPath) {
+  let db;
+  try {
+    db = await openDatabase(dbPath, { readOnly: true });
+    db.exec("BEGIN");
+    const schema = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'threads'").get()?.sql;
+    if (!schema || !tableHasColumn(db, "threads", "model_provider")) {
+      throw new CoreError("SQLITE_UNREADABLE", "The thread index does not support Provider synchronization.");
+    }
+    const key = tableHasColumn(db, "threads", "id") ? "id" : "rowid";
+    const rows = db.prepare(`SELECT ${key} AS id, model_provider FROM threads ORDER BY ${key}`).all();
+    db.exec("COMMIT");
+    return { schema, rows };
+  } catch (error) {
+    if (isSqliteBusyError(error)) throw wrapSqliteBusyError(error, "read Provider revision");
+    if (error instanceof CoreError) throw error;
+    throw new CoreError("SQLITE_UNREADABLE", "state_5.sqlite is malformed or unreadable.", {
+      cause: error, details: sqliteErrorDetails(error)
+    });
+  } finally {
+    db?.close();
+  }
+}
+
 export async function readSqliteRepairStats(storageOrLocation, options = {}) {
   const dbPath = await existingStateDbPath(storageOrLocation);
   if (!dbPath) {
@@ -288,40 +388,210 @@ export async function readSqliteRepairStats(storageOrLocation, options = {}) {
 
   let db;
   try {
-    db = await openDatabase(dbPath);
+    db = await openDatabase(dbPath, { readOnly: true });
+    const selectedSessionIds = options.sessionIds instanceof Set ? options.sessionIds : null;
+    const selectedIds = selectedSessionIds ? [...selectedSessionIds] : null;
+    const rowById = new Map();
+    const affectedSessionIds = new Set();
+    const selectedSessionIdsFound = new Set();
+    const noteFoundRow = (row) => {
+      if (!row || typeof row.id !== "string") return;
+      selectedSessionIdsFound.add(row.id);
+    };
+    const noteAffectedRow = (row) => {
+      if (!row || typeof row.id !== "string") return;
+      affectedSessionIds.add(row.id);
+      if (rowById.size < 100) rowById.set(row.id, row);
+    };
+    const hasModel = tableHasColumn(db, "threads", "model");
+    const hasCwd = tableHasColumn(db, "threads", "cwd");
+    const hasUserEvent = tableHasColumn(db, "threads", "has_user_event");
+    const selectColumns = ["id", ...(hasModel ? ["model"] : []), ...(hasCwd ? ["cwd"] : []), ...(hasUserEvent ? ["has_user_event"] : [])];
+    if (selectedIds?.length) {
+      const statement = db.prepare(`SELECT ${selectColumns.join(", ")} FROM threads WHERE id = ?`);
+      for (const id of selectedIds) noteFoundRow(statement.get(id));
+    }
+    let modelRowsNeedingRepair = 0;
+    if (typeof options.targetModel === "string"
+        && options.targetModel
+        && hasModel) {
+      const sql = selectedIds?.length
+        ? "SELECT COUNT(*) AS count FROM threads WHERE id IN (" + selectedIds.map(() => "?").join(",") + ") AND COALESCE(model, '') <> ?"
+        : `
+        SELECT COUNT(*) AS count
+        FROM threads
+        WHERE COALESCE(model, '') <> ?
+      `;
+      modelRowsNeedingRepair = Number(db.prepare(sql).get(...(selectedIds ?? []), options.targetModel)?.count) || 0;
+      if (!selectedIds) {
+        const preview = db.prepare(`SELECT ${selectColumns.join(", ")} FROM threads WHERE COALESCE(model, '') <> ? ORDER BY id`).iterate(options.targetModel);
+        for (const row of preview) noteAffectedRow(row);
+      }
+      if (selectedIds) {
+        const stmt = db.prepare(`SELECT ${selectColumns.join(", ")} FROM threads WHERE id = ?`);
+        for (const id of selectedIds) {
+          const row = stmt.get(id);
+          if (row && row.model !== options.targetModel) noteAffectedRow(row);
+        }
+      }
+    }
     let userEventRowsNeedingRepair = 0;
-    if (tableHasColumn(db, "threads", "has_user_event") && options.userEventThreadIds?.size) {
-      const stmt = db.prepare("SELECT has_user_event FROM threads WHERE id = ?");
+    if (hasUserEvent && options.userEventThreadIds?.size) {
+      const stmt = db.prepare(`SELECT ${selectColumns.join(", ")} FROM threads WHERE id = ?`);
       for (const threadId of options.userEventThreadIds) {
         const row = stmt.get(threadId);
+        noteFoundRow(row);
         if (row && Number(row.has_user_event) !== 1) {
           userEventRowsNeedingRepair += 1;
+          noteAffectedRow(row);
         }
       }
     }
 
     let cwdRowsNeedingRepair = 0;
-    if (tableHasColumn(db, "threads", "cwd") && options.threadCwdById?.size) {
-      const stmt = db.prepare("SELECT cwd FROM threads WHERE id = ?");
+    if (hasCwd && options.threadCwdById?.size) {
+      const stmt = db.prepare(`SELECT ${selectColumns.join(", ")} FROM threads WHERE id = ?`);
       for (const [threadId, cwd] of options.threadCwdById) {
         if (typeof threadId !== "string" || !threadId || typeof cwd !== "string" || !cwd.trim()) {
           continue;
         }
         const row = stmt.get(threadId);
+        noteFoundRow(row);
         if (row && row.cwd !== cwd) {
           cwdRowsNeedingRepair += 1;
+          noteAffectedRow(row);
         }
       }
     }
 
     return {
+      modelRowsNeedingRepair,
       userEventRowsNeedingRepair,
-      cwdRowsNeedingRepair
+      cwdRowsNeedingRepair,
+      selectedSessionIdsFound,
+      affectedSessionIds,
+      previewRows: [...rowById.values()]
     };
   } catch (error) {
     throw wrapSqliteMalformedError(
       wrapSqliteBusyError(error, "read SQLite repair diagnostics"),
       "read SQLite repair diagnostics"
+    );
+  } finally {
+    db?.close();
+  }
+}
+
+const SQLITE_REPAIR_TARGETS = new Set(["models", "cwd", "userEvent"]);
+
+function normalizeSqliteRepairTargets(value) {
+  if (!Array.isArray(value)
+      || value.some((target) => typeof target !== "string" || !SQLITE_REPAIR_TARGETS.has(target))) {
+    throw new CoreError("INVALID_INPUT", "SQLite repair targets are invalid.");
+  }
+  return new Set(value);
+}
+
+export async function applySqliteRepairs(storageOrLocation, afterUpdateOrOptions, maybeOptions) {
+  const afterUpdate = typeof afterUpdateOrOptions === "function" ? afterUpdateOrOptions : null;
+  const options = typeof afterUpdateOrOptions === "function"
+    ? (maybeOptions ?? {})
+    : (afterUpdateOrOptions ?? {});
+  const targets = normalizeSqliteRepairTargets(options.targets ?? []);
+  const targetModel = options.targetModel ?? null;
+  if (targets.has("models") && (typeof targetModel !== "string" || !targetModel)) {
+    throw new CoreError("INVALID_INPUT", "Model repair requires the current root model.");
+  }
+
+  const emptyResult = {
+    updatedRows: 0,
+    providerRowsUpdated: 0,
+    modelRowsUpdated: 0,
+    userEventRowsUpdated: 0,
+    cwdRowsUpdated: 0,
+    databasePresent: false
+  };
+  const dbPath = await existingStateDbPath(storageOrLocation);
+  if (!dbPath) {
+    if (afterUpdate) await afterUpdate(emptyResult);
+    return emptyResult;
+  }
+
+  let db;
+  let transactionOpen = false;
+  try {
+    db = await openDatabase(dbPath);
+    setBusyTimeout(db, options.busyTimeoutMs);
+    configureSqliteWriteDurability(db);
+    db.exec("BEGIN IMMEDIATE");
+    transactionOpen = true;
+
+    let modelRowsUpdated = 0;
+    if (targets.has("models") && tableHasColumn(db, "threads", "model")) {
+      const selectedIds = options.sessionIds instanceof Set ? [...options.sessionIds] : null;
+      const modelSql = selectedIds?.length
+        ? "UPDATE threads SET model = ? WHERE id IN (" + selectedIds.map(() => "?").join(",") + ") AND COALESCE(model, '') <> ?"
+        : `
+        UPDATE threads
+        SET model = ?
+        WHERE COALESCE(model, '') <> ?
+      `;
+      modelRowsUpdated = db.prepare(modelSql).run(targetModel, ...(selectedIds ?? []), targetModel).changes ?? 0;
+    }
+
+    let userEventRowsUpdated = 0;
+    if (targets.has("userEvent")
+        && tableHasColumn(db, "threads", "has_user_event")
+        && options.userEventThreadIds?.size) {
+      const statement = db.prepare(`
+        UPDATE threads
+        SET has_user_event = 1
+        WHERE id = ? AND COALESCE(has_user_event, 0) <> 1
+      `);
+      for (const threadId of options.userEventThreadIds) {
+        if (options.sessionIds instanceof Set && !options.sessionIds.has(threadId)) continue;
+        userEventRowsUpdated += statement.run(threadId).changes ?? 0;
+      }
+    }
+
+    let cwdRowsUpdated = 0;
+    if (targets.has("cwd")
+        && tableHasColumn(db, "threads", "cwd")
+        && options.threadCwdById?.size) {
+      const statement = db.prepare(`
+        UPDATE threads
+        SET cwd = ?
+        WHERE id = ? AND COALESCE(cwd, '') <> ?
+      `);
+      for (const [threadId, cwd] of options.threadCwdById) {
+        if (options.sessionIds instanceof Set && !options.sessionIds.has(threadId)) continue;
+        if (typeof threadId !== "string" || !threadId || typeof cwd !== "string" || !cwd.trim()) continue;
+        cwdRowsUpdated += statement.run(cwd, threadId, cwd).changes ?? 0;
+      }
+    }
+
+    const result = {
+      updatedRows: modelRowsUpdated + userEventRowsUpdated + cwdRowsUpdated,
+      providerRowsUpdated: 0,
+      modelRowsUpdated,
+      userEventRowsUpdated,
+      cwdRowsUpdated,
+      databasePresent: true
+    };
+    if (afterUpdate) await afterUpdate(result);
+    options.onCommitAttempt?.(result);
+    db.exec("COMMIT");
+    transactionOpen = false;
+    await options.afterCommit?.(result);
+    return result;
+  } catch (error) {
+    if (transactionOpen) {
+      try { db.exec("ROLLBACK"); }
+      catch { /* Preserve the original failure. */ }
+    }
+    throw wrapSqliteMalformedError(
+      wrapSqliteBusyError(error, "repair session metadata"),
+      "repair session metadata"
     );
   } finally {
     db?.close();
@@ -548,15 +818,19 @@ export async function createSqliteOnlineBackup(storageOrLocation, destinationPat
   }
 
   let db;
+  let backupPhase = "source-open";
   try {
     // Read-only is deliberate: a database that disappears after discovery
     // must fail here instead of being silently recreated as an empty file.
     db = await openDatabase(fullSourcePath, { readOnly: true });
+    backupPhase = "source-metadata";
     setBusyTimeout(db, options.busyTimeoutMs);
     const sourceMetadata = readSqliteConnectionMetadata(db);
     const driver = db.driver ?? "unknown";
+    backupPhase = "destination-backup";
     await db.backup(fullDestinationPath, options.backupOptions ?? {});
 
+    backupPhase = "destination-sync";
     const handle = await fs.open(fullDestinationPath, "r+");
     try {
       await handle.sync();
@@ -591,8 +865,13 @@ export async function createSqliteOnlineBackup(storageOrLocation, destinationPat
       `${fullDestinationPath}-wal`,
       `${fullDestinationPath}-shm`
     ].map((filePath) => fs.rm(filePath, { force: true }).catch(() => {})));
+    const phasedError = new Error(
+      `SQLite online backup failed during ${backupPhase}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error instanceof Error ? error : undefined }
+    );
+    if (typeof error?.code === "string") phasedError.code = error.code;
     throw wrapSqliteMalformedError(
-      wrapSqliteBusyError(error, "create a consistent SQLite online backup"),
+      wrapSqliteBusyError(phasedError, "create a consistent SQLite online backup"),
       "create a consistent SQLite online backup"
     );
   } finally {

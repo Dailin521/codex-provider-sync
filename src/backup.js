@@ -10,7 +10,7 @@ import {
   GLOBAL_STATE_BACKUP_FILE_BASENAME,
   GLOBAL_STATE_FILE_BASENAME
 } from "./constants.js";
-import { restoreSessionChanges } from "./session-files.js";
+import { restoreSessionChanges, validateProviderMutationDescriptor, validateProviderByteRestore } from "./session-files.js";
 import {
   assertSqliteWritable,
   createSqliteOnlineBackup,
@@ -28,7 +28,61 @@ import {
   getStartedJournalTargets,
   readTransactionJournal
 } from "./transaction-journal.js";
+import { findRestoreJournals } from "./restore-journal.js";
 import { syncDirectory, writeFileAtomic } from "./atomic-file.js";
+
+const SESSION_CANONICAL_TARGET = Symbol("codex-provider-sync.session-canonical-target");
+const UNDO_TARGET_KINDS = Object.freeze(["config", "globalState", "sqlite", "rollout"]);
+
+function defaultUndoTargetKinds() {
+  return Object.fromEntries(UNDO_TARGET_KINDS.map((kind) => [kind, true]));
+}
+
+// A missing `undoTargets` is deliberate legacy compatibility: v1/v2 backups
+// created before C3 contained every store and must retain their existing
+// Restore behaviour. A present declaration is authoritative so a reduced
+// UndoBackup never causes Restore to infer a destructive action from an
+// absent source file.
+function normalizeUndoTargetKinds(targetKinds) {
+  if (targetKinds === undefined) return defaultUndoTargetKinds();
+  if (!targetKinds || typeof targetKinds !== "object" || Array.isArray(targetKinds)) {
+    throw new TypeError("Backup targetKinds must be an object when supplied.");
+  }
+  const normalized = {};
+  for (const kind of UNDO_TARGET_KINDS) {
+    if (typeof targetKinds[kind] !== "boolean") {
+      throw new TypeError(`Backup targetKinds.${kind} must be a boolean.`);
+    }
+    normalized[kind] = targetKinds[kind];
+  }
+  return normalized;
+}
+
+function readUndoTargets(metadata) {
+  if (metadata?.undoTargets === undefined) {
+    return {
+      legacy: true,
+      config: { captured: true },
+      globalState: { captured: true },
+      sqlite: { captured: true },
+      rollout: { captured: true }
+    };
+  }
+  const value = metadata.undoTargets;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Backup metadata contains an invalid undoTargets declaration.");
+  }
+  const result = { legacy: false };
+  for (const kind of UNDO_TARGET_KINDS) {
+    const target = value[kind];
+    if (!target || typeof target !== "object" || Array.isArray(target)
+        || typeof target.captured !== "boolean") {
+      throw new Error(`Backup metadata contains an invalid undo target: ${kind}.`);
+    }
+    result[kind] = { ...target };
+  }
+  return result;
+}
 
 function timestampSlug(date = new Date()) {
   return date.toISOString().replaceAll(":", "").replaceAll("-", "").replace(".", "");
@@ -47,7 +101,7 @@ async function copyIfPresent(sourcePath, destinationPath) {
   return true;
 }
 
-async function copyFileAtomic(sourcePath, destinationPath) {
+export async function copyFileAtomic(sourcePath, destinationPath) {
   const fullDestination = path.resolve(destinationPath);
   const directory = path.dirname(fullDestination);
   const tempPath = path.join(
@@ -111,6 +165,21 @@ function storagePathsEqual(left, right) {
     : normalizedLeft === normalizedRight;
 }
 
+async function storagePathsEqualPhysical(left, right) {
+  if (storagePathsEqual(left, right)) {
+    return true;
+  }
+  try {
+    const [physicalLeft, physicalRight] = await Promise.all([
+      fs.realpath(path.resolve(left)),
+      fs.realpath(path.resolve(right))
+    ]);
+    return storagePathsEqual(physicalLeft, physicalRight);
+  } catch {
+    return false;
+  }
+}
+
 function pathComparisonKey(value) {
   const resolved = path.resolve(value);
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
@@ -122,6 +191,21 @@ function pathIsWithin(root, target) {
     && !relativePath.startsWith(`..${path.sep}`)
     && relativePath !== ".."
     && !path.isAbsolute(relativePath);
+}
+
+function findRawRolloutRoot(target) {
+  let current = path.dirname(target);
+  while (true) {
+    const name = path.basename(current).toLowerCase();
+    if (name === "sessions" || name === "archived_sessions") {
+      return current;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return null;
+    }
+    current = parent;
+  }
 }
 
 async function assertNoLinkedPathSegments(root, target) {
@@ -141,34 +225,70 @@ async function assertNoLinkedPathSegments(root, target) {
 
 async function validateSessionManifestEntries(entries, codexHome) {
   const roots = ["sessions", "archived_sessions"].map((name) => path.resolve(codexHome, name));
+  const canonicalRoots = (await Promise.all(roots.map(async (root) => {
+    try {
+      return await fs.realpath(root);
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        return null;
+      }
+      throw error;
+    }
+  }))).filter(Boolean);
   const seen = new Set();
+  const validated = [];
   for (const entry of entries) {
     if (!entry || typeof entry.path !== "string" || !path.isAbsolute(entry.path)) {
       throw new Error("Backup session manifest contains a missing or non-absolute rollout path.");
     }
     const target = path.resolve(entry.path);
-    const lexicalRoot = roots.find((root) => pathIsWithin(root, target));
-    if (!lexicalRoot || !/^rollout-.*\.jsonl$/i.test(path.basename(target))) {
+    if (!/^rollout-.*\.jsonl$/i.test(path.basename(target))) {
       throw new Error(`Backup session target is outside the allowed rollout roots: ${entry.path}`);
     }
-    const key = pathComparisonKey(target);
+    const rawRoot = findRawRolloutRoot(target);
+    if (!rawRoot) {
+      throw new Error(`Backup session target is outside the allowed rollout roots: ${entry.path}`);
+    }
+    await assertNoLinkedPathSegments(rawRoot, target);
+    const [canonicalRawRoot, canonicalTarget] = await Promise.all([
+      fs.realpath(rawRoot),
+      fs.realpath(target)
+    ]);
+    const canonicalRoot = canonicalRoots.find((root) =>
+      storagePathsEqual(root, canonicalRawRoot) && pathIsWithin(root, canonicalTarget)
+    );
+    if (!canonicalRoot) {
+      throw new Error(`Backup session target resolves outside the allowed rollout roots: ${entry.path}`);
+    }
+    const key = pathComparisonKey(canonicalTarget);
     if (seen.has(key)) {
       throw new Error(`Backup session manifest contains a duplicate rollout target: ${entry.path}`);
     }
     seen.add(key);
-    await assertNoLinkedPathSegments(lexicalRoot, target);
-    const [canonicalRoot, canonicalTarget] = await Promise.all([
-      fs.realpath(lexicalRoot),
-      fs.realpath(target)
-    ]);
-    if (!pathIsWithin(canonicalRoot, canonicalTarget)) {
-      throw new Error(`Backup session target resolves outside the allowed rollout roots: ${entry.path}`);
+    if (entry.mutation) {
+      if (entry.modelOnlyChange) {
+        throw new Error(`Provider byte mutation cannot describe a model-only change: ${entry.path}`);
+      }
+      validateProviderMutationDescriptor(entry.mutation, entry.path, entry.originalFirstLine, entry.originalSeparator);
     }
+    await assertNoLinkedPathSegments(canonicalRoot, canonicalTarget);
     const stat = await fs.stat(canonicalTarget);
     if (!stat.isFile()) {
       throw new Error(`Backup session target is not a regular file: ${entry.path}`);
     }
+    const normalizedEntry = { ...entry, path: target };
+    Object.defineProperty(normalizedEntry, SESSION_CANONICAL_TARGET, {
+      configurable: true,
+      enumerable: false,
+      value: canonicalTarget
+    });
+    validated.push({
+      originalPath: target,
+      canonicalPath: canonicalTarget,
+      entry: normalizedEntry
+    });
   }
+  return validated;
 }
 
 function resolveRestoreSqliteHome(storage, metadata, stateDb) {
@@ -184,6 +304,17 @@ function resolveRestoreSqliteHome(storage, metadata, stateDb) {
     }
   }
   return storage.sqliteHome;
+}
+
+export async function resolveRestoreStateDbTargetPath(backupDir, storage) {
+  const metadata = await readValidatedBackupMetadata(backupDir, storage.codexHome);
+  const stateDb = Object.hasOwn(storage, "stateDbLocation")
+    ? storage.stateDbLocation
+    : await detectStateDb(storage);
+  if (!stateDb && storage.sqliteHomeSource !== "default") {
+    throw new Error(`state_5.sqlite not found in SQLite home ${storage.sqliteHome}.`);
+  }
+  return path.join(resolveRestoreSqliteHome(storage, metadata, stateDb), DB_FILE_BASENAME);
 }
 
 async function removeIfPresent(targetPath) {
@@ -220,6 +351,17 @@ export async function restoreGlobalStateFilesFromBackup(backupDir, codexHome, op
     }
     const sourcePath = path.join(backupDir, fileName);
     const originalPresent = metadata?.globalStateFiles?.[fileName];
+    const target = {
+      kind: "globalState",
+      targetPath,
+      sourcePath,
+      sourceAction: originalPresent === false
+        ? "delete"
+        : (originalPresent === true || await backupFileExists(sourcePath) ? "copy" : "preserve"),
+      sourcePresent: originalPresent === true
+        || (originalPresent !== false && await backupFileExists(sourcePath))
+    };
+    await options.onBeforeTarget?.(target);
     if (originalPresent === true) {
       try {
         await fs.access(sourcePath);
@@ -234,6 +376,7 @@ export async function restoreGlobalStateFilesFromBackup(backupDir, codexHome, op
       // behavior instead of deleting a file we cannot classify safely.
       await copyIfPresent(sourcePath, targetPath);
     }
+    await options.onAfterTarget?.(target);
   }
 }
 
@@ -243,11 +386,13 @@ export async function createBackup({
   targetProvider,
   sessionChanges,
   configPath,
-  configBackupText
+  configBackupText,
+  targetKinds
 }) {
   const effectiveStorage = storage ?? resolveStorageLayout({ codexHome, env: {} });
   assertSqliteAccessSupported(effectiveStorage, "create a backup");
   codexHome = effectiveStorage.codexHome;
+  const capturedTargets = normalizeUndoTargetKinds(targetKinds);
   const backupRoot = defaultBackupRoot(codexHome);
   const backupDir = path.join(backupRoot, timestampSlug());
   const dbDir = path.join(backupDir, "db");
@@ -255,11 +400,13 @@ export async function createBackup({
 
   const copiedDbFiles = [];
   const copiedSqliteDbFiles = [];
-  const stateDb = Object.hasOwn(effectiveStorage, "stateDbLocation")
-    ? effectiveStorage.stateDbLocation
-    : await detectStateDb(effectiveStorage);
+  const stateDb = capturedTargets.sqlite
+    ? (Object.hasOwn(effectiveStorage, "stateDbLocation")
+      ? effectiveStorage.stateDbLocation
+      : await detectStateDb(effectiveStorage))
+    : null;
   const actualSqliteHome = stateDb ? path.dirname(stateDb.path) : effectiveStorage.sqliteHome;
-  if (stateDb) {
+  if (capturedTargets.sqlite && stateDb) {
     const sqliteRelativePath = DB_FILE_BASENAME;
     const sqliteBackupPath = path.join(dbDir, "sqlite-home", sqliteRelativePath);
     const sqliteBackup = await createSqliteOnlineBackup(stateDb, sqliteBackupPath);
@@ -278,16 +425,20 @@ export async function createBackup({
     }
   }
 
-  if (configBackupText !== undefined) {
+  let configPresent = false;
+  if (capturedTargets.config && configBackupText !== undefined) {
     const configBackupPath = path.join(backupDir, "config.toml");
     await writeFileAtomic(configBackupPath, configBackupText, "utf8");
     const configStat = await fs.stat(configPath);
     await fs.chmod(configBackupPath, configStat.mode);
     await syncFile(configBackupPath);
-  } else {
-    await copyIfPresent(configPath, path.join(backupDir, "config.toml"));
+    configPresent = true;
+  } else if (capturedTargets.config) {
+    configPresent = await copyIfPresent(configPath, path.join(backupDir, "config.toml"));
   }
-  const globalStateFiles = await backupGlobalStateFiles(codexHome, backupDir);
+  const globalStateFiles = capturedTargets.globalState
+    ? await backupGlobalStateFiles(codexHome, backupDir)
+    : null;
 
   const sessionManifest = {
     version: 2,
@@ -300,11 +451,14 @@ export async function createBackup({
     // transaction journal; journal `applying`/`applied` events decide which
     // entries a transactional restore must compensate.
     appliedPaths: null,
-    files: sessionChanges.map((change) => ({
+    files: (capturedTargets.rollout ? sessionChanges : []).map((change) => ({
       path: change.path,
       originalFirstLine: change.originalFirstLine,
       originalSeparator: change.originalSeparator,
       originalMtimeMs: change.originalMtimeMs,
+      // Optional byte-level undo; the standard v2 fields remain sufficient
+      // for older readers to use their existing full-header restore path.
+      ...(change.inPlaceMutation ? { mutation: change.inPlaceMutation } : {}),
       // Per-line record of the original turn_context.model values
       // so a failed rollback can put the per-turn model back to
       // what it was before the sync. Without this, a restore
@@ -331,8 +485,23 @@ export async function createBackup({
     createdAt: sessionManifest.createdAt,
     dbFiles: copiedDbFiles,
     sqliteDbFiles: copiedSqliteDbFiles,
-    globalStateFiles,
-    changedSessionFiles: sessionChanges.length
+    ...(globalStateFiles ? { globalStateFiles } : {}),
+    changedSessionFiles: capturedTargets.rollout ? sessionChanges.length : 0,
+    // Keep v2 so existing readers continue recognizing the backup. This
+    // additive declaration distinguishes an intentionally omitted target
+    // from a captured target whose original file did not exist.
+    undoTargets: {
+      config: { captured: capturedTargets.config, ...(capturedTargets.config ? { present: configPresent } : {}) },
+      globalState: { captured: capturedTargets.globalState },
+      sqlite: {
+        captured: capturedTargets.sqlite,
+        ...(capturedTargets.sqlite ? { present: Boolean(stateDb) } : {})
+      },
+      rollout: {
+        captured: capturedTargets.rollout,
+        ...(capturedTargets.rollout ? { entryCount: sessionChanges.length } : {})
+      }
+    }
   });
 
   return backupDir;
@@ -344,11 +513,8 @@ export async function updateSessionBackupManifest(backupDir, sessionChanges, opt
   const sessionManifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
   const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
 
-  // Promote older manifests to the v2 schema so restoreSessionChanges
-  // can rely on the per-line `originalTurnContextModels` field.
-  if (sessionManifest.version !== 2) {
-    sessionManifest.version = 2;
-  }
+  // Preserve the official v1-to-v2 model-snapshot upgrade.
+  if (sessionManifest.version !== 2) sessionManifest.version = 2;
 
   const filesByPath = new Map(
     (sessionManifest.files ?? []).map((entry) => [pathComparisonKey(entry.path), entry])
@@ -429,13 +595,53 @@ export async function pruneBackups(codexHome, keepCount = DEFAULT_BACKUP_RETENTI
 
   const backupRoot = defaultBackupRoot(codexHome);
   const backupDirs = await listManagedBackupDirectories(backupRoot);
-  const pending = await findPendingTransactions(codexHome);
-  const protectedBackups = new Set(
-    pending.map((transaction) => pathComparisonKey(path.dirname(transaction.filePath)))
-  );
-  const toDelete = backupDirs
-    .slice(keepCount)
-    .filter((entry) => !protectedBackups.has(pathComparisonKey(entry.fullPath)));
+  const [pending, restoreJournals] = await Promise.all([
+    findPendingTransactions(codexHome),
+    findRestoreJournals(codexHome)
+  ]);
+  // A completed Restore may resolve an older nonterminal journal for write
+  // admission, but that does not authorize Prune to delete its evidence.
+  // Protect every still-blocking Restore journal independently of resolution.
+  const pruneTransactions = [
+    ...pending.filter((transaction) => transaction.operationKind !== "restore"),
+    ...restoreJournals.filter((transaction) => transaction.blocking)
+  ];
+  const protectedBackups = new Set();
+  let restoreReferencesUnverifiable = false;
+  for (const transaction of pruneTransactions) {
+    try {
+      protectedBackups.add(pathComparisonKey(await fs.realpath(path.dirname(transaction.filePath))));
+    } catch {
+      if (transaction.operationKind === "restore") restoreReferencesUnverifiable = true;
+    }
+    for (const referencedDir of [
+      transaction.prepared?.sourceBackup?.backupDir,
+      transaction.prepared?.preRestoreSnapshot?.backupDir,
+      transaction.protectionReferences?.sourceBackupDir,
+      transaction.protectionReferences?.preRestoreSnapshotDir
+    ]) {
+      if (typeof referencedDir === "string" && path.isAbsolute(referencedDir)) {
+        try {
+          protectedBackups.add(pathComparisonKey(await fs.realpath(referencedDir)));
+        } catch {
+          if (transaction.operationKind === "restore") restoreReferencesUnverifiable = true;
+        }
+      }
+    }
+    restoreReferencesUnverifiable ||= transaction.operationKind === "restore"
+      && transaction.protectionReferencesUnverifiable === true;
+  }
+  const toDelete = [];
+  for (const entry of backupDirs.slice(keepCount)) {
+    if (restoreReferencesUnverifiable) break;
+    let entryKey;
+    try {
+      entryKey = pathComparisonKey(await fs.realpath(entry.fullPath));
+    } catch {
+      continue;
+    }
+    if (!protectedBackups.has(entryKey)) toDelete.push(entry);
+  }
   let freedBytes = 0;
   for (const entry of toDelete) {
     freedBytes += await getBackupDirectorySize(entry.fullPath);
@@ -487,10 +693,29 @@ async function readValidatedBackupMetadata(backupDir, codexHome) {
   if (metadata.namespace !== BACKUP_NAMESPACE || ![1, 2].includes(metadata.version)) {
     throw new Error(`Unsupported backup metadata in ${metadataPath}.`);
   }
-  if (typeof metadata.codexHome !== "string" || !storagePathsEqual(metadata.codexHome, codexHome)) {
+  if (typeof metadata.codexHome !== "string"
+      || !await storagePathsEqualPhysical(metadata.codexHome, codexHome)) {
     throw new Error(`Backup was created for ${metadata.codexHome}, not ${codexHome}.`);
   }
   return metadata;
+}
+
+// Public to the Restore use case, but intentionally derived only from managed
+// metadata. Callers cannot manufacture this capability set through an apply
+// payload.
+export async function getBackupUndoTargets(backupDir, storageOrCodexHome) {
+  const storage = typeof storageOrCodexHome === "string"
+    ? resolveStorageLayout({ codexHome: storageOrCodexHome, env: {} })
+    : storageOrCodexHome;
+  const metadata = await readValidatedBackupMetadata(backupDir, storage.codexHome);
+  const targets = readUndoTargets(metadata);
+  return {
+    legacy: targets.legacy,
+    config: targets.config.captured === true,
+    globalState: targets.globalState.captured === true,
+    sqlite: targets.sqlite.captured === true,
+    rollout: targets.rollout.captured === true
+  };
 }
 
 async function backupFileExists(filePath) {
@@ -511,6 +736,7 @@ export async function getBackupRecoveryCoverage(backupDir, storageOrCodexHome) {
     : storageOrCodexHome;
   const codexHome = storage.codexHome;
   const metadata = await readValidatedBackupMetadata(backupDir, codexHome);
+  const undoTargets = readUndoTargets(metadata);
   const databaseFiles = metadata.version >= 2
     ? metadata.sqliteDbFiles
     : metadata.dbFiles;
@@ -524,22 +750,25 @@ export async function getBackupRecoveryCoverage(backupDir, storageOrCodexHome) {
     }
   }
 
-  const sessionManifestPath = path.join(backupDir, "session-meta-backup.json");
-  const sessionManifest = JSON.parse(await fs.readFile(sessionManifestPath, "utf8"));
-  if (sessionManifest.namespace !== BACKUP_NAMESPACE || ![1, 2].includes(sessionManifest.version)) {
-    throw new Error(`Unsupported session backup manifest in ${sessionManifestPath}.`);
+  let sessionManifest = { files: [] };
+  if (undoTargets.rollout.captured) {
+    const sessionManifestPath = path.join(backupDir, "session-meta-backup.json");
+    sessionManifest = JSON.parse(await fs.readFile(sessionManifestPath, "utf8"));
+    if (sessionManifest.namespace !== BACKUP_NAMESPACE || ![1, 2].includes(sessionManifest.version)) {
+      throw new Error(`Unsupported session backup manifest in ${sessionManifestPath}.`);
+    }
+    if (typeof sessionManifest.codexHome !== "string"
+        || !await storagePathsEqualPhysical(sessionManifest.codexHome, codexHome)) {
+      throw new Error(`Session backup was created for ${sessionManifest.codexHome}, not ${codexHome}.`);
+    }
+    if (!Array.isArray(sessionManifest.files)) {
+      throw new Error(`Session backup manifest has an invalid files collection: ${sessionManifestPath}`);
+    }
+    await validateSessionManifestEntries(sessionManifest.files, codexHome);
   }
-  if (typeof sessionManifest.codexHome !== "string"
-      || !storagePathsEqual(sessionManifest.codexHome, codexHome)) {
-    throw new Error(`Session backup was created for ${sessionManifest.codexHome}, not ${codexHome}.`);
-  }
-  if (!Array.isArray(sessionManifest.files)) {
-    throw new Error(`Session backup manifest has an invalid files collection: ${sessionManifestPath}`);
-  }
-  await validateSessionManifestEntries(sessionManifest.files, codexHome);
 
   let globalState = false;
-  if (metadata.version >= 2) {
+  if (undoTargets.globalState.captured && metadata.version >= 2) {
     if (!metadata.globalStateFiles
         || typeof metadata.globalStateFiles !== "object"
         || Array.isArray(metadata.globalStateFiles)) {
@@ -562,10 +791,11 @@ export async function getBackupRecoveryCoverage(backupDir, storageOrCodexHome) {
   }
 
   return {
-    config: await backupFileExists(path.join(backupDir, "config.toml")),
+    config: undoTargets.config.captured && await backupFileExists(path.join(backupDir, "config.toml")),
     globalState,
-    database: databaseFiles.some((fileName) => path.basename(fileName) === DB_FILE_BASENAME),
-    sessions: sessionManifest.files.length > 0
+    database: undoTargets.sqlite.captured
+      && databaseFiles.some((fileName) => path.basename(fileName) === DB_FILE_BASENAME),
+    sessions: undoTargets.rollout.captured && sessionManifest.files.length > 0
   };
 }
 
@@ -577,7 +807,11 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
     restoreSessions = true,
     allowSqliteHomeRelocation = false,
     globalStateTargetPaths = null,
-    sessionTargetPaths = null
+    sessionTargetPaths = null,
+    onBeforeSessionRestore = null,
+    onBeforeTarget = null,
+    onAfterTarget = null,
+    dryRun = false
   } = options;
   const storage = typeof storageOrCodexHome === "string"
     ? resolveStorageLayout({ codexHome: storageOrCodexHome, env: {} })
@@ -585,33 +819,65 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
   assertSqliteAccessSupported(storage, "restore");
   const codexHome = storage.codexHome;
   const metadata = await readValidatedBackupMetadata(backupDir, codexHome);
+  const undoTargets = readUndoTargets(metadata);
+  const effectiveRestore = {
+    config: restoreConfig && undoTargets.config.captured,
+    globalState: restoreGlobalState && undoTargets.globalState.captured,
+    database: restoreDatabase && undoTargets.sqlite.captured,
+    sessions: restoreSessions && undoTargets.rollout.captured
+  };
+  const skippedNotCapturedTargetKinds = [];
+  if (restoreConfig && !undoTargets.config.captured) skippedNotCapturedTargetKinds.push("config");
+  if (restoreGlobalState && !undoTargets.globalState.captured) skippedNotCapturedTargetKinds.push("globalState");
+  if (restoreDatabase && !undoTargets.sqlite.captured) skippedNotCapturedTargetKinds.push("sqlite");
+  if (restoreSessions && !undoTargets.rollout.captured) skippedNotCapturedTargetKinds.push("rollout");
+  const restoreWarnings = skippedNotCapturedTargetKinds.map(
+    (kind) => `Restore skipped ${kind}: the selected backup did not capture this target.`
+  );
 
   let sessionManifest = null;
   let sessionRestoreEntries = [];
-  if (restoreSessions) {
+  if (effectiveRestore.sessions) {
     const sessionManifestPath = path.join(backupDir, "session-meta-backup.json");
     sessionManifest = JSON.parse(await fs.readFile(sessionManifestPath, "utf8"));
     if (sessionManifest.namespace !== BACKUP_NAMESPACE || ![1, 2].includes(sessionManifest.version)) {
       throw new Error(`Unsupported session backup manifest in ${sessionManifestPath}.`);
     }
     if (typeof sessionManifest.codexHome !== "string"
-        || !storagePathsEqual(sessionManifest.codexHome, codexHome)) {
+        || !await storagePathsEqualPhysical(sessionManifest.codexHome, codexHome)) {
       throw new Error(`Session backup was created for ${sessionManifest.codexHome}, not ${codexHome}.`);
     }
-    await validateSessionManifestEntries(sessionManifest.files ?? [], codexHome);
+    const validatedEntries = await validateSessionManifestEntries(sessionManifest.files ?? [], codexHome);
     if (sessionTargetPaths) {
       const selected = new Set(sessionTargetPaths.map(pathComparisonKey));
-      sessionRestoreEntries = (sessionManifest.files ?? [])
-        .filter((entry) => selected.has(pathComparisonKey(entry.path)));
+      for (const selectedPath of sessionTargetPaths) {
+        selected.add(pathComparisonKey(await fs.realpath(selectedPath)));
+      }
+      sessionRestoreEntries = validatedEntries
+        .filter(({ originalPath, canonicalPath }) =>
+          selected.has(pathComparisonKey(originalPath)) || selected.has(pathComparisonKey(canonicalPath))
+        )
+        .map(({ entry }) => entry);
     } else {
-      sessionRestoreEntries = await selectSessionRestoreEntries(backupDir, sessionManifest);
+      const selectedEntries = await selectSessionRestoreEntries(backupDir, sessionManifest);
+      const selected = new Set(selectedEntries.map((entry) => pathComparisonKey(entry.path)));
+      sessionRestoreEntries = validatedEntries
+        .filter(({ originalPath }) => selected.has(pathComparisonKey(originalPath)))
+        .map(({ entry }) => entry);
+    }
+    // Preflight before rewinding other stores. Rollout-only compensation must
+    // attempt every target, even if another target has conflicting bytes.
+    if (effectiveRestore.config || effectiveRestore.globalState || effectiveRestore.database) {
+      for (const entry of sessionRestoreEntries) {
+        if (entry.mutation) await validateProviderByteRestore(entry);
+      }
     }
   }
 
   let stateDb = null;
   let targetSqliteHome = null;
   let databaseRestorePlan = null;
-  if (restoreDatabase) {
+  if (effectiveRestore.database) {
     stateDb = Object.hasOwn(storage, "stateDbLocation")
       ? storage.stateDbLocation
       : await detectStateDb(storage);
@@ -621,7 +887,7 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
     targetSqliteHome = resolveRestoreSqliteHome(storage, metadata, stateDb);
     const sqliteHomeRelocation = metadata.version >= 2
       && metadata.sqliteHome
-      && !storagePathsEqual(metadata.sqliteHome, targetSqliteHome);
+      && !await storagePathsEqualPhysical(metadata.sqliteHome, targetSqliteHome);
     if (sqliteHomeRelocation && !allowSqliteHomeRelocation) {
       throw new Error(
         `Backup SQLite home is ${metadata.sqliteHome}, but the current target is ${targetSqliteHome}. `
@@ -669,27 +935,137 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
   }
 
   const configBackupPath = path.join(backupDir, "config.toml");
-  if (restoreConfig) {
-    await copyIfPresent(configBackupPath, path.join(codexHome, "config.toml"));
+  const configTargetPath = path.join(codexHome, "config.toml");
+  const configSourcePresent = effectiveRestore.config && await backupFileExists(configBackupPath);
+  const globalStateTargets = [];
+  if (effectiveRestore.globalState) {
+    const selectedTargets = globalStateTargetPaths
+      ? new Set(globalStateTargetPaths.map(pathComparisonKey))
+      : null;
+    for (const fileName of [GLOBAL_STATE_FILE_BASENAME, GLOBAL_STATE_BACKUP_FILE_BASENAME]) {
+      const targetPath = path.join(codexHome, fileName);
+      if (selectedTargets && !selectedTargets.has(pathComparisonKey(targetPath))) {
+        continue;
+      }
+      const sourcePath = path.join(backupDir, fileName);
+      const originalPresent = metadata?.globalStateFiles?.[fileName];
+      if (originalPresent === true && !await backupFileExists(sourcePath)) {
+        throw new Error(`Backup metadata says ${fileName} was present, but its backup copy is missing.`);
+      }
+      globalStateTargets.push({
+        kind: "globalState",
+        targetPath,
+        sourcePath,
+        sourceAction: originalPresent === false
+          ? "delete"
+          : (originalPresent === true || await backupFileExists(sourcePath) ? "copy" : "preserve"),
+        sourcePresent: originalPresent === true
+          || (originalPresent !== false && await backupFileExists(sourcePath))
+      });
+    }
   }
-  if (restoreGlobalState) {
+  const targets = [
+    ...(configSourcePresent
+      ? [{
+          kind: "config",
+          targetPath: configTargetPath,
+          sourcePath: configBackupPath,
+          sourcePresent: true
+        }]
+      : []),
+    ...globalStateTargets,
+    ...(databaseRestorePlan
+      ? [{
+          kind: "sqlite",
+          targetPath: databaseRestorePlan.targetPath,
+          sourcePath: databaseRestorePlan.sourcePath,
+          sourcePresent: true
+        }]
+      : []),
+    ...sessionRestoreEntries.map((entry) => ({
+      kind: "rollout",
+      targetPath: entry.path,
+      sourceEntry: entry,
+      sourcePresent: true
+    }))
+  ];
+
+  if (dryRun) {
+    return {
+      metadata,
+      backupDir: path.resolve(backupDir),
+      codexHome,
+      targetSqliteHome,
+      targets,
+      skippedNotCapturedTargetKinds,
+      restoreWarnings
+    };
+  }
+
+  if (effectiveRestore.config) {
+    if (configSourcePresent) {
+      const target = targets.find((item) => item.kind === "config");
+      await onBeforeTarget?.(target);
+      await copyFileAtomic(configBackupPath, configTargetPath);
+      await onAfterTarget?.(target);
+    }
+  }
+  if (effectiveRestore.globalState) {
     await restoreGlobalStateFilesFromBackup(backupDir, codexHome, {
-      targetPaths: globalStateTargetPaths
+      targetPaths: globalStateTargetPaths,
+      onBeforeTarget,
+      onAfterTarget
     });
   }
 
   if (databaseRestorePlan) {
+    const target = targets.find((item) => item.kind === "sqlite");
+    await onBeforeTarget?.(target);
     await restoreSqliteOnlineBackup(
       databaseRestorePlan.sourcePath,
       databaseRestorePlan.targetPath
     );
+    await onAfterTarget?.(target);
   }
 
-  if (restoreSessions) {
-    await restoreSessionChanges(sessionRestoreEntries);
+  if (effectiveRestore.sessions) {
+    await restoreSessionChanges(sessionRestoreEntries, {
+      onBeforeRestore: async (entry) => {
+        await onBeforeSessionRestore?.(entry);
+        const [validated] = await validateSessionManifestEntries([entry], codexHome);
+        if (!validated
+            || !storagePathsEqual(
+              validated.entry[SESSION_CANONICAL_TARGET],
+              entry[SESSION_CANONICAL_TARGET]
+            )) {
+          throw new Error(`Backup session target changed after validation: ${entry.path}`);
+        }
+        const target = targets.find((item) =>
+          item.kind === "rollout"
+          && pathComparisonKey(item.targetPath) === pathComparisonKey(entry.path)
+        );
+        await onBeforeTarget?.(target);
+      },
+      onRestored: async (entry) => {
+        const target = targets.find((item) =>
+          item.kind === "rollout"
+          && pathComparisonKey(item.targetPath) === pathComparisonKey(entry.path)
+        );
+        await onAfterTarget?.(target);
+      }
+    });
   }
 
-  return metadata;
+  return restoreWarnings.length > 0
+    ? { ...metadata, skippedNotCapturedTargetKinds, restoreWarnings }
+    : metadata;
+}
+
+export async function prepareRestoreBackup(backupDir, storageOrCodexHome, options = {}) {
+  return restoreBackup(backupDir, storageOrCodexHome, {
+    ...options,
+    dryRun: true
+  });
 }
 
 async function listManagedBackupDirectories(backupRoot) {

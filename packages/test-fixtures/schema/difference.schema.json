@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://codex-provider-sync.local/contracts/runtime-difference.schema.json",
+  "title": "Node and .NET runtime difference record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "fixtureId",
+    "status",
+    "node",
+    "dotnet",
+    "decision",
+    "notes"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "fixtureId": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["matched", "accepted", "blocked"] },
+    "node": { "type": "object" },
+    "dotnet": { "type": "object" },
+    "decision": { "type": "string" },
+    "notes": { "type": "array", "items": { "type": "string" } }
+  }
+}

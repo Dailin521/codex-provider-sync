@@ -302,7 +302,7 @@ public sealed class AutomationHost
             ApplicationOperationLifecycle.RecoveryRequired => AutomationExitCodes.RecoveryRequired,
             ApplicationOperationLifecycle.Failed => ExitCodeForFailedOutcome(outcome),
             ApplicationOperationLifecycle.Rejected when outcome.Errors.Any(static error =>
-                error.Code is "operation_busy" or "target_busy") => AutomationExitCodes.Busy,
+                error.Code is "operation_busy" or "target_busy" or "lock_unverifiable") => AutomationExitCodes.Busy,
             ApplicationOperationLifecycle.Rejected when outcome.Errors.Any(static error =>
                 error.Code.StartsWith("plan_", StringComparison.Ordinal)) => AutomationExitCodes.InvalidPlan,
             ApplicationOperationLifecycle.Rejected => AutomationExitCodes.ValidationOrUsage,

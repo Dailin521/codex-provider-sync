@@ -27,7 +27,7 @@ public sealed record SqliteOnlineBackupResult(
 
 public sealed class SqliteStateService
 {
-    private const int DefaultBusyTimeoutMs = 5000;
+    private const int DefaultBusyTimeoutMs = 0;
 
     private sealed record StateDbCandidateStats(
         StateDbLocation Location,
@@ -291,8 +291,8 @@ public sealed class SqliteStateService
             await connection.OpenAsync();
             await SetBusyTimeoutAsync(connection, busyTimeoutMs);
             await ConfigureSqliteWriteDurabilityAsync(connection);
-            await ExecuteNonQueryAsync(connection, "BEGIN IMMEDIATE");
-            await ExecuteNonQueryAsync(connection, "ROLLBACK");
+            await ExecuteTransactionControlAsync(connection, "BEGIN IMMEDIATE", busyTimeoutMs);
+            await ExecuteTransactionControlAsync(connection, "ROLLBACK", busyTimeoutMs);
             return true;
         }
         catch (Exception error)
@@ -355,7 +355,7 @@ public sealed class SqliteStateService
             await connection.OpenAsync();
             await SetBusyTimeoutAsync(connection, busyTimeoutMs);
             await ConfigureSqliteWriteDurabilityAsync(connection);
-            await ExecuteNonQueryAsync(connection, "BEGIN IMMEDIATE");
+            await ExecuteTransactionControlAsync(connection, "BEGIN IMMEDIATE", busyTimeoutMs);
             transactionOpen = true;
 
             await using SqliteCommand command = connection.CreateCommand();
@@ -443,7 +443,7 @@ public sealed class SqliteStateService
             // immediately before the attempt so it can conservatively restore
             // the bound backup on any acknowledgement failure.
             onCommitAttempt?.Invoke(result);
-            await ExecuteNonQueryAsync(connection, "COMMIT");
+            await ExecuteTransactionControlAsync(connection, "COMMIT", busyTimeoutMs);
             transactionOpen = false;
             if (afterCommitBeforeAcknowledgement is not null)
             {
@@ -457,7 +457,7 @@ public sealed class SqliteStateService
             {
                 try
                 {
-                    await ExecuteNonQueryAsync(connection, "ROLLBACK");
+                    await ExecuteTransactionControlAsync(connection, "ROLLBACK", busyTimeoutMs);
                 }
                 catch
                 {
@@ -820,10 +820,33 @@ public sealed class SqliteStateService
         return value is null || value is DBNull ? 0 : Convert.ToInt64(value);
     }
 
-    private static async Task SetBusyTimeoutAsync(SqliteConnection connection, int? busyTimeoutMs)
+    private static Task SetBusyTimeoutAsync(SqliteConnection connection, int? busyTimeoutMs)
     {
         int timeout = busyTimeoutMs is >= 0 ? busyTimeoutMs.Value : DefaultBusyTimeoutMs;
-        await ExecuteNonQueryAsync(connection, $"PRAGMA busy_timeout = {timeout}");
+        // Microsoft.Data.Sqlite retries SQLITE_BUSY in managed code according
+        // to CommandTimeout (30 seconds by default), independently of
+        // PRAGMA busy_timeout. Keep ordinary commands bounded, and use the
+        // native handle for transaction control so timeout=0 is truly
+        // fail-fast instead of meaning an infinite managed retry window.
+        connection.DefaultTimeout = Math.Max(
+            1,
+            timeout / 1000 + (timeout % 1000 == 0 ? 0 : 1));
+        int result = SQLitePCL.raw.sqlite3_busy_timeout(connection.Handle, timeout);
+        SqliteException.ThrowExceptionForRC(result, connection.Handle);
+        return Task.CompletedTask;
+    }
+
+    private static Task ExecuteTransactionControlAsync(
+        SqliteConnection connection,
+        string commandText,
+        int? busyTimeoutMs)
+    {
+        int timeout = busyTimeoutMs is >= 0 ? busyTimeoutMs.Value : DefaultBusyTimeoutMs;
+        int timeoutResult = SQLitePCL.raw.sqlite3_busy_timeout(connection.Handle, timeout);
+        SqliteException.ThrowExceptionForRC(timeoutResult, connection.Handle);
+        int result = SQLitePCL.raw.sqlite3_exec(connection.Handle, commandText);
+        SqliteException.ThrowExceptionForRC(result, connection.Handle);
+        return Task.CompletedTask;
     }
 
     private static async Task ExecuteNonQueryAsync(SqliteConnection connection, string commandText)

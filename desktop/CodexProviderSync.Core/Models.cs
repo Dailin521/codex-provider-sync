@@ -18,6 +18,9 @@ public sealed class ProviderCounts
 
 public sealed class StatusSnapshot
 {
+    public int SchemaVersion { get; init; } = 1;
+    public DateTimeOffset SnapshotAt { get; init; } = DateTimeOffset.UtcNow;
+    public string StorageRevision { get; init; } = string.Empty;
     public required string CodexHome { get; init; }
     public string SqliteHome { get; init; } = string.Empty;
     public string SqliteHomeSource { get; init; } = "default";
@@ -37,9 +40,27 @@ public sealed class StatusSnapshot
     public required string BackupRoot { get; init; }
     public required BackupSummary BackupSummary { get; init; }
     public IReadOnlyList<TransactionRecoveryInfo> PendingTransactions { get; init; } = [];
+    public StatusOperationInfo? OperationInProgress { get; init; }
+    public StatusReadBlockedInfo? StatusReadBlocked { get; init; }
+    public bool RolloutScanComplete { get; init; } = true;
     [JsonIgnore]
     public StatusPerformanceMetrics PerformanceMetrics { get; init; } = new();
 }
+
+public sealed record StatusOperationInfo(
+    string? OperationId,
+    string Operation,
+    string Actor,
+    string? Runtime,
+    string? StartedAt,
+    string BusyScope,
+    string LockState,
+    string? ErrorCode = null);
+
+public sealed record StatusReadBlockedInfo(
+    string Reason,
+    string LockState,
+    string? Revision = null);
 
 public sealed class StatusPerformanceMetrics
 {
@@ -53,7 +74,10 @@ public sealed record TransactionRecoveryInfo(
     string? OperationId,
     string State,
     string BackupDirectory,
-    string JournalPath);
+    string JournalPath)
+{
+    public string OperationKind { get; init; } = "sync";
+}
 
 public sealed record StateDbLocation(string Path, string RelativePath, string Source);
 
@@ -253,6 +277,12 @@ public sealed class RestoreResult
     /// may be stale.
     /// </summary>
     public string? BackupInventoryWarning { get; init; }
+    public int? RestoreVersion { get; init; }
+    public string? RestoreOperationId { get; init; }
+    public string? PreRestoreSnapshotId { get; init; }
+    public string? RestoreJournalState { get; init; }
+    public bool CommitAcknowledgementRecovered { get; init; }
+    public IReadOnlyList<string> ResolvedOperationIds { get; init; } = [];
 }
 
 public sealed class BackupStorageInfo
@@ -325,8 +355,31 @@ internal sealed class BackupMetadataFile
     public Dictionary<string, bool>? GlobalStateFiles { get; init; }
     public bool? GlobalStateFilePresent { get; init; }
     public bool? GlobalStateBackupFilePresent { get; init; }
+    // Additive v2 compatibility for Node C3 reduced UndoBackups. Null means
+    // a legacy full backup, so older metadata retains its original restore
+    // semantics.
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public UndoTargetsMetadata? UndoTargets { get; init; }
     public long? SizeBytes { get; init; }
     public int? FileCount { get; init; }
+}
+
+internal sealed class UndoTargetsMetadata
+{
+    public UndoTargetMetadata? Config { get; init; }
+    public UndoTargetMetadata? GlobalState { get; init; }
+    public UndoTargetMetadata? Sqlite { get; init; }
+    public UndoTargetMetadata? Rollout { get; init; }
+}
+
+internal sealed class UndoTargetMetadata
+{
+    // Null distinguishes an explicit false from a missing JSON field. Reduced
+    // UndoBackup declarations must fail closed when incomplete.
+    public bool? Captured { get; init; }
+    public bool? Present { get; init; }
+    public int? EntryCount { get; init; }
 }
 
 internal sealed class SessionBackupManifest

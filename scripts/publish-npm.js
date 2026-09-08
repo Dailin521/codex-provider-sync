@@ -12,26 +12,29 @@ function usage() {
 
 Options:
   --dry-run       Build, test, and preview the package without publishing.
-  --skip-tests    Skip npm test (the Web UI build still runs).
+  --node16 PATH   Exact Node 16.20.2 executable (or CPS_NODE16_EXECUTABLE).
+  --node16-npm PATH  npm 8 npm-cli.js (or CPS_NODE16_NPM_CLI; defaults beside Node 16).
   --otp CODE      Pass a one-time npm 2FA code without storing it.
   --tag TAG       Publish with an npm dist-tag (default: latest).
   --registry URL  npm registry (default: https://registry.npmjs.org/).
 `);
 }
 
-function parseArgs(argv) {
-  const options = { dryRun: false, skipTests: false, otp: process.env.NPM_OTP ?? "", tag: "latest", registry: "https://registry.npmjs.org/" };
+export function parseArgs(argv, env = process.env) {
+  const options = { dryRun: false, help: false, node16: env.CPS_NODE16_EXECUTABLE ?? "", node16Npm: env.CPS_NODE16_NPM_CLI ?? "", otp: env.NPM_OTP ?? "", tag: "latest", registry: "https://registry.npmjs.org/" };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
-    if (argument === "--help" || argument === "-h") { usage(); process.exit(0); }
+    if (argument === "--help" || argument === "-h") { options.help = true; continue; }
     if (argument === "--dry-run") { options.dryRun = true; continue; }
-    if (argument === "--skip-tests") { options.skipTests = true; continue; }
-    if (argument === "--otp" || argument === "--tag" || argument === "--registry") {
+    if (argument === "--skip-tests") throw new Error("--skip-tests is no longer supported. Publishing gates cannot be bypassed.");
+    if (["--otp", "--tag", "--registry", "--node16", "--node16-npm"].includes(argument)) {
       const value = argv[++index];
       if (!value) throw new Error(`${argument} requires a value.`);
       if (argument === "--otp") options.otp = value;
       if (argument === "--tag") options.tag = value;
       if (argument === "--registry") options.registry = value;
+      if (argument === "--node16") options.node16 = value;
+      if (argument === "--node16-npm") options.node16Npm = value;
       continue;
     }
     throw new Error(`Unknown option: ${argument}`);
@@ -60,10 +63,16 @@ function npmInvocation(args) {
   return { command: "npm", args };
 }
 
-function runNpm(args, { env = process.env } = {}) {
-  console.log(`\n$ npm ${args.map((value) => value === env.NPM_OTP ? "--otp ******" : value).join(" ")}`);
-  const invocation = npmInvocation(args);
-  const result = spawnSync(invocation.command, invocation.args, { cwd: rootDir, env, stdio: "inherit" });
+function runNpm(args, { env = process.env, node16 = null } = {}) {
+  console.log(`\n$ ${node16 ? "Node 16 / " : ""}npm ${args.map((value, index) => args[index - 1] === "--otp" ? "******" : value).join(" ")}`);
+  const invocation = node16 ? { command: node16.command, args: [node16.npmCli, ...args] } : npmInvocation(args);
+  const runtimeEnv = node16 ? {
+    ...env,
+    PATH: `${path.dirname(node16.command)}${path.delimiter}${env.PATH ?? ""}`,
+    npm_execpath: node16.npmCli,
+    npm_node_execpath: node16.command
+  } : env;
+  const result = spawnSync(invocation.command, invocation.args, { cwd: rootDir, env: runtimeEnv, stdio: "inherit", windowsHide: true });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`npm ${args[0]} failed with exit code ${result.status}.`);
 }
@@ -78,30 +87,64 @@ function packageInfo() {
   return manifest;
 }
 
-function main() {
-  const options = parseArgs(process.argv.slice(2));
-  const manifest = packageInfo();
-  console.log(`Preparing ${manifest.name}@${manifest.version} for npm.`);
+export function resolveNode16(options) {
+  if (!options.node16 || !path.isAbsolute(options.node16) || !fs.statSync(options.node16, { throwIfNoEntry: false })?.isFile()) {
+    throw new Error("Provide an absolute Node 16.20.2 executable via --node16 or CPS_NODE16_EXECUTABLE before running publishing gates.");
+  }
+  const npmCli = options.node16Npm || [
+    path.join(path.dirname(options.node16), "node_modules", "npm", "bin", "npm-cli.js"),
+    path.resolve(path.dirname(options.node16), "../lib/node_modules/npm/bin/npm-cli.js")
+  ].find((candidate) => fs.existsSync(candidate));
+  if (!npmCli || !path.isAbsolute(npmCli) || !fs.statSync(npmCli, { throwIfNoEntry: false })?.isFile()) {
+    throw new Error("Provide the matching npm 8 npm-cli.js via --node16-npm or CPS_NODE16_NPM_CLI.");
+  }
+  return { command: options.node16, npmCli };
+}
 
+// Injected runner keeps unit tests entirely offline: they never authenticate or publish.
+export function runPublishingGates(options, { run = runNpm, nodeVersion = process.version, resolveRuntime = resolveNode16, log = console.log } = {}) {
+  if (!/^v24\./.test(nodeVersion)) throw new Error("Run the publishing workflow on Node 24; Node 16 is a separate compatibility gate.");
+  const node16 = resolveRuntime(options);
   const registryArgs = ["--registry", options.registry];
-  if (!options.dryRun) runNpm(["whoami", ...registryArgs]);
-  runNpm(["run", "web:build"]);
-  if (!options.skipTests) runNpm(["test"]);
-  runNpm(["pack", "--dry-run", "--json", ...registryArgs]);
+  // Fail on a wrong compatibility toolchain before doing expensive builds.
+  run(["run", "runtime:verify-node16"], { node16 });
+  run(["run", "web:build"]);
+  run(["run", "architecture:check"]);
+  run(["test"]);
+  run(["run", "web:test:e2e"]);
+  run(["run", "package:smoke:lifecycle"]);
+  // The installed tarball test uses its own temporary directory; it does not
+  // replace the modern workspace's node_modules with Node 16 dependencies.
+  run(["run", "package:smoke:lifecycle"], { node16 });
+  run(["audit", "--omit=dev", "--audit-level=moderate", ...registryArgs]);
+  run(["audit", "--audit-level=high", ...registryArgs]);
+  run(["pack", "--dry-run", "--json", ...registryArgs]);
 
   const publishArgs = ["publish", "--access", "public", "--tag", options.tag, ...registryArgs];
   if (options.otp) publishArgs.push("--otp", options.otp);
   if (options.dryRun) {
-    console.log("npm dry-run completed; nothing was published.");
+    log("npm dry-run completed; nothing was published.");
     return;
   }
-  runNpm(publishArgs, { env: { ...process.env, ...(options.otp ? { NPM_OTP: options.otp } : {}) } });
+  run(["whoami", ...registryArgs]);
+  run(publishArgs, { env: { ...process.env, ...(options.otp ? { NPM_OTP: options.otp } : {}) } });
+}
+
+function main() {
+  const options = parseArgs(process.argv.slice(2));
+  if (options.help) { usage(); return; }
+  const manifest = packageInfo();
+  console.log(`Preparing ${manifest.name}@${manifest.version} for npm.`);
+  runPublishingGates(options);
+  if (options.dryRun) return;
   console.log(`${manifest.name}@${manifest.version} published successfully.`);
 }
 
-try {
-  main();
-} catch (error) {
-  console.error(`\nPublish failed: ${error instanceof Error ? error.message : String(error)}`);
-  process.exitCode = 1;
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    main();
+  } catch (error) {
+    console.error(`\nPublish failed: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  }
 }

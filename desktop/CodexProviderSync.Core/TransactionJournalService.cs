@@ -560,9 +560,19 @@ internal sealed class FileTransactionJournal : IAsyncDisposable
 
         bool terminal = nextState is "committed" or "rolledBack";
         string journalPath = current?.JournalPath ?? _filePath;
+        string? declaredBackupDir = current?.DeclaredBackupDir;
+        if (declaredBackupDir is null && nextState == "prepared")
+        {
+            string declared = ReadRequiredDetail(details, "backupDir");
+            declaredBackupDir = Path.IsPathFullyQualified(declared)
+                ? Path.GetFullPath(declared)
+                : throw new InvalidOperationException(
+                    "Transaction journal detail backupDir must be an absolute path.");
+        }
         return new PendingTransactionInfo(
             journalPath,
             current?.BackupDir ?? Path.GetDirectoryName(_filePath)!,
+            declaredBackupDir,
             current?.OperationId ?? _operationId,
             nextSequence,
             nextState,
@@ -599,6 +609,12 @@ internal sealed class FileTransactionJournal : IAsyncDisposable
             if (!string.Equals(nextState, "prepared", StringComparison.Ordinal))
             {
                 throw new InvalidOperationException("A transaction journal must begin with prepared.");
+            }
+            string declaredBackupDir = ReadRequiredDetail(details, "backupDir");
+            if (!Path.IsPathFullyQualified(declaredBackupDir))
+            {
+                throw new InvalidOperationException(
+                    "Transaction journal detail backupDir must be an absolute path.");
             }
             return;
         }
@@ -722,15 +738,23 @@ internal sealed class FileTransactionJournal : IAsyncDisposable
     internal static async Task AssertNoPendingAsync(string codexHome)
     {
         IReadOnlyList<PendingTransactionInfo> pending = await FindPendingAsync(codexHome);
-        if (pending.Count == 0)
+        IReadOnlyList<RestoreJournalInfo> pendingRestores =
+            await RestoreJournalService.FindBlockingAsync(codexHome);
+        if (pending.Count == 0 && pendingRestores.Count == 0)
         {
             return;
         }
 
-        string backups = string.Join(", ", pending.Select(static item => item.BackupDir));
+        string[] pendingDirectories = pending
+            .Select(static item => item.BackupDir)
+            .Concat(pendingRestores.Select(static item => item.SnapshotDir))
+            .Select(Path.GetFullPath)
+            .Distinct(PathComparer)
+            .ToArray();
+        string backups = string.Join(", ", pendingDirectories);
         throw new RecoveryRequiredException(
             $"An unfinished provider-sync transaction requires recovery before another write. Restore the bound backup, then retry. Backup(s): {backups}",
-            pending);
+            pendingDirectories);
     }
 
     internal static async Task MarkBackupRolledBackAsync(
@@ -841,6 +865,7 @@ internal sealed class FileTransactionJournal : IAsyncDisposable
         bool invalidTail = false;
         bool sawRecord = false;
         bool sawTerminal = false;
+        string? declaredBackupDir = null;
         List<string> validLines = [];
         List<string> potentialTargets = [];
         Dictionary<string, TransactionTargetInfo> affectedTargets = new(PathComparer);
@@ -905,6 +930,16 @@ internal sealed class FileTransactionJournal : IAsyncDisposable
                     }
 
                     operationId = recordOperationId;
+                    string? preparedBackupDir = root.TryGetProperty("backupDir", out JsonElement backupDirValue)
+                        ? backupDirValue.GetString()
+                        : null;
+                    if (string.IsNullOrWhiteSpace(preparedBackupDir)
+                        || !Path.IsPathFullyQualified(preparedBackupDir))
+                    {
+                        throw new InvalidOperationException(
+                            "Prepared journal record must declare an absolute backupDir.");
+                    }
+                    declaredBackupDir = Path.GetFullPath(preparedBackupDir);
                     if (!root.TryGetProperty("potentialTargets", out JsonElement targets)
                         || targets.ValueKind != JsonValueKind.Array)
                     {
@@ -1019,6 +1054,7 @@ internal sealed class FileTransactionJournal : IAsyncDisposable
         PendingTransactionInfo info = new(
             journalPath,
             Path.GetDirectoryName(journalPath)!,
+            declaredBackupDir,
             operationId,
             lastSequence,
             state,
@@ -1042,6 +1078,7 @@ internal sealed record TransactionTargetInfo(string Kind, string TargetPath, str
 internal sealed record PendingTransactionInfo(
     string JournalPath,
     string BackupDir,
+    string? DeclaredBackupDir,
     string? OperationId,
     int LastSequence,
     string State,
@@ -1057,6 +1094,12 @@ public sealed class RecoveryRequiredException : InvalidOperationException
         : base(message)
     {
         PendingBackupDirectories = pending.Select(static item => item.BackupDir).ToArray();
+    }
+
+    internal RecoveryRequiredException(string message, IReadOnlyList<string> pendingBackupDirectories)
+        : base(message)
+    {
+        PendingBackupDirectories = [.. pendingBackupDirectories];
     }
 
     public string Code => "RECOVERY_REQUIRED";

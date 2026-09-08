@@ -11,6 +11,9 @@ public sealed class WslSqliteSafetyTests
         string sqliteHome = Environment.GetEnvironmentVariable("CODEX_PROVIDER_SYNC_WSL_SQLITE_HOME")!;
 
         Assert.True(OperatingSystem.IsWindows(), "This integration test must run in a Windows process.");
+        Assert.False(
+            string.IsNullOrWhiteSpace(sqliteHome),
+            "CPS_REQUIRE_REAL_WSL=1 requires CODEX_PROVIDER_SYNC_WSL_SQLITE_HOME from a real WSL filesystem.");
         TestCodexHomeFixture fixture = await TestCodexHomeFixture.CreateAsync();
         await fixture.WriteConfigAsync("model_provider = \"openai\"");
         string rolloutPath = fixture.RolloutPath("sessions", "rollout-wsl-safety.jsonl");
@@ -65,7 +68,12 @@ public sealed class WindowsWslIntegrationFactAttribute : FactAttribute
 {
     public WindowsWslIntegrationFactAttribute()
     {
-        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CODEX_PROVIDER_SYNC_WSL_SQLITE_HOME")))
+        bool required = string.Equals(
+            Environment.GetEnvironmentVariable("CPS_REQUIRE_REAL_WSL"),
+            "1",
+            StringComparison.Ordinal);
+        if (!required
+            && string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CODEX_PROVIDER_SYNC_WSL_SQLITE_HOME")))
         {
             Skip = "Run scripts/test-wsl-unc-safety.sh from WSL to provide a real ext4 SQLite Home.";
         }

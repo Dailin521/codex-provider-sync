@@ -45,6 +45,19 @@ apps = true
   });
 });
 
+test("Provider config accepts TOML comments, literal strings and quoted section ids", () => {
+  for (const assignment of ['"dal" # note', "'dal' # note"]) {
+    assert.deepEqual(readCurrentProviderFromConfigText(`model_provider = ${assignment}\n`), { provider: "dal", implicit: false });
+  }
+  const text = `model_provider = 'dal'\n  [ model_providers . 'dal' ] # configured\nmodel = "fixture-model"\n[model_providers."other.name"]\n`;
+  assert.deepEqual(listConfiguredProviderIds(text), ["dal", "openai", "other.name"]);
+  assert.equal(readProviderModel(text, "dal"), "fixture-model");
+  assert.equal(configDeclaresProvider("[model_providers.dal.headers]\n", "dal.headers"), false);
+  for (const value of ['""', "123", '"unterminated']) {
+    assert.throws(() => readCurrentProviderFromConfigText(`model_provider = ${value}\n`), (error) => error.code === "INVALID_INPUT");
+  }
+});
+
 test("setRootProviderInConfigText inserts root-level model_provider before first table", () => {
   const input = `# comment
 sandbox_mode = "danger-full-access"

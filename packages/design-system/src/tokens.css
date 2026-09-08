@@ -1,0 +1,95 @@
+:root,
+:root[data-theme="light"] {
+  color-scheme: light;
+  --surface: #f6f7fb;
+  --surface-raised: #ffffff;
+  --surface-hover: #eef1f7;
+  --input: #ffffff;
+  --border: #dce1eb;
+  --text: #172033;
+  --muted: #657086;
+  --accent: #4867e8;
+  --accent-strong: #3452ce;
+  --accent-soft: #e9edff;
+  --focus: #315ee8;
+  --success: #16734a;
+  --success-soft: #e6f6ee;
+  --warning: #9a5b00;
+  --warning-soft: #fff3d8;
+  --danger: #b42335;
+  --danger-soft: #fdebed;
+  --control-height: 2.5rem;
+  --radius-control: 0.5rem;
+  --radius-panel: 0.75rem;
+  --shadow-panel: 0 1px 2px rgb(23 32 51 / 0.08), 0 8px 24px rgb(23 32 51 / 0.03);
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.25rem;
+  --text-2xl: 1.5rem;
+  --leading-tight: 1.25;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.625;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  font-family: var(--font-sans);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface: #11141b;
+  --surface-raised: #181d27;
+  --surface-hover: #242b38;
+  --input: #111722;
+  --border: #30394a;
+  --text: #eef2f8;
+  --muted: #a6b0c1;
+  --accent: #7189ff;
+  --accent-strong: #8fa1ff;
+  --accent-soft: #222d58;
+  --focus: #91a3ff;
+  --success: #67d8a4;
+  --success-soft: #17392d;
+  --warning: #f2bb61;
+  --warning-soft: #3d2e17;
+  --danger: #ff8c99;
+  --danger-soft: #461e26;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] {
+    color-scheme: dark;
+    --surface: #11141b;
+    --surface-raised: #181d27;
+    --surface-hover: #242b38;
+    --input: #111722;
+    --border: #30394a;
+    --text: #eef2f8;
+    --muted: #a6b0c1;
+    --accent: #7189ff;
+    --accent-strong: #8fa1ff;
+    --accent-soft: #222d58;
+    --focus: #91a3ff;
+    --success: #67d8a4;
+    --success-soft: #17392d;
+    --warning: #f2bb61;
+    --warning-soft: #3d2e17;
+    --danger: #ff8c99;
+    --danger-soft: #461e26;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

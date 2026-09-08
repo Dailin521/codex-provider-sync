@@ -1,15 +1,19 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 
 namespace CodexProviderSync.Core;
 
 public sealed class CodexSyncService
 {
+    private static readonly ConcurrentDictionary<string, StatusSnapshot> LastCompleteStatus = new(
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
     private readonly CodexHomeService _codexHomeService;
     private readonly ConfigFileService _configFileService;
     private readonly SessionRolloutService _sessionRolloutService;
     private readonly SqliteStateService _sqliteStateService;
     private readonly GlobalStateService _globalStateService;
     private readonly BackupService _backupService;
+    private readonly RestoreV2Service _restoreV2Service;
     private readonly LockService _lockService;
     private readonly ProviderDiscoveryService _providerDiscoveryService;
     private readonly CodexStorageLayoutService _storageLayoutService;
@@ -46,6 +50,10 @@ public sealed class CodexSyncService
         _providerDiscoveryService = providerDiscoveryService;
         _storageLayoutService = new CodexStorageLayoutService(codexHomeService, configFileService);
         _backupService = new BackupService(sessionRolloutService, sqliteStateService);
+        _restoreV2Service = new RestoreV2Service(
+            _backupService,
+            sessionRolloutService,
+            sqliteStateService);
     }
 
     public async Task<StatusSnapshot> GetStatusAsync(
@@ -55,8 +63,167 @@ public sealed class CodexSyncService
         long totalStarted = Stopwatch.GetTimestamp();
         string codexHome = _codexHomeService.NormalizeCodexHome(explicitCodexHome);
         await _codexHomeService.EnsureCodexHomeAsync(codexHome);
+        string cacheKey = BuildStatusCacheKey(codexHome, explicitSqliteHome);
+        LockInspection homeBefore = await _lockService.InspectLockAsync(codexHome);
+        if (!homeBefore.IsAbsent)
+        {
+            return BuildBlockedStatus(
+                cacheKey,
+                codexHome,
+                explicitSqliteHome,
+                homeBefore,
+                "codex-home-lock");
+        }
+
         string configText = await _configFileService.ReadConfigTextAsync(_codexHomeService.ConfigPath(codexHome));
         CodexStorageLayout storage = await PrepareStorageAsync(codexHome, explicitSqliteHome, configText);
+        LockInspection homeResolved = await _lockService.InspectLockAsync(codexHome);
+        if (!SameAbsentObservation(homeBefore, homeResolved))
+        {
+            return BuildBlockedStatus(
+                cacheKey,
+                codexHome,
+                explicitSqliteHome,
+                homeResolved,
+                "codex-home-lock");
+        }
+
+        StateDbLockResource? stateResource = null;
+        LockInspection? stateBefore = null;
+        if (storage.StateDbLocation is { } stateDbLocation)
+        {
+            try
+            {
+                stateResource = await StateDbLockResource.ResolveAsync(stateDbLocation.Path);
+                stateBefore = await _lockService.InspectStateDbLockAsync(stateResource);
+            }
+            catch (Exception error) when (error is InvalidOperationException
+                or IOException
+                or UnauthorizedAccessException)
+            {
+                return BuildBlockedStatus(
+                    cacheKey,
+                    codexHome,
+                    explicitSqliteHome,
+                    SyntheticUnverifiableInspection("state-db", error),
+                    "state-db-lock");
+            }
+            if (!stateBefore.IsAbsent)
+            {
+                return BuildBlockedStatus(
+                    cacheKey,
+                    codexHome,
+                    explicitSqliteHome,
+                    stateBefore,
+                    "state-db-lock");
+            }
+        }
+
+        CoreWritePlanSnapshot revisionBefore;
+        try
+        {
+            revisionBefore = await BuildStatusRevisionAsync(codexHome, storage);
+        }
+        catch (Exception error) when (error is IOException
+            or UnauthorizedAccessException
+            or CoreWritePlanStaleException)
+        {
+            return BuildBlockedStatus(
+                cacheKey,
+                codexHome,
+                explicitSqliteHome,
+                SyntheticUnverifiableInspection("codex-home", error),
+                "revision-unverifiable");
+        }
+
+        StatusSnapshot snapshot = await ScanStatusAsync(
+            codexHome,
+            configText,
+            storage,
+            revisionBefore.StateFingerprint,
+            totalStarted);
+
+        LockInspection homeAfter = await _lockService.InspectLockAsync(codexHome);
+        if (!SameAbsentObservation(homeBefore, homeAfter))
+        {
+            return BuildBlockedStatus(
+                cacheKey,
+                codexHome,
+                explicitSqliteHome,
+                homeAfter,
+                "codex-home-lock");
+        }
+        LockInspection? stateAfter = null;
+        if (stateResource is not null)
+        {
+            stateAfter = await _lockService.InspectStateDbLockAsync(stateResource);
+            if (!SameAbsentObservation(stateBefore!, stateAfter))
+            {
+                return BuildBlockedStatus(
+                    cacheKey,
+                    codexHome,
+                    explicitSqliteHome,
+                    stateAfter,
+                    "state-db-lock");
+            }
+        }
+
+        try
+        {
+            CoreWritePlanSnapshot revisionAfter = await BuildStatusRevisionAsync(codexHome, storage);
+            CoreWriteSnapshotBuilder.AssertExactMatch(revisionBefore, revisionAfter);
+        }
+        catch (Exception error) when (error is IOException
+            or UnauthorizedAccessException
+            or CoreWritePlanStaleException)
+        {
+            return BuildBlockedStatus(
+                cacheKey,
+                codexHome,
+                explicitSqliteHome,
+                SyntheticUnverifiableInspection("codex-home", error),
+                "state-changed-during-status",
+                revisionBefore.StateFingerprint);
+        }
+
+        LockInspection homeFinal = await _lockService.InspectLockAsync(codexHome);
+        if (!SameAbsentObservation(homeBefore, homeFinal))
+        {
+            return BuildBlockedStatus(
+                cacheKey,
+                codexHome,
+                explicitSqliteHome,
+                homeFinal,
+                "codex-home-lock");
+        }
+        if (stateResource is not null)
+        {
+            LockInspection stateFinal = await _lockService.InspectStateDbLockAsync(stateResource);
+            if (!SameAbsentObservation(stateBefore!, stateFinal))
+            {
+                return BuildBlockedStatus(
+                    cacheKey,
+                    codexHome,
+                    explicitSqliteHome,
+                    stateFinal,
+                    "state-db-lock");
+            }
+        }
+
+        // Keep the cache isolated from mutable DTO collections returned to
+        // callers. A consumer must never be able to poison the safety snapshot
+        // that is served while a write lock is active.
+        LastCompleteStatus[cacheKey] = CopyStatusSnapshot(snapshot);
+        return snapshot;
+    }
+
+    private async Task<StatusSnapshot> ScanStatusAsync(
+        string codexHome,
+        string configText,
+        CodexStorageLayout storage,
+        string storageRevision,
+        long totalStarted)
+    {
         CurrentProviderInfo currentProvider = _configFileService.ReadCurrentProviderFromConfigText(configText);
         IReadOnlyList<string> configuredProviders = _configFileService.ListConfiguredProviderIds(configText);
         long rolloutScanStarted = Stopwatch.GetTimestamp();
@@ -80,9 +247,12 @@ public sealed class CodexSyncService
         BackupSummary backupSummary = await _backupService.GetBackupSummaryAsync(codexHome);
         long backupSummaryDurationMs = ElapsedMilliseconds(backupSummaryStarted);
         IReadOnlyList<PendingTransactionInfo> pendingTransactions = await FileTransactionJournal.FindPendingAsync(codexHome);
+        IReadOnlyList<RestoreJournalInfo> pendingRestores = await RestoreJournalService.FindBlockingAsync(codexHome);
 
         return new StatusSnapshot
         {
+            SnapshotAt = DateTimeOffset.UtcNow,
+            StorageRevision = storageRevision,
             CodexHome = codexHome,
             SqliteHome = storage.SqliteHome,
             SqliteHomeSource = storage.SqliteHomeSource,
@@ -107,7 +277,17 @@ public sealed class CodexSyncService
                     item.State,
                     item.BackupDir,
                     item.JournalPath))
+                .Concat(pendingRestores.Select(static item => new TransactionRecoveryInfo(
+                    item.OperationId,
+                    item.State,
+                    item.SnapshotDir,
+                    item.JournalPath)
+                {
+                    OperationKind = "restore"
+                }))
                 .ToArray(),
+            RolloutScanComplete = rolloutInfo.LockedPaths.Count == 0
+                && rolloutInfo.UnreadablePaths.Count == 0,
             PerformanceMetrics = new StatusPerformanceMetrics
             {
                 TotalDurationMs = ElapsedMilliseconds(totalStarted),
@@ -116,6 +296,242 @@ public sealed class CodexSyncService
                 RolloutScan = rolloutInfo.ScanMetrics
             }
         };
+    }
+
+    private async Task<CoreWritePlanSnapshot> BuildStatusRevisionAsync(
+        string codexHome,
+        CodexStorageLayout storage)
+    {
+        List<CoreWriteTargetSpec> targets =
+        [
+            new(_codexHomeService.ConfigPath(codexHome), "read"),
+            new(
+                Path.Combine(codexHome, "sessions"),
+                "scan",
+                CoreWriteFingerprintMode.RecursiveInventory),
+            new(
+                Path.Combine(codexHome, "archived_sessions"),
+                "scan",
+                CoreWriteFingerprintMode.RecursiveInventory),
+            new(_globalStateService.StatePath(codexHome), "read-if-present"),
+            new(_globalStateService.BackupPath(codexHome), "read-if-present"),
+            new(
+                _codexHomeService.BackupRoot(codexHome),
+                "inventory",
+                CoreWriteFingerprintMode.RecursiveInventory)
+        ];
+        if (storage.StateDbLocation is { } stateDb)
+        {
+            targets.Add(new CoreWriteTargetSpec(
+                stateDb.Path,
+                "read",
+                CoreWriteFingerprintMode.SqliteMainContent));
+            targets.Add(new CoreWriteTargetSpec(
+                stateDb.Path + "-wal",
+                "read-if-present",
+                CoreWriteFingerprintMode.SqliteWalContent));
+        }
+
+        string binding = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            codexHome,
+            storage.SqliteHome,
+            storage.SqliteHomeSource,
+            stateDbPath = storage.StateDbLocation?.Path,
+            storage.SqliteAccess.Supported,
+            storage.SqliteAccess.Reason
+        });
+        return await CoreWriteSnapshotBuilder.BuildAsync(
+            "status",
+            binding,
+            targets);
+    }
+
+    private StatusSnapshot BuildBlockedStatus(
+        string cacheKey,
+        string codexHome,
+        string? explicitSqliteHome,
+        LockInspection inspection,
+        string reason,
+        string? revision = null)
+    {
+        StatusOperationInfo operation = new(
+            inspection.Owner?.InstanceId,
+            string.IsNullOrWhiteSpace(inspection.Owner?.Label) ? "unknown" : inspection.Owner.Label!,
+            "external",
+            inspection.Owner?.Runtime,
+            inspection.Owner?.StartedAt,
+            inspection.Scope,
+            inspection.State == "active" ? "active" : "unverifiable",
+            inspection.ErrorCode);
+        StatusReadBlockedInfo blocked = new(
+            reason,
+            operation.LockState,
+            revision);
+        if (LastCompleteStatus.TryGetValue(cacheKey, out StatusSnapshot? cached))
+        {
+            return CopyStatusSnapshot(cached, operation, blocked);
+        }
+        return CreateUnavailableStatus(
+            codexHome,
+            explicitSqliteHome,
+            operation,
+            blocked);
+    }
+
+    private static StatusSnapshot CopyStatusSnapshot(
+        StatusSnapshot source,
+        StatusOperationInfo? operation = null,
+        StatusReadBlockedInfo? blocked = null)
+    {
+        return new StatusSnapshot
+        {
+            SchemaVersion = source.SchemaVersion,
+            SnapshotAt = source.SnapshotAt,
+            StorageRevision = source.StorageRevision,
+            CodexHome = source.CodexHome,
+            SqliteHome = source.SqliteHome,
+            SqliteHomeSource = source.SqliteHomeSource,
+            SqliteAccess = source.SqliteAccess with { },
+            CheckedStateDbPaths = source.CheckedStateDbPaths.ToArray(),
+            CurrentProvider = source.CurrentProvider with { },
+            ConfiguredProviders = source.ConfiguredProviders.ToArray(),
+            RolloutCounts = CopyProviderCounts(source.RolloutCounts),
+            LockedRolloutFiles = source.LockedRolloutFiles.ToArray(),
+            UnreadableRolloutFiles = source.UnreadableRolloutFiles.ToArray(),
+            EncryptedContentCounts = CopyProviderCounts(source.EncryptedContentCounts),
+            EncryptedContentWarning = source.EncryptedContentWarning,
+            SqliteCounts = source.SqliteCounts is null ? null : CopyProviderCounts(source.SqliteCounts),
+            StateDbLocation = source.StateDbLocation is null ? null : source.StateDbLocation with { },
+            SqliteRepairStats = source.SqliteRepairStats is null
+                ? null
+                : new SqliteRepairStats
+                {
+                    UserEventRowsNeedingRepair = source.SqliteRepairStats.UserEventRowsNeedingRepair,
+                    CwdRowsNeedingRepair = source.SqliteRepairStats.CwdRowsNeedingRepair
+                },
+            ProjectThreadVisibility = source.ProjectThreadVisibility
+                .Select(static item => new ProjectThreadVisibility
+                {
+                    Root = item.Root,
+                    InteractiveThreads = item.InteractiveThreads,
+                    FirstPageThreads = item.FirstPageThreads,
+                    ExactCwdMatches = item.ExactCwdMatches,
+                    VerbatimCwdRows = item.VerbatimCwdRows,
+                    Ranks = item.Ranks.ToArray(),
+                    RankPreview = item.RankPreview,
+                    ProviderCounts = new Dictionary<string, int>(item.ProviderCounts, StringComparer.Ordinal)
+                })
+                .ToArray(),
+            BackupRoot = source.BackupRoot,
+            BackupSummary = new BackupSummary
+            {
+                Count = source.BackupSummary.Count,
+                TotalBytes = source.BackupSummary.TotalBytes
+            },
+            PendingTransactions = source.PendingTransactions.Select(static item => item with { }).ToArray(),
+            OperationInProgress = operation,
+            StatusReadBlocked = blocked,
+            RolloutScanComplete = source.RolloutScanComplete,
+            PerformanceMetrics = new StatusPerformanceMetrics
+            {
+                TotalDurationMs = source.PerformanceMetrics.TotalDurationMs,
+                RolloutScanDurationMs = source.PerformanceMetrics.RolloutScanDurationMs,
+                BackupSummaryDurationMs = source.PerformanceMetrics.BackupSummaryDurationMs,
+                RolloutScan = new SessionScanMetrics
+                {
+                    EnumeratedRolloutFiles = source.PerformanceMetrics.RolloutScan.EnumeratedRolloutFiles,
+                    ParsedSessionFiles = source.PerformanceMetrics.RolloutScan.ParsedSessionFiles,
+                    ContentScanPasses = source.PerformanceMetrics.RolloutScan.ContentScanPasses,
+                    ModelScanFiles = source.PerformanceMetrics.RolloutScan.ModelScanFiles,
+                    DurationMs = source.PerformanceMetrics.RolloutScan.DurationMs
+                }
+            }
+        };
+    }
+
+    private static ProviderCounts CopyProviderCounts(ProviderCounts source)
+    {
+        return new ProviderCounts
+        {
+            Sessions = new Dictionary<string, int>(source.Sessions, StringComparer.Ordinal),
+            ArchivedSessions = new Dictionary<string, int>(source.ArchivedSessions, StringComparer.Ordinal),
+            Unreadable = source.Unreadable,
+            Error = source.Error
+        };
+    }
+
+    private StatusSnapshot CreateUnavailableStatus(
+        string codexHome,
+        string? explicitSqliteHome,
+        StatusOperationInfo operation,
+        StatusReadBlockedInfo blocked)
+    {
+        string sqliteHome = string.IsNullOrWhiteSpace(explicitSqliteHome)
+            ? string.Empty
+            : Path.GetFullPath(explicitSqliteHome.Trim());
+        ProviderCounts unavailableCounts = new()
+        {
+            Unreadable = true,
+            Error = "Status scanning is blocked by an active or unverifiable write lock."
+        };
+        return new StatusSnapshot
+        {
+            SnapshotAt = DateTimeOffset.UtcNow,
+            CodexHome = codexHome,
+            SqliteHome = sqliteHome,
+            SqliteHomeSource = string.IsNullOrWhiteSpace(explicitSqliteHome) ? "unresolved" : "explicit",
+            SqliteAccess = new SqliteAccessInfo(
+                false,
+                "status-blocked",
+                "Status scanning is blocked by an active or unverifiable write lock."),
+            CurrentProvider = new CurrentProviderInfo("unknown", false),
+            ConfiguredProviders = [],
+            RolloutCounts = unavailableCounts,
+            LockedRolloutFiles = [],
+            UnreadableRolloutFiles = [],
+            EncryptedContentCounts = new ProviderCounts
+            {
+                Unreadable = true,
+                Error = unavailableCounts.Error
+            },
+            SqliteCounts = null,
+            BackupRoot = _codexHomeService.BackupRoot(codexHome),
+            BackupSummary = new BackupSummary { Count = 0, TotalBytes = 0 },
+            OperationInProgress = operation,
+            StatusReadBlocked = blocked,
+            RolloutScanComplete = false
+        };
+    }
+
+    private static string BuildStatusCacheKey(string codexHome, string? explicitSqliteHome)
+    {
+        string selector = string.IsNullOrWhiteSpace(explicitSqliteHome)
+            ? "<resolved>"
+            : Path.GetFullPath(explicitSqliteHome.Trim());
+        return Path.GetFullPath(codexHome) + "\0" + selector;
+    }
+
+    private static bool SameAbsentObservation(LockInspection left, LockInspection right)
+    {
+        return left.IsAbsent
+            && right.IsAbsent
+            && string.Equals(
+                left.ObservationRevision,
+                right.ObservationRevision,
+                StringComparison.Ordinal);
+    }
+
+    private static LockInspection SyntheticUnverifiableInspection(string scope, Exception error)
+    {
+        return new LockInspection(
+            "unverifiable",
+            scope,
+            null,
+            string.Empty,
+            null,
+            LockService.LockUnverifiableErrorCode,
+            error.Message);
     }
 
     public IReadOnlyList<ProviderOption> BuildProviderOptions(StatusSnapshot status, AppSettings settings)
@@ -164,7 +580,6 @@ public sealed class CodexSyncService
         ValidateAutomaticRetention(keepCount);
         string codexHome = _codexHomeService.NormalizeCodexHome(explicitCodexHome);
         await _codexHomeService.EnsureCodexHomeAsync(codexHome);
-        await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "plan-sync");
         await FileTransactionJournal.AssertNoPendingAsync(codexHome);
         SyncPreparation preparation = await PrepareSyncAsync(
             codexHome,
@@ -395,7 +810,11 @@ public sealed class CodexSyncService
 
         string codexHome = _codexHomeService.NormalizeCodexHome(explicitCodexHome);
         await _codexHomeService.EnsureCodexHomeAsync(codexHome);
-        await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "sync");
+        await using LockHandle homeLock = await _lockService.AcquireLockAsync(codexHome, "sync");
+        string operationLabel = switchPreparationFactory is null ? "sync" : "switch";
+        (StateDbLockResource? lockedStateDb, LockHandle? stateDbHandle) =
+            await AcquireCurrentStateDbLockAsync(codexHome, explicitSqliteHome, operationLabel, cancellationToken);
+        await using LockHandle? stateDbLock = stateDbHandle;
         await FileTransactionJournal.AssertNoPendingAsync(codexHome);
         long preparationStarted = Stopwatch.GetTimestamp();
         SyncPreparation preparation = await PrepareSyncAsync(
@@ -406,6 +825,7 @@ public sealed class CodexSyncService
             explicitSqliteHome,
             switchPreparationFactory,
             cancellationToken);
+        await AssertStateDbLockMatchesAsync(preparation.Storage, lockedStateDb, cancellationToken);
         long preparationDurationMs = ElapsedMilliseconds(preparationStarted);
         string configPath = preparation.ConfigPath;
         string configText = preparation.ConfigText;
@@ -988,7 +1408,6 @@ public sealed class CodexSyncService
         ValidateAutomaticRetention(keepCount);
         string codexHome = _codexHomeService.NormalizeCodexHome(explicitCodexHome);
         await _codexHomeService.EnsureCodexHomeAsync(codexHome);
-        await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "plan-switch");
         await FileTransactionJournal.AssertNoPendingAsync(codexHome);
         SyncPreparation preparation = await PrepareSyncAsync(
             codexHome,
@@ -1148,7 +1567,6 @@ public sealed class CodexSyncService
         ValidateRestoreRequest(backupDir, options);
         string codexHome = _codexHomeService.NormalizeCodexHome(explicitCodexHome);
         await _codexHomeService.EnsureCodexHomeAsync(codexHome);
-        await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "plan-restore");
         RestorePreparation preparation = await PrepareRestoreAsync(
             codexHome,
             backupDir,
@@ -1188,15 +1606,55 @@ public sealed class CodexSyncService
         CancellationToken cancellationToken)
     {
         ValidateRestoreRequest(backupDir, options);
+        string requestedBackupDir = Path.GetFullPath(backupDir);
         string codexHome = _codexHomeService.NormalizeCodexHome(explicitCodexHome);
         await _codexHomeService.EnsureCodexHomeAsync(codexHome);
 
-        await using LockHandle _ = await _lockService.AcquireLockAsync(codexHome, "restore");
+        await using LockHandle homeLock = await _lockService.AcquireLockAsync(codexHome, "restore");
+        string? physicalBackupDir = null;
+        StateDbLockResource? lockedStateDb = null;
+        LockHandle? stateDbHandle = null;
+        if (options.RestoreDatabase)
+        {
+            string lockConfigText = await _configFileService.ReadConfigTextAsync(
+                _codexHomeService.ConfigPath(codexHome));
+            CodexStorageLayout lockStorage = await PrepareStorageAsync(
+                codexHome,
+                explicitSqliteHome,
+                lockConfigText);
+            lockStorage.EnsureSqliteAccessSupported("restore");
+            RestoreBackupIdentity lockedSourceBackup = await RestoreV2Service.CaptureSourceIdentityAsync(
+                requestedBackupDir,
+                cancellationToken);
+            physicalBackupDir = lockedSourceBackup.BackupDir;
+            if (await _backupService.HasCapturedUndoTargetAsync(
+                physicalBackupDir,
+                "sqlite",
+                cancellationToken))
+            {
+                string stateDbTargetPath = await _backupService.ResolveRestoreStateDbTargetPathAsync(
+                    physicalBackupDir,
+                    lockStorage,
+                    options);
+                lockedStateDb = await StateDbLockResource.ResolveAsync(
+                    stateDbTargetPath,
+                    cancellationToken);
+                stateDbHandle = await _lockService.AcquireStateDbLockAsync(lockedStateDb, "restore");
+            }
+        }
+        await using LockHandle? stateDbLock = stateDbHandle;
+        physicalBackupDir ??= (await RestoreV2Service.CaptureSourceIdentityAsync(
+            requestedBackupDir,
+            cancellationToken)).BackupDir;
         RestorePreparation preparation = await PrepareRestoreAsync(
             codexHome,
-            backupDir,
+            physicalBackupDir,
             options,
             explicitSqliteHome,
+            cancellationToken);
+        await AssertStateDbTargetLockMatchesAsync(
+            preparation.StateDbTargetPath,
+            lockedStateDb,
             cancellationToken);
         if (expectedSnapshot is not null)
         {
@@ -1207,19 +1665,41 @@ public sealed class CodexSyncService
             CoreWriteSnapshotBuilder.AssertExactMatch(expectedSnapshot, actualSnapshot);
             AssertSnapshotFresh(snapshotExpiresAtUtc);
         }
-        // BackupService currently exposes an atomic restore operation rather
-        // than per-file cancellation. Honor cancellation until the mutation
-        // boundary, then let that authoritative operation finish and report
-        // its real result instead of returning a false cancelled outcome.
         cancellationToken.ThrowIfCancellationRequested();
-        RestoreResult result = await _backupService.RestoreBackupAsync(
-            preparation.BackupDirectory,
-            preparation.Storage,
-            preparation.Options);
-        await FileTransactionJournal.MarkBackupRolledBackAsync(
-            preparation.BackupDirectory,
-            codexHome,
-            result.TargetProvider);
+        _restoreV2Service.FaultInjector = FaultInjector;
+        RestoreResult result;
+        if (preparation.PendingCommitAcknowledgement is { } pendingAcknowledgement)
+        {
+            RestoreJournalInfo completed = await _restoreV2Service.AcknowledgePendingAsync(
+                pendingAcknowledgement,
+                preparation.Storage,
+                lockedStateDb,
+                cancellationToken);
+            result = new RestoreResult
+            {
+                CodexHome = preparation.Storage.CodexHome,
+                BackupDir = preparation.BackupDirectory,
+                TargetProvider = preparation.RestorePlan.Metadata.TargetProvider,
+                CreatedAt = preparation.RestorePlan.Metadata.CreatedAt,
+                ChangedSessionFiles = preparation.RestorePlan.Metadata.ChangedSessionFiles,
+                RestoreVersion = 2,
+                RestoreOperationId = completed.OperationId,
+                PreRestoreSnapshotId = completed.Prepared?.PreRestoreSnapshot.BackupId,
+                RestoreJournalState = completed.State,
+                CommitAcknowledgementRecovered = true,
+                ResolvedOperationIds = completed.Prepared?.ResolvesOperationIds ?? []
+            };
+        }
+        else
+        {
+            result = await _restoreV2Service.ExecuteAsync(
+                preparation.RestorePlan,
+                preparation.SourceBackup,
+                lockedStateDb,
+                preparation.ResolvesOperationIds,
+                cancellationToken);
+        }
+        result = CopyRestoreResult(result, requestedBackupDir);
         // The restore and its journal marker are already durable. Refreshing the
         // inventory only corrects metadata.json bookkeeping, so surface a
         // failure as a warning instead of reporting a completed restore as
@@ -1231,15 +1711,10 @@ public sealed class CodexSyncService
         }
         catch (Exception error)
         {
-            return new RestoreResult
-            {
-                CodexHome = result.CodexHome,
-                BackupDir = result.BackupDir,
-                TargetProvider = result.TargetProvider,
-                CreatedAt = result.CreatedAt,
-                ChangedSessionFiles = result.ChangedSessionFiles,
-                BackupInventoryWarning = $"Backup inventory refresh failed: {error.Message}"
-            };
+            return CopyRestoreResult(
+                result,
+                requestedBackupDir,
+                $"Backup inventory refresh failed: {error.Message}");
         }
     }
 
@@ -1255,12 +1730,29 @@ public sealed class CodexSyncService
         string configText = await _configFileService.ReadConfigTextAsync(configPath);
         CodexStorageLayout storage = await PrepareStorageAsync(codexHome, explicitSqliteHome, configText);
         storage.EnsureSqliteAccessSupported("restore");
-        string normalizedBackupDir = Path.GetFullPath(backupDir);
+        RestoreBackupIdentity sourceBackup = await RestoreV2Service.CaptureSourceIdentityAsync(
+            backupDir,
+            cancellationToken);
+        string normalizedBackupDir = sourceBackup.BackupDir;
+        string? stateDbTargetPath = options.RestoreDatabase
+            && await _backupService.HasCapturedUndoTargetAsync(
+                normalizedBackupDir,
+                "sqlite",
+                cancellationToken)
+            ? await _backupService.ResolveRestoreStateDbTargetPathAsync(
+                normalizedBackupDir,
+                storage,
+                options)
+            : null;
+        RestoreBackupPlan restorePlan = await _backupService.PrepareRestoreBackupAsync(
+            normalizedBackupDir,
+            storage,
+            options,
+            expectedStateDbTargetPath: stateDbTargetPath,
+            cancellationToken);
         IReadOnlyList<PendingTransactionInfo> pending = await FileTransactionJournal.FindPendingAsync(codexHome);
         PendingTransactionInfo[] foreignPending = pending
-            .Where(transaction => !PathComparer.Equals(
-                Path.GetFullPath(transaction.BackupDir),
-                normalizedBackupDir))
+            .Where(transaction => !PendingTransactionMatchesBackup(transaction, normalizedBackupDir))
             .ToArray();
         if (foreignPending.Length > 0)
         {
@@ -1270,26 +1762,90 @@ public sealed class CodexSyncService
                 + $"Restore the bound backup first: {backups}",
                 foreignPending);
         }
-        await EnsurePendingRecoveryCoverageAsync(normalizedBackupDir, codexHome, options);
+        IReadOnlyList<RestoreJournalInfo> pendingRestores =
+            await RestoreJournalService.FindBlockingAsync(codexHome, cancellationToken);
+        string[] requestedKinds = restorePlan.Targets
+            .Select(static target => target.Kind)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        await EnsurePendingRecoveryCoverageAsync(normalizedBackupDir, codexHome, requestedKinds);
+        List<RestoreJournalInfo> boundRestores = [];
+        List<RestoreJournalInfo> foreignRestores = [];
+        foreach (RestoreJournalInfo transaction in pendingRestores)
+        {
+            RestoreBackupIdentity? preparedSource = transaction.Prepared?.SourceBackup;
+            bool physicalHomeMatches = RestoreV2Service.JournalMatchesCurrentPhysicalHome(
+                transaction,
+                storage);
+            bool sourceMatches = RestoreV2Service.JournalMatchesSource(
+                preparedSource,
+                sourceBackup);
+            bool committedLocationMatches = transaction.State == "committed-pending-ack"
+                && RestoreV2Service.JournalMatchesSource(
+                    preparedSource,
+                    sourceBackup,
+                    ignoreRevision: true);
+            bool coverageComplete = transaction.Prepared?.RequiredTargetKinds.All(
+                kind => requestedKinds.Contains(kind, StringComparer.Ordinal)) == true;
+            if ((sourceMatches || committedLocationMatches)
+                && physicalHomeMatches
+                && coverageComplete)
+            {
+                boundRestores.Add(transaction);
+            }
+            else
+            {
+                foreignRestores.Add(transaction);
+            }
+        }
+        if (foreignRestores.Count > 0)
+        {
+            throw new RecoveryRequiredException(
+                "An unrelated unfinished Restore transaction must be resolved before this backup can be used.",
+                foreignRestores.Select(static item => item.SnapshotDir).ToArray());
+        }
+        RestoreJournalInfo[] committedPendingAcknowledgements = boundRestores
+            .Where(static item => item.State == "committed-pending-ack" && !item.InvalidTail)
+            .ToArray();
+        if (committedPendingAcknowledgements.Length > 0
+            && (committedPendingAcknowledgements.Length != 1 || boundRestores.Count != 1))
+        {
+            throw new RecoveryRequiredException(
+                "Multiple Restore acknowledgements cannot be reconciled automatically.",
+                boundRestores.Select(static item => item.SnapshotDir).ToArray());
+        }
         cancellationToken.ThrowIfCancellationRequested();
         return new RestorePreparation(
             codexHome,
             configPath,
             normalizedBackupDir,
             options,
-            storage);
+            storage,
+            stateDbTargetPath,
+            restorePlan,
+            sourceBackup,
+            boundRestores
+                .Select(static item => item.OperationId)
+                .Where(static value => !string.IsNullOrWhiteSpace(value))
+                .Cast<string>()
+                .ToArray(),
+            committedPendingAcknowledgements.SingleOrDefault());
     }
 
     private async Task<CoreWritePlanSnapshot> BuildRestorePlanSnapshotAsync(
         RestorePreparation preparation,
         CancellationToken cancellationToken)
     {
+        bool restoreConfig = RestorePlanContainsTarget(preparation.RestorePlan, "config");
+        bool restoreGlobalState = RestorePlanContainsTarget(preparation.RestorePlan, "globalState");
+        bool restoreSessions = RestorePlanContainsTarget(preparation.RestorePlan, "rollout");
+        bool restoreDatabase = RestorePlanContainsTarget(preparation.RestorePlan, "sqlite");
         List<CoreWriteTargetSpec> targets =
         [
             new(preparation.BackupDirectory, "read-restore-source"),
-            new(preparation.ConfigPath, preparation.Options.RestoreConfig ? "restore" : "read")
+            new(preparation.ConfigPath, restoreConfig ? "restore" : "read")
         ];
-        if (preparation.Options.RestoreConfig)
+        if (restoreGlobalState)
         {
             targets.Add(new CoreWriteTargetSpec(
                 _globalStateService.StatePath(preparation.CodexHome),
@@ -1298,7 +1854,7 @@ public sealed class CodexSyncService
                 _globalStateService.BackupPath(preparation.CodexHome),
                 "restore"));
         }
-        if (preparation.Options.RestoreSessions)
+        if (restoreSessions)
         {
             targets.Add(new CoreWriteTargetSpec(
                 Path.Combine(preparation.CodexHome, "sessions"),
@@ -1309,10 +1865,10 @@ public sealed class CodexSyncService
                 "restore",
                 CoreWriteFingerprintMode.RecursiveInventory));
         }
-        if (preparation.Options.RestoreDatabase)
+        if (restoreDatabase)
         {
-            string databasePath = preparation.Storage.StateDbLocation?.Path
-                ?? Path.Combine(preparation.Storage.SqliteHome, AppConstants.DbFileBasename);
+            string databasePath = preparation.StateDbTargetPath
+                ?? throw new InvalidOperationException("Restore preparation did not resolve a State DB target.");
             targets.Add(new CoreWriteTargetSpec(
                 databasePath,
                 "restore",
@@ -1330,9 +1886,10 @@ public sealed class CodexSyncService
             preparation.BackupDirectory,
             preparation.Storage.SqliteHome,
             preparation.Storage.SqliteHomeSource,
-            preparation.Options.RestoreConfig,
-            preparation.Options.RestoreDatabase,
-            preparation.Options.RestoreSessions,
+            RestoreConfig = restoreConfig,
+            RestoreGlobalState = restoreGlobalState,
+            RestoreDatabase = restoreDatabase,
+            RestoreSessions = restoreSessions,
             preparation.Options.AllowSqliteHomeRelocation
         });
         return await CoreWriteSnapshotBuilder.BuildAsync(
@@ -1354,7 +1911,7 @@ public sealed class CodexSyncService
     private async Task EnsurePendingRecoveryCoverageAsync(
         string backupDir,
         string codexHome,
-        RestoreBackupOptions options)
+        IReadOnlyCollection<string> effectiveTargetKinds)
     {
         string journalPath = Path.Combine(backupDir, FileTransactionJournal.FileName);
         if (!File.Exists(journalPath))
@@ -1369,33 +1926,42 @@ public sealed class CodexSyncService
         }
 
         bool requireConfig;
+        bool requireGlobalState;
         bool requireDatabase;
         bool requireSessions;
         if (journal.InvalidTail || string.IsNullOrWhiteSpace(journal.OperationId))
         {
             BackupRecoveryCoverage coverage = await _backupService.GetRecoveryCoverageAsync(backupDir, codexHome);
+            // Legacy malformed journals represent config/global state as one
+            // coverage bit. Treat it conservatively as requiring both concrete
+            // stores, so a reduced backup cannot falsely resolve the journal.
             requireConfig = coverage.Config;
+            requireGlobalState = coverage.Config;
             requireDatabase = coverage.Database;
             requireSessions = coverage.Sessions;
         }
         else
         {
-            requireConfig = journal.AffectedTargets.Any(
-                static target => target.Kind is "config" or "globalState");
+            requireConfig = journal.AffectedTargets.Any(static target => target.Kind == "config");
+            requireGlobalState = journal.AffectedTargets.Any(static target => target.Kind == "globalState");
             requireDatabase = journal.AffectedTargets.Any(static target => target.Kind == "sqlite");
             requireSessions = journal.AffectedTargets.Any(static target => target.Kind == "rollout");
         }
 
         List<string> missing = [];
-        if (requireConfig && !options.RestoreConfig)
+        if (requireConfig && !effectiveTargetKinds.Contains("config", StringComparer.Ordinal))
         {
-            missing.Add("config/global state");
+            missing.Add("config.toml");
         }
-        if (requireDatabase && !options.RestoreDatabase)
+        if (requireGlobalState && !effectiveTargetKinds.Contains("globalState", StringComparer.Ordinal))
+        {
+            missing.Add("global state");
+        }
+        if (requireDatabase && !effectiveTargetKinds.Contains("sqlite", StringComparer.Ordinal))
         {
             missing.Add("SQLite");
         }
-        if (requireSessions && !options.RestoreSessions)
+        if (requireSessions && !effectiveTargetKinds.Contains("rollout", StringComparer.Ordinal))
         {
             missing.Add("rollout sessions");
         }
@@ -1578,6 +2144,88 @@ public sealed class CodexSyncService
         return storage with { StateDbLocation = stateDb };
     }
 
+    private static bool PathsEqual(string left, string right) => string.Equals(
+        Path.GetFullPath(left),
+        Path.GetFullPath(right),
+        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+
+    private async Task<(StateDbLockResource? Resource, LockHandle? Handle)> AcquireCurrentStateDbLockAsync(
+        string codexHome,
+        string? explicitSqliteHome,
+        string label,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        string configText = await _configFileService.ReadConfigTextAsync(
+            _codexHomeService.ConfigPath(codexHome));
+        CodexStorageLayout storage = await PrepareStorageAsync(codexHome, explicitSqliteHome, configText);
+        storage.EnsureSqliteAccessSupported(label);
+        EnsureWritableStorage(storage);
+        if (storage.StateDbLocation is null)
+        {
+            return (null, null);
+        }
+        StateDbLockResource resource = await StateDbLockResource.ResolveAsync(
+            storage.StateDbLocation.Path,
+            cancellationToken);
+        LockHandle handle = await _lockService.AcquireStateDbLockAsync(resource, label);
+        return (resource, handle);
+    }
+
+    private static async Task AssertStateDbLockMatchesAsync(
+        CodexStorageLayout storage,
+        StateDbLockResource? lockedResource,
+        CancellationToken cancellationToken)
+    {
+        if (storage.StateDbLocation is null)
+        {
+            if (lockedResource is null) return;
+            throw StateDbLockChanged();
+        }
+        StateDbLockResource current = await StateDbLockResource.ResolveAsync(
+            storage.StateDbLocation.Path,
+            cancellationToken);
+        if (lockedResource is null
+            || !string.Equals(current.ResourceKey, lockedResource.ResourceKey, StringComparison.Ordinal))
+        {
+            throw StateDbLockChanged();
+        }
+    }
+
+    private static bool RestorePlanContainsTarget(RestoreBackupPlan plan, string kind)
+    {
+        return plan.Targets.Any(target => string.Equals(target.Kind, kind, StringComparison.Ordinal));
+    }
+
+    private static async Task AssertStateDbTargetLockMatchesAsync(
+        string? stateDbTargetPath,
+        StateDbLockResource? lockedResource,
+        CancellationToken cancellationToken)
+    {
+        if (stateDbTargetPath is null)
+        {
+            if (lockedResource is null) return;
+            throw StateDbLockChanged();
+        }
+        StateDbLockResource current = await StateDbLockResource.ResolveAsync(
+            stateDbTargetPath,
+            cancellationToken);
+        if (lockedResource is null
+            || !string.Equals(current.ResourceKey, lockedResource.ResourceKey, StringComparison.Ordinal))
+        {
+            throw StateDbLockChanged();
+        }
+    }
+
+    private static InvalidOperationException StateDbLockChanged()
+    {
+        InvalidOperationException error = new(
+            "The resolved State DB resource changed while the write operation was acquiring its locks.");
+        error.Data["codex-provider-sync/error-code"] = LockService.LockUnverifiableErrorCode;
+        error.Data["codex-provider-sync/lock-scope"] = "state-db";
+        return error;
+    }
+
     private static void EnsureWritableStorage(CodexStorageLayout storage)
     {
         if (storage.StateDbLocation is null && storage.HasConfiguredSqliteHome)
@@ -1593,6 +2241,61 @@ public sealed class CodexSyncService
         if (expiresAtUtc is not null && DateTimeOffset.UtcNow >= expiresAtUtc.Value)
         {
             throw new CoreWritePlanExpiredException();
+        }
+    }
+
+    private static RestoreResult CopyRestoreResult(
+        RestoreResult result,
+        string backupDir,
+        string? backupInventoryWarning = null)
+    {
+        return new RestoreResult
+        {
+            CodexHome = result.CodexHome,
+            BackupDir = backupDir,
+            TargetProvider = result.TargetProvider,
+            CreatedAt = result.CreatedAt,
+            ChangedSessionFiles = result.ChangedSessionFiles,
+            BackupInventoryWarning = backupInventoryWarning ?? result.BackupInventoryWarning,
+            RestoreVersion = result.RestoreVersion,
+            RestoreOperationId = result.RestoreOperationId,
+            PreRestoreSnapshotId = result.PreRestoreSnapshotId,
+            RestoreJournalState = result.RestoreJournalState,
+            CommitAcknowledgementRecovered = result.CommitAcknowledgementRecovered,
+            ResolvedOperationIds = result.ResolvedOperationIds
+        };
+    }
+
+    private static bool PendingTransactionMatchesBackup(
+        PendingTransactionInfo transaction,
+        string physicalBackupDir)
+    {
+        try
+        {
+            string? journalParent = Path.GetDirectoryName(transaction.JournalPath);
+            if (string.IsNullOrWhiteSpace(journalParent))
+            {
+                return false;
+            }
+            string journalParentPhysical = RestoreV2Service.ResolveStablePhysicalDirectory(
+                journalParent);
+            if (string.IsNullOrWhiteSpace(transaction.DeclaredBackupDir))
+            {
+                // A readable but unparseable journal has no trustworthy
+                // prepared record to bind. Preserve the explicit managed-
+                // backup repair path only when the journal itself is physically
+                // inside the exact backup selected by the caller.
+                return transaction.InvalidTail
+                    && PathComparer.Equals(journalParentPhysical, physicalBackupDir);
+            }
+            string declaredPhysical = RestoreV2Service.ResolveStablePhysicalDirectory(
+                transaction.DeclaredBackupDir);
+            return PathComparer.Equals(declaredPhysical, physicalBackupDir)
+                && PathComparer.Equals(journalParentPhysical, physicalBackupDir);
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -1627,5 +2330,10 @@ public sealed class CodexSyncService
         string ConfigPath,
         string BackupDirectory,
         RestoreBackupOptions Options,
-        CodexStorageLayout Storage);
+        CodexStorageLayout Storage,
+        string? StateDbTargetPath,
+        RestoreBackupPlan RestorePlan,
+        RestoreBackupIdentity SourceBackup,
+        IReadOnlyList<string> ResolvesOperationIds,
+        RestoreJournalInfo? PendingCommitAcknowledgement);
 }

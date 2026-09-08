@@ -2,6 +2,8 @@
 
 [中文](README_MAC_GUI_ZH.md) · English
 
+> This guide covers the retained .NET/Avalonia compatibility build for macOS, not the V1 Electron desktop app. The implementation remains buildable and tested; it has not been removed or retired.
+
 `CodexProviderSync.app` is the macOS desktop GUI. It is built with Avalonia and
 reuses the status, synchronization, switching, restore, and backup-cleanup
 logic from `desktop/CodexProviderSync.Core`.
