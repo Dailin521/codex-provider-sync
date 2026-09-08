@@ -82,15 +82,22 @@ async function applySyncDirect(page, planId, requestId) {
   }), { planId, requestId });
 }
 
+async function fixtureStep(name, run) {
+  // These names identify synthetic test phases only; never dump payloads.
+  process.stderr.write(`[desktop-fixture] ${name}\n`);
+  return test.step(name, run);
+}
+
 async function lockRolloutFile(filePath) {
   const script = `
 & {
   param([string]$path)
+  $ErrorActionPreference = 'Stop'
   $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
   try {
     Write-Output 'locked'
     [Console]::Out.Flush()
-    Start-Sleep -Seconds 30
+    [void][Console]::In.ReadLine()
   } finally {
     $stream.Close()
   }
@@ -103,23 +110,32 @@ async function lockRolloutFile(filePath) {
     "-Command",
     script,
     filePath
-  ], { stdio: ["ignore", "pipe", "pipe"] });
+  ], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+  child.stdin.on("error", () => {}); // Exit/readiness below owns fixture failure reporting.
   await new Promise((resolve, reject) => {
     let output = "";
     let settled = false;
+    const deadline = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill();
+      reject(new Error("Synthetic rollout lock was not ready within 20 seconds."));
+    }, 20_000);
     child.stdout.on("data", (chunk) => {
       output += chunk.toString("utf8");
       if (!settled && output.includes("locked")) {
         settled = true;
+        clearTimeout(deadline);
         resolve();
       }
     });
     child.once("error", (error) => {
-      if (!settled) { settled = true; reject(error); }
+      if (!settled) { settled = true; clearTimeout(deadline); reject(error); }
     });
     child.once("exit", (code, signal) => {
       if (!settled) {
         settled = true;
+        clearTimeout(deadline);
         reject(new Error(`Rollout lock exited before ready (${code ?? "null"}/${signal ?? "null"}).`));
       }
     });
@@ -128,10 +144,24 @@ async function lockRolloutFile(filePath) {
 }
 
 async function releaseChild(child) {
-  if (!child || child.exitCode !== null) return;
-  const exited = new Promise((resolve) => child.once("exit", resolve));
-  child.kill();
-  await exited;
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise((resolve, reject) => {
+    let terminationDeadline;
+    let releaseTimedOut = false;
+    const deadline = setTimeout(() => {
+      releaseTimedOut = true;
+      child.kill();
+      terminationDeadline = setTimeout(() => reject(new Error("Synthetic rollout lock did not exit after termination.")), 2_000);
+    }, 5_000);
+    child.once("exit", (code) => {
+      clearTimeout(deadline);
+      clearTimeout(terminationDeadline);
+      if (releaseTimedOut) reject(new Error("Synthetic rollout lock did not release within 5 seconds."));
+      else if (code === 0) resolve();
+      else reject(new Error(`Synthetic rollout lock exited abnormally (${code ?? "null"}).`));
+    });
+    child.stdin.end("release\n");
+  });
 }
 
 async function runProcess(command, args) {
@@ -493,13 +523,13 @@ test("Electron reports a locked rollout as partial without rewriting the locked 
   let electronApp;
   let lockProcess;
   try {
-    lockProcess = await lockRolloutFile(fixture.rolloutPath);
-    electronApp = await launchDesktop(fixture);
-    const page = await electronApp.firstWindow();
-    const dialog = await openSyncPlan(page);
-    await dialog.getByRole("button", { name: "Confirm sync" }).click();
-    await expect(page.getByRole("dialog", { name: "Operation result" }).getByRole("heading", { name: "Partially completed" })).toBeVisible();
-    await releaseChild(lockProcess);
+    lockProcess = await fixtureStep("Acquire synthetic rollout lock", () => lockRolloutFile(fixture.rolloutPath));
+    electronApp = await fixtureStep("Launch locked-rollout Electron fixture", () => launchDesktop(fixture));
+    const page = await fixtureStep("Open locked-rollout window", () => electronApp.firstWindow());
+    const dialog = await fixtureStep("Preview locked-rollout sync", () => openSyncPlan(page));
+    await fixtureStep("Confirm locked-rollout sync", () => dialog.getByRole("button", { name: "Confirm sync" }).click());
+    await fixtureStep("Observe locked-rollout partial result", () => expect(page.getByRole("dialog", { name: "Operation result" }).getByRole("heading", { name: "Partially completed" })).toBeVisible());
+    await fixtureStep("Release synthetic rollout lock", () => releaseChild(lockProcess));
     lockProcess = undefined;
     const state = await fixture.inspect();
     expect(await fs.readFile(fixture.rolloutPath)).toEqual(rolloutBefore);
@@ -507,9 +537,12 @@ test("Electron reports a locked rollout as partial without rewriting the locked 
     expect(state.sqlite.provider).toBe("openai");
     expect(state.backupIds).toHaveLength(1);
   } finally {
-    await releaseChild(lockProcess);
-    await electronApp?.close();
-    await fixture.close();
+    try {
+      await releaseChild(lockProcess);
+    } finally {
+      try { await electronApp?.close(); }
+      finally { await fixture.close(); }
+    }
   }
 });
 
@@ -589,46 +622,47 @@ for (const scenario of [
     const baseline = await fixture.snapshotProtected();
     let electronApp;
     try {
-      electronApp = await launchDesktop(fixture, {
+      electronApp = await fixtureStep(`Launch crash fixture: ${scenario.point}`, () => launchDesktop(fixture, {
         CPS_DESKTOP_TEST_GATE: scenario.point,
         CPS_DESKTOP_TEST_GATE_FILE: fixture.gateMarkerPath
-      });
-      const page = await electronApp.firstWindow();
-      const dialog = scenario.operation === "switch"
-        ? await openSwitchPlan(page, { provider: "relay", mode: "provider-default" })
-        : await openSyncPlan(page);
-      await dialog.getByRole("button", { name: scenario.operation === "switch" ? "Confirm switch" : "Confirm sync" }).click();
-      await waitForGate(fixture.gateMarkerPath, scenario.point);
-      const beforeCrash = await electronApp.evaluate(
+      }));
+      const page = await fixtureStep("Open crash fixture window", () => electronApp.firstWindow());
+      const dialog = await fixtureStep("Preview operation before crash", () => scenario.operation === "switch"
+        ? openSwitchPlan(page, { provider: "relay", mode: "provider-default" })
+        : openSyncPlan(page));
+      await fixtureStep("Confirm operation before crash", () => dialog.getByRole("button", { name: scenario.operation === "switch" ? "Confirm switch" : "Confirm sync" }).click());
+      await fixtureStep(`Reach crash gate: ${scenario.point}`, () => waitForGate(fixture.gateMarkerPath, scenario.point));
+      const beforeCrash = await fixtureStep("Read runtime before crash", () => electronApp.evaluate(
         () => globalThis.__CPS_DESKTOP_TEST__.runtime()
-      );
-      expect((await page.evaluate(() => window.codexProvider.test.crashRuntime())).crashed).toBe(true);
-      await expect(latestNotification(page)).toContainText(
+      ));
+      const crash = await fixtureStep("Crash Utility through test IPC", () => page.evaluate(() => window.codexProvider.test.crashRuntime()));
+      expect(crash.crashed).toBe(true);
+      await fixtureStep("Observe crash notification", () => expect(latestNotification(page)).toContainText(
         "The background service stopped unexpectedly. It will restart automatically when possible."
-      );
+      ));
       // The renderer refreshes Status after the failed write and the query
       // layer may retry a transient first recovery probe. Assert the safety
       // boundary (the crashed generation is abandoned and a ready Runtime
       // preflights the journal), not the UI's exact number of read attempts.
-      await expect.poll(() => electronApp.evaluate(
+      await fixtureStep("Wait for replacement runtime readiness", () => expect.poll(() => electronApp.evaluate(
         () => globalThis.__CPS_DESKTOP_TEST__.runtime()
-      )).toMatchObject({ state: "ready" });
+      )).toMatchObject({ state: "ready" }));
 
-      const recovered = await electronApp.evaluate(
+      const recovered = await fixtureStep("Read replacement runtime", () => electronApp.evaluate(
         () => globalThis.__CPS_DESKTOP_TEST__.runtime()
-      );
+      ));
       expect(recovered.generation).toBeGreaterThan(beforeCrash.generation);
       if (!scenario.mutationExpected) {
         expect((await fixture.snapshotProtected()).hash).toBe(baseline.hash);
       }
 
-      const nextWrite = await prepareSyncDirect(page, `crash-${scenario.point}`);
+      const nextWrite = await fixtureStep("Prepare retry after crash", () => prepareSyncDirect(page, `crash-${scenario.point}`));
       expect(nextWrite.ok, JSON.stringify(nextWrite)).toBe(true);
-      const converged = await applySyncDirect(
+      const converged = await fixtureStep("Apply retry after crash", () => applySyncDirect(
         page,
         nextWrite.result.planId,
         `crash-retry-${scenario.point}`
-      );
+      ));
       expect(converged.ok, JSON.stringify(converged)).toBe(true);
       expect(converged.result.outcome).toBe("completed");
       const afterRecoveryProbe = await electronApp.evaluate(
