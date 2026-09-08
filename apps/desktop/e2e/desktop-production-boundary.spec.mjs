@@ -8,6 +8,7 @@ import { _electron as electron, chromium, expect, test } from "@playwright/test"
 import { createDesktopReadOnlyFixture } from "../../../test-support/desktop-readonly-fixture.mjs";
 import { createDesktopSyncSwitchFixture } from "../../../test-support/desktop-sync-switch-fixture.mjs";
 import { shouldRetryPackagedCdpActivation } from "./packaged-cdp-retry.mjs";
+import { captureViewport } from "./viewport-screenshot.mjs";
 import { claimDailyUpdateCheck } from "../dist/main/daily-update-check.js";
 import { OperationLogService } from "../dist/main/operation-log-service.js";
 
@@ -62,7 +63,7 @@ async function verifyLogPanes(page) {
     await list.evaluate((element) => { element.scrollTop = 0; });
     await syncRows.nth(1).click();
     await expect.poll(() => detail.evaluate((element) => element.scrollTop)).toBe(0);
-    await page.screenshot({ path: test.info().outputPath(`operation-logs-split-${width}.png`) });
+    await captureViewport(page, { path: test.info().outputPath(`operation-logs-split-${width}.png`) });
   }
   for (const viewport of [{ width: 683, height: 384 }, { width: 390, height: 700 }]) {
     await page.setViewportSize(viewport);
@@ -77,7 +78,7 @@ async function verifyLogPanes(page) {
     await expect(detail).toBeHidden();
     await syncRows.first().click();
     await expect(detail).toBeFocused();
-    await page.screenshot({ path: test.info().outputPath(`operation-logs-narrow-${viewport.width}.png`) });
+    await captureViewport(page, { path: test.info().outputPath(`operation-logs-narrow-${viewport.width}.png`) });
   }
   await page.setViewportSize({ width: 1366, height: 768 });
 }
@@ -303,7 +304,7 @@ test("production desktop bundle has no test bridge and reads the real SQLite fix
     expect(storageBox.x + storageBox.width).toBeLessThan(syncBox.x);
     await expect(page.getByRole("button", { name: "Preview sync", exact: true })).toBeInViewport({ ratio: 1 });
     await expect(page.getByRole("button", { name: "Sync now", exact: true })).toBeInViewport({ ratio: 1 });
-    await page.screenshot({ path: test.info().outputPath("overview-first-screen-1366.png") });
+    await captureViewport(page, { path: test.info().outputPath("overview-first-screen-1366.png") });
     await expect(page.getByRole("heading", { name: "Switch Provider separately" })).toBeVisible();
     const usageCard = page.getByText("Sessions currently in use", { exact: true }).locator("..");
     await expect(usageCard.getByText(process.platform === "win32" ? "2" : "Unknown", { exact: true })).toBeVisible();
@@ -466,12 +467,13 @@ test("production desktop bundle has no test bridge and reads the real SQLite fix
     await expect(page.getByRole("checkbox", { name: "Unify historical model names" })).toBeVisible();
     await expect(page.getByText(/Optional changes, not fault repairs/)).toBeVisible();
     const repairControls = page.getByText("Targeted repair", { exact: true }).locator("..").locator("..").locator("..");
-    await repairControls.screenshot({ path: test.info().outputPath("repair-controls-en.png"), style: "header { visibility: hidden !important; }" });
+    await repairControls.scrollIntoViewIfNeeded();
+    await captureViewport(page, { path: test.info().outputPath("repair-controls-en.png"), style: "header { visibility: hidden !important; }" });
     await page.evaluate(() => { document.documentElement.style.zoom = "2"; });
     const repairLayout = await page.evaluate(() => ({ width: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth }));
     expect(repairLayout.scrollWidth).toBeLessThanOrEqual(repairLayout.width);
     await expect(page.getByRole("button", { name: "Preview adjustment", exact: true })).toBeVisible();
-    await repairControls.screenshot({ path: test.info().outputPath("repair-controls-200-percent.png"), style: "header { visibility: hidden !important; }" });
+    await captureViewport(page, { path: test.info().outputPath("repair-controls-200-percent.png"), style: "header { visibility: hidden !important; }" });
     await page.evaluate(() => { document.documentElement.style.zoom = ""; });
     for (const checkbox of await page.getByRole("checkbox").all()) await expect(checkbox).not.toBeChecked();
     await expect(page.getByText(/These repairs do not fix session record numbering/)).toBeVisible();
@@ -508,9 +510,9 @@ test("production desktop bundle has no test bridge and reads the real SQLite fix
     await expect(previewDialog.getByText("Affected chats (unique)", { exact: true }).locator("..")).toContainText("1");
     await expect(previewDialog.getByText("Index field changes (total)", { exact: true }).locator("..")).toContainText("1");
     await expect(previewDialog.getByText("Create the missing settings backup", { exact: true })).toBeVisible();
-    await previewDialog.screenshot({ path: test.info().outputPath("repair-global-preview.png") });
+    await captureViewport(page, { path: test.info().outputPath("repair-global-preview.png") });
     await previewDialog.getByText("Create the missing settings backup", { exact: true }).scrollIntoViewIfNeeded();
-    await previewDialog.screenshot({ path: test.info().outputPath("repair-count-breakdown.png") });
+    await captureViewport(page, { path: test.info().outputPath("repair-count-breakdown.png") });
     // Browser 200% zoom halves the CSS viewport. Root style.zoom leaves vw and
     // media queries unchanged and is not equivalent for a fixed-position dialog.
     await page.setViewportSize({ width: 683, height: 384 });
@@ -519,7 +521,7 @@ test("production desktop bundle has no test bridge and reads the real SQLite fix
     await expect(previewDialog.getByRole("button", { name: "Confirm repair", exact: true })).toBeInViewport({ ratio: 1 });
     // Capture the verified viewport directly: an element screenshot may try
     // to resize the hidden Electron surface after CDP viewport emulation.
-    await page.screenshot({ path: test.info().outputPath("repair-preview-200-percent-equivalent.png"), timeout: 10_000 });
+    await captureViewport(page, { path: test.info().outputPath("repair-preview-200-percent-equivalent.png") });
     await page.setViewportSize({ width: 1366, height: 768 });
     await previewDialog.getByRole("button", { name: "Close", exact: true }).last().click();
   } finally {
