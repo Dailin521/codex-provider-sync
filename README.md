@@ -2,7 +2,7 @@
 
 # codex-provider-sync
 
-### 切换 Provider 后，让 Codex 历史会话重新可见
+### 切换 Provider 后，帮助 Codex 旧会话重新可用
 
 [![CI](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml)
 [![CLI / Web](https://img.shields.io/npm/v/%40dailin521%2Fcodex-provider-sync?label=CLI%20%2F%20Web)](https://www.npmjs.com/package/@dailin521/codex-provider-sync)
@@ -16,18 +16,20 @@
 
 ## 它解决什么
 
-切换 `model_provider` 后，旧会话可能从 Codex Desktop 或 `/resume` 中消失。**数据通常仍在磁盘上**，只是会话文件和 SQLite 索引中的 Provider 信息没有同步。
+**会话能看见，不代表能按当前 Provider 正常继续。** 切换 `model_provider` 后，会话文件和 SQLite 索引中的 Provider 信息可能仍停留在旧值。本工具将两者对齐到当前配置，帮助因 Provider 元数据不一致而无法正常使用的旧会话重新可用。
 
-本工具将两者对齐到当前 Provider。有实际修改时先备份，默认保留最近 **2 份**；无需修改时不创建备份。它不负责登录、切换账号、解密或重建消息，也不读取或修改 `auth.json`。
+工具的重点是切换后的会话复用，而不是让列表重新显示。有实际修改时先备份，默认保留最近 **2 份**；无需修改时不创建备份。它不负责登录、切换账号、解密或重建消息，也不读取或修改 `auth.json`。**同步不保证跨 Provider / 账号的旧会话一定能继续或压缩**；加密内容与模型兼容问题仍需分别处理。
 
-<p align="center">
-  <img src="images/README/provider-metadata-sync-flow.png" alt="Provider 元数据同步前后效果" width="760">
-</p>
+| Provider 信息 | 同步前（示例） | 同步后 |
+| --- | --- | --- |
+| 当前配置 | Provider B | Provider B（不改） |
+| 会话文件 | Provider A | Provider B |
+| SQLite 聊天索引 | Provider A | Provider B |
 
 - 已通过 CCSwitch 等工具切换 Provider：使用“同步当前 Provider”。
 - 希望由本工具修改 Provider：使用“单独切换 Provider”，修改配置后同步历史中的 Provider 信息。
 - Provider ID 没变、历史也已对齐：无需重复同步。
-- 历史能显示但无法继续或压缩：可能是跨 Provider 的加密内容不兼容，同步不能解决解密问题。
+- 已对齐但仍无法继续或压缩：查看 Codex 的具体报错；跨 Provider 的加密内容不兼容不能靠同步解决。
 
 ## 快速开始
 
@@ -43,6 +45,8 @@
 ### 桌面版
 
 安装对应平台包，或解压完整程序目录运行。**不要只复制 Electron 的单个 EXE。**
+
+Windows `1.0.0` 的[安装与旧版迁移说明](docs/release-notes/v1.0.0-zh.md)：未签名、手动安装更新；旧 .NET 的单 EXE 更新按钮不能完成迁移。本轮不发布 npm、macOS/Linux 或 Legacy 安装包。
 
 1. 打开“概览”，核对当前 Provider、存储路径和同步状态。
 2. 在存储配置右侧使用“预览同步”查看影响，或“直接同步”立即执行，两者同步范围相同。
@@ -132,7 +136,7 @@ CLI 写命令直接执行，不再弹出交互确认。有限命令支持 `--jso
 | 状态待刷新 / 数据已变化 | 手动刷新或重新预览，不要删除锁文件或数据库 |
 | 自定义 Provider 不存在 | 先在配置/常用 Provider 工具中补齐定义；本工具不会擅自切回 OpenAI |
 | SQLite busy | 停止相关 Codex 写入后重试；若已部分写入，先查看结果和备份 |
-| 旧聊天可见但无法继续 | 回到原 Provider/账号或新建会话；本工具不能解密旧内容 |
+| 已同步但旧会话仍无法继续 | 查看具体报错；若为加密内容不兼容，回到原 Provider/账号或新建会话，本工具不能解密旧内容 |
 
 普通 Sync/Switch/Repair 在修改前创建覆盖实际目标的备份；写入后失败报告部分完成，不自动全量回滚。Restore 独立保留恢复前快照、journal 和补偿。所有操作都不会通过修改 `threads.updated_at`、消息顺序或时间来强行刷新历史。
 

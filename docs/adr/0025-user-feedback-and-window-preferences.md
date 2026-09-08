@@ -22,6 +22,8 @@
 
 ### 回归范围
 
+2026-09-08 通知关闭补充：共享 Toast 的内容和右上角 × 为同一个关闭按钮，点击任一处仅移除该通知；使用本地化可访问名称，保留焦点提示、Enter/空格/Esc 关闭与原有 5 秒自动收起、悬停/聚焦暂停。不得关闭或重置 OperationResult、清除日志/备份、触发刷新或影响操作执行。成功、partial/警告和错误通知使用一致的关闭方式；全局 Recovery/进行中阻断不是 Toast，不允许由该入口解除。`packages/app-ui/tests/toast-dismiss.vitest.tsx` 固定点击、键盘、双语、多通知隔离与自动收起；UI 与用户说明同步，Core/API/Provider I/O 不变。
+
 2026-09-07 用户明确调整概览排序，随后补充首屏布局：状态摘要 → 会话记录文件/本地聊天索引分布 → 当前存储配置及完整路径（左）与同步当前 Provider（右）同排 → 最底部“单独切换 Provider”。取代 ADR-0024 第 5 项的操作优先排序；Sync 和 Switch 本身仍上下独立。宽屏（≥1024 CSS px）四个摘要卡片一排、存储/同步并排，收紧留白，使常用 1280×720 / 1366×768 视口能直接看到预览与直接同步按钮；窄屏保持存储在前、Sync 在后，不压缩字体或裁剪路径。`overview-paths.vitest.tsx` 固定 DOM/键盘顺序；Web/Electron E2E 验证实际坐标和按钮完全在首屏，而不仅是存在于 DOM。该变更只调整共享 UI，不隐藏路径、合并业务或改变授权语义。
 
 2026-09-07 占用口径补充：用户否决仅展示“读取受阻文件”，明确使用“正在使用的会话”并与预览同步一致。[ADR-0029](0029-overview-preview-session-usage.md) 增加可选 `syncSessionUsage`，复用预览的目标范围和独占写探测；不再用旧 `lockedRolloutFiles` 冒充该值。`overview-session-usage.vitest.tsx` 验证双语、已验证零值/非零、未知、旧 Host、阻断/缓存快照。

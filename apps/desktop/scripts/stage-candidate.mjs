@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { assertDesktopArtifactVersion } from "./desktop-artifact-version.mjs";
 import {
   auditPackagedApp,
   ARTIFACT_AUDIT_POLICY_PATH,
@@ -11,7 +12,6 @@ import {
   sha256File
 } from "./release-audit.mjs";
 
-const VERSION_PATTERN = /^1\.0\.0-(?:alpha|beta|rc)\.\d+$/;
 const BUILD_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/i;
 const outputRoot = path.join(RELEASE_REPOSITORY_ROOT, "dist-desktop");
@@ -56,7 +56,7 @@ const buildId = process.env.CPS_DESKTOP_BUILD_ID;
 const commit = process.env.CPS_CANDIDATE_SHA?.toLowerCase();
 const descriptor = RELEASE_TARGETS[target];
 if (!descriptor) throw new Error("CPS_CANDIDATE_TARGET is invalid.");
-if (!VERSION_PATTERN.test(version || "")) throw new Error("CPS_DESKTOP_VERSION is invalid.");
+assertDesktopArtifactVersion({ version, target, releaseChannel: process.env.CPS_RELEASE_CHANNEL });
 if (!BUILD_ID_PATTERN.test(buildId || "")) throw new Error("CPS_DESKTOP_BUILD_ID is invalid.");
 if (!COMMIT_PATTERN.test(commit || "")) throw new Error("CPS_CANDIDATE_SHA must be a full commit SHA.");
 if (process.platform !== descriptor.platform || process.arch !== descriptor.arch) {

@@ -127,6 +127,7 @@ Sync 不改根 config、历史 model、cwd、user-event、workspace roots、titl
 - **刷新**：首次加载和手动刷新，无数据轮询。用户明确开启的 Watch 与每天首次启动的更新检查是独立能力，不授权后台 Diagnostics/History 扫描。
 - **正在使用的会话**：[ADR-0030](../adr/0030-writer-owned-session-count.md) 用 SessionStore 的 `readSessionActivity` 只读观察当前 Home 的 Codex writer owners，含已对齐/等待输入/子会话；Status 与 Provider Plan 的 `sessionActivity` 只含 state/count，未知不返回零。这不是正在生成数。独立的 `impact.lockedRolloutFiles` 仍是本次同步写入受阻集合；Apply 原样重检。不要以 Provider 差异、mtime、遗留文件、进程数或新 app-server 的空状态冒充当前使用情况，也不要将此展示观察变为写入锁或新业务流程。
 - **展示与偏好**：[ADR-0025](../adr/0025-user-feedback-and-window-preferences.md) 约束缺失状态、清理确认上限估计、当前 Profile 标记、Apply 后单次 Status 复核及 History 草稿筛选；窗口位置只由 Main 保存在 userData。不得为这些 UI 能力扩张 Core API、增加扫描或改 Provider I/O。
+  - 浮动通知可点击内容/× 或键盘关闭，只移除该 Toast，保留自动收起；操作结果、日志、备份及全局阻断独立，不触发业务或状态刷新。
 - **Legacy .NET**：保留构建及兼容维护，不复制本次 Node 普通写模型到旧 GUI，也不能引用旧 GUI 自动回滚证明新 Node 行为。
 - **包体优化**：[ADR-0026](../adr/0026-windows-package-size-budget.md) 只调整构建压缩和 Windows 许可证归档；不能通过替换 SQLite、改写 Provider 算法或裁掉功能达到体积门禁。压缩后的 Utility 必须通过 packaged Sync/Restore。
 - **实测前优化**：[ADR-0028](../adr/0028-pretest-feedback-and-validation.md) 固定日志 DTO/内存轮转一致性、Watch 主动终态反馈和 History 有界定位复用。History 定位表只含 ID/路径/身份，不含正文或标题；仍核对全部候选文件身份，不能宣传为恒定时间查询。Watch 私有 Host 协议 v3 不改变公开 Core v1，也不增加后台轮询。

@@ -28,3 +28,11 @@
 本 ADR 缩小本轮发布范围，不将总体迁移 Phase 6/7 标为完成，不降低完整合并 CI、Provider I/O、备份、Restore、Node 16 或 Legacy 兼容门禁。
 
 详见 [Windows Electron 发布操作说明](../WINDOWS_ELECTRON_RELEASE_ZH.md)、[执行索引](../migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md)、[更新约束](0020-desktop-manual-release-check.md)。
+
+## 2026-09-08：Windows 手动安装正式版批准
+
+在 RC 和最新本地 Windows 功能确认后，维护者明确授权将当前版本发布为最新版。批准范围是未签名、手动安装的 Windows x64 `1.0.0`；不包括 npm、其他平台、Legacy 或生产自动下载安装通道。
+
+准备流程增加显式 `stable-manual` 选项，只接受 `1.0.0` 与 `refs/tags/v1.0.0`；默认仍为严格 RC。两者都只生成候选资产或 Draft，继续 exact main push CI、不可变 tag/SHA、全套安装/解包验收及拒绝覆盖。核对最终资产后，才在独立步骤公开正式 Release 并设为 latest。
+
+构建、暂存和容器验证允许此 Windows-only 正式版本，但保留候选审核文件原始字段（`releaseAuthorized: false`、`unsigned-candidate`），表示构建未启用自动安装且审核发生在公开前，不伪造签名/升级证据。人工发布状态以 GitHub Release 为准。不得把 RC 资产重命名或改写已校验 manifest。此次批准不宣称 21 秒同步问题已优化，也不将全平台迁移阶段标为完成。

@@ -1,22 +1,30 @@
-name: prepare Electron Windows release candidate
+name: prepare Electron Windows release
 
 on:
   workflow_dispatch:
     inputs:
       release_ref:
-        description: Existing version tag, exactly refs/tags/v1.0.0-rc.N
+        description: Existing version tag, exactly refs/tags/v1.0.0-rc.N or refs/tags/v1.0.0
         required: true
         type: string
       release_version:
-        description: Matching candidate version, for example 1.0.0-rc.42
+        description: Matching version, for example 1.0.0-rc.42 or 1.0.0
         required: true
         type: string
+      release_channel:
+        description: Stable manual release requires maintainer acceptance of unsigned Windows-only installation
+        required: true
+        default: rc
+        type: choice
+        options:
+          - rc
+          - stable-manual
       expected_sha:
         description: Full 40-character commit SHA resolved by the existing tag
         required: true
         type: string
       create_draft_release:
-        description: Create only a prerelease Draft GitHub Release (the repository environment decides approval); never publish stable/latest
+        description: Create only a Draft GitHub Release (the repository environment decides approval); never publish or set latest
         required: true
         default: false
         type: boolean
@@ -36,6 +44,7 @@ jobs:
       release_ref: ${{ steps.prepare.outputs.release_ref }}
       release_tag: ${{ steps.prepare.outputs.release_tag }}
       version: ${{ steps.prepare.outputs.version }}
+      channel: ${{ steps.prepare.outputs.channel }}
       commit: ${{ steps.prepare.outputs.commit }}
       build_id: ${{ steps.prepare.outputs.build_id }}
       ci_run_id: ${{ steps.ci_gate.outputs.ci_run_id }}
@@ -55,6 +64,7 @@ jobs:
         env:
           CPS_RELEASE_REF: ${{ inputs.release_ref }}
           CPS_RELEASE_VERSION: ${{ inputs.release_version }}
+          CPS_RELEASE_CHANNEL: ${{ inputs.release_channel }}
           CPS_EXPECTED_SHA: ${{ inputs.expected_sha }}
         run: node apps/desktop/scripts/prepare-electron-windows-release.mjs
       - name: Verify existing tag resolves to the exact main-contained commit
@@ -80,6 +90,7 @@ jobs:
     runs-on: windows-latest
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      CPS_RELEASE_CHANNEL: ${{ needs.verify-input.outputs.channel }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -177,20 +188,25 @@ jobs:
         with:
           name: electron-windows-release-${{ needs.verify-input.outputs.version }}-${{ needs.verify-input.outputs.commit }}
           path: artifacts/release
-      - name: Create a Windows-only prerelease draft through the environment gate
+      - name: Create a Windows-only draft through the environment gate
         shell: bash
         working-directory: artifacts/release
         env:
           GH_TOKEN: ${{ github.token }}
           CPS_RELEASE_TAG: ${{ needs.verify-input.outputs.release_tag }}
           CPS_RELEASE_VERSION: ${{ needs.verify-input.outputs.version }}
+          CPS_RELEASE_CHANNEL: ${{ needs.verify-input.outputs.channel }}
           CPS_EXPECTED_SHA: ${{ needs.verify-input.outputs.commit }}
         run: |
           sha256sum --check metadata/SHA256SUMS.txt
+          release_flags=(--prerelease)
+          if [ "$CPS_RELEASE_CHANNEL" = stable-manual ]; then
+            release_flags=(--prerelease=false)
+          fi
           gh release create "$CPS_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --verify-tag --target "$CPS_EXPECTED_SHA" --draft --prerelease --latest=false \
-            --title "Codex Provider Sync Electron $CPS_RELEASE_VERSION (Windows x64 RC)" \
-            --notes "Windows x64 Electron RC. Unsigned; manual installation only. Not stable/latest. Signing and online upgrade acceptance remain unverified. Legacy .NET users must install or fully extract Electron; the old single-EXE updater is incompatible. Source: $CPS_EXPECTED_SHA." \
+            --verify-tag --target "$CPS_EXPECTED_SHA" --draft "${release_flags[@]}" --latest=false \
+            --title "Codex Provider Sync $CPS_RELEASE_VERSION (Windows x64)" \
+            --notes "Windows x64 Electron. Channel: $CPS_RELEASE_CHANNEL. Draft awaiting artifact verification and explicit publication. Unsigned; manual installation only. Signing and online upgrade acceptance remain unverified. Legacy .NET users must install or fully extract Electron; the old single-EXE updater is incompatible. Source: $CPS_EXPECTED_SHA." \
             "assets/CodexProviderSync-$CPS_RELEASE_VERSION-windows-x64-setup.exe" \
             "assets/CodexProviderSync-$CPS_RELEASE_VERSION-windows-x64-portable.zip" \
             metadata/SHA256SUMS.txt metadata/sbom.cyclonedx.json \

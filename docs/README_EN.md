@@ -2,7 +2,7 @@
 
 # codex-provider-sync
 
-### Make Codex history visible again after switching providers
+### Help reuse existing Codex sessions after switching providers
 
 [![CI](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/Dailin521/codex-provider-sync/actions/workflows/ci.yml)
 [![CLI / Web](https://img.shields.io/npm/v/%40dailin521%2Fcodex-provider-sync?label=CLI%20%2F%20Web)](https://www.npmjs.com/package/@dailin521/codex-provider-sync)
@@ -16,13 +16,15 @@
 
 ## What it solves
 
-After switching `model_provider`, older sessions may disappear from Codex Desktop or `/resume`. **The data usually remains on disk**; only the provider information in session files and the SQLite index is out of sync.
+**A visible session is not necessarily ready to continue with the current Provider.** After switching `model_provider`, session files and the SQLite index may still reference the previous Provider. This tool aligns that metadata with the current configuration to help reuse sessions affected by a Provider mismatch, rather than focusing on history-list visibility. It does not guarantee cross-provider continuation or compaction; encrypted content and model compatibility remain separate concerns.
 
 This tool aligns Provider metadata in session files and the SQLite index. Actual changes are backed up first, retaining the two most recent managed backups by default; a no-op creates no backup. Desktop/Web manage retention only in Backups / Restore. Operations share the app setting, with a separate pool per Codex Home; Desktop, browsers and CLI do not share preferences. Saving the setting does not immediately delete backups, and recovery-protected backups may exceed the limit. It does not sign in, switch accounts, decrypt or reconstruct messages, or modify `auth.json`.
 
-<p align="center">
-  <img src="../images/README/provider-metadata-sync-flow.png" alt="Provider metadata before and after synchronization" width="760">
-</p>
+| Provider metadata | Before (example) | After sync |
+| --- | --- | --- |
+| Current configuration | Provider B | Provider B (unchanged) |
+| Session files | Provider A | Provider B |
+| SQLite chat index | Provider A | Provider B |
 
 ### When is synchronization needed?
 
@@ -81,7 +83,7 @@ The Web UI listens on `127.0.0.1` by default and opens a browser to pair automat
 3. Choose Preview sync and confirm, or click Sync now.
 4. Inspect the result. For partial completion, end the active session and sync again; skipped records are not updated records.
 
-> **Note:** Metadata sync restores history visibility only. When continuing an old session across providers, the target backend may be unable to decrypt its `encrypted_content` reasoning data, causing continuation or compaction to fail.
+> **Note:** Metadata sync addresses Provider mismatches, not every cause of an unusable session. When continuing an old session across providers, the target backend may be unable to decrypt its `encrypted_content` reasoning data, causing continuation or compaction to fail.
 
 [Full Web UI guide (Chinese)](README_WEB_UI_ZH.md)
 

@@ -1,5 +1,9 @@
 # vNext 行为兼容 Fixture 清单
 
+## 2026-09-08：Windows 手动安装正式版（ADR-0039 补充）
+
+- `apps/desktop/tests/release-candidate.test.mjs`：默认 RC 严格版本、显式 stable-manual 仅 Windows 1.0.0、tag/SHA 一致、拒绝已有 Release/异常 API、构建/暂存/容器验收共同校验，workflow 保持 Draft-only 且不启用生产自动安装。
+
 ## 2026-09-08：Windows 清理与分项计时（ADR-0038）
 
 - windows-rewrite-worker.test.js / windows-provider-bytes.ps1：Force 清理回退、两种更新、正文/身份/mtime、单批聚合、未知计时和 observer/worker 失败。
@@ -271,6 +275,7 @@ SQLite live WAL、真实文件锁、跨进程 crash 和 WSL UNC 不能作为静�
 | prune-estimate-and-confirm | 同上、`provider-sync-mode.vitest.tsx` | 默认 2，上限估计、0 提示、确认/取消、列表或配置版本改变阻断 |
 | current-profile-badge | `packages/app-ui/tests/ux-polish.vitest.tsx` | 当前使用标记与编辑选择独立 |
 | post-write-status-verification | 同上 | 单次现有 Status 复核、失败不使用旧值、完整/不完整对齐明确区分 |
+| dismissible-operation-notification | `packages/app-ui/tests/toast-dismiss.vitest.tsx` | 点击标题/描述/关闭图标、Enter/空格/Esc、双语标签、仅关闭选中通知、可再次通知及原有自动收起；不接入 Core、日志、备份或刷新 |
 | history-draft-reset | 同上 | 草稿不扫描，清除回元数据默认筛选，不缓存正文 |
 | desktop-window-state | `apps/desktop/tests/window-state.test.mjs` | 正常边界/最大化分离、负坐标/显示器失效/小工作区、原子偏好、退出 flush 和测试隔离 |
 
