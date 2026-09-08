@@ -9,6 +9,7 @@ import {
   useCallback,
   useContext,
   useMemo,
+  useRef,
   useState,
   type ButtonHTMLAttributes,
   type HTMLAttributes,
@@ -17,6 +18,7 @@ import {
 } from "react";
 import { twMerge } from "tailwind-merge";
 import clsx, { type ClassValue } from "clsx";
+import { useTranslation } from "react-i18next";
 
 export function cn(...values: ClassValue[]): string {
   return twMerge(clsx(values));
@@ -148,6 +150,8 @@ interface ToastContextValue { push(item: Omit<ToastItem, "id">): void; }
 const ToastContext = createContext<ToastContextValue | null>(null);
 
 export function ToastProvider({ children }: { children: ReactNode }) {
+  const { t } = useTranslation();
+  const viewportRef = useRef<HTMLOListElement>(null);
   const [items, setItems] = useState<ToastItem[]>([]);
   const push = useCallback((item: Omit<ToastItem, "id">) => {
     const id = Date.now() + Math.floor(Math.random() * 1000);
@@ -161,17 +165,30 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         {items.map((item) => (
           <ToastPrimitive.Root
             className={cn(
-              "grid w-[min(92vw,420px)] gap-[var(--space-1)] rounded-xl border bg-[var(--surface-raised)] p-[var(--space-4)] text-[var(--text)] shadow-xl",
+              "w-[min(92vw,420px)] rounded-xl border bg-[var(--surface-raised)] text-[var(--text)] shadow-xl",
               item.tone === "danger" ? "border-[var(--danger)]" : item.tone === "warning" ? "border-[var(--warning)]" : "border-[var(--success)]"
             )}
             key={item.id}
             onOpenChange={(open) => { if (!open) setItems((current) => current.filter((entry) => entry.id !== item.id)); }}
           >
-            <ToastPrimitive.Title className="font-semibold">{item.title}</ToastPrimitive.Title>
-            {item.description ? <ToastPrimitive.Description className="[font-size:var(--text-sm)] leading-[var(--leading-normal)] text-[var(--muted)]">{item.description}</ToastPrimitive.Description> : null}
+            {/* Keep announcement text outside Radix Close's excluded subtree. */}
+            <button
+              type="button"
+              aria-label={t("common.dismissNotification", { title: item.title })}
+              onClick={(event) => {
+                // Match Radix Close's focus fallback before removing this item.
+                if (event.currentTarget.contains(document.activeElement)) viewportRef.current?.focus();
+                setItems((current) => current.filter((entry) => entry.id !== item.id));
+              }}
+              className="relative grid min-h-11 w-full cursor-pointer gap-[var(--space-1)] rounded-xl p-[var(--space-4)] pr-12 text-left hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface)]"
+            >
+              <ToastPrimitive.Title asChild><span className="font-semibold">{item.title}</span></ToastPrimitive.Title>
+              {item.description ? <ToastPrimitive.Description asChild><span className="[font-size:var(--text-sm)] leading-[var(--leading-normal)] text-[var(--muted)]">{item.description}</span></ToastPrimitive.Description> : null}
+              <X aria-hidden="true" size={18} className="absolute right-4 top-4 text-[var(--muted)]" />
+            </button>
           </ToastPrimitive.Root>
         ))}
-        <ToastPrimitive.Viewport className="fixed bottom-5 right-5 z-[60] grid gap-[var(--space-3)] outline-none" />
+        <ToastPrimitive.Viewport ref={viewportRef} className="fixed bottom-5 right-5 z-[60] grid gap-[var(--space-3)] outline-none" />
       </ToastPrimitive.Provider>
     </ToastContext.Provider>
   );
