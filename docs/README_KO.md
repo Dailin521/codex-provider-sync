@@ -34,7 +34,7 @@
 
 ## 빠른 시작
 
-> 이 가이드는 V1 코드를 설명합니다. Electron이 기본 데스크톱 앱이며 .NET은 Legacy 호환 버전으로 유지됩니다. 로컬 V1 빌드가 공개 릴리스, 서명 또는 업데이트 채널 활성화를 의미하지는 않습니다. Releases에 실제로 올라온 파일만 사용하세요. npm은 공개된 버전을 설치합니다. [제공 현황](migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md)도 확인하세요.
+> [Windows x64 Electron v1.0.0](https://github.com/Dailin521/codex-provider-sync/releases/tag/v1.0.0)이 공개되었습니다. 미서명 버전이며 업데이트는 수동 설치입니다. 기존 .NET 업데이트 버튼으로는 이전할 수 없습니다. macOS/Linux Electron 패키지는 아직 미공개입니다. CLI / Web npm 버전은 독립적으로 배포되므로 데스크톱 버전과 같지 않습니다. [다운로드 및 간단한 가이드(영문)](README_EN.md#download-for-windows).
 
 | 상황 | 권장 방법 |
 | --- | --- |

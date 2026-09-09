@@ -14,11 +14,11 @@ An external behavior change must update its contract and add or update a fixture
 
 ## Goal
 
-Restore Codex session visibility after `model_provider` changes by keeping rollout metadata and the resolved SQLite thread index aligned. Do not treat this as an authentication or account-management tool.
+Help reuse Codex sessions affected by `model_provider` metadata mismatches by keeping rollout metadata and the resolved SQLite thread index aligned. This does not guarantee cross-provider continuation or compaction. Do not treat this as an authentication or account-management tool.
 
 ## Choose the interface
 
-- Prefer the Windows GUI for users who want a double-click tool and do not want Node.js.
+- Prefer the Windows Electron desktop app for users who want a double-click tool and do not want Node.js.
 - Prefer the Local Web UI for browser-based or cross-platform use: `codex-provider web`.
 - Use the CLI for explicit command requests, automation, diagnostics, WSL paths, or when a GUI is unavailable.
 - Use `CodexProviderSync.Automation.exe` only for repository development or explicit Automation work. It ships with the v0.4 Windows Release, but protocol 0.4 is experimental and is not a stable public API or a production GUI control port.
@@ -63,7 +63,7 @@ On Windows, `\\wsl.localhost\...` and `\\wsl$\...` SQLite Homes are diagnostic-o
 - Do not change thread `updated_at` or reorder history to force visibility.
 - Preserve Home locking, backup-first, native SQLite transactions, WSL and path boundaries. Ordinary Sync/Switch/Repair use retryable partial outcomes after mutation, not cross-file journals or automatic full rollback. Restore alone retains its durable recovery journal and compensation. Do not reintroduce a Node State DB resource lock.
 - Rollout/SQLite counts may differ briefly because of an active session; Provider distributions are the alignment signal.
-- Metadata synchronization restores visibility only. Another Provider/account may be unable to decrypt existing `encrypted_content`; advise the user to return to the original Provider/account or start a new session if continuation or compact fails.
+- Metadata synchronization only addresses Provider alignment, not every cause of an unusable session. Another Provider/account may be unable to decrypt existing `encrypted_content`; advise the user to return to the original Provider/account or start a new session if continuation or compact fails.
 - Tests and reproduction scripts must use temporary directories or fixtures, never a real user Codex Home.
 
 ## Handle common outcomes

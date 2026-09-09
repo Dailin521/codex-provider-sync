@@ -34,7 +34,7 @@
 
 ## クイックスタート
 
-> 本書は V1 コードの説明です。Electron が主デスクトップアプリで、.NET は Legacy 互換版として維持されます。ローカル V1 ビルドは公開リリース、署名、更新チャネルの有効化を意味しません。Releases に実際に掲載されたファイルのみを利用してください。npm は公開済みバージョンをインストールします。[提供状況](migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md)も確認してください。
+> [Windows x64 Electron v1.0.0](https://github.com/Dailin521/codex-provider-sync/releases/tag/v1.0.0) を公開済みです。未署名で、更新は手動インストールです。旧 .NET 更新ボタンでは移行できません。macOS/Linux Electron パッケージは未公開です。CLI / Web の npm バージョンは独立して公開され、デスクトップ版とは一致しません。[ダウンロードと簡潔なガイド（英語）](README_EN.md#download-for-windows)。
 
 | 利用場面 | 推奨する入口 |
 | --- | --- |

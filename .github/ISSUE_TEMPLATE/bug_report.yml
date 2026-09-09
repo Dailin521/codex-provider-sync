@@ -13,8 +13,8 @@ body:
     id: version
     attributes:
       label: codex-provider-sync 版本
-      description: 例如 v0.5.0。GUI 版本请填写 Release 版本；CLI 版本请填写 `npm list -g @dailin521/codex-provider-sync` 或安装来源。
-      placeholder: v0.5.0
+      description: 桌面版请填写 Release 版本（如 v1.0.0）；CLI / Web 请填写 `npm list -g @dailin521/codex-provider-sync` 的版本或源码 commit。桌面与 npm 版本独立发布。
+      placeholder: Windows Electron v1.0.0 / npm CLI v0.5.0
     validations:
       required: true
   - type: dropdown
@@ -22,7 +22,9 @@ body:
     attributes:
       label: 使用方式
       options:
-        - Windows GUI EXE
+        - Windows Electron 桌面版
+        - 本地 Web UI
+        - Legacy .NET 桌面版（Windows / macOS）
         - npm 全局 CLI
         - 仓库源码运行
         - 其它
@@ -47,12 +49,12 @@ body:
     id: steps
     attributes:
       label: 复现步骤
-      description: 从 provider 切换、Refresh、Execute、sync/switch 命令开始写，尽量按时间顺序。
+      description: 从 Provider 切换、刷新、预览或直接同步、sync/switch 命令开始写，尽量按时间顺序。
       placeholder: |
         1. 关闭 Codex Desktop
         2. 切换 provider 到 ...
-        3. 打开 CodexProviderSync.exe，点击 Refresh
-        4. 点击 Execute 后出现 ...
+        3. 打开工具，在概览点击刷新
+        4. 点击直接同步后出现 ...
     validations:
       required: true
   - type: textarea
@@ -71,8 +73,8 @@ body:
   - type: textarea
     id: diagnostics
     attributes:
-      label: status / GUI Refresh 诊断文本
-      description: 优先粘贴完整输出。CLI 可运行 `codex-provider status`；GUI 请复制 Refresh 后状态区文本。
+      label: 概览状态 / CLI status 输出
+      description: CLI 可运行 `codex-provider status`；桌面 / Web 请附刷新后的概览截图或文字。无需为提交问题执行高级修复。请遮盖个人路径等隐私信息。
       render: text
     validations:
       required: true
@@ -80,7 +82,7 @@ body:
     id: logs
     attributes:
       label: 日志或错误堆栈
-      description: Windows GUI 常规问题请贴 `%AppData%\codex-provider-sync\logs\execution-YYYY-MM-DD.log`；EXE 启动问题另请贴 `%AppData%\codex-provider-sync\startup-error.log`；CLI 问题请贴终端完整输出。
+      description: Electron 请附“操作日志”中对应操作的结果、错误码和阶段耗时；CLI / Web 请附终端错误。Legacy .NET Windows 日志位于 `%AppData%\codex-provider-sync\logs`，启动错误为同目录上级的 `startup-error.log`。不要上传 auth.json、凭据、聊天正文、原始数据库或备份。
       render: text
     validations:
       required: false
@@ -89,7 +91,7 @@ body:
     attributes:
       label: 确认事项
       options:
-        - label: 我理解本工具只同步可见性 metadata，不处理登录、认证或 auth.json。
+        - label: 我理解普通同步只对齐 Provider 元数据，不处理登录、认证或 auth.json。
           required: true
         - label: 我理解含 encrypted_content 的历史会话跨 provider/account 后可能不能继续对话。
           required: true
