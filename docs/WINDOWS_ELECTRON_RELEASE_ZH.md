@@ -9,6 +9,8 @@
 3. 处理所有未解决审查，采用 merge commit 合并，禁止 squash、rebase、force-push 或绕过失败门禁。
 4. main 合入后的实际 SHA 必须再次通过 `ci-gate`。所有产物与测试结论记录实际 SHA，不以 PR 分支名代替。
 
+部分重跑：GitHub 的“仅重跑失败 job”会保留本次 workflow 中已成功 job 的产物。C10 可复用同一仓库、同一 `runId`、同一 tested commit 且来自当前或更早正整数 `runAttempt` 的历史 Release 验证证据；拒绝跨运行、跨提交、未来或无效次数。全部 required jobs 仍必须成功，Release 资产/二进制/备份哈希校验不变。新 bundle 的 `workflow.runAttempt` 记录当前次数，`historicalFormalRelease.sourceRunAttempt` 如实记录证据来源次数，不改写源证据；v1 schema 将该新增字段设为可选，仅为兼容历史 bundle。重跑成功不抹去之前失败的记录，也不授权发布。
+
 ## 2. 候选包与独立流程
 
 `.github/workflows/publish-electron-windows.yml` 是独立的手动候选准备流程。现有 `publish.yml` 仍构建 Legacy .NET；`publish-npm.yml` 仍发布 npm。本轮不得运行后两者。

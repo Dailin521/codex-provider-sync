@@ -201,6 +201,45 @@ test("C10 formal Release evidence binds the hosted binary and current workflow",
   }
 });
 
+test("C10 partial reruns reuse only same-run, same-commit evidence from non-future attempts", () => {
+  const context = {
+    manifest: formalReleaseManifest,
+    evidenceForCommit: sha,
+    repository: formalReleaseManifest.repository,
+    runId: "42",
+    runAttempt: 3
+  };
+  for (const attempt of [1, 2, 3]) {
+    const evidence = formalReleaseEvidence();
+    evidence.workflow.runAttempt = attempt;
+    const normalized = normalizeFormalReleaseEvidence(evidence, context);
+    assert.equal(normalized.sourceRunAttempt, attempt);
+    assert.equal(evidence.workflow.runAttempt, attempt);
+  }
+  for (const attempt of [0, -1, 1.5, "1", null, undefined, NaN, Infinity, 4, Number.MAX_SAFE_INTEGER + 1]) {
+    const evidence = formalReleaseEvidence();
+    evidence.workflow.runAttempt = attempt;
+    assert.throws(() => normalizeFormalReleaseEvidence(evidence, context), /attempt/i);
+  }
+  for (const attempt of [0, -1, 1.5, "3", null, undefined, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() => normalizeFormalReleaseEvidence(formalReleaseEvidence(), {
+      ...context, runAttempt: attempt
+    }), /attempt/i);
+  }
+  for (const mutate of [
+    (evidence) => { evidence.workflow.repository = "other/repository"; },
+    (evidence) => { evidence.workflow.runId = "41"; },
+    (evidence) => { evidence.workflow.testedCommit = "c".repeat(40); },
+    (evidence) => { evidence.asset.sha256 = hash; },
+    (evidence) => { evidence.verification.currentNodeRestoreVerified = false; }
+  ]) {
+    const evidence = formalReleaseEvidence();
+    evidence.workflow.runAttempt = 1;
+    mutate(evidence);
+    assert.throws(() => normalizeFormalReleaseEvidence(evidence, context));
+  }
+});
+
 test("C10 redaction rejects protected keys, absolute paths, and credential markers", () => {
   assert.doesNotThrow(() => assertRedacted({ evidencePath: "docs/migration/evidence/C9.md", result: "success" }));
   assert.throws(() => assertRedacted({ token: "redacted" }), /forbidden key class/);
@@ -267,6 +306,30 @@ test("C10 JSON schema compiles in strict mode and rejects an incomplete bundle",
     assertEvidenceSchema({}, rootDir),
     /does not match its JSON Schema/
   );
+});
+
+test("C10 evidence schema validates source attempt and remains compatible with older bundles", {
+  skip: Number(process.versions.node.split(".")[0]) < 24
+}, async () => {
+  const { default: Ajv2020 } = await import("ajv/dist/2020.js");
+  const schema = JSON.parse(fs.readFileSync(path.join(rootDir, "docs", "migration", "evidence", "C10_EVIDENCE_BUNDLE.v1.schema.json"), "utf8"));
+  const validate = new Ajv2020({ strict: true }).compile({
+    $defs: schema.$defs,
+    ...schema.properties.historicalFormalRelease
+  });
+  const evidence = {
+    evidenceSha256: hash,
+    ...normalizeFormalReleaseEvidence(formalReleaseEvidence(), {
+      manifest: formalReleaseManifest, evidenceForCommit: sha,
+      repository: formalReleaseManifest.repository, runId: "42", runAttempt: 4
+    })
+  };
+  assert.equal(validate(evidence), true, JSON.stringify(validate.errors));
+  for (const attempt of [0, -1, 1.5, "3", null]) {
+    assert.equal(validate({ ...evidence, sourceRunAttempt: attempt }), false);
+  }
+  delete evidence.sourceRunAttempt;
+  assert.equal(validate(evidence), true, JSON.stringify(validate.errors));
 });
 
 test("C10 event-base evidence follows the actual Git graph for push and pull-request commits", async () => {

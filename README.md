@@ -16,156 +16,140 @@
 
 ## 它解决什么
 
-**会话能看见，不代表能按当前 Provider 正常继续。** 切换 `model_provider` 后，会话文件和 SQLite 索引中的 Provider 信息可能仍停留在旧值。本工具将两者对齐到当前配置，帮助因 Provider 元数据不一致而无法正常使用的旧会话重新可用。
+切换 Provider 后，旧会话可能仍记录着原来的 Provider。本工具将**会话文件与 SQLite 聊天索引中的 Provider 信息**对齐到当前配置，解决元数据不一致的问题。
 
-工具的重点是切换后的会话复用，而不是让列表重新显示。有实际修改时先备份，默认保留最近 **2 份**；无需修改时不创建备份。它不负责登录、切换账号、解密或重建消息，也不读取或修改 `auth.json`。**同步不保证跨 Provider / 账号的旧会话一定能继续或压缩**；加密内容与模型兼容问题仍需分别处理。
+**不保证跨 Provider / 账号的旧会话一定能继续或压缩**，也不处理登录、认证或加密内容。信息已对齐时，无需重复同步。
 
-| Provider 信息 | 同步前（示例） | 同步后 |
-| --- | --- | --- |
-| 当前配置 | Provider B | Provider B（不改） |
-| 会话文件 | Provider A | Provider B |
-| SQLite 聊天索引 | Provider A | Provider B |
+<p align="center">
+  <img src="images/README/provider-metadata-sync-flow.png" alt="Provider 元数据同步示意：保持当前配置不变，将会话文件与 SQLite 索引从 Provider A 对齐到 Provider B" width="760">
+</p>
 
-- 已通过 CCSwitch 等工具切换 Provider：使用“同步当前 Provider”。
-- 希望由本工具修改 Provider：使用“单独切换 Provider”，修改配置后同步历史中的 Provider 信息。
-- Provider ID 没变、历史也已对齐：无需重复同步。
-- 已对齐但仍无法继续或压缩：查看 Codex 的具体报错；跨 Provider 的加密内容不兼容不能靠同步解决。
+- **已用 CCSwitch 等工具切换**：同步到当前配置中的 Provider。
+- **希望在本工具中切换**：修改配置后，同步会话文件和索引中的 Provider。
+- **Provider 信息已经一致**：不必重复同步；继续失败时应查看 Codex 的具体报错。
 
-## 快速开始
+## 核心功能
 
-> 本页对应 V1 代码。Electron 是主桌面端，.NET 保留为 Legacy。下载以 [Releases 实际资产](https://github.com/Dailin521/codex-provider-sync/releases) 为准，npm 安装得到已发布版本；本地构建和代码版本号不代表已公开发布、签名或启用更新通道。
+- **同步与切换**：预览或直接同步，按需开启自动同步。
+- **备份与恢复**：修改前自动备份，支持恢复和清理。
+- **聊天与日志**：按项目浏览会话，查看操作结果和耗时。
+- **存储与修复**：自定义数据位置，按需诊断和专项修复。
 
-| 场景 | 入口 |
-| --- | --- |
-| Windows 桌面，无需安装 Node.js | [Electron 桌面版指南](docs/README_DESKTOP_ZH.md) |
-| macOS / Linux 桌面 | [平台与构建说明](docs/README_DESKTOP_ZH.md#程序安装更新与体积)，以对应版本实际资产为准 |
-| 浏览器操作 / 跨平台 | [本地 Web UI](#本地-web-ui) |
-| 命令行、脚本或 WSL | [CLI](#cli) |
+## 下载 Windows 桌面版
 
-### 桌面版
+**v1.0.0 · Windows x64**，无需 Node.js。
 
-安装对应平台包，或解压完整程序目录运行。**不要只复制 Electron 的单个 EXE。**
+[安装版](https://github.com/Dailin521/codex-provider-sync/releases/download/v1.0.0/CodexProviderSync-1.0.0-windows-x64-setup.exe) · [便携 ZIP](https://github.com/Dailin521/codex-provider-sync/releases/download/v1.0.0/CodexProviderSync-1.0.0-windows-x64-portable.zip) · [版本说明与校验](https://github.com/Dailin521/codex-provider-sync/releases/tag/v1.0.0)
 
-Windows `1.0.0` 的[安装与旧版迁移说明](docs/release-notes/v1.0.0-zh.md)：未签名、手动安装更新；旧 .NET 的单 EXE 更新按钮不能完成迁移。本轮不发布 npm、macOS/Linux 或 Legacy 安装包。
+未签名，手动安装更新；便携版须完整解压。旧 .NET 版需重新下载安装，不能通过旧更新按钮迁移。
 
-1. 打开“概览”，核对当前 Provider、存储路径和同步状态。
-2. 在存储配置右侧使用“预览同步”查看影响，或“直接同步”立即执行，两者同步范围相同。
-3. 需要修改 Provider 时，在概览底部使用“单独切换 Provider”，选择目标和模型策略，预览后确认。
-4. 查看结果。部分完成时，结束相关占用会话后重新同步；需要撤销时前往“备份 / 恢复”。
+macOS/Linux Electron 包尚未发布；CLI / Web 的 npm 版本独立发布。
 
-“单独切换”不是仅修改配置：它仍会同步历史 Provider，但不修改历史模型。自定义 Provider 必须已在 `config.toml` 中定义；模型策略见[同步与切换说明](docs/README_DESKTOP_ZH.md#同步与切换-provider)。
+## 日常使用
 
-### 本地 Web UI
+1. 打开“概览”，确认 **Provider、存储路径和同步状态**。
+2. 已通过 CCSwitch 等工具切换 Provider：点击“预览同步”查看影响，或“直接同步”立即执行。
+3. 查看结果。部分完成时，结束相关占用会话后重试；需要撤销时进入“备份 / 恢复”。
 
-安装 Node.js `16.20.2+`，然后运行：
+“单独切换 Provider”会修改配置并同步历史 Provider，不改历史模型；自定义 Provider 需预先配置。
+
+修改前自动备份，默认保留最近 **2 份**，在“备份 / 恢复”中管理；无需修改时不备份，受保护备份不受数量限制。
+
+[桌面完整指南](docs/README_DESKTOP_ZH.md) · [旧版迁移说明](docs/release-notes/v1.0.0-zh.md)
+
+## 本地 Web UI
+
+安装 Node.js `16.20.2+` 后运行，获得 npm 当前已发布的 CLI / Web 版本：
 
 ```bash
 npm install -g @dailin521/codex-provider-sync
 codex-provider web
 ```
 
-服务只监听本机 `127.0.0.1:8791`，默认打开浏览器完成配对。日常同步流程与桌面版相同，Web 不提供桌面操作日志和应用更新。
+默认只监听本机 `127.0.0.1:8791`，打开浏览器完成配对。跨设备使用见 [Web 指南与 SSH 用法](docs/README_WEB_UI_ZH.md)。
 
-```bash
-codex-provider web --no-open       # 不自动打开浏览器
-codex-provider web --port 8792     # 指定端口
-codex-provider web --reset-access  # 撤销旧连接并重新配对
-```
+## CLI
 
-[Web 完整指南与 SSH 用法](docs/README_WEB_UI_ZH.md)
-
-### CLI
-
-安装同一个 npm 包后，先检查，再执行：
+安装同一个 npm 包后，先检查，再同步：
 
 ```bash
 codex-provider status
 codex-provider sync
 ```
 
-| 命令 | 用途 |
-| --- | --- |
-| `status` | 检查当前 Provider、存储位置和同步状态 |
-| `sync` | 同步到 config 当前 Provider |
-| `switch <provider-id>` | 修改配置中的 Provider，然后同步 |
-| `diagnostics` | 手动执行一次完整只读诊断 |
-| `repair <targets>` | 显式执行选定的非 Provider 元数据修复 |
-| `restore <backup-dir>` | 恢复受管备份 |
-| `prune-backups --keep N` | 清理较旧受管备份 |
-| `watch` | 主动开启自动同步；按 Ctrl+C 停止 |
+CLI 写命令直接执行。切换 Provider、恢复备份、Watch、路径参数及 JSON 退出码见 [CLI 指南](docs/README_CLI_ZH.md)；命令是否可用以安装版本的 `--help` 为准。
 
-CLI 写命令直接执行，不再弹出交互确认。有限命令支持 `--json`；例如 `codex-provider sync --json`。脚本必须检查 `outcome` 和退出码，部分完成的 JSON 退出码为 `3`。
+## 架构：一个共享核心，多种入口
 
-[CLI 参数、模型策略、路径、备份与 JSON 指南](docs/README_CLI_ZH.md)
+CLI、Web 与 Electron 共用 **Node Core 的同一套业务用例和存储算法**。桌面版不通过启动 CLI、解析终端文本来执行同步，安装 CLI 也不会额外安装 Electron。
 
-## 界面里还可以做什么
+```mermaid
+flowchart TB
+    CLI["CLI / 脚本 / WSL"] --> Adapter["CLI 兼容适配器"]
+    Web["Web 界面"] --> Http["HttpCoreClient · 本地 Web Host"]
+    Desktop["Electron 桌面界面"] --> IPC["DesktopCoreClient · Preload / Main 窄 IPC"]
+    IPC --> Utility["Utility Process"]
 
-| 页面 | 用途 |
-| --- | --- |
-| 概览 | 核对路径和两侧 Provider 分布，预览/直接同步，单独切换 Provider |
-| 备份 / 恢复 | 统一设置备份保留数、查看备份、恢复和手动清理 |
-| 聊天记录 | 按项目浏览主会话/子任务，查看消息；右键复制会话 ID、继续命令等 |
-| 操作日志（桌面） | 左侧选操作、右侧看详情，查看目标、结果、数量和阶段耗时 |
-| 存储配置 | 新建具名配置，指定 Codex Home 和可选的 SQLite Home |
-| 高级功能 | 手动诊断、专项修复和独立的历史模型调整 |
-| 设置 | 语言、主题、主动开启的 Watch；桌面端另有更新检查 |
+    subgraph Core["共享 Node Core"]
+        Facade["CoreFacade · 统一接口"]
+        UseCases["业务用例<br/>状态 / 同步 / 切换 / 备份与恢复<br/>历史 / 诊断与修复 / Watch"]
+        Runtime["OperationRuntime<br/>计划校验 / 并发协调 / 进度与取消"]
+        Storage["存储端口<br/>Config / Sessions / State DB / Global State"]
+        Backup["UndoBackup / RestoreRecovery<br/>备份与恢复基础设施"]
+        Facade --> UseCases
+        UseCases --> Runtime
+        UseCases --> Storage
+        UseCases --> Backup
+    end
 
-数据首次加载、手动刷新或明确操作后更新，**不后台轮询**。聊天正文只有明确查看/提交正文搜索才加载；手动 Diagnostics 与 Repair 按各自范围扫描。正文不进入日志、诊断包或持久缓存。
+    Http --> Facade
+    Utility --> Facade
+    Adapter --> UseCases
+    Storage --> Data["config.toml / 会话文件 / SQLite / 工作区设置"]
+    Backup --> Managed["受管备份 / Restore journal"]
+```
 
-备份保留数量统一在“备份 / 恢复”设置：同一应用内各项操作共用，每个 Codex Home 分别保留。保存设置不会立即删除备份；恢复依赖的受保护备份可能超过数量。桌面、Web 浏览器与 CLI 不共享偏好。
+- **界面与 Host** 负责交互、传输和桌面能力，不重复实现 Provider 读写算法。
+- **CoreFacade** 是新版 Web `/api/core` 与 Electron 的入口；CLI 及保留的旧 Web 写路由仍通过兼容适配层调用同一业务用例。
+- **Sync、Repair、Restore 各司其职**：普通同步只对齐 Provider，专项修复需明确选择，恢复独立保留恢复前快照和补偿机制。
+- **旧 .NET Windows/macOS** 是独立的 Legacy 实现，保留构建与兼容维护，不是 Node Core 的另一个分发壳。
 
-日常同步不需要高级修复。专项修复只处理明确选择的目录/用户消息标记/工作区设置；统一历史模型名称单独放在“高级调整”。当前不提供会话序号改写或历史显示索引重建。
+模块归属、依赖方向和不可改变的读写约束，以 [当前 Node Core 架构](docs/architecture/NODE_CORE_ARCHITECTURE_ZH.md) 为准；总体路线见 [Electron + Node 架构基线](docs/VNEXT_ELECTRON_NODE_ARCHITECTURE_ZH.md)。
 
-## 同步速度与读写边界
+## 同步如何读写，速度取决于什么
 
-- **合格的等字节长 Provider** 自动原地更新，只覆盖首行中的 Provider 字节，保留文件身份、大小和正文。
-- **不等长或不满足原地资格** 的有效首行采用临时文件流式替换，正文逐字节复制，不解析聊天正文。
-- 没有 `--fast` 或 `sync --provider` 模式，不要求用户统一 Provider 名称长度。原地写失败不会强制改成整文件替换。
-- 时间戳恢复、备份和落盘检查不会为了提速取消。会话文件很多或正文很大时，复制和落盘仍可能耗时。
+普通同步从 `config.toml` 获取当前 Provider，只解析会话首行的 `session_meta`，再对齐会话文件与 SQLite 的 Provider 信息，**不扫描聊天正文来修复其他字段**。
 
-概览可展开“如何加快同步”。Windows 新同步/切换日志提供复制、落盘、替换、清理和时间戳恢复的分项耗时；旧日志不补造计时。实测速率取决于数据、磁盘和占用，不以合成样本承诺真实同步耗时。
+| 文件更新方式 | 适用情况 | 读写行为 |
+| --- | --- | --- |
+| 等长原地替换 | Provider 的 JSON 字面量 UTF-8 字节等长，且定位、身份及占用校验通过 | 定位覆盖 Provider 字节，保持文件身份、大小和正文不变 |
+| 流式替换 | 有效首行不满足原地替换条件，如 Provider 字节长度不同 | 更新首行，逐字节复制正文到临时文件，再原子替换 |
 
-[工作原理](docs/WORKING_PRINCIPLE_ZH.md) · [开发必守的 Provider I/O 约束](docs/architecture/NODE_CORE_ARCHITECTURE_ZH.md#3-provider-io-不变量必须保持)
+以上策略自动选择，不需要 `--fast`，也不要求用户把 Provider 名称统一成固定长度。原地写失败不会强制退回整文件替换。
+
+**等长不代表整次操作只写几个字节。** 备份、校验、落盘及时间戳恢复仍有开销；大量文件或大体积历史仍可能耗时。概览中的“如何加快同步”提供建议，Windows 操作日志可查看复制、落盘、替换、清理和时间戳恢复的分项耗时。
+
+[工作原理与路径解析](docs/WORKING_PRINCIPLE_ZH.md) · [Provider I/O 不变量](docs/architecture/NODE_CORE_ARCHITECTURE_ZH.md#3-provider-io-不变量必须保持)
 
 ## 常见结果与注意事项
 
-| 情况 | 怎么处理 |
-| --- | --- |
-| 会话文件数与索引行数不同 | 不一定是故障，以 Provider 分布和同步状态为准 |
-| 部分完成 / 会话被占用 | 查看跳过项和失败阶段，结束相关占用后重新同步；需要撤销时手动恢复 |
-| 状态待刷新 / 数据已变化 | 手动刷新或重新预览，不要删除锁文件或数据库 |
-| 自定义 Provider 不存在 | 先在配置/常用 Provider 工具中补齐定义；本工具不会擅自切回 OpenAI |
-| SQLite busy | 停止相关 Codex 写入后重试；若已部分写入，先查看结果和备份 |
-| 已同步但旧会话仍无法继续 | 查看具体报错；若为加密内容不兼容，回到原 Provider/账号或新建会话，本工具不能解密旧内容 |
+- **同步范围**：只对齐 Provider，不修改聊天正文、历史模型或 `threads.updated_at`，不读取或修改 `auth.json`。
+- **部分完成**：不代表全部失败，也不会自动全量回滚。查看跳过项、失败阶段和备份，再重试或手动恢复。
+- **数据已变化 / 状态待刷新**：手动刷新或重新预览，不要删除锁文件或数据库。
+- **文件数与索引数不同**：不一定是故障，以 Provider 分布和同步状态为准。
+- **仍无法继续**：若为加密内容或模型兼容问题，请回到原 Provider / 账号，或新建会话；同步不能解决这类问题。
+- **存储位置**：以概览实际路径为准。Windows 的 WSL UNC SQLite 路径仅支持诊断；写入需进入对应 WSL 运行 CLI。
 
-普通 Sync/Switch/Repair 在修改前创建覆盖实际目标的备份；写入后失败报告部分完成，不自动全量回滚。Restore 独立保留恢复前快照、journal 和补偿。所有操作都不会通过修改 `threads.updated_at`、消息顺序或时间来强行刷新历史。
-
-SQLite Home 优先级：显式参数/存储配置 → `config.toml` 的 `sqlite_home` → `CODEX_SQLITE_HOME` → `<Codex Home>/sqlite`。只有默认布局允许回退到旧位置 `<Codex Home>/state_5.sqlite`。Windows 的 WSL UNC SQLite Home 仅诊断；写入须在对应 WSL 内使用 Linux 路径运行 CLI。
-
-## 一个共享核心，多种入口
-
-```text
-CLI → 兼容适配器 ──────────────────────────────┐
-Web UI → HttpCoreClient → Local Web Host → CoreFacade ─┤
-Electron UI → 窄 IPC → Utility Process → CoreFacade ──┤
-                                                    ↓
-                                    同一 Node Core 业务用例
-                                                    ↓
-                              config / 会话文件 / SQLite / 受管备份
-```
-
-CLI 当前保留 `src/public-api.js` 适配层，和 Web/Electron 共用 ProviderSync；UI/Host 不另写同步算法，也不启动 CLI 解析其文本输出。Electron 不进入根 npm 包，安装 CLI 不会额外安装 Electron。
-
-.NET Windows/macOS 是独立的 **Legacy fallback**，保留构建和兼容维护，不是上述 Node Core 的另一个分发壳；它们的旧 journal/自动回滚行为不能套到新核心。
+备份数量在同一应用内统一管理，各 Codex Home 分别保留；桌面、Web 浏览器与 CLI 不共享偏好。保存数量设置不会立即删除备份。
 
 ## 文档与开发
 
 - 用户指南：[桌面中文](docs/README_DESKTOP_ZH.md) / [English](docs/README_DESKTOP_EN.md) · [Web](docs/README_WEB_UI_ZH.md) · [CLI](docs/README_CLI_ZH.md)
-- [完整文档索引](docs/README_ZH.md) · [更新日志](CHANGELOG.md) · [贡献指南](CONTRIBUTING.md)
-- 开发先读：[当前 Node Core 架构](docs/architecture/NODE_CORE_ARCHITECTURE_ZH.md) → [总体架构基线](docs/VNEXT_ELECTRON_NODE_ARCHITECTURE_ZH.md) → 对应合同、ADR 和测试
-- [迁移与发布门禁](docs/migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md) · [AI / Agent 指南](AGENTS.md)
+- [完整文档索引](docs/README_ZH.md) · [更新日志](CHANGELOG.md) · [反馈问题](https://github.com/Dailin521/codex-provider-sync/issues)
+- [工作原理](docs/WORKING_PRINCIPLE_ZH.md) · [当前 Node Core 架构与读写约束](docs/architecture/NODE_CORE_ARCHITECTURE_ZH.md)
+- [贡献与构建指南](CONTRIBUTING.md) · [迁移与发布门禁](docs/migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md) · [AI / Agent 指南](AGENTS.md)
 
-工作区构建使用 Node 24；已安装根 CLI 仍支持 Node 16.20.2。
+源码开发使用 Node 24：
 
 ```bash
 npm ci
@@ -175,14 +159,10 @@ npm run web:build
 npm run desktop:build
 ```
 
-仅本地改文档不代表完成代码、平台或发布验收。具体验证和发布命令见 [贡献指南](CONTRIBUTING.md)与 [npm 发布维护指南](docs/NPM_PUBLISHING.md)。
+开发时先读当前架构，再查对应合同、ADR 与测试。构建成功不等于完成所有平台的发布验收。
 
-## 致谢
+## 致谢与许可
 
-感谢 [@tangquanwei](https://github.com/tangquanwei) 提出并实现本地 Web UI，贡献聊天记录浏览和多语言文档基础，并通过 [PR #80](https://github.com/Dailin521/codex-provider-sync/pull/80) 将其带入 v0.5.0；也感谢所有参与代码、文档、测试和问题调查的贡献者。
+感谢 [@tangquanwei](https://github.com/tangquanwei) 贡献本地 Web UI、聊天记录浏览和多语言文档基础，并通过 [PR #80](https://github.com/Dailin521/codex-provider-sync/pull/80) 带入 v0.5.0；感谢所有参与贡献和问题调查的朋友。
 
-[贡献者名单](CONTRIBUTORS.md) · [GitHub Contributors](https://github.com/Dailin521/codex-provider-sync/graphs/contributors)
-
-## License
-
-[MIT](LICENSE)
+[贡献者](CONTRIBUTORS.md) · [GitHub Contributors](https://github.com/Dailin521/codex-provider-sync/graphs/contributors) · [LINUX DO 社区](https://linux.do/) · [MIT License](LICENSE)
