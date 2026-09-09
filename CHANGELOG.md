@@ -4,7 +4,7 @@
 
 ## [Unreleased]
 
-后续变更在此记录。
+- 将 Desktop 更新器与构建链的传递依赖 `js-yaml` 从 `4.3.1` 更新至 `4.3.2`，修复空 YAML 合并源绕过处理上限的问题（[GHSA-2883-xcg3-v3hh](https://github.com/advisories/GHSA-2883-xcg3-v3hh)）。不改变 Provider 读写；已发布安装包不会因此自动更新。
 
 ## [1.0.0] - 2026-09-08
 

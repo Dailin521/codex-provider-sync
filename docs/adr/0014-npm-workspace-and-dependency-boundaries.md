@@ -63,6 +63,8 @@ C6 的 Electron、electron-vite、electron-builder、Desktop Vite/React plugin �
 
 所有直接 dependency/devDependency/optionalDependency/peerDependency 使用精确版本，不使用 `^`、`~`、`workspace:*`、`file:` 或未锁定 URL。传递依赖由唯一 lockfile 锁定。候选经 `npm audit --omit=dev --audit-level=moderate` 与全树 `npm audit --audit-level=high` 检查；任一不合格候选不得进入 checkpoint。
 
+2026-09-09 安全维护：将 `electron-updater` / `electron-builder` 依赖链中由 lockfile 锁定的 `js-yaml 4.3.1` 更新为 `4.3.2`，修复 [GHSA-2883-xcg3-v3hh](https://github.com/advisories/GHSA-2883-xcg3-v3hh)。选择上游现有 `^4.1.0` 范围内的补丁版，不跨到 5.x、不新增根生产依赖，也不改变其余依赖解析。回归测试直接加载 updater 实际解析到的 YAML 模块，覆盖空合并源预算拒绝与正常更新元数据解析；依赖审计和现有构建/产物门禁继续执行，不用版本号断言代替行为验证。本次源码修复不改写已发布 v1.0.0 资产。
+
 Electron、electron-vite 与 electron-builder 已在 C6 按上述规则解析。C9 解析并锁定 Desktop `better-sqlite3`、ASAR/Fuse/PE/plist 审计工具；这些依赖只存在于 private Desktop workspace，不得写入根 manifest、根 production tree 或根 npm tarball。Desktop runtime SBOM 从唯一 lockfile 投影 production closure，必须包含 Electron framework 与 native fallback，但排除 Playwright、builder、Vite、审计工具和 test fixtures。
 
 C8 增加的 `electron-updater` 只能由 `apps/desktop/src/main/updater.ts` 动态加载；Renderer、Preload、Utility、共享 UI 和 Core 不得导入 updater、指定 URL/channel 或接触原始 `UpdateInfo`。安装前由同一 `CoreRuntimeSupervisor` 同步关闭 restart gate，排空已 admission 的写请求，再执行 active Watch 与全部 Profile recovery 复核；失败路径必须重新开放 gate。C8 实现受控状态机与安装门禁，但 `apps/desktop` 版本仍为 `0.0.0` 时发布通道保持 disabled；实际版本注入、签名、更新 metadata 与真实跨版本升级 smoke 属于 C9/C10 发布门禁，不因依赖已接入而视为已发布。
