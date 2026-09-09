@@ -141,6 +141,7 @@
       ],
       "properties": {
         "evidenceSha256": { "$ref": "#/$defs/hash" },
+        "sourceRunAttempt": { "type": "integer", "minimum": 1 },
         "artifactName": { "const": "historical-formal-release-backup-evidence" },
         "release": {
           "type": "object",

@@ -258,7 +258,12 @@ export function normalizeFormalReleaseEvidence(
   assertExactKeys(evidence.workflow, ["repository", "runId", "runAttempt", "testedCommit"], "Formal Release workflow binding");
   assert.equal(evidence.workflow.repository, repository);
   assert.equal(evidence.workflow.runId, runId);
-  assert.equal(evidence.workflow.runAttempt, runAttempt);
+  assert.ok(Number.isSafeInteger(runAttempt) && runAttempt >= 1, "Current workflow attempt must be a positive safe integer.");
+  const sourceRunAttempt = evidence.workflow.runAttempt;
+  assert.ok(Number.isSafeInteger(sourceRunAttempt) && sourceRunAttempt >= 1, "Formal Release evidence attempt must be a positive safe integer.");
+  // GitHub partial reruns retain artifacts from successful jobs in earlier attempts.
+  // Repository, run ID and tested commit must still match exactly.
+  assert.ok(sourceRunAttempt <= runAttempt, "Formal Release evidence cannot come from a future attempt.");
   assert.equal(evidence.workflow.testedCommit, evidenceForCommit);
 
   assertExactKeys(evidence.release, [
@@ -324,6 +329,7 @@ export function normalizeFormalReleaseEvidence(
 
   return Object.freeze({
     artifactName: "historical-formal-release-backup-evidence",
+    sourceRunAttempt,
     release: Object.freeze({
       repository: evidence.release.repository,
       releaseId: evidence.release.releaseId,
