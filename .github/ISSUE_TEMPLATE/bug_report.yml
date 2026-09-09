@@ -75,7 +75,6 @@ body:
     attributes:
       label: 概览状态 / CLI status 输出
       description: CLI 可运行 `codex-provider status`；桌面 / Web 请附刷新后的概览截图或文字。无需为提交问题执行高级修复。请遮盖个人路径等隐私信息。
-      render: text
     validations:
       required: true
   - type: textarea
