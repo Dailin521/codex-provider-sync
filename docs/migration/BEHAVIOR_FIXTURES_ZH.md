@@ -72,7 +72,7 @@ Fixture 不是用户数据样本，严禁从真实 `~/.codex`、认证文件或�
 
 History 项目布局补充：`test/history-project-summary.test.js` 保留平铺词法分组兼容；`test/history-project-tree.test.js` 验证全量 metadata 建树、保存项目根、父子关系、独立分页与孤儿访问。`history-project-menu.vitest.tsx` 验证树形展示、按需展开、无后台读取、右键/键盘菜单和焦点；本地别名由 `project-alias-preferences.vitest.ts` 验证，不写 Codex 数据。`history-actions`、`clipboard-host`、`history-scroll` 和 packaged Electron 回归继续覆盖复制/独立滚动边界，不再以本页五条分组描述当前项目树。
 
-更新入口补充（ADR-0020）：`apps/desktop/tests/public-release-checker.test.mjs` 覆盖固定公开源、正式版本比较、Electron目标资产、超时/HTTP/大小错误；`updater.test.mjs`覆盖手动模式与自动安装隔离、进度推送和失败可重试；`packages/app-ui/tests/settings-updates.vitest.tsx`覆盖设置当前版本、手动查更/下载页、IPC错误反馈和推送不轮询。生产packaged测试只验证入口，不下载真实更新或替换程序。
+更新入口补充（ADR-0020）：`apps/desktop/tests/public-release-checker.test.mjs` 覆盖固定公开源、正式版本比较、Electron目标资产、超时/HTTP/大小错误；`updater.test.mjs`覆盖手动模式与自动安装隔离、进度推送和失败可重试；`updater-module.test.mjs` 保留真实 CommonJS 依赖、仅替换 Electron host，验证生产模块懒加载及关闭自动下载/退出安装；`packages/app-ui/tests/settings-updates.vitest.tsx`覆盖设置当前版本、手动查更/下载页、IPC错误反馈和推送不轮询。普通生产packaged测试验证入口，`stable-updater` 发布容器另在安装版和便携版实际检查公开更新源，失败阻止发布；均不下载真实更新或替换程序。
 
 V1 本地交互补充 fixture：`packages/app-ui/tests/direct-sync.vitest.tsx` 验证默认保留2份、一次 Prepare/同 planId Apply、无二次确认、重复点击、取消 Prepare、失败不写、completed/partial结果与焦点返回；`advanced-features.vitest.tsx` 验证诊断扫描中/失败/重试、旧结果保留与导航不自动扫描；Desktop `runtime-supervisor.test.mjs` 验证诊断独立超时预算、普通读预算保持、超时后迟到响应隔离。均使用合成数据。
 

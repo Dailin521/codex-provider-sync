@@ -29,6 +29,8 @@
 
 ## 3. 验收清单
 
+从 1.0.2 起，`stable-updater` 的安装版和便携版容器 smoke 都实际调用公开源检查更新（`CPS_VERIFY_PUBLIC_UPDATE_CHECK=true`），必须返回已检查结果而非 `error`。这一步保留真实模块加载、网络栈和发布源；网络失败须诊断后再重跑，不能退回只验证 `idle`。不会下载或安装更新，不能据此宣称跨版本升级已验收。单元回归 `updater-module.test.mjs` 仅替换 Electron host，保留真实 CommonJS 依赖，以检出 ESM 导入兼容问题。
+
 应用内更新的显式渠道为 `stable-updater`，仅 Windows x64 严格 `1.0.x`；仍默认 RC。此渠道增加 `latest.yml` 与安装器 `.exe.blockmap`，两者必须来自同次构建并通过 metadata/大小/SHA512、blockmap、包内 GitHub 配置和 SHA256 清单审核。下载和安装均需用户确认，便携版仍手动。固定依赖对有 publisherName 的包继续校验签名；无发布者的未签名包不能冒充已签名更新。
 
 默认不得移动已有 tag 或覆盖既有 Release；本次 1.0.1 明确授权例外见第 6 节。相同版本需手动重装，线上更新需更高版本。真实安装版跨版本下载/重启、数据保持、失败重试与安装门禁需独立记录，首批更新能力上线仍须在公告明确线上跨版本尚未验收，不以单元测试替代。
