@@ -149,6 +149,20 @@ test("code spans, fences and HTML comments do not expose example links", () => f
   verifyLocalLinks(root, "README.md"); // Unclosed fence continues to EOF.
 }));
 
+test("footnotes and indented code do not create spurious destinations", () => fixture((root) => {
+  const readme = path.join(root, "README.md");
+  for (const body of ["[^1]: Explanatory prose", "    [sample](missing.md)\n    <img src='missing.png'>",
+    "Paragraph\n\n\t[sample](missing.md)\n\n    [sample](missing.md)"]) {
+    fs.writeFileSync(readme, body);
+    verifyLocalLinks(root, "README.md");
+  }
+  for (const body of ["[^1]: See [active](missing.md)", "    [sample](ignored.md)\n\n[active](missing.md)",
+    "Paragraph\n    [active](missing.md)"]) {
+    fs.writeFileSync(readme, body);
+    assert.throws(() => verifyLocalLinks(root, "README.md"), /missing local link/);
+  }
+}));
+
 test("literal percent and valid UTF-8 escapes coexist in local paths", () => fixture((root) => {
   const readme = path.join(root, "README.md");
   for (const name of ["100%.md", "100% 文.md", "%FF.md"]) fs.writeFileSync(path.join(root, name), "target");

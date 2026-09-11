@@ -81,8 +81,23 @@ function maskExamples(body) {
   let result = "";
   for (let i = 0; i < body.length;) {
     let end = i;
-    const fence = (i === 0 || body[i - 1] === "\n") && /^ {0,3}(`{3,}|~{3,})([^\n]*)/.exec(body.slice(i));
-    if (fence && !(fence[1][0] === "`" && fence[2].includes("`"))) {
+    const lineStart = i === 0 || body[i - 1] === "\n";
+    const indented = lineStart && /^(?: {4}| {0,3}\t)/.test(body.slice(i));
+    const preceding = body.slice(0, i).trimEnd();
+    // Indented code cannot interrupt a paragraph. Only start after a blank line
+    // (or at BOF); consume its indented continuation and intervening blank lines.
+    const blankBefore = i === 0 || /\n[ \t]*\r?\n$/.test(body.slice(0, i));
+    const fence = lineStart && /^ {0,3}(`{3,}|~{3,})([^\n]*)/.exec(body.slice(i));
+    if (indented && (blankBefore || !preceding)) {
+      end = i;
+      while (end < body.length) {
+        const lineEnd = body.indexOf("\n", end);
+        const next = lineEnd < 0 ? body.length : lineEnd + 1;
+        const line = body.slice(end, next);
+        if (!/^(?: {4}| {0,3}\t)/.test(line) && line.trim()) break;
+        end = next;
+      }
+    } else if (fence && !(fence[1][0] === "`" && fence[2].includes("`"))) {
       const closers = /^ {0,3}(`{3,}|~{3,})[ \t]*\r?$/gm;
       closers.lastIndex = i + fence[0].length;
       end = body.length;
@@ -154,7 +169,7 @@ function linkTargets(body) {
     if (!destination) continue;
     if (hasLinkEnd(body.slice(destination.end))) targets.push(destination.target);
   }
-  for (const match of body.matchAll(/^\s*\[[^\]]+\]:\s*/gm)) {
+  for (const match of body.matchAll(/^\s*\[(?!\^)[^\]]+\]:\s*/gm)) {
     const destination = readLinkDestination(body, match.index + match[0].length);
     if (destination) targets.push(destination.target);
   }
