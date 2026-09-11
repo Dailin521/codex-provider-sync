@@ -121,6 +121,60 @@ test("local destinations preserve balanced, escaped and angle-bracket parenthese
   }
 }));
 
+test("parenthesized titles validate active destinations", () => fixture((root) => {
+  fs.writeFileSync(path.join(root, "target.md"), "target");
+  const readme = path.join(root, "README.md");
+  fs.writeFileSync(readme, "[guide](target.md (legacy))");
+  verifyLocalLinks(root, "README.md");
+  fs.writeFileSync(readme, "[guide](missing.md (legacy))");
+  assert.throws(() => verifyLocalLinks(root, "README.md"), /missing local link missing.md/);
+}));
+
+test("code spans, fences and HTML comments do not expose example links", () => fixture((root) => {
+  const readme = path.join(root, "README.md");
+  const examples = [
+    "`[example](missing.md)`", "`` ` [example](missing.md) ``",
+    "```inline [example](missing.md) ```", "<!-- [example](missing.md) -->",
+    "````markdown\n```\n[example](missing.md)\n````",
+    "~~~html\n<img src='missing.png'>\n~~~", "`<a href='missing.md'>example</a>`",
+    "<!-- <img src='missing.png'> -->",
+  ].join("\n");
+  fs.writeFileSync(readme, examples);
+  verifyLocalLinks(root, "README.md");
+  fs.writeFileSync(readme, `${examples}\n[active](missing.md (title))`);
+  assert.throws(() => verifyLocalLinks(root, "README.md"), /missing local link/);
+  fs.writeFileSync(readme, "<!--\n```\n-->\n[active](missing.md)");
+  assert.throws(() => verifyLocalLinks(root, "README.md"), /missing local link/);
+  fs.writeFileSync(readme, "````\n[example](missing.md)\n```");
+  verifyLocalLinks(root, "README.md"); // Unclosed fence continues to EOF.
+}));
+
+test("literal percent and valid UTF-8 escapes coexist in local paths", () => fixture((root) => {
+  const readme = path.join(root, "README.md");
+  for (const name of ["100%.md", "100% 文.md", "%FF.md"]) fs.writeFileSync(path.join(root, name), "target");
+  for (const target of ["100%.md", "100%25.md", "100%%20%E6%96%87.md", "%FF.md"]) {
+    fs.writeFileSync(readme, `[guide](${target})`);
+    verifyLocalLinks(root, "README.md");
+  }
+  fs.writeFileSync(readme, "[guide](missing%20%E6%96%87%.md)");
+  assert.throws(() => verifyLocalLinks(root, "README.md"), /missing local link missing 文%.md/);
+}));
+
+test("rendered HTML image sources and anchor destinations are validated", () => fixture((root) => {
+  const readme = path.join(root, "README.md");
+  fs.writeFileSync(path.join(root, "target.md"), "target");
+  fs.writeFileSync(path.join(root, "image&photo.png"), "image");
+  fs.writeFileSync(readme, `<a title="x > y" HREF='target.md'>link</a>\n<img SRC="image&amp;photo.png">\n<a href=target.md>link</a>`);
+  verifyLocalLinks(root, "README.md");
+  for (const html of ['<img src="missing.png">', "<a href='missing.md'>link</a>", "<img src=missing.png>",
+    '<img src="../outside.png">', '<img src="%2e%2e/outside.png">']) {
+    fs.writeFileSync(readme, html);
+    assert.throws(() => verifyLocalLinks(root, "README.md"), /missing local link|escapes repository/);
+  }
+  fs.writeFileSync(readme, '<img src="image&unknown;photo.png">');
+  assert.throws(() => verifyLocalLinks(root, "README.md"), /Unsupported link character entity/);
+}));
+
 test("C10 retains exactly the original business results including failures", () => {
   const needs = results("full");
   delete needs["docs-check"];
