@@ -5,6 +5,12 @@ using Microsoft.Data.Sqlite;
 
 namespace CodexProviderSync.Core.Tests;
 
+[CollectionDefinition("Cross-runtime process locks", DisableParallelization = true)]
+public sealed class CrossRuntimeProcessLockCollection;
+
+// Keep the real Node/.NET contenders inside each test concurrent, while avoiding
+// unrelated process-heavy classes competing for the hosted runner's startup budget.
+[Collection("Cross-runtime process locks")]
 public sealed class CrossRuntimeStateDbLockTests
 {
     private static readonly TimeSpan NodeReadinessTimeout = TimeSpan.FromSeconds(30);
@@ -216,7 +222,11 @@ public sealed class CrossRuntimeStateDbLockTests
 
         string script = $$"""
             import { acquireLock } from {{JsonSerializer.Serialize(LockingModuleUrl())}};
-            const release = await acquireLock({{JsonSerializer.Serialize(fixture.CodexHome)}}, "node-home-status-writer");
+            process.stderr.write("lock-parity: acquiring-home-lock\n");
+            const release = await acquireLock({{JsonSerializer.Serialize(fixture.CodexHome)}}, "node-home-status-writer", {
+              onCandidateReady: () => process.stderr.write("lock-parity: candidate-ready\n")
+            });
+            process.stderr.write("lock-parity: home-lock-acquired\n");
             console.log(JSON.stringify({ ready: true }));
             await new Promise((resolve) => process.stdin.once("data", resolve));
             await release();
