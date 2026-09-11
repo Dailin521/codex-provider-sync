@@ -9,8 +9,52 @@ on:
 permissions:
   contents: read
 
+# Only superseded PR runs are cancelled; main/release evidence is never cancelled here.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  change-scope:
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.scope.outputs.mode }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+      - name: Classify the entire PR conservatively
+        id: scope
+        env:
+          CPS_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CPS_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/ci-docs.mjs classify
+      - name: Verify classification and gate regressions without installing dependencies
+        run: node --test test/ci-docs.test.js
+
+  docs-check:
+    needs: change-scope
+    if: needs.change-scope.outputs.mode == 'docs'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+      - name: Check ordinary documentation
+        env:
+          CPS_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CPS_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/ci-docs.mjs check
+
   test:
+    needs: change-scope
+    if: needs.change-scope.outputs.mode == 'full'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -39,6 +83,8 @@ jobs:
       - run: npm test
 
   workspace-contract:
+    needs: change-scope
+    if: needs.change-scope.outputs.mode == 'full'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -57,6 +103,8 @@ jobs:
         run: npm run architecture:check
 
   root-package-compat:
+    needs: change-scope
+    if: needs.change-scope.outputs.mode == 'full'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -77,6 +125,8 @@ jobs:
       - run: npm run package:smoke:lifecycle
 
   web-build:
+    needs: change-scope
+    if: needs.change-scope.outputs.mode == 'full'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -94,6 +144,8 @@ jobs:
       - run: npm run web:build
 
   web-browser:
+    needs: change-scope
+    if: needs.change-scope.outputs.mode == 'full'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -107,6 +159,8 @@ jobs:
       - run: npm run web:test:e2e
 
   electron-desktop:
+    needs: change-scope
+    if: needs.change-scope.outputs.mode == 'full'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -167,6 +221,8 @@ jobs:
           retention-days: 7
 
   electron-release-candidate:
+    needs: change-scope
+    if: needs.change-scope.outputs.mode == 'full'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -258,7 +314,8 @@ jobs:
           retention-days: 30
 
   electron-candidate-set:
-    needs: electron-release-candidate
+    needs: [change-scope, electron-release-candidate]
+    if: needs.change-scope.outputs.mode == 'full'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -284,6 +341,8 @@ jobs:
           retention-days: 30
 
   dependency-audit:
+    needs: change-scope
+    if: needs.change-scope.outputs.mode == 'full'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -298,6 +357,8 @@ jobs:
         run: npm audit --audit-level=high
 
   cross-runtime-fixtures:
+    needs: change-scope
+    if: needs.change-scope.outputs.mode == 'full'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -341,6 +402,8 @@ jobs:
           retention-days: 30
 
   desktop-test:
+    needs: change-scope
+    if: needs.change-scope.outputs.mode == 'full'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -359,6 +422,8 @@ jobs:
         run: dotnet test desktop/CodexProviderSync.GuiE2E.Tests/CodexProviderSync.GuiE2E.Tests.csproj --configuration Release --no-build
 
   desktop-macos:
+    needs: change-scope
+    if: needs.change-scope.outputs.mode == 'full'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -373,6 +438,8 @@ jobs:
       - run: dotnet build desktop/CodexProviderSync.Mac/CodexProviderSync.Mac.csproj --configuration Release
 
   desktop-linux-lock:
+    needs: change-scope
+    if: needs.change-scope.outputs.mode == 'full'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -382,8 +449,9 @@ jobs:
       - run: dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj --filter FullyQualifiedName~LockServiceTests
 
   c10-evidence-bundle:
-    if: ${{ always() }}
+    if: ${{ always() && needs.change-scope.result == 'success' && needs.change-scope.outputs.mode == 'full' }}
     needs:
+      - change-scope
       - test
       - workspace-contract
       - root-package-compat
@@ -424,7 +492,7 @@ jobs:
           CPS_REQUIRED_JOB_RESULTS_JSON: ${{ toJSON(needs) }}
           CPS_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           CPS_EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: npm run evidence:c10
+        run: node scripts/ci-docs.mjs c10
       - name: Upload the non-release C10 evidence bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -438,6 +506,8 @@ jobs:
     name: ci-gate
     if: ${{ always() }}
     needs:
+      - change-scope
+      - docs-check
       - test
       - workspace-contract
       - root-package-compat
@@ -454,37 +524,11 @@ jobs:
       - c10-evidence-bundle
     runs-on: ubuntu-latest
     steps:
-      - name: Verify required jobs
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+      - name: Verify required jobs without accepting unexpected skips
         env:
-          NODE_TEST_RESULT: ${{ needs.test.result }}
-          WORKSPACE_CONTRACT_RESULT: ${{ needs.workspace-contract.result }}
-          ROOT_PACKAGE_COMPAT_RESULT: ${{ needs.root-package-compat.result }}
-          WEB_BUILD_RESULT: ${{ needs.web-build.result }}
-          WEB_BROWSER_RESULT: ${{ needs.web-browser.result }}
-          ELECTRON_DESKTOP_RESULT: ${{ needs.electron-desktop.result }}
-          ELECTRON_RELEASE_CANDIDATE_RESULT: ${{ needs.electron-release-candidate.result }}
-          ELECTRON_CANDIDATE_SET_RESULT: ${{ needs.electron-candidate-set.result }}
-          DEPENDENCY_AUDIT_RESULT: ${{ needs.dependency-audit.result }}
-          CROSS_RUNTIME_FIXTURES_RESULT: ${{ needs.cross-runtime-fixtures.result }}
-          DESKTOP_TEST_RESULT: ${{ needs.desktop-test.result }}
-          MACOS_TEST_RESULT: ${{ needs.desktop-macos.result }}
-          LINUX_LOCK_RESULT: ${{ needs.desktop-linux-lock.result }}
-          C10_EVIDENCE_RESULT: ${{ needs.c10-evidence-bundle.result }}
-        run: |
-          if [ "$NODE_TEST_RESULT" != "success" ] ||
-             [ "$WORKSPACE_CONTRACT_RESULT" != "success" ] ||
-             [ "$ROOT_PACKAGE_COMPAT_RESULT" != "success" ] ||
-             [ "$WEB_BUILD_RESULT" != "success" ] ||
-             [ "$WEB_BROWSER_RESULT" != "success" ] ||
-             [ "$ELECTRON_DESKTOP_RESULT" != "success" ] ||
-             [ "$ELECTRON_RELEASE_CANDIDATE_RESULT" != "success" ] ||
-             [ "$ELECTRON_CANDIDATE_SET_RESULT" != "success" ] ||
-             [ "$DEPENDENCY_AUDIT_RESULT" != "success" ] ||
-             [ "$CROSS_RUNTIME_FIXTURES_RESULT" != "success" ] ||
-             [ "$DESKTOP_TEST_RESULT" != "success" ] ||
-             [ "$MACOS_TEST_RESULT" != "success" ] ||
-             [ "$LINUX_LOCK_RESULT" != "success" ] ||
-             [ "$C10_EVIDENCE_RESULT" != "success" ]; then
-            echo "One or more required CI jobs did not succeed."
-            exit 1
-          fi
+          CPS_CI_NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/ci-docs.mjs gate

@@ -5,11 +5,19 @@
 ## 1. 提交与合并
 
 1. 保留本地已有变更，核对源码、合同、配套生成物与测试清单。不要提交 `output/`、Playwright traces、真实数据或本地安装目录。
-2. 首次 V1 迁移使用 V1 分支；后续补丁从最新 `origin/main` 创建独立修复分支。以可审计提交推送并创建指向 main 的 PR，等待当前 head 对应的完整 `ci-gate` 成功；旧 head 的绿灯不可复用。
+2. 首次 V1 迁移使用 V1 分支；后续补丁从最新 `origin/main` 创建独立修复分支。以可审计提交推送并创建指向 main 的 PR，等待当前 head 对应的 `ci-gate` 成功；产品改动必须完整检查，普通文档例外见下文，旧 head 的绿灯不可复用。
 3. 处理所有未解决审查，采用 merge commit 合并，禁止 squash、rebase、force-push 或绕过失败门禁。
 4. main 合入后的实际 SHA 必须再次通过 `ci-gate`。所有产物与测试结论记录实际 SHA，不以 PR 分支名代替。
 
 部分重跑：GitHub 的“仅重跑失败 job”会保留本次 workflow 中已成功 job 的产物。C10 可复用同一仓库、同一 `runId`、同一 tested commit 且来自当前或更早正整数 `runAttempt` 的历史 Release 验证证据；拒绝跨运行、跨提交、未来或无效次数。全部 required jobs 仍必须成功，Release 资产/二进制/备份哈希校验不变。新 bundle 的 `workflow.runAttempt` 记录当前次数，`historicalFormalRelease.sourceRunAttempt` 如实记录证据来源次数，不改写源证据；v1 schema 将该新增字段设为可选，仅为兼容历史 bundle。重跑成功不抹去之前失败的记录，也不授权发布。
+
+### 普通文档 PR 的轻量检查
+
+仅 `pull_request` 的整个 base…head 差异非空、且所有路径都属于根 `README.md`、`CHANGELOG.md` 或 `docs/release-notes/v*-zh.md` 时，允许轻量检查。不按最后一次提交判断；重命名检查新旧两个路径。合同、ADR、行为夹具、发布流程文档、工作流、配置、依赖和代码均触发完整 CI；未知路径或空差异也走完整 CI，Git 比较失败直接使门禁失败。
+
+轻量检查无需安装依赖，验证改动文档的本地链接目标、全项目版本一致性和改动的中文发布说明。远程链接与 Markdown 锚点不做可达性验证。重型任务和 C10 明确跳过，但 `ci-gate` 始终执行，只有分类与文档检查成功且跳过状态符合预期才通过。轻量 PR 不生成候选包或 C10 发布证据。
+
+main push 始终完整执行全部原有任务和 C10，最终 SHA 的发布门禁不变。同一 PR 新提交可取消过期检查；main 检查和独立发布工作流不被该规则取消。首次提交前一次性核对代码、版本、文档和测试要求，避免补漏引发重复 CI。
 
 ## 2. 候选包与独立流程
 

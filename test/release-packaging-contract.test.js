@@ -63,11 +63,14 @@ test("CI requires all four native Electron candidates and their aggregate index"
     "desktop:smoke:candidate:artifacts",
     "desktop:verify:candidate:set"
   ]) assert.match(workflow, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  assert.match(workflow, /ELECTRON_RELEASE_CANDIDATE_RESULT/);
-  assert.match(workflow, /ELECTRON_CANDIDATE_SET_RESULT/);
+  const gate = workflow.slice(workflow.indexOf("  ci-gate:"));
+  assert.match(gate, /- electron-release-candidate/);
+  assert.match(gate, /- electron-candidate-set/);
+  assert.match(gate, /CPS_CI_NEEDS: \$\{\{ toJSON\(needs\) \}\}/);
+  assert.match(gate, /node scripts\/ci-docs\.mjs gate/);
   assert.match(workflow, /c10-evidence-bundle:/);
   assert.match(workflow, /CPS_REQUIRED_JOB_RESULTS_JSON: \$\{\{ toJSON\(needs\) \}\}/);
-  assert.match(workflow, /C10_EVIDENCE_RESULT/);
+  assert.match(gate, /- c10-evidence-bundle/);
   assert.match(workflow, /vnext-c10-evidence-\$\{\{ github\.sha \}\}/);
   assert.ok((workflow.match(/retention-days: 30/g) || []).length >= 3);
   assert.match(workflow, /if-no-files-found: error/);
