@@ -139,7 +139,7 @@ async function forceStopPackagedChild(child) {
 
 async function launchPackagedDesktop({ args, env }) {
   let firstRetryableFailure;
-  const maxAttempts = process.platform === "win32" ? 2 : 1;
+  const maxAttempts = ["win32", "linux"].includes(process.platform) ? 2 : 1;
 
   for (let activationAttempt = 1; activationAttempt <= maxAttempts; activationAttempt += 1) {
     const child = spawn(packagedExecutable, [...args, "--remote-debugging-port=0"], {
