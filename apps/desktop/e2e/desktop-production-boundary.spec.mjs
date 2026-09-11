@@ -333,7 +333,7 @@ test("production desktop bundle has no test bridge and reads the real SQLite fix
         "requestSyncSwitch",
         "subscribeOperation"
       ],
-      updateKeys: ["check", "download", "getStatus", "install", "subscribe"],
+      updateKeys: ["check", "download", "getStatus", "install", "setReminder", "subscribe"],
       watchKeys: ["subscribeStopped"],
       process: "undefined",
       require: "undefined"

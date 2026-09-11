@@ -15,8 +15,8 @@ const SHA_PATTERN = /^[0-9a-f]{40}$/i;
  */
 export function prepareElectronWindowsRelease({ releaseRef, version, expectedSha, channel = "rc" }) {
   if (!(channel === "rc" && RC_VERSION_PATTERN.test(version || ""))
-    && !(channel === "stable-manual" && STABLE_VERSION_PATTERN.test(version || ""))) {
-    throw new Error("Release version must match the explicit RC or Windows stable-manual channel.");
+    && !(["stable-manual", "stable-updater"].includes(channel) && STABLE_VERSION_PATTERN.test(version || ""))) {
+    throw new Error("Release version must match the explicit RC or Windows stable release channel.");
   }
   if (!SHA_PATTERN.test(expectedSha || "")) {
     throw new Error("Expected commit must be a full 40-character hexadecimal SHA.");

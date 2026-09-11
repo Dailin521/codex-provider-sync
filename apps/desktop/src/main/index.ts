@@ -30,6 +30,8 @@ import { createSecureWebPreferences } from "./security-policy.js";
 import { DesktopUpdateController } from "./updater.js";
 import { checkPublicDesktopRelease, PUBLIC_RELEASES_URL } from "./public-release-checker.js";
 import { claimDailyUpdateCheck } from "./daily-update-check.js";
+import { UpdateReminderStore } from "./update-preferences.js";
+import { showUpdateNotification } from "./update-notification.js";
 import { fitWindowToDisplays, restoreWindowState, WindowStateController, WindowStateStore } from "./window-state.js";
 import {
   registerDesktopProtocol,
@@ -220,7 +222,10 @@ if (!app.requestSingleInstanceLock()) {
       isPackaged: app.isPackaged,
       recentLogs: () => operationLogs.recentJsonLines()
     });
+    const updateReminders = new UpdateReminderStore(app.getPath("userData"));
     updates = new DesktopUpdateController({
+      ignoredVersion: await updateReminders.load(),
+      saveIgnoredVersion: version => updateReminders.save(version),
       claimStartupCheck: () => claimDailyUpdateCheck(app.getPath("userData")),
       async runStartupCheck(check) {
         const logId = await operationLogs.begin({ operation: "update", stage: "startup-check" });
@@ -238,14 +243,13 @@ if (!app.requestSingleInstanceLock()) {
         }
       },
       async onStartupUpdateAvailable(status) {
-        if (!mainWindow || mainWindow.isDestroyed()) return;
-        await dialog.showMessageBox(mainWindow, {
-          type: "info",
-          title: chinese ? "发现新版本" : "Update available",
-          message: chinese ? `Codex Provider Sync ${status.version} 已可用` : `Codex Provider Sync ${status.version} is available`,
-          detail: chinese ? "请前往“设置 → 更新”查看和下载。不会自动下载或退出软件。" : "Go to Settings → Updates to review and download. Nothing is downloaded or installed automatically.",
-          buttons: [chinese ? "知道了" : "OK"],
-          noLink: true
+        if (!mainWindow || mainWindow.isDestroyed() || !status.version) return;
+        const window = mainWindow;
+        await showUpdateNotification({
+          version: status.version,
+          chinese,
+          show: options => dialog.showMessageBox(window, options),
+          ignore: version => updates!.setReminder({ schemaVersion: 1, version, ignored: true }).then(() => {})
         });
       },
       isPackaged: app.isPackaged,

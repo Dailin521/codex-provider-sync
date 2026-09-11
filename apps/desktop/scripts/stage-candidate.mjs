@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { assertDesktopArtifactVersion } from "./desktop-artifact-version.mjs";
+import { updateAssetNames, auditWindowsUpdateAssets, auditWindowsUpdateConfiguration } from "./windows-update-artifacts.mjs";
 import {
   auditPackagedApp,
   ARTIFACT_AUDIT_POLICY_PATH,
@@ -67,12 +68,17 @@ const candidateRoot = path.join(artifactRoot, target);
 const assetsRoot = path.join(candidateRoot, "assets");
 const metadataRoot = path.join(candidateRoot, "metadata");
 const audit = await auditPackagedApp({ outputRoot, target, version, buildId });
+const updateAssets = updateAssetNames({ target, version, releaseChannel: process.env.CPS_RELEASE_CHANNEL });
+const updateAudit = updateAssets.length ? {
+  ...await auditWindowsUpdateAssets({ assetsRoot: outputRoot, version }),
+  ...await auditWindowsUpdateConfiguration(path.join(outputRoot, "win-unpacked", "resources"))
+} : undefined;
 await assertNewDirectory(candidateRoot);
 await fs.mkdir(assetsRoot);
 await fs.mkdir(metadataRoot);
 
 const assetRecords = [];
-for (const assetName of descriptor.assets(version)) {
+for (const assetName of [...descriptor.assets(version), ...updateAssets]) {
   assetRecords.push(await copyAsset(path.join(outputRoot, assetName), path.join(assetsRoot, assetName)));
 }
 assetRecords.sort((left, right) => left.name.localeCompare(right.name));
@@ -89,6 +95,8 @@ const staging = {
   schemaVersion: 1,
   scope: "ci-candidate-staging",
   releaseAuthorized: false,
+  updaterAuthorized: updateAssets.length > 0,
+  ...(updateAudit ? { updateAudit } : {}),
   signingStatus: "unsigned-candidate",
   notarizationStatus: "not-authorized",
   target,

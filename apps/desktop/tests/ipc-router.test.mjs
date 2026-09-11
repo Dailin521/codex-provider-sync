@@ -313,6 +313,10 @@ function harness({
       async install() {
         updateCalls += 1;
         return { schemaVersion: 2, state: "installing", version: "1.0.1", installAllowed: false };
+      },
+      async setReminder(input) {
+        updateCalls += 1;
+        return { schemaVersion: 2, state: "available", version: input.version, reminderIgnored: input.ignored, installAllowed: false };
       }
     },
     onActiveWatchCountChanged(count) { activeWatchCounts.push(count); }
@@ -731,6 +735,21 @@ test("Update restart intent rejects every new Desktop write before Core dispatch
       assert.equal(response.error.details.busyScope, "codex-home");
     }
     assert.equal(value.calls.length, 0);
+  } finally { value.cleanup(); }
+});
+
+test("Update reminder accepts only a trusted version-scoped preference", async () => {
+  const value = harness();
+  try {
+    const handler = value.handlers.get(DESKTOP_IPC_CHANNELS.updateReminder);
+    const input = { schemaVersion: 1, version: "1.0.2", ignored: true };
+    assert.equal((await handler(value.event, input)).reminderIgnored, true);
+    const calls = value.updateCalls;
+    for (const invalid of [null, { ...input, url: "https://example.invalid" }, { ...input, ignored: 1 }]) {
+      await assert.rejects(handler(value.event, invalid));
+    }
+    await assert.rejects(handler({ ...value.event, sender: { id: -1 } }, input));
+    assert.equal(value.updateCalls, calls);
   } finally { value.cleanup(); }
 });
 

@@ -560,6 +560,10 @@ export const resources = {
         updateManualHint: "Check once on the first launch each day; only newer releases trigger a popup. This portable or local build opens the GitHub download page; download and replace it manually. It does not install or restart automatically.",
         updateAutomaticHint: "Check once on the first launch each day and notify only for newer releases. Download when ready, then confirm a restart to install. Your Codex data is not part of the update.",
         updateOpenDownload: "Open official download page",
+        updateIgnore: "Don't remind me about this version",
+        updateRestoreReminder: "Remind me about this version",
+        updateIgnored: "Reminders for this version are off. You can still update now.",
+        updateReminderFailed: "Could not save your preference. Please try again.",
         updateRequestFailed: "The update request failed. Refresh the status or retry; the current app remains available.",
         updateStatus: {
           disabled: "In-app updates unavailable",
@@ -1400,6 +1404,10 @@ export const resources = {
         updateManualHint: "每天首次启动检查一次，仅发现新版时弹窗。便携版或本地构建会打开 GitHub 下载页，请下载后手动替换；不会自动安装或退出。",
         updateAutomaticHint: "每天首次启动检查一次，有新版时弹窗提示。按需下载，再确认重启安装。更新不替换你的 Codex 数据。",
         updateOpenDownload: "打开官方下载页",
+        updateIgnore: "不再提醒此版本",
+        updateRestoreReminder: "恢复此版本提醒",
+        updateIgnored: "已关闭此版本提醒，仍可正常更新。",
+        updateReminderFailed: "未能保存提醒设置，请重试。",
         updateRequestFailed: "更新请求失败，请刷新状态或重试；当前软件仍可正常使用。",
         updateStatus: {
           disabled: "应用内更新不可用",

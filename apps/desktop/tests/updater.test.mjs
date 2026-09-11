@@ -427,3 +427,82 @@ test("startup checks remain silent on failure/no update and do not retry during 
     controller.dispose();
   }
 });
+
+test("ignored version suppresses only startup notice, still allows manual download; next version notifies", async () => {
+  let ignoredVersion = null;
+  let offeredVersion = "1.0.1";
+  const notices = [];
+  const timers = [];
+  const options = () => ({
+    ignoredVersion,
+    saveIgnoredVersion: async version => { ignoredVersion = version; },
+    claimStartupCheck: async () => true,
+    onStartupUpdateAvailable: async status => { notices.push(status.version); },
+    setTimeoutImpl: callback => { timers.push(callback); return { unref() {} }; }
+  });
+  const first = fixture(options());
+  await first.controller.check();
+  assert.equal((await first.controller.setReminder({ schemaVersion: 1, version: "1.0.1", ignored: true })).reminderIgnored, true);
+  first.controller.dispose();
+  const second = fixture(options());
+  second.controller.scheduleInitialCheck(); timers.shift()();
+  for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(notices, []);
+  assert.equal((await second.controller.check()).reminderIgnored, true);
+  assert.equal((await second.controller.download()).state, "downloaded");
+  assert.equal(second.port.installs, 0);
+  assert.equal((await second.controller.setReminder({ schemaVersion: 1, version: "1.0.1", ignored: false })).reminderIgnored, undefined);
+  assert.equal(ignoredVersion, null);
+  second.controller.dispose();
+  ignoredVersion = "1.0.1";
+  offeredVersion = "1.0.2";
+  const third = fixture(options());
+  third.port.checkResult = { updateInfo: { version: offeredVersion } };
+  third.controller.scheduleInitialCheck(); timers.shift()();
+  for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(notices, ["1.0.2"]);
+  assert.equal(third.controller.status.reminderIgnored, undefined);
+  third.controller.dispose();
+});
+
+test("reminder writes reject stale version and failures do not mute or poison subsequent requests", async () => {
+  let fail = true;
+  const saved = [];
+  const { controller, port } = fixture({ saveIgnoredVersion: async version => {
+    if (fail) throw new Error("fixture persistence failure");
+    saved.push(version);
+  } });
+  const input = { schemaVersion: 1, version: "1.0.1", ignored: true };
+  await assert.rejects(controller.setReminder(input));
+  await controller.check();
+  await assert.rejects(controller.setReminder({ ...input, version: "1.0.2" }));
+  await assert.rejects(controller.setReminder(input));
+  assert.equal(controller.status.reminderIgnored, undefined);
+  fail = false;
+  await Promise.all([controller.setReminder(input), controller.setReminder({ ...input, ignored: false })]);
+  assert.deepEqual(saved, ["1.0.1", null]);
+  assert.equal(controller.status.reminderIgnored, undefined);
+  assert.equal(port.downloads + port.installs, 0);
+  controller.dispose();
+});
+
+for (const asynchronous of [false, true]) {
+  test(`installer error event without throw releases restart gate (async=${asynchronous})`, async () => {
+    const { controller, port, state } = fixture();
+    await controller.check();
+    await controller.download();
+    port.quitAndInstall = () => {
+      const fail = () => port.emit("error", new Error("fixture installer failure"));
+      if (asynchronous) setImmediate(fail);
+      else fail();
+    };
+    await controller.install();
+    if (asynchronous) await new Promise(resolve => setImmediate(resolve));
+    assert.equal(controller.status.state, "error");
+    assert.equal(controller.status.reason, "install-failed");
+    assert.equal(controller.restartPending, false);
+    assert.equal(state.gateClosed, false);
+    assert.equal((await controller.check()).state, "available");
+    controller.dispose();
+  });
+}

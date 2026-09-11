@@ -12,6 +12,11 @@ const windowsProviderBytesSource = fs.readFileSync(
 );
 const desktopBuildId = process.env.CPS_DESKTOP_BUILD_ID?.trim() || "dev-c9";
 const desktopReleaseAuthorized = process.env.CPS_DESKTOP_RELEASE_AUTHORIZED === "true";
+if (desktopReleaseAuthorized && (process.env.CPS_RELEASE_CHANNEL !== "stable-updater"
+    || process.env.CPS_CANDIDATE_TARGET !== "windows-x64"
+    || !/^1\.0\.(?:0|[1-9]\d*)$/.test(process.env.CPS_DESKTOP_VERSION || ""))) {
+  throw new Error("Updater authorization requires an explicit stable-updater Windows x64 build.");
+}
 
 if (!/^[A-Za-z0-9._-]{1,128}$/.test(desktopBuildId)) {
   throw new Error("CPS_DESKTOP_BUILD_ID must be a 1-128 character safe identifier.");
