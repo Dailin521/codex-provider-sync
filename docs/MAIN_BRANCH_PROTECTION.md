@@ -148,7 +148,8 @@ PR #63 已在 `.github/workflows/ci.yml` 增加名称固定的汇总 Job：
 - Windows Desktop 测试必须成功
 - macOS 构建和 Core 测试必须成功
 - Linux 文件锁测试必须成功
-- 任一依赖失败、取消或跳过，`ci-gate` 都失败
+- 完整 CI 模式下任一业务依赖失败、取消或跳过，`ci-gate` 都失败
+- 普通文档 PR 例外：整个 PR 非空差异均在根 README、CHANGELOG、版本中文发布说明白名单中时，分类和文档校验必须成功，重型任务及 C10 必须全部明确为 skipped，才允许 `ci-gate` 通过。main push 始终完整；轻量结果不作为发布证据。具体范围见 [ADR-0039 增补](adr/0039-windows-first-electron-release.md) 和 [发布流程](WINDOWS_ELECTRON_RELEASE_ZH.md)。上方旧四任务 YAML 仅说明稳定汇总门禁原理；当前精确任务清单与模式判定以 `.github/workflows/ci.yml`、`scripts/ci-docs.mjs` 为准。
 - Ruleset 只绑定名称稳定的 `ci-gate`
 
 未来可以修改矩阵版本或增加内部检查，而不必同步修改 `main` 的 Required status

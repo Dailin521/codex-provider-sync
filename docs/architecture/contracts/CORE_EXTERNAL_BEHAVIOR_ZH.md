@@ -1036,7 +1036,8 @@ ADR-0042 补充：`stable-updater` 显式启用 Windows 安装版应用内下载
 - Electron 优先使用 `node:sqlite`；`better-sqlite3` 作为 production fallback 必须针对当前 Electron ABI 验证加载。ASAR 只能引用当前 target 的一个 native binding，且该 binding 是 `app.asar.unpacked` 中唯一文件；其它平台 prebuild、source、build/deps 不得进入包。
 - 每个最终容器都必须实际解包或安装，并与 staging audit 逐字段一致；审计覆盖 ASAR 全文件/block hash、embedded header binding、fuse wire、敏感路径/文件/高置信 token、fixture/test/source map、native binding 与 production buildId。Windows NSIS 还必须完成静默卸载清理。
 - packaged smoke 只使用临时 synthetic fixture，以隐藏窗口启动正式 executable，验证 production test bridge 不存在、真实 SQLite Status、Sync→Restore byte/hash 回环与正常退出；不得访问真实 Codex Home、`auth.json`、凭据或消息正文。
-- 每个目标输出 CycloneDX SBOM、最终容器报告、release manifest 和 `SHA256SUMS.txt`。checksum 必须精确覆盖所有资产与 metadata；aggregate 必须证明四目标 version/commit/lockfile/tool versions/fuse policy/audit policy 一致，且任一 matrix job 失败、取消或跳过都使唯一 `ci-gate` 失败。
+- 完整 CI 中每个目标输出 CycloneDX SBOM、最终容器报告、release manifest 和 `SHA256SUMS.txt`。checksum 必须精确覆盖所有资产与 metadata；aggregate 必须证明四目标 version/commit/lockfile/tool versions/fuse policy/audit policy 一致，且任一 matrix job 失败、取消或跳过都使唯一 `ci-gate` 失败。
+- 2026-09-12 普通文档 PR 例外（ADR-0039 增补）：仅整个 PR 的非空 base…head 差异均为根 `README.md`、`CHANGELOG.md` 或 `docs/release-notes/v*-zh.md` 时，允许文档检查成功后按固定清单跳过重型任务及 C10。重命名检查新旧路径，删除文档拒绝通过；未知路径、空差异走完整 CI，差异读取失败使门禁失败。`ci-gate` 始终执行，分类、文档校验或任务结果不符合预期均拒绝。main push 始终完整检查；轻量 PR 不生成候选包/C10，也不能授权发布或替代最终 main SHA 的完整证据。此例外不改变 Core 业务行为或 Provider I/O。
 - 推送 tag 不得自动发布。旧发布工作流改为显式 `workflow_dispatch` 并要求既有 `v` 前缀 tag 位于 `main`；这只是发布授权后的入口，不表示当前已获 tag、npm/GitHub Release、签名、公证或更新通道授权。
 
 ### 16.9 Desktop Host UI、日志与 Profile 扩展（不改变 CoreFacade）

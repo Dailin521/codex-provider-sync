@@ -1,5 +1,9 @@
 # vNext 行为兼容 Fixture 清单
 
+## ADR-0039 增补：普通文档 PR 的 CI 分流
+
+`test/ci-docs.test.js` 验证整个 PR 比较（早期代码改动不可被后续文档提交掩盖）、重命名两侧、白名单/未知/空差异、main 始终完整、分类失败、精确任务清单、非预期失败/取消/跳过拒绝，以及 C10 业务结果保真。链接夹具覆盖删除公告入链、括号路径/标题、非渲染示例、百分号及 HTML 目标。`test/release-packaging-contract.test.js` 继续验证四目标和稳定 gate；不以纯文档跳过结果生成或替代正式发布证据。
+
 ## ADR-0043：正常聊天不阻断 Status
 
 `test/status-coordination.test.js`：持续正文追加、非 Provider SQLite 更新/WAL checkpoint 仍返回完整 Provider 状态；不整读正文/数据库。持续 Provider/archived/config 漂移、revision 故障、实际锁仍阻断；HTTP DTO 一致。Sync Plan/Apply 和完整 Diagnostics 的原门禁保留。
