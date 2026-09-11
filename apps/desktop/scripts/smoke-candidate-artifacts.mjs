@@ -12,6 +12,7 @@ import {
 } from "./release-audit.mjs";
 
 import { assertDesktopArtifactVersion } from "./desktop-artifact-version.mjs";
+import { expectedContainerUpdateMode } from "./smoke-update-mode.mjs";
 import { updateAssetNames, auditWindowsUpdateAssets, auditWindowsUpdateConfiguration } from "./windows-update-artifacts.mjs";
 const LINUX_SANDBOX_HELPER = fileURLToPath(new URL("./configure-linux-sandbox.mjs", import.meta.url));
 const target = process.env.CPS_CANDIDATE_TARGET;
@@ -121,7 +122,7 @@ async function waitForRemoval(targetPath, timeoutMs = 15_000) {
   throw new Error(`Timed out waiting for uninstall cleanup: ${path.basename(targetPath)}`);
 }
 
-function runProductSmoke(executable) {
+function runProductSmoke(executable, expectedUpdateMode) {
   const npmCli = process.env.npm_execpath;
   if (!npmCli) throw new Error("npm_execpath is required for candidate smoke.");
   run(process.execPath, [
@@ -135,6 +136,7 @@ function runProductSmoke(executable) {
     env: {
       ...process.env,
       CPS_DESKTOP_EXECUTABLE: executable,
+      CPS_EXPECTED_UPDATE_MODE: expectedUpdateMode,
       CPS_DESKTOP_WINDOW_DISPLAY: "hidden"
     }
   });
@@ -187,7 +189,10 @@ async function inspectAndSmokeContainer({ appRoot, executable, assetName, contai
     assert.equal(config.signaturePolicy, staging.updateAudit.signaturePolicy);
   }
   await configureLinuxSandbox(appRoot);
-  runProductSmoke(executable);
+  runProductSmoke(executable, expectedContainerUpdateMode({
+    updaterAuthorized: updateAssets.length > 0,
+    containerKind
+  }));
   return Object.freeze({
     assetName,
     containerKind,

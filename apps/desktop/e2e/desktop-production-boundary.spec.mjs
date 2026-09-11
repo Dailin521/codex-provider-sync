@@ -10,12 +10,14 @@ import { createDesktopReadOnlyFixture } from "../../../test-support/desktop-read
 import { createDesktopSyncSwitchFixture } from "../../../test-support/desktop-sync-switch-fixture.mjs";
 import { shouldRetryPackagedCdpActivation } from "./packaged-cdp-retry.mjs";
 import { captureViewport } from "./viewport-screenshot.mjs";
+import { parseSmokeUpdateMode } from "../scripts/smoke-update-mode.mjs";
 import { claimDailyUpdateCheck } from "../dist/main/daily-update-check.js";
 import { OperationLogService } from "../dist/main/operation-log-service.js";
 
 const require = createRequire(import.meta.url);
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packagedExecutable = process.env.CPS_DESKTOP_EXECUTABLE;
+const expectedUpdateMode = parseSmokeUpdateMode(process.env.CPS_EXPECTED_UPDATE_MODE);
 const electronExecutable = packagedExecutable || require("electron");
 const PRODUCTION_SMOKE_TIMEOUT_MS = 180_000;
 const PRODUCTION_OPERATION_TIMEOUT_MS = 30_000;
@@ -348,12 +350,15 @@ test("production desktop bundle has no test bridge and reads the real SQLite fix
     expect(updateStatus.installAllowed).toBe(false);
     expect(updateStatus.currentVersion).toBeTruthy();
     if (packagedExecutable) {
-      expect(updateStatus.mode).toBe("manual");
+      expect(updateStatus.mode).toBe(expectedUpdateMode === "manual" ? "manual" : undefined);
       expect(updateStatus.state).toBe("idle");
       await page.getByRole("button", { name: "Settings", exact: true }).click();
       await expect(page.getByRole("button", { name: "Check for updates" })).toBeVisible();
       await expect(page.getByText(/Current version:/)).toBeVisible();
-      await expect(page.getByText(/This portable or local build opens/)).toBeVisible();
+      const manualHint = page.getByText(/This portable or local build opens/);
+      const installerHint = page.getByText(/Download when ready, then confirm a restart to install/);
+      await expect(expectedUpdateMode === "manual" ? manualHint : installerHint).toBeVisible();
+      await expect(expectedUpdateMode === "manual" ? installerHint : manualHint).toBeHidden();
       // No network check or download is launched by opening Settings.
       expect((await page.evaluate(() => window.codexProvider.updates.getStatus())).state).toBe("idle");
       await page.getByRole("button", { name: "Overview", exact: true }).click();
