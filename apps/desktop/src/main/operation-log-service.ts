@@ -3,7 +3,14 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
-import { CORE_ERROR_CODES, publicFileUpdateTiming, type CoreResponseEnvelope, type ProgressEvent } from "@codex-provider-sync/contracts";
+import {
+  CORE_ERROR_CODES,
+  OPERATION_FAILURE_STAGES,
+  SAFE_CAUSE_CODES,
+  publicFileUpdateTiming,
+  type CoreResponseEnvelope,
+  type ProgressEvent
+} from "@codex-provider-sync/contracts";
 import { validateOperationLogEntry } from "../shared/operation-log-validation.js";
 
 import type {
@@ -17,8 +24,16 @@ const DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024;
 const DEFAULT_MAX_FILES = 5;
 const MAX_WARNINGS = 64;
 const MAX_STAGES = 256;
-const FAILURE_STAGES = new Set(["mutation", "update_config", "rewrite_rollout_files", "repair_workspace_roots", "update_sqlite", "verify_repair"]);
-const FAILURE_CODES = new Set<string>([...CORE_ERROR_CODES, "WRITE_FAILED", "EIO", "EPERM", "EACCES", "EBUSY", "ENOSPC", "ENOENT", "SQLITE_LOCKED", "SQLITE_READONLY", "SQLITE_FULL"]);
+const FAILURE_STAGES = new Set([...OPERATION_FAILURE_STAGES, "mutation", "repair_workspace_roots", "verify_repair"]);
+const FAILURE_CODES = new Set<string>([
+  ...CORE_ERROR_CODES,
+  "WRITE_FAILED",
+  ...SAFE_CAUSE_CODES,
+  // Existing partial-result codes are not DTO cause codes, but remain valid
+  // result fields and must not be downgraded while projecting old records.
+  "SQLITE_READONLY",
+  "SQLITE_FULL"
+]);
 const PARTIAL_REASONS = new Set(["locked-session", "rollout-changed", "mutation-failed"]);
 const ERROR_REASONS = new Set(["profile", "config", "storage", "rollout", "state-db", "backup", "provider-not-configured"]);
 const COUNT_FIELDS = new Set([
@@ -326,6 +341,12 @@ export class OperationLogService {
       status: response.error.code === "OPERATION_CANCELLED" ? "cancelled" : "failed",
       errorCode: response.error.code,
       errorReason: safeErrorReason(response.error.details?.reason),
+      failedStage: typeof response.error.details?.failureStage === "string"
+        ? response.error.details.failureStage
+        : undefined,
+      failureCode: typeof response.error.details?.causeCode === "string"
+        ? response.error.details.causeCode
+        : undefined,
       outcome: response.error.code === "OPERATION_CANCELLED" ? "cancelled" : "failed"
     });
   }

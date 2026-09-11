@@ -230,6 +230,17 @@ test("JSON sync progress goes only to stderr and redacts the backup path", async
   assert.doesNotMatch(result.stdout, /\[1\/6\]|secret-backup-path/);
 });
 
+test("JSON Sync failure before any progress retains safe stage and cause in stdout and stderr", async () => {
+  const result = await runNode(driverPath, ["sync", "--json"], { scenario: "error-before-progress" });
+  assert.equal(result.code, 1);
+  const envelope = parseSingleEnvelope(result.stdout);
+  assert.equal(envelope.error.code, "INTERNAL_ERROR");
+  assert.deepEqual(envelope.error.details, { failureStage: "prepare_config", causeCode: "EIO" });
+  assert.match(result.stderr, /Failure stage: prepare_config/);
+  assert.match(result.stderr, /Cause code: EIO/);
+  assert.doesNotMatch(result.stdout + result.stderr, /fixture-private|stack|Scanning rollout/);
+});
+
 test("Repair progress has its own seventh stage without changing Sync's six-stage contract", async () => {
   const output = [];
   const code = await runCli(["repair", "models"], {

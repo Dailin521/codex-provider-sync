@@ -20,14 +20,17 @@ export function formatBytes(bytes) {
 
 export function renderStatus(status) {
   if (status.statusReadBlocked || status.operationInProgress) {
+    const unverified = status.operationInProgress?.lockState === "unverifiable";
     const message = status.operationInProgress
-      ? "Another operation is using this storage, or its lock cannot be verified."
+      ? unverified
+        ? "Lock ownership could not be verified. Close other sync tools and check again; do not manually delete the lock."
+        : "Another operation is using this storage. Wait for it to finish."
       : status.statusReadBlocked.reason === "state-changed-during-status"
         ? "Data changed while checking. Run status again to refresh."
         : "The current status could not be fully checked. Run status again to refresh.";
     return [
       `Codex home: ${status.codexHome}`,
-      status.operationInProgress ? "Status: operation in progress or lock unverified" : "Status: refresh needed",
+      status.operationInProgress ? unverified ? "Status: lock unverified" : "Status: operation in progress" : "Status: refresh needed",
       message,
       ...(status.pendingRecovery ? ["Recovery required: inspect managed Restore backups before writing."] : [])
     ].join("\n");
@@ -40,6 +43,10 @@ export function renderStatus(status) {
     `Backups: ${status.backupSummary.count} (${formatBytes(status.backupSummary.totalBytes)})`,
     `Backup root: ${status.backupRoot}`
   ];
+
+  if (status.staleLockDetected === true) {
+    lines.push("Previous operation ended: a subsequent write will recheck and safely reclaim its stale lock.");
+  }
 
   if (status.pendingTransactions?.length) {
     lines.push("");

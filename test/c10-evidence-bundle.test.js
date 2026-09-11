@@ -11,9 +11,12 @@ import {
   assertEventBaseContained,
   assertEvidenceSchema,
   assertRedacted,
+  assertCandidateMatchesSourceVersion,
   normalizeCandidateIndex,
   normalizeFormalReleaseEvidence,
   normalizeRequiredJobs,
+  normalizeSourceVersions,
+  pendingItems,
   REQUIRED_JOBS,
   REQUIRED_TARGETS
 } from "../scripts/write-c10-evidence-bundle.mjs";
@@ -148,6 +151,23 @@ test("C10 candidate set binds four native targets to the tested commit", () => {
   const toolDrift = candidateIndex();
   toolDrift.targets[0].toolVersions.electron = "44.0.1";
   assert.throws(() => normalizeCandidateIndex(toolDrift, sha), /tool-version set/);
+});
+
+test("C10 source manifests and candidates use one strict matching 1.0.x version", () => {
+  const sourceVersions = normalizeSourceVersions({ rootPackage: "1.0.1", desktopPackage: "1.0.1" });
+  assert.deepEqual(sourceVersions, { rootPackage: "1.0.1", desktopPackage: "1.0.1" });
+  assert.doesNotThrow(() => assertCandidateMatchesSourceVersion("1.0.1-rc.42", sourceVersions));
+  assert.throws(() => assertCandidateMatchesSourceVersion("1.0.0-rc.42", sourceVersions), /matching source package/);
+  for (const versions of [
+    { rootPackage: "1.0.01", desktopPackage: "1.0.01" },
+    { rootPackage: "1.1.0", desktopPackage: "1.1.0" },
+    { rootPackage: "1.0.1", desktopPackage: "1.0.0" },
+    { rootPackage: "1.0.1-rc.1", desktopPackage: "1.0.1-rc.1" }
+  ]) assert.throws(() => normalizeSourceVersions(versions));
+  assert.equal(
+    pendingItems({ event: "push", ref: "refs/heads/main", sourceVersions }).some((item) => item.id === "final-source-version"),
+    false
+  );
 });
 
 test("C10 formal Release evidence binds the hosted binary and current workflow", () => {

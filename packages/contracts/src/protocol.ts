@@ -563,7 +563,8 @@ function assertDiagnosticsSnapshot(value: unknown): void {
       "operationInProgress",
       "rolloutScanComplete",
       "lockedRolloutCount",
-      "projectThreadVisibilityAvailable"
+      "projectThreadVisibilityAvailable",
+      ...(safety.staleLockDetected === undefined ? [] : ["staleLockDetected"])
     ])
     && (safety.storageRevision === undefined
       || (typeof safety.storageRevision === "string"
@@ -575,7 +576,8 @@ function assertDiagnosticsSnapshot(value: unknown): void {
     && isDiagnosticOperationState(safety.operationInProgress)
     && typeof safety.rolloutScanComplete === "boolean"
     && isNonNegativeInteger(safety.lockedRolloutCount)
-    && typeof safety.projectThreadVisibilityAvailable === "boolean";
+    && typeof safety.projectThreadVisibilityAvailable === "boolean"
+    && (safety.staleLockDetected === undefined || typeof safety.staleLockDetected === "boolean");
   if (!valid) {
     throw new ContractValidationError("INVALID_INPUT", "Invalid DiagnosticsSnapshot.");
   }
@@ -666,6 +668,7 @@ export function assertCoreMethodOutput<M extends CoreMethodName>(
           || !isNonNegativeInteger(status.backupSummary.count)
           || !isNonNegativeInteger(status.backupSummary.totalBytes)
           || typeof status.pendingRecovery !== "boolean"
+          || (status.staleLockDetected !== undefined && typeof status.staleLockDetected !== "boolean")
           || !Array.isArray(status.pendingTransactions)
           || status.pendingTransactions.some((entry) => !isRecord(entry) || !isJsonValue(entry))
           || !(status.operationInProgress === null

@@ -14,7 +14,7 @@ import {
 import { prepareElectronWindowsRelease } from "../scripts/prepare-electron-windows-release.mjs";
 import { assertDesktopArtifactVersion } from "../scripts/desktop-artifact-version.mjs";
 import { readReleaseMetadata } from "../../../scripts/read-release-metadata.js";
-import { resolveCandidateBuild } from "../scripts/resolve-candidate-build.mjs";
+import { DESKTOP_RELEASE_BASE_VERSION, resolveCandidateBuild } from "../scripts/resolve-candidate-build.mjs";
 import {
   hasSuccessfulCiGateJob,
   assertNoExistingRelease,
@@ -38,14 +38,17 @@ test("stable Windows announcement satisfies the repository release metadata cont
 });
 
 test("candidate identity is injected without mutating the source package version", async () => {
+  const rootManifest = JSON.parse(await read("package.json"));
+  const desktopManifest = JSON.parse(await read("apps/desktop/package.json"));
+  assert.equal(DESKTOP_RELEASE_BASE_VERSION, rootManifest.version);
   assert.deepEqual(resolveCandidateBuild({
     channel: "rc",
     runNumber: 42,
     sha: "0123456789abcdef0123456789abcdef01234567",
     target: "windows-x64"
   }), {
-    version: "1.0.0-rc.42",
-    buildId: "1.0.0-rc.42-0123456789ab-windows-x64",
+    version: `${rootManifest.version}-rc.42`,
+    buildId: `${rootManifest.version}-rc.42-0123456789ab-windows-x64`,
     commit: "0123456789abcdef0123456789abcdef01234567",
     target: "windows-x64",
     channel: "rc",
@@ -53,10 +56,16 @@ test("candidate identity is injected without mutating the source package version
   });
   assert.throws(() => resolveCandidateBuild({ channel: "nightly", runNumber: 1, sha: "0123456", target: "windows-x64" }));
   assert.throws(() => resolveCandidateBuild({ channel: "rc", runNumber: -1, sha: "0123456", target: "windows-x64" }));
-  const rootManifest = JSON.parse(await read("package.json"));
-  const desktopManifest = JSON.parse(await read("apps/desktop/package.json"));
-  assert.equal(rootManifest.version, "1.0.0");
-  assert.equal(desktopManifest.version, "1.0.0");
+  assert.deepEqual(resolveCandidateBuild({
+    channel: "rc", runNumber: 1, sha: "0123456", target: "windows-x64", baseVersion: "1.0.1"
+  }), {
+    version: "1.0.1-rc.1", buildId: "1.0.1-rc.1-0123456-windows-x64", commit: "0123456",
+    target: "windows-x64", channel: "rc", runNumber: 1
+  });
+  for (const baseVersion of ["1.0.01", "1.1.0", "1.0.1-rc.1"]) {
+    assert.throws(() => resolveCandidateBuild({ channel: "rc", runNumber: 1, sha: "0123456", target: "windows-x64", baseVersion }));
+  }
+  assert.equal(desktopManifest.version, rootManifest.version);
   assert.equal(rootManifest.optionalDependencies["better-sqlite3"], "8.7.0");
   assert.equal(desktopManifest.dependencies["better-sqlite3"], "13.0.3");
   assert.equal(desktopManifest.homepage, "https://github.com/Dailin521/codex-provider-sync#readme");
@@ -99,18 +108,24 @@ test("Windows release preparation accepts only an existing immutable RC tag and 
     version: "1.0.0-rc.42",
     expectedSha: "0123456"
   }));
+  assert.doesNotThrow(() => prepareElectronWindowsRelease({
+    releaseRef: "refs/tags/v1.0.1-rc.1",
+    version: "1.0.1-rc.1",
+    expectedSha: sha
+  }));
 });
 
-test("stable Windows preparation requires explicit manual channel and exact stable tag/version", () => {
+test("stable Windows preparation requires explicit manual channel and exact strict patch tag/version", () => {
   const input = { releaseRef: "refs/tags/v1.0.0", version: "1.0.0", expectedSha: "a".repeat(40), channel: "stable-manual" };
   assert.deepEqual(prepareElectronWindowsRelease(input), {
     releaseRef: input.releaseRef, releaseTag: "v1.0.0", version: "1.0.0", channel: "stable-manual",
     commit: input.expectedSha, target: "windows-x64", buildId: "1.0.0-aaaaaaaaaaaa-windows-x64"
   });
   for (const change of [
-    { channel: "rc" }, { channel: "stable" }, { version: "1.0.1" },
+    { channel: "rc" }, { channel: "stable" }, { version: "1.0.01" }, { version: "1.1.0" },
     { version: "1.0.0-rc.1" }, { releaseRef: "refs/heads/main" }, { expectedSha: "aaaaaaa" }
   ]) assert.throws(() => prepareElectronWindowsRelease({ ...input, ...change }));
+  assert.doesNotThrow(() => prepareElectronWindowsRelease({ ...input, releaseRef: "refs/tags/v1.0.1", version: "1.0.1" }));
 });
 
 test("artifact build, stage and smoke accept stable only for explicit Windows manual release", async () => {
@@ -123,7 +138,9 @@ test("artifact build, stage and smoke accept stable only for explicit Windows ma
       assert.throws(() => assertDesktopArtifactVersion({ version: "1.0.0", target, releaseChannel: "stable-manual" }));
     }
   }
-  for (const version of ["1.0.1", "1.0.0-rc.1", "1.0.0; echo unsafe"]) {
+  assert.doesNotThrow(() => assertDesktopArtifactVersion({ version: "1.0.1", target: "windows-x64", releaseChannel: "stable-manual" }));
+  assert.doesNotThrow(() => assertDesktopArtifactVersion({ version: "1.0.1-rc.1", target: "windows-x64" }));
+  for (const version of ["1.0.01", "1.1.0", "1.0.0-rc.1", "1.0.0; echo unsafe"]) {
     assert.throws(() => assertDesktopArtifactVersion({ version, target: "windows-x64", releaseChannel: "stable-manual" }));
   }
   for (const file of ["build-candidate", "stage-candidate", "smoke-candidate-artifacts"]) {
@@ -373,14 +390,14 @@ test("Windows Electron release workflow defaults to RC, explicitly allows manual
   const workflow = await read(".github/workflows/publish-electron-windows.yml");
   const preparation = await read("apps/desktop/scripts/prepare-electron-windows-release.mjs");
   const ciGate = await read("apps/desktop/scripts/verify-exact-ci-gate.mjs");
-  assert.match(preparation, /\^1\\\.0\\\.0-rc\\\./);
+  assert.match(preparation, /PATCH_VERSION/);
   assert.doesNotMatch(preparation, /alpha\|beta\|rc/);
   assert.match(workflow, /workflow_dispatch:/);
   assert.match(workflow, /run: test "\$GITHUB_REF" = refs\/heads\/main/);
   assert.match(workflow, /contents: write\r?\n\s+actions: read/);
   assert.match(workflow, /create_draft_release:/);
   assert.match(workflow, /default: false/);
-  assert.match(workflow, /refs\/tags\/v1\.0\.0-rc\.N/);
+  assert.match(workflow, /refs\/tags\/v1\.0\.x-rc\.N/);
   assert.match(workflow, /git merge-base --is-ancestor/);
   assert.match(workflow, /Require a successful exact push ci-gate/);
   assert.match(ciGate, /run\.event === "push"/);

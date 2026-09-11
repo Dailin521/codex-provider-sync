@@ -163,6 +163,40 @@ test("CLI JSON hides arbitrary internal error text and optional properties", () 
   assert.doesNotMatch(JSON.stringify(normalized), /secret|message body/);
 });
 
+test("CLI JSON retains only audited INTERNAL_ERROR diagnostics", () => {
+  const operationId = "11111111-1111-4111-8111-111111111111";
+  const normalized = normalizeCliErrorDto({
+    code: "INTERNAL_ERROR",
+    message: "token=secret and private body",
+    severity: "fatal",
+    retryable: false,
+    recoveryRequired: false,
+    operationId,
+    details: {
+      failureStage: "preflight_sqlite",
+      causeCode: "ETIMEDOUT",
+      path: "C:/private",
+      provider: "private-provider",
+      message: "private body",
+      stack: "private stack"
+    }
+  });
+  assert.deepEqual(normalized, {
+    code: "INTERNAL_ERROR",
+    message: "An internal error occurred.",
+    severity: "fatal",
+    retryable: false,
+    recoveryRequired: false,
+    operationId,
+    details: { failureStage: "preflight_sqlite", causeCode: "ETIMEDOUT" }
+  });
+  assert.doesNotMatch(JSON.stringify(normalized), /secret|private|stack|path|provider/);
+  assert.deepEqual(normalizeCliErrorDto({
+    code: "INTERNAL_ERROR", message: "safe", severity: "fatal", retryable: false, recoveryRequired: false,
+    details: { failureStage: "unknown-stage", causeCode: "UNKNOWN", path: "C:/private" }
+  }).details, undefined);
+});
+
 test("CLI JSON rejects inherited error-code property names", () => {
   for (const code of ["__proto__", "constructor", "toString"]) {
     const normalized = normalizeCliErrorDto(dto(code));

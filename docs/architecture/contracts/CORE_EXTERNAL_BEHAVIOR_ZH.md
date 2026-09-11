@@ -1,5 +1,9 @@
 # Node Core 外部行为兼容合同
 
+## 2026-09-11：失效锁观察与恢复（ADR-0041）
+
+Status 三次 Home 锁检查只读区分 absent/stale/active/unverifiable。所有 owner 与 claims 均已证明失效时允许正常扫描，可选返回 `staleLockDetected:true`，不产生 operationInProgress；revision/pending Restore 门禁不变。真正清理由后续 Apply 的 acquireLock 重验执行，不新增方法、不允许直接删除。未知 owner/权限/身份变化继续阻断，UI 不再与 active 共用“执行中”文案。Diagnostics safety 可选投影同一 boolean；已有 operationInProgress 时不继续完整性扫描，省略可选 historyIntegrity 并标记未完整，脱敏状态与日志仍可导出。见 [ADR-0041](../../adr/0041-stale-home-lock-status-recovery.md)。
+
 ## 2026-09-08：Windows 文件更新计时
 
 [ADR-0038](../../adr/0038-windows-cleanup-and-file-update-timing.md)：Sync/Switch 结果可选 result.fileUpdateTiming，包含固定 schema v1、windows-first-line 范围、五种非负整数文件计数和有限非负毫秒分项（可有小数），完整字段以 Contracts FileUpdateTiming 为准。一次批次聚合，mutation 后 partial 可保留已测部分；noop、非 Windows、未收到观测时缺失，不造零。Watch finished 可信 activity 和 Desktop 日志可复用投影。嵌套时间不可相加；观测失败不改变业务结果。Provider I/O、Apply 输入、ProgressEvent 和 CLI 退出码保持。
@@ -505,6 +509,8 @@ freedBytes
 这些能力当前不全部位于 `service.js`，但已被 Web/CLI 使用，迁移时必须保留。
 
 ### 9.1 `listBackups`
+
+ADR-0040：只读列表及 Status 备份摘要在发现受管目录后，若 metadata/文件/子目录读取遇到 ENOENT，则整条省略该备份，数量和大小只计成功读取的条目；不返回半条备份。非 ENOENT 的权限/损坏错误继续失败。读取不加写锁、不是锁定快照或 Restore 完整性证明；Prune、Restore 和备份写入的校验不放宽。
 
 输入：Codex Home。
 
@@ -1028,6 +1034,8 @@ V1/C3 已实现上述边界；`runSync/runSwitch/runRepair/runRestore/runWatch` 
 - 推送 tag 不得自动发布。旧发布工作流改为显式 `workflow_dispatch` 并要求既有 `v` 前缀 tag 位于 `main`；这只是发布授权后的入口，不表示当前已获 tag、npm/GitHub Release、签名、公证或更新通道授权。
 
 ### 16.9 Desktop Host UI、日志与 Profile 扩展（不改变 CoreFacade）
+
+ADR-0040：Prepare/普通写内部失败可携带白名单 `failureStage/causeCode`，Main 投影到已有日志 `failedStage/failureCode`，保留重启读取和关联 ID。未知值/旧记录不补造信息，不记录异常原文、路径或正文。进度和阶段耗时协议不扩张，失败阶段不从最后一次进度推测。
 
 - ADR-0036：概览提供默认折叠的同步速度说明；Sync/Switch 结果和 Desktop 日志仅凭实际 `rewrittenSessionFiles >= 100` 显示折叠提速入口，不按预计数量或耗时推断策略，不新增 Fast/改名/扫描能力。日志宽屏（≥1024 CSS px）左列表右详情、独立滚动；窄屏选择后切换详情并提供返回。翻页/筛选/配置变化或刷新后日志被清理时，不保留无关联旧详情；详情迟到响应按 ID 隔离。预计/实际计数、阶段时间、可复制编号和 Profile/revision 操作门禁保留，首次/手动刷新及既有推送策略不变。History 之外的固定视口例外仅新增日志页，其余页面滚动不变。
 

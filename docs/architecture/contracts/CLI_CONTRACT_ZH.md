@@ -1,5 +1,7 @@
 # CLI 命令兼容合同
 
+ADR-0041 增量：Status/Diagnostics JSON 可选 `staleLockDetected:boolean` 表示发现已证明失效的 Home 锁，不表示已删除锁；检查保持只读。正常写命令重新验证后回收失效锁。未知 owner 仍为 `LOCK_UNVERIFIABLE`，写命令 JSON 退出码仍为 5。
+
 > 状态：Accepted（Phase 0 Human 兼容基线；ADR-0016 C2/C3 增量已实现）
 >
 > 基线版本：`@dailin521/codex-provider-sync` v0.5.0
@@ -441,6 +443,8 @@ codex-provider install-windows-launcher [--dir PATH] [--codex-home PATH] [--sqli
 Human Mode 不采用 JSON 模式的 `2`、`3`、`4`、`5`、`130`；partial 仍为 `0`，其余既有失败仍为 `1`。这一区分防止现有脚本因 opt-in JSON 能力而改变行为。
 
 ### 14.2 vNext C2 JSON 合同
+
+ADR-0040：失败 Error DTO 可带枚举化 `details.failureStage/causeCode`（含 INTERNAL_ERROR）和合法 UUID operationId。失败时 stderr 可追加 `Failure stage: <enum>` / `Cause code: <enum>`，即使尚未出现业务进度；未知值不输出。stdout 包络、退出码、Human 输出和六阶段进度不变，stderr 失败不得改变原业务错误。
 
 ADR-0038：Windows Sync/Switch JSON 的 result 可选包含白名单 fileUpdateTiming 数值聚合，与 Core 合同一致；缺失不补零，字段含义/嵌套关系见对应 ADR。顶层键、Human 输出、进度 stderr 与 partial 退出码 3 不变。
 

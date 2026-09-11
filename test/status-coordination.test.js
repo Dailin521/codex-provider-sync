@@ -14,6 +14,7 @@ import { createMemoryWebUiState } from "../src/web-state.js";
 import { getStatus } from "../packages/core/src/application/status.js";
 import { acquireLock } from "../src/locking.js";
 import { getDiagnostics } from "../packages/core/src/application/diagnostics.js";
+import { prepareSync, applySync } from "../src/service.js";
 
 // Node 16 has afterEach, but no TestContext.mock. Keep these filesystem
 // injections test-local and restore them even when a tested assertion fails.
@@ -220,6 +221,34 @@ function asLastComplete(status) {
   return value;
 }
 
+test("stale Home lock does not trap Status and is reclaimed through ordinary Plan/Apply", async () => {
+  const fixture = await makeFixture();
+  try {
+    const lockDir = path.join(fixture.codexHome, "tmp", "provider-sync.lock");
+    await fs.mkdir(lockDir, { recursive: true });
+    const ownerPath = path.join(lockDir, "owner.json");
+    const ownerText = JSON.stringify({ pid: 2147483647, processStartMarker: "windows:1" });
+    await fs.writeFile(ownerPath, ownerText);
+    const options = { codexHome: fixture.codexHome, sqliteHome: fixture.sqliteHome };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const status = await getStatus(options);
+      assert.equal(status.operationInProgress, null);
+      assert.equal(status.staleLockDetected, true);
+      assert.equal(status.statusReadBlocked, undefined);
+      assert.equal(await fs.readFile(ownerPath, "utf8"), ownerText);
+    }
+    const plan = await prepareSync(options);
+    const result = await applySync({ schemaVersion: 1, planId: plan.planId });
+    assert.equal(result.outcome, "completed");
+    const status = await getStatus(options);
+    assert.equal(status.operationInProgress, null);
+    assert.equal(status.staleLockDetected, undefined);
+    await assert.rejects(fs.stat(ownerPath), { code: "ENOENT" });
+  } finally {
+    await fs.rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("Core and Web Status block on the Home lock and ignore legacy State DB resource locks", async () => {
   const fixture = await makeFixture();
   const web = await startRealWeb(fixture.codexHome, path.join(fixture.root, "web"));
@@ -311,6 +340,39 @@ function afterHeaderRead(t, fixture, callback) {
 
 const syntheticAppend = (fixture) => fs.appendFile(fixture.rolloutPath,
   '{"type":"event_msg","payload":{"type":"user_message","message":"synthetic append"}}\n');
+
+for (const lockState of ["active", "unverifiable"]) {
+  test(`Diagnostics under ${lockState} lock exports safety without opening any rollout`, async () => {
+    const fixture = await makeFixture();
+    let release;
+    try {
+      if (lockState === "active") release = await acquireLock(fixture.codexHome, "sync");
+      else {
+        const lockDir = path.join(fixture.codexHome, "tmp", "provider-sync.lock");
+        await fs.mkdir(lockDir, { recursive: true });
+        await fs.writeFile(path.join(lockDir, "owner.json"), "{");
+      }
+      const open = fs.open;
+      const readFile = fs.readFile;
+      methodMocks.method(fs, "open", async (file, ...args) => {
+        assert.notEqual(file, fixture.rolloutPath, "blocked diagnostic must not open rollout");
+        return open(file, ...args);
+      });
+      methodMocks.method(fs, "readFile", async (file, ...args) => {
+        assert.notEqual(file, fixture.rolloutPath);
+        return readFile(file, ...args);
+      });
+      const result = await getDiagnostics({ codexHome: fixture.codexHome });
+      assert.equal(result.safety.operationInProgress.lockState, lockState);
+      assert.equal(result.safety.rolloutScanComplete, false);
+      assert.equal(result.historyIntegrity, undefined);
+    } finally {
+      methodMocks.restoreAll();
+      await release?.();
+      await fs.rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+}
 
 for (const locked of [false, true]) {
   test(`Diagnostics preserves current facts after revision failure, with Home lock priority (${locked})`, async (t) => {

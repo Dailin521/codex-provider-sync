@@ -1,3 +1,41 @@
+import { OPERATION_FAILURE_STAGES, SAFE_CAUSE_CODES } from "../packages/contracts/dist/index.js";
+
+const FAILURE_STAGE_SET = new Set(OPERATION_FAILURE_STAGES);
+const annotatedFailures = new WeakSet();
+
+// Trusted stage annotations are data only, never derived from exception text.
+// Preserve the original error/code for existing retry and partial-result logic.
+export function annotateFailureStage(error, stage) {
+  if (!FAILURE_STAGE_SET.has(stage) || !(error instanceof Error)) return error;
+  if (annotatedFailures.has(error)) return error;
+  try {
+    const previous = Object.getOwnPropertyDescriptor(error, "details")?.value;
+    const details = {};
+    if (previous && typeof previous === "object" && !Array.isArray(previous)) {
+      for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(previous))) {
+        if (descriptor.enumerable && "value" in descriptor) {
+          Object.defineProperty(details, key, { enumerable: true, configurable: true, value: descriptor.value });
+        }
+      }
+    }
+    const causeCode = safeCauseCode(error instanceof CoreError
+      ? Object.getOwnPropertyDescriptor(error, "cause")?.value : error);
+    const annotated = { ...details, failureStage: stage, ...(SAFE_CAUSE_CODES.has(causeCode) ? { causeCode } : {}) };
+    if (error instanceof CoreError) Object.freeze(annotated);
+    Object.defineProperty(error, "details", { configurable: true, enumerable: true, writable: true, value: annotated });
+    annotatedFailures.add(error);
+    return error;
+  } catch {
+    // Diagnostics must never change a frozen third-party error's classification.
+    return error;
+  }
+}
+
+/** @template T @param {string} stage @param {() => T | Promise<T>} run @returns {Promise<T>} */
+export async function withFailureStage(stage, run) {
+  try { return await run(); } catch (error) { throw annotateFailureStage(error, stage); }
+}
+
 const ERROR_DEFINITIONS = Object.freeze({
   INVALID_INPUT: { severity: "error", retryable: true, recoveryRequired: false },
   PROFILE_CHANGED: { severity: "warning", retryable: true, recoveryRequired: false },
@@ -150,9 +188,17 @@ export class CoreError extends Error {
 }
 
 function safeCauseCode(error) {
-  return typeof error?.code === "string" && error.code && error.code.length <= 120
-    ? error.code
-    : undefined;
+  // Preserve the legacy internal DTO; transport sanitizers retain only audited codes.
+  const directCode = error && typeof error === "object" ? Object.getOwnPropertyDescriptor(error, "code")?.value : undefined;
+  if (typeof directCode === "string" && directCode && directCode.length <= 120) return directCode;
+  const visited = new Set();
+  for (let depth = 0; error && typeof error === "object" && depth < 4 && !visited.has(error); depth += 1) {
+    visited.add(error);
+    const code = Object.getOwnPropertyDescriptor(error, "code")?.value;
+    if (SAFE_CAUSE_CODES.has(code)) return code;
+    error = Object.getOwnPropertyDescriptor(error, "cause")?.value;
+  }
+  return undefined;
 }
 
 function mappedCode(error, fallbackCode) {
@@ -175,19 +221,22 @@ export function toCoreErrorDto(error, {
   suggestedAction
 } = {}) {
   if (error instanceof CoreError) {
-    return error.toDto();
+    const dto = error.toDto();
+    const causeCode = safeCauseCode(error.cause);
+    return SAFE_CAUSE_CODES.has(causeCode) ? { ...dto, details: { ...dto.details, causeCode } } : dto;
   }
 
   const message = error instanceof Error ? error.message : String(error);
   const causeCode = safeCauseCode(error);
   const normalizedDetails = {
     ...(details ?? {}),
+    ...(annotatedFailures.has(error) ? { failureStage: error.details.failureStage } : {}),
     ...(causeCode && !CORE_ERROR_CODE_SET.has(causeCode) ? { causeCode } : {})
   };
   const code = mappedCode(error, fallbackCode);
   try {
     return new CoreError(code, message || "An unknown Core error occurred.", {
-      operationId,
+      operationId: operationId ?? (annotatedFailures.has(error) ? error?.operationId : undefined),
       details: Object.keys(normalizedDetails).length > 0 ? normalizedDetails : undefined,
       suggestedAction,
       cause: error instanceof Error ? error : undefined

@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       release_ref:
-        description: Existing version tag, exactly refs/tags/v1.0.0-rc.N or refs/tags/v1.0.0
+        description: Existing version tag, exactly refs/tags/v1.0.x-rc.N or refs/tags/v1.0.x (x has no leading zero)
         required: true
         type: string
       release_version:
-        description: Matching version, for example 1.0.0-rc.42 or 1.0.0
+        description: Matching version, for example 1.0.1-rc.42 or 1.0.1
         required: true
         type: string
       release_channel:

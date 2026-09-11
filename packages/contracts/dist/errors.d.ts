@@ -2,6 +2,14 @@ import type { JsonObject } from "./json.js";
 export declare const CORE_ERROR_CODES: readonly ["INVALID_INPUT", "PROFILE_CHANGED", "STORAGE_CHANGED", "PLAN_STALE", "PLAN_EXPIRED", "STALE_STATE", "CODEX_HOME_NOT_FOUND", "STATE_DB_NOT_FOUND", "SQLITE_UNSUPPORTED_PATH", "SQLITE_BUSY", "SQLITE_UNREADABLE", "ROLLOUT_LOCKED", "ROLLOUT_CHANGED", "PENDING_TRANSACTION", "BACKUP_FAILED", "SYNC_FAILED_ROLLED_BACK", "RECOVERY_REQUIRED", "RESTORE_VALIDATION_FAILED", "PERMISSION_DENIED", "OPERATION_BUSY", "LOCK_UNVERIFIABLE", "OPERATION_CANCELLED", "CORE_RUNTIME_CRASHED", "PROTOCOL_VERSION_MISMATCH", "INTERNAL_ERROR"];
 export type CoreErrorCode = typeof CORE_ERROR_CODES[number];
 export type CoreErrorSeverity = "info" | "warning" | "error" | "fatal";
+/**
+ * Fixed, data-free boundaries at which an ordinary operation may fail. These
+ * are intentionally not progress labels: callers must report one only when
+ * the corresponding boundary was actually entered.
+ */
+export declare const OPERATION_FAILURE_STAGES: ReadonlySet<string>;
+/** Safe machine-readable causes. Never use an arbitrary Error.code as a DTO value. */
+export declare const SAFE_CAUSE_CODES: ReadonlySet<string>;
 export interface CoreErrorDto {
     code: CoreErrorCode;
     message: string;

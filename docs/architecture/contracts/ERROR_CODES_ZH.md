@@ -1,5 +1,7 @@
 # vNext Error Code 合同
 
+ADR-0041 修订：全部 owner 已证明失效时，内部锁观察返回 `stale`，不再把该情形当作 `LOCK_UNVERIFIABLE`；Status 不创建虚假的进行中操作。任何未知、变动或不可验证 owner 仍按原码阻止写入，未新增错误码。
+
 > **状态：Accepted（阶段 0 合同；ADR-0016 C2/C3 轻量写增量已实施）**
 >
 > **日期：2026-08-24；当前实现增量：2026-09-03**
@@ -38,7 +40,7 @@ interface CoreErrorDto {
 
 - `code` 是程序判断依据；Canonical Code 使用大写蛇形命名。
 - C4 CoreClient/HTTP/IPC 公共边界的 `message` 按 code 使用固定安全文案；UI 本地化只依据 code，不能回显内部异常原文。Core 内部异常仍可携带操作建议，但 `suggestedAction` 不进入公共 DTO。
-- 公共 `details` 只允许 `busyScope`、`lockScope`、`causeCode`、`reason`、`missing`、`sqliteHomeSource`、SQLite 整数错误码和 `operationKind` 的固定枚举/范围；未知 key、路径、认证信息、Token、消息正文或任意建议文本全部丢弃。
+- 公共 `details` 只允许 `busyScope`、`lockScope`、`causeCode`、`failureStage`、`reason`、`missing`、`sqliteHomeSource`、SQLite 整数错误码和 `operationKind` 的固定枚举/范围；未知 key、路径、认证信息、Token、消息正文或任意建议文本全部丢弃。
 - 公共 `operationId` 只接受 UUID；不可信值不得透传。
 - 普通用户默认不接收 Error Stack；诊断日志也必须遵守相同的隐私边界。
 - 一个失败只选择一个最能指导恢复动作的顶层 Canonical Code；底层 OS/SQLite Code 可放入安全的 `details.causeCode`。
@@ -47,6 +49,8 @@ interface CoreErrorDto {
 普通写的 partial 使用固定安全字段：`partialReason=locked-session|rollout-changed|mutation-failed`。`skippedLockedRolloutFiles` 与 `skippedChangedRolloutFiles` 分别列出活动会话锁定和 Apply 期间漂移的 rollout；两者同时存在时主原因固定为 `locked-session`，mutation 后失败优先为 `mutation-failed`。所有 partial 都携带 `retryRecommended=true`；mutation 后失败还携带枚举化 `failedStage`、`failureCode` 与可用于手动 Restore 的受管 `backupId`。这些字段不得包含路径或底层异常文本。
 
 ## 3. Canonical vNext CoreErrorCode
+
+ADR-0040：`failureStage` 仅接受 Contracts 的 `OPERATION_FAILURE_STAGES`（实际 Prepare/普通写执行边界），`causeCode` 仅接受 `SAFE_CAUSE_CODES`，新增 ENOSPC/EMFILE/ENFILE/ETIMEDOUT。INTERNAL_ERROR 只允许这两项安全 details 和合法 UUID operationId，仍为固定 fatal、retryable=false、recoveryRequired=false；不是自动重试或写入完成的证明。无法获得阶段时省略，不从进度/错误文本猜测，不回显原始 cause。完整枚举及边界见 [ADR-0040](../../adr/0040-backup-read-races-and-failure-diagnostics.md)。
 
 ### 3.1 正式集合
 

@@ -36,3 +36,7 @@
 准备流程增加显式 `stable-manual` 选项，只接受 `1.0.0` 与 `refs/tags/v1.0.0`；默认仍为严格 RC。两者都只生成候选资产或 Draft，继续 exact main push CI、不可变 tag/SHA、全套安装/解包验收及拒绝覆盖。核对最终资产后，才在独立步骤公开正式 Release 并设为 latest。
 
 构建、暂存和容器验证允许此 Windows-only 正式版本，但保留候选审核文件原始字段（`releaseAuthorized: false`、`unsigned-candidate`），表示构建未启用自动安装且审核发生在公开前，不伪造签名/升级证据。人工发布状态以 GitHub Release 为准。不得把 RC 资产重命名或改写已校验 manifest。此次批准不宣称 21 秒同步问题已优化，也不将全平台迁移阶段标为完成。
+
+## 2026-09-11：Windows 1.0.x 补丁发布兼容
+
+上述 `1.0.0` 是首发批准的历史事实。后续 Windows Electron 补丁候选以根 `package.json` 的实际严格 `1.0.x` 基础版本生成，仅允许 `1.0.x-rc.N`；`x` 与 `N` 都是无前导零整数。`stable-manual` 仅接受 Windows x64 的严格 `1.0.x` 和完全匹配的现有 tag。每个新 stable 版本仍须独立发布批准，且不改变 exact main push `ci-gate`、不可变 tag/SHA、拒绝覆盖已有 Release、Draft 复核、资产白名单、未签名手动安装及不上传生产更新 metadata 的边界。

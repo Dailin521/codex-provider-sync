@@ -12,6 +12,7 @@ import {
   defaultBackupRoot
 } from "../../../../src/constants.js";
 import { CoreError } from "../../../../src/core-error.js";
+export { annotateFailureStage, withFailureStage } from "../../../../src/core-error.js";
 import {
   configDeclaresProvider,
   listConfiguredProviderIds,

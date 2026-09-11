@@ -10,6 +10,8 @@
 
 ## 决策
 
+2026-09-11：[ADR-0041](0041-stale-home-lock-status-recovery.md) 进一步区分已证明失效的锁与未知锁；前者允许只读状态/正常同步重新验证，后者仍阻断。下文活动锁、revision 和最后完整快照规则保持有效。
+
 1. 只有进程内 OperationRuntime 或实际 Home lock 检查才能产生 `operationInProgress`。实际活动/无法验证的 Home lock 仍按现有规则阻断；不删除锁、不根据文件变化推断工具操作。
 2. revision 漂移或读取失败分别返回现有 `statusReadBlocked.reason=state-changed-during-status/revision-unverifiable`，无真实占用证据时 `operationInProgress=null`、`rolloutScanComplete=false`。首轮、扫描后和一次重试后的 revision 失败采用相同语义。
 3. 保留同 Profile/revision 的最后完整快照，但标注未核验，不缓存本次中间扫描结果。首次启动没有旧快照时返回降级 DTO，不推断健康、Provider 或零计数。pending Restore 仍检查，检查失败保持恢复阻断。

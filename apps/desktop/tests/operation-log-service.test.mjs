@@ -84,6 +84,41 @@ test("failed Sync preserves safe plan details and a timed validation stage acros
   assert.equal(restarted.get(id).targetProvider, "dal");
 });
 
+test("failed operation projects only audited failure diagnostics across restart", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cps-failure-diagnostic-log-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const logs = new OperationLogService({ directory: root });
+  await logs.initialize();
+  const id = await logs.begin({ operation: "sync", requestId: "apply" });
+  await logs.resume(id, "apply-2");
+  await logs.finishFromResponse(id, { protocolVersion: 1, requestId: "apply-2", ok: false, error: {
+    code: "INTERNAL_ERROR",
+    details: {
+      failureStage: "preflight_sqlite",
+      causeCode: "ETIMEDOUT",
+      path: "C:/private",
+      message: "private body",
+      stack: "private stack"
+    }
+  } });
+  const entry = logs.get(id);
+  assert.equal(entry.failedStage, "preflight_sqlite");
+  assert.equal(entry.failureCode, "ETIMEDOUT");
+  assert.doesNotMatch(logs.recentJsonLines(), /private|stack|path/);
+  const restarted = new OperationLogService({ directory: root });
+  await restarted.initialize();
+  assert.equal(restarted.get(id).failedStage, "preflight_sqlite");
+  assert.equal(restarted.get(id).failureCode, "ETIMEDOUT");
+
+  const unsafe = await logs.begin({ operation: "sync" });
+  await logs.finishFromResponse(unsafe, { protocolVersion: 1, requestId: "unsafe", ok: false, error: {
+    code: "INTERNAL_ERROR", details: { failureStage: "secret/path", causeCode: "SECRET" }
+  } });
+  assert.equal(logs.get(unsafe).failedStage, undefined);
+  assert.equal(logs.get(unsafe).failureCode, "INTERNAL_ERROR");
+  assert.doesNotMatch(logs.recentJsonLines(), /secret\/path|SECRET/);
+});
+
 test("Switch logs preserve a validated plan without reconstructing older records, and filter by revision", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cps-switch-log-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

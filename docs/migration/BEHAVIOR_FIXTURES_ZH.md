@@ -1,5 +1,12 @@
 # vNext 行为兼容 Fixture 清单
 
+## ADR-0041：失效锁恢复
+
+- `test/lock-inspection.test.js`：canonical/全部 claims、Node/.NET owner、代际竞争、未知 owner、只读不改字节与写入时回收。
+- `test/status-coordination.test.js`：失效锁 Status→Prepare→Apply、活动/未知锁下诊断不继续读取 rollout。
+- `packages/app-ui/tests/app-status-gating.vitest.tsx`：失效锁允许同步、未知锁独立提示与手动复查。
+- `apps/desktop/e2e/desktop-production-boundary.spec.mjs`：真实 Utility Core 在遗留锁下 Preview→Direct Sync→Restore，确认失效锁直到写入才回收。
+
 ## 2026-09-08：Windows 手动安装正式版（ADR-0039 补充）
 
 - `apps/desktop/tests/release-candidate.test.mjs`：默认 RC 严格版本、显式 stable-manual 仅 Windows 1.0.0、tag/SHA 一致、拒绝已有 Release/异常 API、构建/暂存/容器验收共同校验，workflow 保持 Draft-only 且不启用生产自动安装。
@@ -280,6 +287,8 @@ SQLite live WAL、真实文件锁、跨进程 crash 和 WSL UNC 不能作为静�
 | desktop-window-state | `apps/desktop/tests/window-state.test.mjs` | 正常边界/最大化分离、负坐标/显示器失效/小工作区、原子偏好、退出 flush 和测试隔离 |
 
 ## 11. 阶段验收边界
+
+ADR-0040 fixture：`test/backup-read-race.test.js` 使用确定性 read/stat/readdir 屏障验证整条省略消失备份、幸存计数/字节、权限/损坏错误和写入 inventory 严格性；`test/watch.test.js` 等待真实 finished 终态后验证保留数量。`test/operation-failure-stage.test.js` 验证真实 Prepare/Apply 前后失败、零 mutation、partial/retry、原错误分类和诊断 observer；CLI 子进程/Contracts/Desktop 日志测试验证无进度失败仍有安全阶段/cause、未知值拒绝、日志持久化，不输出真实数据。
 
 ADR-0031 fixture：`packages/app-ui/tests/repair-clarity.vitest.tsx`、`advanced-features.vitest.tsx`、`plan-review.vitest.tsx` 和 Desktop production E2E 验证专项修复三项/模型高级调整独立默认空选，双语用途和实际 Plan 说明；当前完整诊断仅提供展开/聚焦，不自动选中或请求；旧/失败/不完整/不可写结果不推荐；切换 Profile/revision 重置、禁用表单提交不绕过。保持原模型调整 → Restore hash 回环和 Provider I/O fixture。
 

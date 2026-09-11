@@ -24,14 +24,17 @@ export async function getDiagnostics(options = {}) {
   emitProgress(onProgress, { stage: "prepare_diagnostics", status: "running" });
   const status = await getDiagnosticSnapshot(options);
   throwIfAborted(signal);
-  emitProgress(onProgress, { stage: "inspect_history_integrity", status: "running" });
-  const historyIntegrity = await codexStorage.sessions.inspectHistoryIntegrity(status.codexHome, { onProgress, signal });
+  let historyIntegrity;
+  if (!status.operationInProgress) {
+    emitProgress(onProgress, { stage: "inspect_history_integrity", status: "running" });
+    historyIntegrity = await codexStorage.sessions.inspectHistoryIntegrity(status.codexHome, { onProgress, signal });
+  }
   throwIfAborted(signal);
   emitProgress(onProgress, { stage: "finish_diagnostics", status: "completed" });
   return {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
-    historyIntegrity,
+    ...(historyIntegrity ? { historyIntegrity } : {}),
     runtime: {
       node: process.version,
       platform: process.platform,
@@ -73,6 +76,7 @@ export async function getDiagnostics(options = {}) {
         preRestoreSnapshotId: transaction.preRestoreSnapshotId
       })),
       operationInProgress: status.operationInProgress,
+      ...(status.staleLockDetected === true ? { staleLockDetected: true } : {}),
       rolloutScanComplete: Boolean(status.diagnosticIssues) && status.rolloutScanComplete
         && !status.statusReadBlocked && !status.operationInProgress,
       lockedRolloutCount: status.lockedRolloutFiles?.length ?? 0,

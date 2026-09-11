@@ -1,5 +1,7 @@
 # vNext 升级改造执行索引
 
+2026-09-11 补丁增量：[ADR-0041](../adr/0041-stale-home-lock-status-recovery.md) 修订失效 Home 锁观察与 UI 门控；实现和回归证据随 v1.0.1 PR/发布容器报告交付。该增量不代替历史阶段的独立验收，不将未验收平台标记为 Completed。
+
 > **状态：受保护分支上的阶段 0 已完成；V1 的 C0 checkpoint 在单最终 PR 合入前不推进任何后续 Phase 状态。**
 >
 > **日期：2026-08-28**
@@ -9,6 +11,8 @@
 > **架构基线：[vNext Electron + Node 单核心架构](../VNEXT_ELECTRON_NODE_ARCHITECTURE_ZH.md)**
 
 ## 1. 索引职责
+
+2026-09-09 单独本地修复：[ADR-0040](../adr/0040-backup-read-races-and-failure-diagnostics.md) 处理备份清理/只读竞态，并补齐内部同步失败的阶段与底层错误码。保留 Provider I/O、原退出码和恢复校验；不改变阶段状态，不授权提交、推送或发布。
 
 2026-09-08 维护者确认 Windows Electron 首发范围：[ADR-0039](../adr/0039-windows-first-electron-release.md) 与[发布操作说明](../WINDOWS_ELECTRON_RELEASE_ZH.md) 规定整理推送 V1、最终 CI/合并后复验、仅 Windows 公开产物，以及安装/更新证据未闭合时先 RC。本轮不发布 npm、其他桌面平台或 Legacy .NET。该授权不使下表阶段自动完成，历史“本地修改不授权发布”描述保留为当时范围；实际 tag/Release 和验证结果另行记录。
 

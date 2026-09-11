@@ -2,7 +2,9 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-const VERSION_PATTERN = /^1\.0\.0-rc\.(?:0|[1-9]\d*)$/;
+const PATCH_VERSION = "1\\.0\\.(?:0|[1-9]\\d*)";
+const RC_VERSION_PATTERN = new RegExp(`^${PATCH_VERSION}-rc\\.(?:0|[1-9]\\d*)$`);
+const STABLE_VERSION_PATTERN = new RegExp(`^${PATCH_VERSION}$`);
 const SHA_PATTERN = /^[0-9a-f]{40}$/i;
 
 /**
@@ -11,8 +13,8 @@ const SHA_PATTERN = /^[0-9a-f]{40}$/i;
  * the workflow must never mint a tag as a side effect of building a candidate.
  */
 export function prepareElectronWindowsRelease({ releaseRef, version, expectedSha, channel = "rc" }) {
-  if (!(channel === "rc" && VERSION_PATTERN.test(version || ""))
-    && !(channel === "stable-manual" && version === "1.0.0")) {
+  if (!(channel === "rc" && RC_VERSION_PATTERN.test(version || ""))
+    && !(channel === "stable-manual" && STABLE_VERSION_PATTERN.test(version || ""))) {
     throw new Error("Release version must match the explicit RC or Windows stable-manual channel.");
   }
   if (!SHA_PATTERN.test(expectedSha || "")) {

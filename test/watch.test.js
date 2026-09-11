@@ -51,15 +51,6 @@ async function waitUntil(predicate, message, timeoutMs = 3000) {
   throw new Error(message);
 }
 
-async function waitForBackupCount(codexHome, expectedCount, timeoutMs = 5000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if ((await getBackupSummary(codexHome)).count === expectedCount) return;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(`Managed backup count did not reach ${expectedCount}.`);
-}
-
 async function writeWatchRetentionFixture(codexHome) {
   const configPath = path.join(codexHome, "config.toml");
   const rolloutPath = path.join(codexHome, "sessions", "rollout-watch-retention.jsonl");
@@ -137,24 +128,36 @@ test("runWatch rejects when codex home or config.toml is missing", async () => {
 test("runWatch forwards keepCount to automatic Provider Sync retention", async (t) => {
   const { root, codexHome } = await makeTempCodexHome();
   let handle;
+  const events = [];
   cleanups.push(async () => { await handle?.stop(); await fs.rm(root, { recursive: true, force: true }); });
   const { configPath, rolloutPath } = await writeWatchRetentionFixture(codexHome);
-  handle = await runWatch({ codexHome, debounceMs:20, includeStateDb: false, keepCount: 1, onLog() {} });
+  handle = await runWatch({
+    codexHome, debounceMs: 20, includeStateDb: false, keepCount: 1, onLog() {},
+    onActivity: (event) => events.push(event)
+  });
 
   await fs.appendFile(configPath, "\n# trigger automatic sync\n", "utf8");
-  await waitForBackupCount(codexHome, 1);
+  await waitUntil(() => events.some((event) => event.event === "finished"), "Watch retention sync did not finish", 5000);
+  assert.equal(events.find((event) => event.event === "finished").outcome, "completed");
+  assert.equal((await getBackupSummary(codexHome)).count, 1);
   assert.match(await fs.readFile(rolloutPath, "utf8"), /"model_provider":"openai"/);
 });
 
 test("runWatch keeps the default automatic backup retention at two", async (t) => {
   const { root, codexHome } = await makeTempCodexHome();
   let handle;
+  const events = [];
   cleanups.push(async () => { await handle?.stop(); await fs.rm(root, { recursive: true, force: true }); });
   const { configPath, rolloutPath } = await writeWatchRetentionFixture(codexHome);
-  handle = await runWatch({ codexHome, debounceMs: 20, includeStateDb: false, onLog() {} });
+  handle = await runWatch({
+    codexHome, debounceMs: 20, includeStateDb: false, onLog() {},
+    onActivity: (event) => events.push(event)
+  });
 
   await fs.appendFile(configPath, "\n# trigger automatic sync\n", "utf8");
-  await waitForBackupCount(codexHome, 2);
+  await waitUntil(() => events.some((event) => event.event === "finished"), "Watch retention sync did not finish", 5000);
+  assert.equal(events.find((event) => event.event === "finished").outcome, "completed");
+  assert.equal((await getBackupSummary(codexHome)).count, 2);
   assert.match(await fs.readFile(rolloutPath, "utf8"), /"model_provider":"openai"/);
 });
 

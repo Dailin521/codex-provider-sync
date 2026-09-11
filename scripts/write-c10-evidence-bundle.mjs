@@ -128,7 +128,8 @@ const CHECKPOINTS = Object.freeze([
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 const VERSION_PATTERN = /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/;
-const CANDIDATE_VERSION_PATTERN = /^1\.0\.0-(?:alpha|beta|rc)\.[0-9]+$/;
+const STRICT_V1_PATCH_VERSION_PATTERN = /^1\.0\.(?:0|[1-9]\d*)$/;
+const CANDIDATE_VERSION_PATTERN = /^1\.0\.(?:0|[1-9]\d*)-(?:alpha|beta|rc)\.(?:0|[1-9]\d*)$/;
 
 function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
@@ -511,7 +512,26 @@ function requiredEnvironment(environment, key, pattern) {
   return value;
 }
 
-function pendingItems({ event, ref, sourceVersions }) {
+export function normalizeSourceVersions(sourceVersions) {
+  assert.match(sourceVersions?.rootPackage || "", STRICT_V1_PATCH_VERSION_PATTERN,
+    "Root source version must be a strict 1.0.x release version.");
+  assert.match(sourceVersions?.desktopPackage || "", STRICT_V1_PATCH_VERSION_PATTERN,
+    "Desktop source version must be a strict 1.0.x release version.");
+  assert.equal(sourceVersions.rootPackage, sourceVersions.desktopPackage,
+    "Root and Desktop source versions must match exactly.");
+  return Object.freeze({
+    rootPackage: sourceVersions.rootPackage,
+    desktopPackage: sourceVersions.desktopPackage
+  });
+}
+
+export function assertCandidateMatchesSourceVersion(candidateVersion, sourceVersions) {
+  assert.match(candidateVersion || "", CANDIDATE_VERSION_PATTERN);
+  assert.match(candidateVersion, new RegExp(`^${sourceVersions.rootPackage.replaceAll(".", "\\.")}-`),
+    "Candidate version must use the matching source package version.");
+}
+
+export function pendingItems({ event, ref, sourceVersions }) {
   const pending = [];
   if (!(event === "push" && ref === "refs/heads/main")) {
     pending.push({
@@ -521,12 +541,14 @@ function pendingItems({ event, ref, sourceVersions }) {
       requiredEvidence: "Run the same required CI and C10 bundle on the resulting main commit."
     });
   }
-  if (sourceVersions.rootPackage !== "1.0.0" || sourceVersions.desktopPackage !== "1.0.0") {
+  if (!STRICT_V1_PATCH_VERSION_PATTERN.test(sourceVersions.rootPackage || "")
+    || !STRICT_V1_PATCH_VERSION_PATTERN.test(sourceVersions.desktopPackage || "")
+    || sourceVersions.rootPackage !== sourceVersions.desktopPackage) {
     pending.push({
       id: "final-source-version",
       blocking: true,
-      reason: "The source manifests have not been set to the gated 1.0.0 version.",
-      requiredEvidence: "After RC gates pass, set both source manifests to 1.0.0 and rerun every required job."
+      reason: "The source manifests are not matching strict 1.0.x release versions.",
+      requiredEvidence: "After RC gates pass, set both source manifests to the same strict 1.0.x version and rerun every required job."
     });
   }
   pending.push(
@@ -612,7 +634,8 @@ export async function createEvidenceBundle({
   const desktopPackage = JSON.parse(await fs.readFile(path.join(repositoryRoot, "apps", "desktop", "package.json"), "utf8"));
   assert.match(rootPackage.version || "", VERSION_PATTERN);
   assert.match(desktopPackage.version || "", VERSION_PATTERN);
-  const sourceVersions = Object.freeze({ rootPackage: rootPackage.version, desktopPackage: desktopPackage.version });
+  const sourceVersions = normalizeSourceVersions({ rootPackage: rootPackage.version, desktopPackage: desktopPackage.version });
+  assertCandidateMatchesSourceVersion(candidateSet.version, sourceVersions);
   const workflowBlob = await git(repositoryRoot, ["show", `${evidenceForCommit}:.github/workflows/ci.yml`]);
   const createdAt = now.toISOString();
   assert.equal(Number.isNaN(Date.parse(createdAt)), false, "C10 creation time is invalid.");
