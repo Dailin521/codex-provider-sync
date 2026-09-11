@@ -109,7 +109,7 @@
       "properties": {
         "artifactName": { "const": "electron-release-candidate-set" },
         "indexSha256": { "$ref": "#/$defs/hash" },
-        "version": { "type": "string", "pattern": "^1\\.0\\.0-(alpha|beta|rc)\\.[0-9]+$" },
+        "version": { "type": "string", "pattern": "^1\\.0\\.(0|[1-9][0-9]*)-(alpha|beta|rc)\\.(0|[1-9][0-9]*)$" },
         "commit": { "$ref": "#/$defs/sha" },
         "lockfileSha256": { "$ref": "#/$defs/hash" },
         "targets": {

@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -138,7 +139,7 @@ async function forceStopPackagedChild(child) {
 
 async function launchPackagedDesktop({ args, env }) {
   let firstRetryableFailure;
-  const maxAttempts = process.platform === "win32" ? 2 : 1;
+  const maxAttempts = ["win32", "linux"].includes(process.platform) ? 2 : 1;
 
   for (let activationAttempt = 1; activationAttempt <= maxAttempts; activationAttempt += 1) {
     const child = spawn(packagedExecutable, [...args, "--remote-debugging-port=0"], {
@@ -637,7 +638,7 @@ test("production Provider switch records model history and refreshes recent choi
       await expect(detail.getByRole("heading", { name: "File update timing" })).toBeVisible();
       await expect(detail.getByText("Restore file timestamps", { exact: true })).toBeVisible();
     }
-    await page.screenshot({ path: test.info().outputPath("switch-history-details.png") });
+    await captureViewport(page, { path: test.info().outputPath("switch-history-details.png") });
     expect((await fixture.inspect()).backupIds).toHaveLength(1);
   } finally {
     try { await electronApp?.close(); } finally { await fixture.close(); }
@@ -649,6 +650,10 @@ test("production or unpacked desktop completes real Sync and Restore through Uti
   const fixture = await createDesktopSyncSwitchFixture();
   await claimDailyUpdateCheck(fixture.userData);
   const baseline = await fixture.snapshotTargets();
+  const staleLock = path.join(fixture.codexHome, "tmp", "provider-sync.lock");
+  const staleOwner = JSON.stringify({ pid: 2147483647, processStartMarker: "windows:1" });
+  await fs.mkdir(staleLock, { recursive: true });
+  await fs.writeFile(path.join(staleLock, "owner.json"), staleOwner);
   let electronApp;
   try {
     electronApp = await launchProductionDesktop({
@@ -678,6 +683,8 @@ test("production or unpacked desktop completes real Sync and Restore through Uti
     await page.getByRole("button", { name: "Preview sync" }).click();
     const dialog = page.getByRole("dialog", { name: "Confirm sync" });
     await expect(dialog).toBeVisible();
+    await expect(page.getByText("A previous operation has ended", { exact: true })).toBeVisible();
+    expect(await fs.readFile(path.join(staleLock, "owner.json"), "utf8")).toBe(staleOwner);
     await dialog.getByRole("button", { name: "Close" }).last().click();
     await page.getByRole("button", { name: "Sync now" }).click();
     await expect(dialog).toBeHidden();
@@ -690,6 +697,8 @@ test("production or unpacked desktop completes real Sync and Restore through Uti
       { timeout: PRODUCTION_OPERATION_TIMEOUT_MS }
     ).toBe("openai");
     const state = await fixture.inspect();
+    await expect(page.getByText("A previous operation has ended", { exact: true })).toHaveCount(0);
+    expect(await fs.stat(staleLock).then(() => true, (error) => error.code === "ENOENT" ? false : Promise.reject(error))).toBe(false);
     expect(state.rollout.model_provider).toBe("openai");
     expect(state.backupIds).toHaveLength(1);
     const syncBackupId = state.backupIds[0];

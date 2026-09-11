@@ -25,6 +25,49 @@ export const CORE_ERROR_CODES = [
     "PROTOCOL_VERSION_MISMATCH",
     "INTERNAL_ERROR"
 ];
+/**
+ * Fixed, data-free boundaries at which an ordinary operation may fail. These
+ * are intentionally not progress labels: callers must report one only when
+ * the corresponding boundary was actually entered.
+ */
+export const OPERATION_FAILURE_STAGES = new Set([
+    "prepare_config",
+    "prepare_storage",
+    "prepare_rollouts",
+    "prepare_status",
+    "prepare_revisions",
+    "prepare_usage",
+    "acquire_lock",
+    "read_config",
+    "resolve_storage",
+    "check_pending_restore",
+    "validate_plan",
+    "scan_rollout_files",
+    "check_locked_rollout_files",
+    "preflight_sqlite",
+    "create_backup",
+    "update_config",
+    "rewrite_rollout_files",
+    "update_sqlite",
+    "release_lock"
+]);
+/** Safe machine-readable causes. Never use an arbitrary Error.code as a DTO value. */
+export const SAFE_CAUSE_CODES = new Set([
+    "ENOENT",
+    "EACCES",
+    "EPERM",
+    "EIO",
+    "EBUSY",
+    "ENOSPC",
+    "EMFILE",
+    "ENFILE",
+    "ETIMEDOUT",
+    "SQLITE_BUSY",
+    "SQLITE_LOCKED",
+    "SQLITE_CORRUPT",
+    "SQLITE_NOTADB",
+    "ERR_SQLITE_ERROR"
+]);
 export const PUBLIC_CORE_ERROR_MESSAGES = Object.freeze({
     INVALID_INPUT: "The command input is invalid.",
     PROFILE_CHANGED: "The selected profile changed. Prepare the operation again.",
@@ -74,18 +117,6 @@ const SAFE_REASONS = new Set([
     "provider-not-configured",
     "windows-wsl-unc"
 ]);
-const SAFE_CAUSE_CODES = new Set([
-    "ENOENT",
-    "EACCES",
-    "EPERM",
-    "EIO",
-    "EBUSY",
-    "SQLITE_BUSY",
-    "SQLITE_LOCKED",
-    "SQLITE_CORRUPT",
-    "SQLITE_NOTADB",
-    "ERR_SQLITE_ERROR"
-]);
 const SQLITE_HOME_SOURCES = new Set(["cli", "config", "env", "default"]);
 const OPERATION_KINDS = new Set(["sync", "switch", "repair", "restore", "prune-backups", "watch"]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -128,12 +159,15 @@ function sanitizeDetails(value) {
     const missing = ownValue(source, "missing");
     const sqliteHomeSource = ownValue(source, "sqliteHomeSource");
     const operationKind = ownValue(source, "operationKind");
+    const failureStage = ownValue(source, "failureStage");
     if (LOCK_SCOPES.has(String(busyScope)))
         details.busyScope = String(busyScope);
     if (LOCK_SCOPES.has(String(lockScope)))
         details.lockScope = String(lockScope);
     if (SAFE_CAUSE_CODES.has(String(causeCode)))
         details.causeCode = String(causeCode);
+    if (OPERATION_FAILURE_STAGES.has(String(failureStage)))
+        details.failureStage = String(failureStage);
     if (SAFE_REASONS.has(String(reason)))
         details.reason = String(reason);
     if (missing === "config.toml" || missing === "state_5.sqlite")
@@ -154,16 +188,23 @@ function sanitizeDetails(value) {
 export function createPublicCoreErrorDto(code, options = {}) {
     if (!CORE_ERROR_CODE_SET.has(code))
         code = "INTERNAL_ERROR";
+    const details = sanitizeDetails(options.details);
+    const internalDetails = details
+        ? Object.fromEntries(Object.entries(details).filter(([key]) => (key === "failureStage" || key === "causeCode")))
+        : undefined;
     if (code === "INTERNAL_ERROR") {
         return {
             code,
             message: PUBLIC_CORE_ERROR_MESSAGES[code],
             severity: "fatal",
             retryable: false,
-            recoveryRequired: false
+            recoveryRequired: false,
+            ...(typeof options.operationId === "string" && UUID_PATTERN.test(options.operationId)
+                ? { operationId: options.operationId }
+                : {}),
+            ...(internalDetails && Object.keys(internalDetails).length > 0 ? { details: internalDetails } : {})
         };
     }
-    const details = sanitizeDetails(options.details);
     if ((code === "OPERATION_BUSY" && details?.busyScope === undefined)
         || (code === "LOCK_UNVERIFIABLE" && details?.lockScope === undefined)) {
         return createPublicCoreErrorDto("INTERNAL_ERROR");

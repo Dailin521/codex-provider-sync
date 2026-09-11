@@ -310,7 +310,7 @@ async function readStatus(options = {}, diagnostic = false) {
 
   const homeLockPath = path.join(codexHome, "tmp", DEFAULT_LOCK_NAME);
   const homeBefore = await inspectStatusLock(homeLockPath, { scope: "codex-home", platform });
-  if (homeBefore.error || homeBefore.inspection.state !== "absent") {
+  if (homeBefore.error || !["absent", "stale"].includes(homeBefore.inspection.state)) {
     const operation = externalOperationFromLock({
       inspection: homeBefore.inspection,
       error: homeBefore.error,
@@ -363,7 +363,7 @@ async function readStatus(options = {}, diagnostic = false) {
   });
 
   const homeAfter = await inspectStatusLock(homeLockPath, { scope: "codex-home", platform });
-  if (homeAfter.error || homeAfter.inspection.state !== "absent") {
+  if (homeAfter.error || !["absent", "stale"].includes(homeAfter.inspection.state)) {
     const source = { ...homeAfter, scope: "codex-home" };
     const operation = externalOperationFromLock(source);
     return blockedStatus(codexHome, profile, operation, platform, {
@@ -428,7 +428,7 @@ async function readStatus(options = {}, diagnostic = false) {
   }
 
   const homeFinal = await inspectStatusLock(homeLockPath, { scope: "codex-home", platform });
-  if (homeFinal.error || homeFinal.inspection.state !== "absent") {
+  if (homeFinal.error || !["absent", "stale"].includes(homeFinal.inspection.state)) {
     const operation = externalOperationFromLock({
       inspection: homeFinal.inspection,
       error: homeFinal.error,
@@ -438,6 +438,10 @@ async function readStatus(options = {}, diagnostic = false) {
       reason: "codex-home-lock",
       lockState: operation.lockState
     });
+  }
+  // Observation only. Actual reclamation still belongs to acquireLock at Apply.
+  if ([homeBefore, homeAfter, homeFinal].some((entry) => entry.inspection?.state === "stale")) {
+    snapshot.staleLockDetected = true;
   }
   if (revisionUnverifiable) {
     return { ...snapshot, rolloutScanComplete: false, statusReadBlocked: { reason: "revision-unverifiable" } };

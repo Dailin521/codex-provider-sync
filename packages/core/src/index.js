@@ -350,6 +350,7 @@ function publicStatus(value, includeLocalDisplayPaths = false) {
       || value.pendingRecovery === true,
     pendingTransactions: pending,
     operationInProgress: operation,
+    ...(value.staleLockDetected === true ? { staleLockDetected: true } : {}),
     rolloutScanComplete: value.rolloutScanComplete === true && locked.length === 0,
     lockedRolloutFiles: locked,
     currentProviderImplicit: value.currentProviderImplicit === true,
@@ -1065,6 +1066,7 @@ export function createCoreFacade({ resolveProfile, onWatchActivity, onWatchStopp
             })
             : [],
           operationInProgress: diagnosticOperationState(safety.operationInProgress),
+          ...(safety.staleLockDetected === true ? { staleLockDetected: true } : {}),
           rolloutScanComplete: safety.rolloutScanComplete === true,
           lockedRolloutCount: Number.isSafeInteger(safety.lockedRolloutCount)
             && Number(safety.lockedRolloutCount) >= 0

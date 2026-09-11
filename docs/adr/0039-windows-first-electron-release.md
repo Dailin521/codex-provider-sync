@@ -6,6 +6,8 @@
 
 ## 决策
 
+2026-09-11 补丁发布约束：输入与 Draft 创建前均从已核验 tag 对象读取根/桌面 `package.json`，两个源码版本必须等于正式版本或 RC 的基础版本；不能用 dispatch 分支清单替代，不允许将 1.0.1 源码注入成 1.0.2。Release 存在性检查同样支持严格 1.0.x，仍拒绝覆盖已有 Draft/公开版本。
+
 维护者确认先交付已进行人工功能测试的 Windows Electron。整理并推送 V1，在最终 PR 的完整 CI 通过后，使用 merge commit 保留既有 checkpoint 历史。最新 main 必须已包含于候选；main 合入后的实际 commit 需要重新取得成功的 `ci-gate` 与绑定该 SHA 的产物证据。
 
 本轮不发布 npm、macOS/Linux 安装包或 Legacy .NET，也不以缩小公开下载范围为理由跳过既有跨平台 CI。Windows 人工测试、自动 fixture 验收、其他平台 CI 与尚未执行的真人验收分别记录。
@@ -36,3 +38,9 @@
 准备流程增加显式 `stable-manual` 选项，只接受 `1.0.0` 与 `refs/tags/v1.0.0`；默认仍为严格 RC。两者都只生成候选资产或 Draft，继续 exact main push CI、不可变 tag/SHA、全套安装/解包验收及拒绝覆盖。核对最终资产后，才在独立步骤公开正式 Release 并设为 latest。
 
 构建、暂存和容器验证允许此 Windows-only 正式版本，但保留候选审核文件原始字段（`releaseAuthorized: false`、`unsigned-candidate`），表示构建未启用自动安装且审核发生在公开前，不伪造签名/升级证据。人工发布状态以 GitHub Release 为准。不得把 RC 资产重命名或改写已校验 manifest。此次批准不宣称 21 秒同步问题已优化，也不将全平台迁移阶段标为完成。
+
+## 2026-09-11：Windows 1.0.x 补丁发布兼容
+
+上述 `1.0.0` 是首发批准的历史事实。后续 Windows Electron 补丁候选以根 `package.json` 的实际严格 `1.0.x` 基础版本生成，仅允许 `1.0.x-rc.N`；`x` 与 `N` 都是无前导零整数。`stable-manual` 仅接受 Windows x64 的严格 `1.0.x` 和完全匹配的现有 tag。每个新 stable 版本仍须独立发布批准，且不改变 exact main push `ci-gate`、不可变 tag/SHA、拒绝覆盖已有 Release、Draft 复核、资产白名单、未签名手动安装及不上传生产更新 metadata 的边界。
+
+C10 的机器可读 JSON Schema 同步接受严格 `1.0.x-alpha/beta/rc.N` CI 证据，并通过实际 Schema 验证补丁候选。正式版本不直接作为 CI 候选，来源版本一致性仍由生成器核验；历史 `1.0.0` 候选证据继续兼容。

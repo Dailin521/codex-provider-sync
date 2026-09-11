@@ -1,5 +1,9 @@
 # codex-provider-sync vNext 成熟架构设计
 
+2026-09-11 补丁：[ADR-0041](adr/0041-stale-home-lock-status-recovery.md) 区分已失效与不可验证 Home 锁；只读不清锁，由正常 Apply 重验回收，保留全部 Provider I/O 和 Restore 约束。不以文档更新代替发布证据。
+
+2026-09-09 当前修复：[ADR-0040](adr/0040-backup-read-races-and-failure-diagnostics.md) 固定备份只读/清理竞态和失败阶段诊断边界；无 Provider 写入策略、恢复校验或 ProgressEvent 变更，不代表已经发布。
+
 2026-09-08 Windows 写入增量：[ADR-0038](adr/0038-windows-cleanup-and-file-update-timing.md) 优化临时文件清理并加入批次级分项计时；保留 Force 回退、既有原地/流式算法、Flush 与时间戳。固定数字聚合走结果/Host 日志，不扩张 ProgressEvent；不代表发布或阶段完成。
 
 2026-09-08 当前 UI 增量：[ADR-0036](adr/0036-sync-performance-guidance-and-log-split-view.md) 加入按需同步提速说明和 Desktop 日志固定视口双栏/窄屏详情切换；仅使用现有结果计数，无新增 Core API、扫描、Fast 模式或写入策略。不代表发布或阶段完成。

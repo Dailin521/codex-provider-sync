@@ -202,6 +202,7 @@ export class DesktopDiagnosticsExporter {
           safety: {
             pendingRecovery: snapshot.safety.pendingRecovery,
             operationInProgress: snapshot.safety.operationInProgress,
+            ...(snapshot.safety.staleLockDetected === true ? { staleLockDetected: true } : {}),
             rolloutScanComplete: snapshot.safety.rolloutScanComplete,
             lockedRolloutCount: snapshot.safety.lockedRolloutCount,
             projectThreadVisibilityAvailable: snapshot.safety.projectThreadVisibilityAvailable

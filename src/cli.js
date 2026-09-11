@@ -825,6 +825,9 @@ export async function runCli(argv, options = {}) {
       return 1;
     }
     const envelope = createCliFailureEnvelope(command, await cliErrorDto(error, loadCoreImpl));
+    // Only the sanitized DTO reaches diagnostics; never print raw exception text.
+    if (envelope.error.details?.failureStage) stderrLine(`Failure stage: ${envelope.error.details.failureStage}`);
+    if (envelope.error.details?.causeCode) stderrLine(`Cause code: ${envelope.error.details.causeCode}`);
     if (!terminalWritten) await writeEnvelope(envelope);
     return cliJsonExitCode(envelope);
   }

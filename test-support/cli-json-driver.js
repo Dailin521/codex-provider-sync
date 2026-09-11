@@ -1,5 +1,6 @@
 import { CoreError, toCoreErrorDto } from "../src/public-api.js";
 import { runCli } from "../src/cli.js";
+import { annotateFailureStage } from "../src/core-error.js";
 
 const scenario = process.env.CODEX_PROVIDER_SYNC_CLI_SCENARIO ?? "completed";
 
@@ -49,6 +50,9 @@ const core = {
     codexHome: "C:\\fixture\\.codex"
   }),
   runSync: async ({ onProgress }) => {
+    if (scenario === "error-before-progress") {
+      throw annotateFailureStage(Object.assign(new Error("fixture-private-path-and-body"), { code: "EIO" }), "prepare_config");
+    }
     onProgress?.({ stage: "scan_rollout_files", status: "start" });
     onProgress?.({
       stage: "create_backup",

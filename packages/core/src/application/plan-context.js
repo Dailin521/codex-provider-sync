@@ -2,6 +2,7 @@
 
 import {
   CoreError,
+  withFailureStage,
   assertSqliteAccessSupported,
   captureOperationRevisions,
   findPendingTransactions,
@@ -88,18 +89,18 @@ export async function preparePlanContext(options, operation, { backupDir = null,
   }
   const sqliteHome = explicitSqliteHomeFromOptions(options);
   const configPath = path.join(codexHome, "config.toml");
-  const configText = await readConfigText(configPath);
+  const configText = await withFailureStage("prepare_config", () => readConfigText(configPath));
   if (options.expectedConfigText !== undefined && configText !== options.expectedConfigText) {
     throw new CoreError("PLAN_STALE", "config.toml changed after the operation was confirmed. Refresh and retry.");
   }
-  const storage = await prepareStorage({ codexHome, sqliteHome, configText, platform: options.platform });
+  const storage = await withFailureStage("prepare_storage", () => prepareStorage({ codexHome, sqliteHome, configText, platform: options.platform }));
   assertSqliteAccessSupported(storage, operation);
   const profile = profileFromOptions(options, codexHome, sqliteHome, options.platform);
   // The use case supplies this resolver directly, never through caller options.
   // Only Provider Prepare shares ephemeral facts; Apply/Repair/Restore still read afresh.
   const providerFacts = resolveProviderTarget && (operation === "sync" || operation === "switch")
-    ? await collectProviderPreparationFacts(codexHome, resolveProviderTarget(configText)) : null;
-  const status = await scanStatus({
+    ? await withFailureStage("prepare_rollouts", () => collectProviderPreparationFacts(codexHome, resolveProviderTarget(configText))) : null;
+  const status = await withFailureStage("prepare_status", () => scanStatus({
     codexHome,
     sqliteHome,
     storage,
@@ -111,10 +112,10 @@ export async function preparePlanContext(options, operation, { backupDir = null,
     // Actual write targets are still probed separately by the use case.
     includeSessionActivity: operation === "sync" || operation === "switch",
     platform: options.platform
-  }, providerFacts ? { ...providerFacts.scan, incompletePaths: [] } : null);
+  }, providerFacts ? { ...providerFacts.scan, incompletePaths: [] } : null));
   const rolloutRevisionMode = (operation === "sync" || operation === "switch" ? "provider" : options.rolloutRevisionMode)
     ?? (options.rolloutScanMode === "full" ? "content" : "metadata");
-  const revisions = await captureOperationRevisions({
+  const revisions = await withFailureStage("prepare_revisions", () => captureOperationRevisions({
     codexHome,
     profileRevision: profile.revision,
     configText,
@@ -122,7 +123,7 @@ export async function preparePlanContext(options, operation, { backupDir = null,
     backupDir,
     rolloutRevisionMode,
     platform: options.platform
-  }, providerFacts?.rollout);
+  }, providerFacts?.rollout));
   operationCoordinator.cacheStatus(codexHome, status, options.platform);
   return { codexHome, sqliteHome, configText, storage, profile, revisions, status, rolloutRevisionMode,
     providerScan: providerFacts?.scan };

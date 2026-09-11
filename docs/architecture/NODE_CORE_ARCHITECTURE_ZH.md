@@ -5,6 +5,10 @@
 
 ## 1. 文档职责与变更规则
 
+失效 Home 锁恢复遵循 [ADR-0041](../adr/0041-stale-home-lock-status-recovery.md)：Status 只读验证全部锁 owner/claims，确认失效时允许正常预览/同步，由 Apply 既有 acquireLock 重验并回收；未知或真实活动锁继续阻断且分别提示。Status/Diagnostics 不清锁，不新增解锁 API，不改变 Provider I/O。
+
+备份只读与失败诊断遵循 [ADR-0040](../adr/0040-backup-read-races-and-failure-diagnostics.md)：只读枚举遇到清理导致的 ENOENT 整条省略，写入/恢复验证不放宽；普通操作按真实调用边界附加安全阶段和底层码，经 CLI/Host 日志透传，不改变 PIO、取消、partial 或进度合同。
+
 修复预览与显式诊断遵循 [ADR-0034](../adr/0034-repair-preview-counts-and-single-diagnostic-scan.md)：索引字段累计、去重会话、工作区设置类别分开统计；全局修复保留只读明细。Diagnostics 通过内部 `getDiagnosticSnapshot` 最多扫描一次完整事实，rollout revision 仅 stat，不因漂移重复全文扫描、不污染 Status 缓存；漂移时保留本轮观察但明确未完整，实际 Home 锁仍优先。独立有界记录完整性检查、普通 Status 重试及 Plan/Apply 内容校验不变。
 
 高级功能请求进度遵循 [ADR-0032](../adr/0032-explicit-scan-and-preview-progress.md)：`prepareRepair/getDiagnostics` 经可信 Host control 推送既有 ProgressEvent，传输使用无 operationId 的 request-progress。不得伪造写 Operation、后台轮询或为显示进度增加正文扫描；Prepare control 不保存在 Apply 计划。Core 与 Storage observer 失败不影响业务，UI 只显示真实阶段进度和本地等待耗时。

@@ -4,6 +4,7 @@ import {
   DEFAULT_BACKUP_RETENTION_COUNT,
   DEFAULT_PROVIDER,
   CoreError,
+  withFailureStage,
   isConfiguredSqliteHome,
   missingConfiguredStateDbError,
   codexStorage
@@ -118,9 +119,9 @@ export async function buildProviderWriteProgram(context, settings = {}) {
   assertConfiguredProvider(context.configText, targetProvider);
 
   context.emitProgress({ stage: "scan_rollout_files", status: "start" });
-  const scan = await collectProviderChanges(context.codexHome, targetProvider, { skipLockedReads: true });
+  const scan = await withFailureStage("scan_rollout_files", () => collectProviderChanges(context.codexHome, targetProvider, { skipLockedReads: true }));
   context.emitProgress({ stage: "check_locked_rollout_files", status: "start" });
-  const { writableChanges, lockedPaths: initiallySkipped } = await inspectSessionUsage(scan);
+  const { writableChanges, lockedPaths: initiallySkipped } = await withFailureStage("check_locked_rollout_files", () => inspectSessionUsage(scan));
   context.emitProgress({
     stage: "scan_rollout_files",
     status: "complete",
@@ -135,7 +136,7 @@ export async function buildProviderWriteProgram(context, settings = {}) {
   });
 
   const sqliteCounts = context.storage.stateDbLocation
-    ? await readSqliteProviderCounts(context.storage)
+    ? await withFailureStage("preflight_sqlite", () => readSqliteProviderCounts(context.storage))
     : null;
   const sqliteRowsToWrite = sqliteProviderRowsToChange(sqliteCounts, targetProvider);
   const targetKinds = {
@@ -296,7 +297,7 @@ export async function prepareProviderPlan(operation, options, switchIntent = nul
     ?? DEFAULT_PROVIDER;
   assertConfiguredProvider(context.configText, targetProvider);
   const scan = context.providerScan;
-  const { writableChanges, lockedPaths } = await inspectSessionUsage(scan);
+  const { writableChanges, lockedPaths } = await withFailureStage("prepare_usage", () => inspectSessionUsage(scan));
   const lockedCount = lockedPaths.length;
   const warnings = [];
   if (lockedCount > 0) {

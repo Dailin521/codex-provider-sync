@@ -133,7 +133,7 @@ jobs:
         run: sudo -- "$(command -v node)" apps/desktop/scripts/configure-linux-sandbox.mjs node_modules/electron/dist chrome-sandbox
       - name: Install Linux Electron runtime dependencies
         if: runner.os == 'Linux'
-        run: npx playwright install-deps
+        run: npx playwright install-deps chromium
       - run: npm run desktop:test
       - run: npm run desktop:build
       - run: npm run desktop:verify-production-bundle

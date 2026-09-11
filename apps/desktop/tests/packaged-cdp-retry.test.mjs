@@ -12,18 +12,20 @@ function playwrightTimeout(message = "browserType.connectOverCDP: Timeout 20000m
   return error;
 }
 
-test("packaged CDP activation retries one clean Windows handshake timeout", () => {
+test("packaged CDP activation retries one clean Windows or Linux handshake timeout", () => {
   const error = playwrightTimeout();
 
   assert.equal(isPackagedCdpConnectTimeout(error), true);
-  assert.equal(shouldRetryPackagedCdpActivation({
-    platform: "win32",
-    attempt: 1,
-    endpointReady: true,
-    browserConnected: false,
-    cleanupCompleted: true,
-    error
-  }), true);
+  for (const platform of ["win32", "linux"]) {
+    assert.equal(shouldRetryPackagedCdpActivation({
+      platform,
+      attempt: 1,
+      endpointReady: true,
+      browserConnected: false,
+      cleanupCompleted: true,
+      error
+    }), true);
+  }
 });
 
 test("packaged CDP activation never retries broader launch or application failures", () => {
@@ -36,14 +38,17 @@ test("packaged CDP activation never retries broader launch or application failur
     error: playwrightTimeout()
   };
 
-  assert.equal(shouldRetryPackagedCdpActivation({ ...base, platform: "linux" }), false);
-  assert.equal(shouldRetryPackagedCdpActivation({ ...base, attempt: 2 }), false);
-  assert.equal(shouldRetryPackagedCdpActivation({ ...base, endpointReady: false }), false);
-  assert.equal(shouldRetryPackagedCdpActivation({ ...base, browserConnected: true }), false);
-  assert.equal(shouldRetryPackagedCdpActivation({ ...base, cleanupCompleted: false }), false);
-  assert.equal(shouldRetryPackagedCdpActivation({ ...base, error: new Error("endpoint failed") }), false);
-  assert.equal(shouldRetryPackagedCdpActivation({
-    ...base,
-    error: playwrightTimeout("page.waitForLoadState: Timeout 20000ms exceeded.")
-  }), false);
+  assert.equal(shouldRetryPackagedCdpActivation({ ...base, platform: "darwin" }), false);
+  for (const platform of ["win32", "linux"]) {
+    for (const invalid of [
+      { attempt: 2 },
+      { endpointReady: false },
+      { browserConnected: true },
+      { cleanupCompleted: false },
+      { error: new Error("endpoint failed") },
+      { error: playwrightTimeout("page.waitForLoadState: Timeout 20000ms exceeded.") }
+    ]) {
+      assert.equal(shouldRetryPackagedCdpActivation({ ...base, platform, ...invalid }), false);
+    }
+  }
 });

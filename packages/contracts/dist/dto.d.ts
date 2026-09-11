@@ -129,6 +129,8 @@ export interface StatusSnapshot {
     pendingRecovery: boolean;
     pendingTransactions: JsonObject[];
     operationInProgress: JsonObject | null;
+    /** Verified dead lock generations; read-only observation, reclaimed only by a subsequent locked write. */
+    staleLockDetected?: boolean;
     rolloutScanComplete: boolean;
     lockedRolloutFiles: string[];
     [extension: string]: JsonValue | undefined;
@@ -302,6 +304,7 @@ export interface DiagnosticsOperationState {
     errorCode?: string;
 }
 export interface DiagnosticsSafety {
+    staleLockDetected?: boolean;
     storageRevision?: string;
     pendingRecovery: boolean;
     pendingTransactions: DiagnosticsPendingTransaction[];

@@ -47,9 +47,12 @@ async function getProcessStartMarker(pid) {
       "-ExecutionPolicy",
       "Bypass",
       "-Command",
-      `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`
+      `try { (Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks } catch { if ($_.FullyQualifiedErrorId -eq 'NoProcessFoundForGivenId,Microsoft.PowerShell.Commands.GetProcessCommand') { 'absent'; exit 0 }; throw }`
     ]);
     const marker = stdout.trim();
+    // The process may exit after processExists. Only the precise OS lookup
+    // result means absent; permissions and all other probe failures stay closed.
+    if (marker === "absent") return null;
     if (!/^\d+$/.test(marker)) {
       throw new Error(`Unable to verify process start identity for PID ${pid}.`);
     }
@@ -948,8 +951,8 @@ export async function acquirePathLock(lockPath, label = "codex-provider-sync", o
 
 /**
  * Read-only inspection of a protocol lock. This never reclaims or removes a
- * stale/ambiguous owner: callers use it to avoid observing protected state
- * while another runtime may be mutating it.
+ * stale/ambiguous owner. A fully verified dead generation is observationally
+ * stale, not active; only acquirePathLock may reclaim it before a write.
  */
 export async function inspectPathLock(lockPath, options = {}) {
   const {
@@ -970,6 +973,10 @@ export async function inspectPathLock(lockPath, options = {}) {
   const lockDir = path.resolve(lockPath);
   const claimsDir = `${lockDir}.claims`;
   const inspectOwner = async (ownerPath) => {
+    const stats = await lstatOrNull(ownerPath, fsImpl);
+    if (!stats?.isFile() || stats.isSymbolicLink()) {
+      throw lockExistsError(lockDir, "The owner record is not a verifiable regular file.", { lockScope: scope });
+    }
     const owner = await readLockOwner(ownerPath, fsImpl, scope);
     assertOwnerResource(owner, lockDir, scope, resourceKey);
     let live;
@@ -982,73 +989,88 @@ export async function inspectPathLock(lockPath, options = {}) {
         { lockScope: scope }
       );
     }
-    if (!live) {
-      throw lockExistsError(
-        lockDir,
-        "The recorded owner is stale; read-only inspection preserves it fail-closed.",
-        { lockScope: scope }
-      );
-    }
-    return owner;
+    return { owner, live, identity: directoryIdentity(stats) };
   };
 
   const canonicalIdentity = await inspectCanonicalDirectory(lockDir, fsImpl, scope);
-  if (canonicalIdentity !== null) {
-    const owner = await inspectOwner(path.join(lockDir, "owner.json"));
-    const verifiedIdentity = await inspectCanonicalDirectory(lockDir, fsImpl, scope);
-    if (!sameDirectoryIdentity(canonicalIdentity, verifiedIdentity)) {
-      throw lockExistsError(
-        lockDir,
-        "The canonical lock identity changed during read-only inspection.",
-        { lockScope: scope }
-      );
-    }
-    const verifiedOwner = await readLockOwner(path.join(lockDir, "owner.json"), fsImpl, scope);
-    assertOwnerResource(verifiedOwner, lockDir, scope, resourceKey);
-    if (!ownerMatchesExpected(verifiedOwner, owner)) {
-      throw lockExistsError(
-        lockDir,
-        "The canonical owner identity changed during read-only inspection.",
-        { lockScope: scope }
-      );
-    }
-    return Object.freeze({ state: "active", scope, resourceKey, owner });
-  }
-
-  let entries = [];
-  try {
-    entries = await fsImpl.readdir(claimsDir, { withFileTypes: true });
-  } catch (error) {
-    if (error?.code !== "ENOENT") {
+  const canonical = canonicalIdentity === null
+    ? null : await inspectOwner(path.join(lockDir, "owner.json"));
+  const claimsIdentity = await inspectCanonicalDirectory(claimsDir, fsImpl, scope);
+  const readClaims = async () => {
+    let entries;
+    try {
+      entries = await fsImpl.readdir(claimsDir, { withFileTypes: true });
+    } catch (error) {
+      if (error?.code === "ENOENT" && claimsIdentity === null) return [];
       throw lockExistsError(
         claimsDir,
         "The claims directory cannot be inspected safely.",
         { cause: error, causeCode: error?.code, lockScope: scope }
       );
     }
-  }
-  const claims = entries
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
-    .sort((left, right) => left.name.localeCompare(right.name));
-  if (claims.length > 0) {
-    const owner = await inspectOwner(path.join(claimsDir, claims[0].name));
-    if (!owner.instanceId || claims[0].name !== `${owner.instanceId}.json`) {
+    const claims = entries.filter((entry) => entry.name.endsWith(".json"));
+    if (claims.some((entry) => !entry.isFile()) || claims.length > 1024) {
+      throw lockExistsError(claimsDir, "The claims cannot be verified safely.", { lockScope: scope });
+    }
+    return claims.map((entry) => entry.name).sort();
+  };
+  const claims = await readClaims();
+  const inspectedClaims = [];
+  for (const name of claims) {
+    const claimPath = path.join(claimsDir, name);
+    const stats = await lstatOrNull(claimPath, fsImpl);
+    if (!stats?.isFile() || stats.isSymbolicLink()) {
+      throw lockExistsError(claimsDir, "A claim changed during inspection.", { lockScope: scope });
+    }
+    const inspected = await inspectOwner(claimPath);
+    if (!inspected.owner.instanceId || name !== `${inspected.owner.instanceId}.json`) {
       throw lockExistsError(
         claimsDir,
-        "A live claim has no matching immutable instance identity.",
+        "A claim has no matching immutable instance identity.",
         { lockScope: scope }
       );
     }
-    return Object.freeze({ state: "active", scope, resourceKey, owner });
+    inspectedClaims.push({ ...inspected, claimPath, identity: directoryIdentity(stats) });
   }
 
+  // A dead canonical owner must never hide a live/unknown claimant. Recheck
+  // every observed generation and the set after all liveness probes.
+  for (const claim of inspectedClaims) {
+    const stats = await lstatOrNull(claim.claimPath, fsImpl);
+    const owner = await readLockOwner(claim.claimPath, fsImpl, scope);
+    assertOwnerResource(owner, lockDir, scope, resourceKey);
+    if (!stats?.isFile() || stats.isSymbolicLink()
+        || directoryIdentity(stats) !== claim.identity
+        || !ownerMatchesExpected(owner, claim.owner)) {
+      throw lockExistsError(claimsDir, "A claim generation changed during inspection.", { lockScope: scope });
+    }
+  }
+  const finalClaims = await readClaims();
+  const finalClaimsIdentity = await inspectCanonicalDirectory(claimsDir, fsImpl, scope);
+  if (claimsIdentity !== finalClaimsIdentity || JSON.stringify(claims) !== JSON.stringify(finalClaims)) {
+    throw lockExistsError(claimsDir, "The claims changed during inspection.", { lockScope: scope });
+  }
   const finalIdentity = await inspectCanonicalDirectory(lockDir, fsImpl, scope);
-  if (finalIdentity !== null) {
+  if (finalIdentity !== canonicalIdentity) {
     throw lockExistsError(
       lockDir,
-      "A lock appeared during read-only inspection.",
+      "The canonical lock identity changed during read-only inspection.",
       { lockScope: scope }
     );
   }
-  return Object.freeze({ state: "absent", scope, resourceKey, owner: null });
+  if (canonical) {
+    const stats = await lstatOrNull(path.join(lockDir, "owner.json"), fsImpl);
+    const owner = await readLockOwner(path.join(lockDir, "owner.json"), fsImpl, scope);
+    assertOwnerResource(owner, lockDir, scope, resourceKey);
+    if (!stats?.isFile() || stats.isSymbolicLink()
+        || directoryIdentity(stats) !== canonical.identity
+        || !ownerMatchesExpected(owner, canonical.owner)) {
+      throw lockExistsError(lockDir, "The canonical owner changed during inspection.", { lockScope: scope });
+    }
+  }
+  const active = [canonical, ...inspectedClaims].find((entry) => entry?.live);
+  return Object.freeze({
+    state: active ? "active" : canonical || claims.length > 0 ? "stale" : "absent",
+    scope, resourceKey, owner: active?.owner ?? null
+  });
 }

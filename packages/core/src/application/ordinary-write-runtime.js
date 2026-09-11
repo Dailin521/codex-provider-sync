@@ -6,6 +6,7 @@
 import {
   DEFAULT_BACKUP_RETENTION_COUNT,
   CoreError,
+  withFailureStage,
   acquireLock,
   assertSqliteAccessSupported,
   isConfiguredSqliteHome,
@@ -92,7 +93,7 @@ export async function executeOrdinaryWrite({
 
   const codexHome = providedStorage?.codexHome ?? normalizeCodexHome(explicitCodexHome);
   const configPath = path.join(codexHome, "config.toml");
-  const releaseLock = await acquireLock(codexHome, operationKind);
+  const releaseLock = await withFailureStage("acquire_lock", () => acquireLock(codexHome, operationKind));
   const state = {
     backupDir: null,
     backupDurationMs: 0,
@@ -106,23 +107,26 @@ export async function executeOrdinaryWrite({
   };
   try {
     throwIfAborted(signal);
-    const configText = await readConfigText(configPath);
+    const configText = await withFailureStage("read_config", () => readConfigText(configPath));
     if (!expectedPlanState && expectedConfigText !== undefined && configText !== expectedConfigText) {
       throw new CoreError("PLAN_STALE", "config.toml changed after confirmation. Refresh and retry.");
     }
-    const storage = await prepareStorage({
-      codexHome,
-      sqliteHome,
-      configText,
-      storage: providedStorage,
-      platform
+    const storage = await withFailureStage("resolve_storage", async () => {
+      const resolved = await prepareStorage({
+        codexHome,
+        sqliteHome,
+        configText,
+        storage: providedStorage,
+        platform
+      });
+      assertSqliteAccessSupported(resolved, operationKind);
+      if (!resolved.stateDbLocation && isConfiguredSqliteHome(resolved)) {
+        throw missingConfiguredStateDbError(resolved);
+      }
+      return resolved;
     });
-    assertSqliteAccessSupported(storage, operationKind);
-    if (!storage.stateDbLocation && isConfiguredSqliteHome(storage)) {
-      throw missingConfiguredStateDbError(storage);
-    }
-    await assertNoPendingRestoreTransactions(codexHome);
-    await verifyExpectedPlanState({ expectedPlanState, codexHome, configText, storage, platform });
+    await withFailureStage("check_pending_restore", () => assertNoPendingRestoreTransactions(codexHome));
+    await withFailureStage("validate_plan", () => verifyExpectedPlanState({ expectedPlanState, codexHome, configText, storage, platform }));
 
     const context = {
       codexHome,
@@ -146,7 +150,7 @@ export async function executeOrdinaryWrite({
     // A use case may need to turn an indeterminate scan (for example an
     // unreadable SQLite database) into a typed pre-mutation failure even when
     // no concrete target could be counted.
-    if (typeof program.preflight === "function") await program.preflight({ context, state });
+    if (typeof program.preflight === "function") await withFailureStage("preflight_sqlite", () => program.preflight({ context, state }));
     if (!hasTargets(program.targetKinds)) {
       return program.noMutationResult({ context, state });
     }
@@ -154,10 +158,10 @@ export async function executeOrdinaryWrite({
     // file-only convergence must fail before backup when the active State DB
     // is busy, so a later retry observes one coherent store.
     if (storage.stateDbLocation) {
-      await assertSqliteWritable(storage, { busyTimeoutMs: sqliteBusyTimeoutMs });
+      await withFailureStage("preflight_sqlite", () => assertSqliteWritable(storage, { busyTimeoutMs: sqliteBusyTimeoutMs }));
     }
     throwIfAborted(signal);
-    await faultInjector?.({ point: "before_backup" });
+    await withFailureStage("create_backup", () => faultInjector?.({ point: "before_backup" }));
     context.emitProgress({
       stage: "create_backup",
       status: "start",
@@ -165,13 +169,13 @@ export async function executeOrdinaryWrite({
     });
     throwIfAborted(signal);
     const backupStartedAt = Date.now();
-    state.backupDir = await undoBackup.capture({
+    state.backupDir = await withFailureStage("create_backup", () => undoBackup.capture({
       storage,
       codexHome,
       targetKinds: program.targetKinds,
       faultInjector,
       ...(program.backup ?? {})
-    });
+    }));
     state.backupDurationMs = Date.now() - backupStartedAt;
     context.emitProgress({
       stage: "create_backup",
@@ -191,7 +195,7 @@ export async function executeOrdinaryWrite({
         if (!step.silent) {
           context.emitProgress({ stage: step.stage, status: "start", ...(step.start ?? {}) });
         }
-        state.outputs[key] = await step.run({ context, state });
+        state.outputs[key] = await withFailureStage(step.stage, () => step.run({ context, state }));
         if (!step.silent) {
           context.emitProgress({
             stage: step.stage,
@@ -224,6 +228,6 @@ export async function executeOrdinaryWrite({
     });
     return await program.toResult({ context, state, outcome: "completed", error: null });
   } finally {
-    await releaseLock();
+    await withFailureStage("release_lock", () => releaseLock());
   }
 }

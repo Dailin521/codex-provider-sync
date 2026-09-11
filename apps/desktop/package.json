@@ -1,6 +1,6 @@
 {
   "name": "@codex-provider-sync/desktop",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Desktop app for synchronizing Codex Provider metadata and local session history.",
   "homepage": "https://github.com/Dailin521/codex-provider-sync#readme",
   "author": "Dailin521",

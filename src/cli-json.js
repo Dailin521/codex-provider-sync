@@ -1,5 +1,9 @@
 import path from "node:path";
-import { publicFileUpdateTiming } from "../packages/contracts/dist/index.js";
+import {
+  OPERATION_FAILURE_STAGES,
+  SAFE_CAUSE_CODES,
+  publicFileUpdateTiming
+} from "../packages/contracts/dist/index.js";
 import { publicHistoryIntegrity } from "./history-integrity-dto.js";
 
 export const CLI_JSON_SCHEMA_VERSION = 1;
@@ -60,18 +64,6 @@ const PENDING_STATES = new Set([
   "recovery-required"
 ]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const SAFE_CAUSE_CODES = new Set([
-  "ENOENT",
-  "EACCES",
-  "EPERM",
-  "EIO",
-  "EBUSY",
-  "SQLITE_BUSY",
-  "SQLITE_LOCKED",
-  "SQLITE_CORRUPT",
-  "SQLITE_NOTADB",
-  "ERR_SQLITE_ERROR"
-]);
 
 const CLI_ERROR_MESSAGES = Object.freeze({
   INVALID_INPUT: "The command input is invalid.",
@@ -446,6 +438,7 @@ function sanitizeStatusResult(value) {
   } else if (value.operationInProgress === null) {
     result.operationInProgress = null;
   }
+  if (value.staleLockDetected === true) result.staleLockDetected = true;
   if (value.statusReadBlocked && typeof value.statusReadBlocked === "object") {
     const reasons = new Set(["write-operation", "codex-home-lock", "revision-unverifiable", "state-changed-during-status"]);
     result.statusReadBlocked = {
@@ -551,6 +544,7 @@ function sanitizeDiagnosticsResult(value) {
     ? value.safety
     : {};
   result.safety = {
+    ...(safety.staleLockDetected === true ? { staleLockDetected: true } : {}),
     pendingRecovery: safety.pendingRecovery === true,
     rolloutScanComplete: safety.rolloutScanComplete === true,
     lockedRolloutCount: safeNumber(safety.lockedRolloutCount, { integer: true, minimum: 0 }) ?? 0,
@@ -624,13 +618,19 @@ export function createCliSuccessEnvelope(command, result, options = {}) {
   };
 }
 
-function internalErrorDto() {
+function internalErrorDto(details, operationId) {
+  const publicDetails = normalizePublicDetails(details);
+  const internalDetails = publicDetails && Object.fromEntries(
+    Object.entries(publicDetails).filter(([key]) => key === "failureStage" || key === "causeCode")
+  );
   return {
     code: "INTERNAL_ERROR",
     message: CLI_ERROR_MESSAGES.INTERNAL_ERROR,
     severity: "fatal",
     retryable: false,
-    recoveryRequired: false
+    recoveryRequired: false,
+    ...(operationId ? { operationId } : {}),
+    ...(internalDetails && Object.keys(internalDetails).length > 0 ? { details: internalDetails } : {})
   };
 }
 
@@ -648,6 +648,9 @@ function normalizePublicDetails(details) {
   if (LOCK_SCOPES.has(details.lockScope)) normalized.lockScope = details.lockScope;
   if (SAFE_CAUSE_CODES.has(details.causeCode)) {
     normalized.causeCode = details.causeCode;
+  }
+  if (OPERATION_FAILURE_STAGES.has(details.failureStage)) {
+    normalized.failureStage = details.failureStage;
   }
   if (SAFE_REASONS.has(details.reason)) normalized.reason = details.reason;
   if (details.missing === "config.toml" || details.missing === "state_5.sqlite") {
@@ -680,9 +683,9 @@ export function normalizeCliErrorDto(dto) {
         || typeof dto.recoveryRequired !== "boolean") {
       return internalErrorDto();
     }
-    if (code === "INTERNAL_ERROR") return internalErrorDto();
     const details = normalizePublicDetails(dto.details);
     const operationId = safeUuid(dto.operationId);
+    if (code === "INTERNAL_ERROR") return internalErrorDto(dto.details, operationId);
     return {
       code,
       message,

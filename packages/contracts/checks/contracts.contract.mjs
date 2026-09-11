@@ -184,6 +184,34 @@ test("public errors use fixed messages and allowlisted details", () => {
 
 });
 
+test("internal public errors retain only audited failure diagnostics", () => {
+  const operationId = "11111111-1111-4111-8111-111111111111";
+  const error = createPublicCoreErrorDto("INTERNAL_ERROR", {
+    operationId,
+    details: {
+      failureStage: "preflight_sqlite",
+      causeCode: "ETIMEDOUT",
+      message: "private message",
+      stack: "private stack",
+      path: "C:/private",
+      provider: "private-provider"
+    }
+  });
+  assert.deepEqual(error, {
+    code: "INTERNAL_ERROR",
+    message: "An internal error occurred.",
+    severity: "fatal",
+    retryable: false,
+    recoveryRequired: false,
+    operationId,
+    details: { failureStage: "preflight_sqlite", causeCode: "ETIMEDOUT" }
+  });
+  assert.doesNotThrow(() => assertCoreErrorDto(error));
+  assert.deepEqual(createPublicCoreErrorDto("INTERNAL_ERROR", {
+    details: { failureStage: "unknown-stage", causeCode: "UNKNOWN", path: "C:/private" }
+  }).details, undefined);
+});
+
 test("method output guards reject structurally invalid successes", () => {
   const status = {
     schemaVersion: 1,
@@ -203,6 +231,12 @@ test("method output guards reject structurally invalid successes", () => {
     lockedRolloutFiles: []
   };
   assert.throws(() => assertCoreMethodOutput("getStatus", null));
+  for (const staleLockDetected of [true, false]) {
+    assert.doesNotThrow(() => assertCoreMethodOutput("getStatus", { ...status, staleLockDetected }));
+  }
+  for (const staleLockDetected of [null, "true", 1, {}]) {
+    assert.throws(() => assertCoreMethodOutput("getStatus", { ...status, staleLockDetected }), ContractValidationError);
+  }
   for (const syncSessionUsage of [
     { state: "checked", count: 0 }, { state: "checked", count: 2 },
     { state: "unavailable", count: null }, { state: "unsupported", count: null }
@@ -370,6 +404,16 @@ test("DiagnosticsSnapshot is a recursive pathless allowlist", () => {
     }
   };
   assert.doesNotThrow(() => assertCoreMethodOutput("getDiagnostics", diagnostics));
+  for (const staleLockDetected of [true, false]) {
+    assert.doesNotThrow(() => assertCoreMethodOutput("getDiagnostics", {
+      ...diagnostics, safety: { ...diagnostics.safety, staleLockDetected }
+    }));
+  }
+  for (const staleLockDetected of [null, "true", 1, {}]) {
+    assert.throws(() => assertCoreMethodOutput("getDiagnostics", {
+      ...diagnostics, safety: { ...diagnostics.safety, staleLockDetected }
+    }), ContractValidationError);
+  }
 
   for (const [section, field] of [
     ["runtime", "path"],

@@ -12,7 +12,7 @@ export function shouldRetryPackagedCdpActivation({
   cleanupCompleted,
   error
 }) {
-  return platform === "win32"
+  return (platform === "win32" || platform === "linux")
     && attempt === 1
     && endpointReady === true
     && browserConnected === false

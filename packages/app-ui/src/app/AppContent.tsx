@@ -219,6 +219,7 @@ export function AppContent({ props }: { props: AppUiProps }) {
     }
   }, [handleProfileStale, profile?.revision, status?.profile.revision, statusQuery.error, statusReady]);
   const externalWriteActive = status?.operationInProgress != null;
+  const lockUnverified = status?.operationInProgress?.lockState === "unverifiable";
   const writeDisabled = !profile
     || !statusReady
     || status?.pendingRecovery === true
@@ -565,6 +566,8 @@ export function AppContent({ props }: { props: AppUiProps }) {
     ? { label: t("global.recoveryTitle"), tone: "warning" as const }
     : statusQuery.isError
       ? { label: t("global.statusUnavailable"), tone: "danger" as const }
+      : lockUnverified
+        ? { label: t("global.lockUnverified"), tone: "warning" as const }
       : mutationCount > 0 || directSyncPhase !== null || externalWriteActive
         ? { label: t("global.busy"), tone: "warning" as const }
         : statusReadBlocked
@@ -608,7 +611,8 @@ export function AppContent({ props }: { props: AppUiProps }) {
         <main className={cn("min-w-0", ["history", "operation-logs"].includes(route) ? "flex min-h-0 flex-col overflow-hidden p-3 md:p-4" : "p-4 md:p-8")} id="main-content" tabIndex={-1}>
           <div className={["history", "operation-logs"].includes(route) ? "max-h-[30%] shrink-0 overflow-y-auto overscroll-contain" : undefined}>
           {status?.pendingRecovery ? <div className="mb-5 flex items-start gap-3 rounded-xl border border-[var(--danger)] bg-[var(--danger-soft)] p-4 text-sm" role="alert"><ShieldAlert className="mt-0.5 shrink-0 text-[var(--danger)]" size={20} /><div><div className="font-semibold">{t("global.recoveryTitle")}</div><div className="mt-1">{t("global.recovery")}</div></div></div> : null}
-          {status?.operationInProgress ? <div className="mb-5 flex items-start gap-3 rounded-xl border border-[var(--warning)] bg-[var(--warning-soft)] p-4 text-sm" role="status"><FileClock className="mt-0.5 shrink-0 text-[var(--warning)]" size={20} /><div><div className="font-semibold">{t("global.busy")}</div><div className="mt-1 text-[var(--muted)]">{t("global.busyHint")}</div></div></div> : null}
+          {status?.operationInProgress ? <div className="mb-5 flex flex-wrap items-start gap-3 rounded-xl border border-[var(--warning)] bg-[var(--warning-soft)] p-4 text-sm" role="status"><FileClock className="mt-0.5 shrink-0 text-[var(--warning)]" size={20} /><div className="min-w-0 flex-1"><div className="font-semibold">{t(lockUnverified ? "global.lockUnverified" : "global.busy")}</div><div className="mt-1 text-[var(--muted)]">{t(lockUnverified ? "global.lockUnverifiedHint" : "global.busyHint")}</div></div>{lockUnverified ? <Button disabled={statusQuery.isFetching} onClick={() => void statusQuery.refetch()} type="button" variant="secondary">{t("global.retryStatus")}</Button> : null}</div> : null}
+          {status?.staleLockDetected && statusReady && !externalWriteActive && !status.pendingRecovery ? <div className="mb-5 rounded-xl border border-[var(--border)] bg-[var(--surface-raised)] p-4 text-sm" role="status"><div className="font-semibold">{t("global.staleLock")}</div><p className="mt-1 text-[var(--muted)]">{t("global.staleLockHint")}</p></div> : null}
           {statusReadBlocked && !externalWriteActive ? <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface-raised)] p-4 text-sm" role="status"><div><div className="font-semibold">{t("global.statusNeedsRefresh")}</div><p className="mt-1 text-[var(--muted)]">{t(statusChangedDuringRead ? "global.statusChangedHint" : "global.statusUnavailableHint")}</p></div><Button disabled={statusQuery.isFetching} onClick={() => void statusQuery.refetch()} type="button" variant="secondary">{t("global.retryStatus")}</Button></div> : null}
           {statusQuery.isError ? <div className="mb-5 rounded-xl border border-[var(--danger)] bg-[var(--danger-soft)] p-4 text-sm text-[var(--danger)]" role="alert">{safeErrorText(statusQuery.error, t)}</div> : null}
           </div>

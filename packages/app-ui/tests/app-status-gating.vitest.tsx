@@ -30,6 +30,36 @@ const preferences = {
 };
 
 describe("App write gating", () => {
+  it("allows normal preview/sync for a verified stale lock without automatic cleanup", async () => {
+    const readStatus = vi.fn().mockResolvedValue({ ...status, staleLockDetected: true });
+    const prepareSync = vi.fn();
+    const core = new MockCoreClient({ getStatus: readStatus, prepareSync });
+    render(<AppUi surface="desktop" core={core} host={{ listProfiles: async () => [{ id: "default", name: "Default", revision: "profile-r1" }] }} initialLocale="en" initialTheme="system" preferences={preferences} />);
+    expect(await screen.findByText("A previous operation has ended")).toBeVisible();
+    expect(screen.queryByText("Operation in progress")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Preview sync" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Sync now" })).toBeEnabled();
+    expect(prepareSync).not.toHaveBeenCalled();
+    expect(readStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("distinguishes an unverified lock from a running operation and permits only manual recheck", async () => {
+    const readStatus = vi.fn().mockResolvedValueOnce({
+      ...status, operationInProgress: { lockState: "unverifiable", errorCode: "LOCK_UNVERIFIABLE" },
+      statusReadBlocked: { reason: "codex-home-lock" }
+    }).mockResolvedValue(status);
+    const core = new MockCoreClient({ getStatus: readStatus });
+    const user = userEvent.setup();
+    render(<AppUi surface="desktop" core={core} host={{ listProfiles: async () => [{ id: "default", name: "Default", revision: "profile-r1" }] }} initialLocale="en" initialTheme="system" preferences={preferences} />);
+    expect(await screen.findAllByText("Storage lock needs checking")).toHaveLength(2);
+    expect(screen.queryByText("Operation in progress")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sync now" })).toBeDisabled();
+    expect(readStatus).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Check status again" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Sync now" })).toBeEnabled());
+    expect(readStatus).toHaveBeenCalledTimes(2);
+  });
+
   for (const reason of ["state-changed-during-status", "revision-unverifiable"]) {
     it(`shows refresh-needed rather than busy for ${reason}, with manual recovery`, async () => {
       const readStatus = vi.fn().mockResolvedValueOnce({

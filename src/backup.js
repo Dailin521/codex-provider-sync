@@ -558,13 +558,21 @@ export async function refreshBackupInventory(backupDir, options = {}) {
 export async function getBackupSummary(codexHome) {
   const backupRoot = defaultBackupRoot(codexHome);
   const backupDirs = await listManagedBackupDirectories(backupRoot);
-  let totalBytes = 0;
+  const backups = [];
+
   for (const entry of backupDirs) {
-    totalBytes += await getBackupDirectorySize(entry.fullPath);
+    const backup = await readManagedBackupForRead(entry, async (metadata) => ({
+      sizeBytes: await getBackupDirectorySizeForRead(entry.fullPath, metadata)
+    }));
+    if (backup !== null) backups.push(backup);
+  }
+  let totalBytes = 0;
+  for (const backup of backups) {
+    totalBytes += backup.sizeBytes;
   }
 
   return {
-    count: backupDirs.length,
+    count: backups.length,
     totalBytes
   };
 }
@@ -575,14 +583,13 @@ export async function listBackups(codexHome) {
   const backups = [];
 
   for (const entry of backupDirs) {
-    const metadataPath = path.join(entry.fullPath, "metadata.json");
-    const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
-    backups.push({
+    const backup = await readManagedBackupForRead(entry, async (metadata) => ({
       id: entry.name,
       path: entry.fullPath,
-      sizeBytes: await getDirectorySize(entry.fullPath),
+      sizeBytes: await getDirectorySize(entry.fullPath, { strictMissing: true }),
       metadata
-    });
+    }));
+    if (backup !== null) backups.push(backup);
   }
 
   return { backupRoot, backups };
@@ -1109,6 +1116,33 @@ async function isManagedBackupDirectory(backupDir) {
   }
 }
 
+// Summary and list are read-only observations and can race a completed
+// retention prune from another process. Once discovery identified a managed
+// directory, never expose a partially traversed backup: any ENOENT after
+// discovery omits that whole backup. Retain the successful-read metadata
+// recheck so a cached inventory cannot count a directory that vanished later.
+// Restore and prune deliberately keep their existing traversal.
+async function readManagedBackupForRead(entry, read) {
+  try {
+    const metadata = await readManagedBackupMetadataForRead(entry.fullPath);
+    const value = await read(metadata);
+    await readManagedBackupMetadataForRead(entry.fullPath);
+    return value;
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function readManagedBackupMetadataForRead(backupDir) {
+  const metadataPath = path.join(backupDir, "metadata.json");
+  const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
+  if (metadata?.namespace !== BACKUP_NAMESPACE) {
+    throw new Error(`Managed backup metadata changed while reading: ${metadataPath}.`);
+  }
+  return metadata;
+}
+
 async function writeMetadataWithInventory(backupDir, metadata, options = {}) {
   const metadataPath = path.join(backupDir, "metadata.json");
   const payload = await getDirectoryInventory(backupDir, metadataPath);
@@ -1145,16 +1179,27 @@ async function getBackupDirectorySize(backupDir) {
   return getDirectorySize(backupDir);
 }
 
-async function getDirectorySize(directoryPath) {
-  return (await getDirectoryInventory(directoryPath)).sizeBytes;
+async function getBackupDirectorySizeForRead(backupDir, metadata) {
+  if (metadata?.namespace === BACKUP_NAMESPACE
+      && Number.isSafeInteger(metadata.sizeBytes)
+      && metadata.sizeBytes >= 0
+      && Number.isSafeInteger(metadata.fileCount)
+      && metadata.fileCount >= 1) {
+    return metadata.sizeBytes;
+  }
+  return getDirectorySize(backupDir, { strictMissing: true });
 }
 
-async function getDirectoryInventory(directoryPath, excludedFilePath = null) {
+async function getDirectorySize(directoryPath, options = {}) {
+  return (await getDirectoryInventory(directoryPath, null, options)).sizeBytes;
+}
+
+async function getDirectoryInventory(directoryPath, excludedFilePath = null, options = {}) {
   let entries;
   try {
     entries = await fs.readdir(directoryPath, { withFileTypes: true });
   } catch (error) {
-    if (error?.code === "ENOENT") {
+    if (error?.code === "ENOENT" && !options.strictMissing) {
       return { sizeBytes: 0, fileCount: 0 };
     }
     throw error;
@@ -1166,7 +1211,7 @@ async function getDirectoryInventory(directoryPath, excludedFilePath = null) {
   for (const entry of entries) {
     const fullPath = path.join(directoryPath, entry.name);
     if (entry.isDirectory()) {
-      const child = await getDirectoryInventory(fullPath, excluded);
+      const child = await getDirectoryInventory(fullPath, excluded, options);
       sizeBytes += child.sizeBytes;
       fileCount += child.fileCount;
       continue;
