@@ -137,6 +137,8 @@ function runProductSmoke(executable, expectedUpdateMode) {
       ...process.env,
       CPS_DESKTOP_EXECUTABLE: executable,
       CPS_EXPECTED_UPDATE_MODE: expectedUpdateMode,
+      // Stable updater containers must exercise the real lazy-loaded dependency and public feed.
+      CPS_VERIFY_PUBLIC_UPDATE_CHECK: updateAssets.length > 0 ? "true" : "false",
       CPS_DESKTOP_WINDOW_DISPLAY: "hidden"
     }
   });

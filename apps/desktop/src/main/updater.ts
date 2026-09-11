@@ -76,7 +76,9 @@ function safeProgressPercent(value: unknown): number | undefined {
 export async function createProductionUpdaterPort(options: {
   allowPrerelease: boolean;
 }): Promise<DesktopUpdaterPort> {
-  const { autoUpdater } = await import("electron-updater");
+  // electron-updater exposes autoUpdater through a CommonJS getter, not an ESM named export.
+  const { default: updater } = await import("electron-updater");
+  const { autoUpdater } = updater;
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.allowPrerelease = options.allowPrerelease;

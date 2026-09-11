@@ -29,9 +29,11 @@
 
 ## 3. 验收清单
 
+从 1.0.2 起，`stable-updater` 的安装版和便携版容器 smoke 都实际调用公开源检查更新（`CPS_VERIFY_PUBLIC_UPDATE_CHECK=true`），必须返回已检查结果而非 `error`。这一步保留真实模块加载、网络栈和发布源；网络失败须诊断后再重跑，不能退回只验证 `idle`。不会下载或安装更新，不能据此宣称跨版本升级已验收。单元回归 `updater-module.test.mjs` 仅替换 Electron host，保留真实 CommonJS 依赖，以检出 ESM 导入兼容问题。
+
 应用内更新的显式渠道为 `stable-updater`，仅 Windows x64 严格 `1.0.x`；仍默认 RC。此渠道增加 `latest.yml` 与安装器 `.exe.blockmap`，两者必须来自同次构建并通过 metadata/大小/SHA512、blockmap、包内 GitHub 配置和 SHA256 清单审核。下载和安装均需用户确认，便携版仍手动。固定依赖对有 publisherName 的包继续校验签名；无发布者的未签名包不能冒充已签名更新。
 
-默认不得移动已有 tag 或覆盖既有 Release；本次 1.0.1 明确授权例外见第 6 节。相同版本需手动重装，线上更新需更高版本。真实安装版跨版本下载/重启、数据保持、失败重试与安装门禁需独立记录，首批更新能力上线仍须在公告明确线上跨版本尚未验收，不以单元测试替代。
+不得移动已有 tag 或覆盖既有 Release；当前 1.0.2 使用新标签和新 Release，见第 6 节。历史 1.0.1 的单次覆盖例外已经结束。真实安装版跨版本下载/重启、数据保持、失败重试与安装门禁需独立记录，首批更新能力上线仍须在公告明确线上跨版本尚未验收，不以单元测试替代。
 
 - 核心回归、架构/Provider I/O 门禁、完整跨平台 CI、根包 Node 16 安装兼容通过。
 - 生产依赖无 moderate/high/critical，完整依赖树无 high/critical；其他告警如实列明。
@@ -66,14 +68,12 @@
 
 正式版公告先通过 `node scripts/read-release-metadata.js --tag v1.0.x`，然后按该版本的明确授权执行 `gh release edit v1.0.x --draft=false --prerelease=false --latest=true --notes-file docs/release-notes/v1.0.x-zh.md`。公开后再次检查 `/releases/latest`、tag SHA、对应渠道的全部下载资产与哈希。RC 只公开 prerelease，不使用正式版命令，也不设 latest。
 
-## 6. 2026-09-11 同版本重新发布例外
+## 6. 当前 1.0.2 发布与历史例外
 
-维护者明确要求覆盖 1.0.1，不升版本。本次原标签 SHA 为 `30c276a585344fa3f4f8fee4066565c97981d038`，原 Release ID 为 `386924117`。这不是默认发布规则，也不授权覆盖其他版本。
+维护者已明确选择发布 **1.0.2**，修复更新器模块加载失败。本次遵循第 1～5 节：最终 main SHA 的 CI 通过后创建新的 `v1.0.2` 标签，以 `stable-updater` 准备并验收 10 项附件，再创建/公开对应的新 Release。不得移动 `v1.0.1` 标签、覆盖其附件或撤下原 Release。
 
-1. 原始 8 个附件、GitHub 元数据/哈希和标签对象保存至 D 盘独立目录；确认可恢复后才替换。原 SHA 与新 SHA、重新发布事实保留在公告和 PR。
-2. 新提交仍通过 PR 和合并后 exact main `ci-gate`。仅在本次明确授权范围内更新 `v1.0.1` 标签，使用旧标签对象值的 lease 拒绝第三方竞争，绝不 force-push main。
-3. 使用 `stable-updater`、`create_draft_release=false` 准备新候选，不修改默认工作流的重复 Release 拒绝规则。新的容器、哈希和全部 10 项附件审核通过后，替换前暂时撤下公开 Release，避免用户下载混合的新旧文件。
-4. 只替换本版对应的审核清单文件，重新验证完整 Release 后恢复公开/latest，并记录新 main SHA。失败时保留 Draft 或恢复已备份的原始标签及全部附件，不公开半套产物。
-5. 旧 1.0.1 同版本不通知，公告必须要求手动重装一次，并如实列明未签名、线上跨版本升级尚未验收；不发布 npm、Legacy 或其他平台包。
+受影响的 1.0.1 安装版无法正常检查更新，公告必须要求手动安装 1.0.2 一次，并如实列明未签名、线上跨版本下载安装尚未验收；不发布 npm、Legacy 或其他平台包。
+
+历史记录：2026-09-11 曾按单次明确授权重新发布 1.0.1，原标签 SHA 为 `30c276a585344fa3f4f8fee4066565c97981d038`，原 Release ID 为 `386924117`；原文件与哈希先备份再替换。该例外已经结束，仅保留审计来源，不再是当前操作指令，也不授权任何后续覆盖。
 
 规则依据：[ADR-0039](adr/0039-windows-first-electron-release.md)、[Core 不变量](architecture/NODE_CORE_ARCHITECTURE_ZH.md)、[迁移执行索引](migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md)。

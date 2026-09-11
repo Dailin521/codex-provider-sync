@@ -278,7 +278,7 @@ test("production desktop bundle has no test bridge and reads the real SQLite fix
   test.setTimeout(PRODUCTION_SMOKE_TIMEOUT_MS);
   const fixture = await createDesktopReadOnlyFixture({ includeUntitled: true, repairPreview: true, currentProvider: "dal",
     writerSessionIds: process.platform === "win32" ? ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"] : [] });
-  await claimDailyUpdateCheck(fixture.userData); // No real network checks in fixture tests.
+  await claimDailyUpdateCheck(fixture.userData); // Suppress startup checks; release smoke checks explicitly below.
   let electronApp;
   try {
     electronApp = await launchProductionDesktop({
@@ -361,6 +361,18 @@ test("production desktop bundle has no test bridge and reads the real SQLite fix
       await expect(expectedUpdateMode === "manual" ? installerHint : manualHint).toBeHidden();
       // No network check or download is launched by opening Settings.
       expect((await page.evaluate(() => window.codexProvider.updates.getStatus())).state).toBe("idle");
+      if (process.env.CPS_VERIFY_PUBLIC_UPDATE_CHECK === "true") {
+        const checked = await test.step("check the public release through the production updater", () => withDeadline(
+          "Production public update check",
+          page.evaluate(() => window.codexProvider.updates.check()),
+          PRODUCTION_BRIDGE_TIMEOUT_MS
+        ));
+        expect(checked.mode).toBe(expectedUpdateMode === "manual" ? "manual" : undefined);
+        expect(["available", "not-available"]).toContain(checked.state);
+        expect(checked.installAllowed).toBe(false);
+        expect(checked.reason).toBeUndefined();
+        expect(JSON.stringify(checked)).not.toMatch(/url|path|releaseNotes|token/i);
+      }
       await page.getByRole("button", { name: "Overview", exact: true }).click();
     }
     expect(JSON.stringify(updateStatus)).not.toMatch(/url|path|releaseNotes|token/i);

@@ -1,6 +1,6 @@
 {
   "name": "@dailin521/codex-provider-sync",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Synchronize Codex session provider metadata across rollout files and SQLite state.",
   "type": "module",
   "workspaces": [
