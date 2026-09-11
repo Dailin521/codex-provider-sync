@@ -198,7 +198,21 @@ async function confirmPlan(page, returnFocus, { dialogName = "Confirm sync", con
   await expect(dialog.getByText("Selected changes", { exact: true })).toBeVisible();
   await expect(dialog.getByText("Expected changes", { exact: true })).toBeVisible();
   await dialog.getByRole("button", { name: confirmName }).click();
-  await expect(dialog).toHaveCount(0);
+  try {
+    await expect(dialog).toHaveCount(0);
+  } catch (error) {
+    // Record only structured synthetic operation state on a failed wait. This
+    // distinguishes a slow running Restore from a terminal Core error in CI.
+    const logs = await page.evaluate(async () => {
+      const result = await window.codexProvider.operationLogs.list({ schemaVersion: 1, page: 1, pageSize: 10 });
+      return result.entries.map(({ operation, status, outcome, error: failure, stages }) => ({
+        operation, status, outcome, code: failure?.code,
+        stages: stages?.map(({ stage, durationMs }) => ({ stage, durationMs }))
+      }));
+    }).catch(() => null);
+    process.stderr.write(`[desktop-fixture] confirmation wait failed: ${JSON.stringify({ dialogName, logs })}\n`);
+    throw error;
+  }
   const resultDialog = page.getByRole("dialog", { name: "Operation result" });
   await expect(resultDialog).toBeVisible();
   await expect(resultDialog.getByRole("heading", { name: "Completed", exact: true })).toBeVisible();

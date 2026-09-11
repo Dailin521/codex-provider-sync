@@ -71,6 +71,8 @@ jobs:
         shell: bash
         env:
           CPS_RELEASE_REF: ${{ steps.prepare.outputs.release_ref }}
+          CPS_RELEASE_VERSION: ${{ steps.prepare.outputs.version }}
+          CPS_RELEASE_CHANNEL: ${{ steps.prepare.outputs.channel }}
           CPS_EXPECTED_SHA: ${{ steps.prepare.outputs.commit }}
         run: |
           git fetch --force --no-tags origin "+${CPS_RELEASE_REF}:${CPS_RELEASE_REF}"
@@ -78,6 +80,7 @@ jobs:
           tag_commit="$(git rev-parse "${CPS_RELEASE_REF}^{commit}")"
           test "$tag_commit" = "$CPS_EXPECTED_SHA"
           git merge-base --is-ancestor "$CPS_EXPECTED_SHA" refs/remotes/origin/main
+          node apps/desktop/scripts/prepare-electron-windows-release.mjs --verify-source-manifests
       - name: Require a successful exact push ci-gate
         id: ci_gate
         env:
@@ -169,6 +172,8 @@ jobs:
         shell: bash
         env:
           CPS_RELEASE_REF: ${{ needs.verify-input.outputs.release_ref }}
+          CPS_RELEASE_VERSION: ${{ needs.verify-input.outputs.version }}
+          CPS_RELEASE_CHANNEL: ${{ needs.verify-input.outputs.channel }}
           CPS_EXPECTED_SHA: ${{ needs.verify-input.outputs.commit }}
         run: |
           git fetch --force --no-tags origin "+${CPS_RELEASE_REF}:${CPS_RELEASE_REF}"
@@ -176,6 +181,7 @@ jobs:
           tag_commit="$(git rev-parse "${CPS_RELEASE_REF}^{commit}")"
           test "$tag_commit" = "$CPS_EXPECTED_SHA"
           git merge-base --is-ancestor "$CPS_EXPECTED_SHA" refs/remotes/origin/main
+          node apps/desktop/scripts/prepare-electron-windows-release.mjs --verify-source-manifests
       - name: Recheck exact push ci-gate and refuse an existing Release
         env:
           CPS_EXPECTED_SHA: ${{ needs.verify-input.outputs.commit }}

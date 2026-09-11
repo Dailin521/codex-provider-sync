@@ -72,7 +72,7 @@ export async function verifyExactMainCiGate({ repository, expectedSha, token, fe
 /** Refuse to overwrite a prior draft or published release with the same immutable tag. */
 export async function assertNoExistingRelease({ repository, releaseTag, token, fetchImpl = fetch }) {
   if (!REPOSITORY_PATTERN.test(repository || "")) throw new Error("GitHub repository is invalid.");
-  if (!/^v1\.0\.0(?:-rc\.(?:0|[1-9]\d*))?$/.test(releaseTag || "")) {
+  if (!/^v1\.0\.(?:0|[1-9]\d*)(?:-rc\.(?:0|[1-9]\d*))?$/.test(releaseTag || "")) {
     throw new Error("Release tag must be a supported Windows stable or RC tag.");
   }
   if (typeof token !== "string" || token.length === 0) throw new Error("GitHub Actions read token is required.");

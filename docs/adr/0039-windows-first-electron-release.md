@@ -6,6 +6,8 @@
 
 ## 决策
 
+2026-09-11 补丁发布约束：输入与 Draft 创建前均从已核验 tag 对象读取根/桌面 `package.json`，两个源码版本必须等于正式版本或 RC 的基础版本；不能用 dispatch 分支清单替代，不允许将 1.0.1 源码注入成 1.0.2。Release 存在性检查同样支持严格 1.0.x，仍拒绝覆盖已有 Draft/公开版本。
+
 维护者确认先交付已进行人工功能测试的 Windows Electron。整理并推送 V1，在最终 PR 的完整 CI 通过后，使用 merge commit 保留既有 checkpoint 历史。最新 main 必须已包含于候选；main 合入后的实际 commit 需要重新取得成功的 `ci-gate` 与绑定该 SHA 的产物证据。
 
 本轮不发布 npm、macOS/Linux 安装包或 Legacy .NET，也不以缩小公开下载范围为理由跳过既有跨平台 CI。Windows 人工测试、自动 fixture 验收、其他平台 CI 与尚未执行的真人验收分别记录。

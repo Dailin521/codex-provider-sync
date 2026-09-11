@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -37,6 +38,21 @@ export function prepareElectronWindowsRelease({ releaseRef, version, expectedSha
   });
 }
 
+export function verifyTaggedSourceVersions(input, readAtRef = (ref, file) =>
+  execFileSync("git", ["show", `${ref}:${file}`], { encoding: "utf8" })) {
+  const release = prepareElectronWindowsRelease(input);
+  const baseVersion = release.version.replace(/-rc\.\d+$/, "");
+  for (const file of ["package.json", "apps/desktop/package.json"]) {
+    // The workflow has just verified tag -> commit. Read that immutable object,
+    // not dispatch HEAD or a tag that could move between the two reads.
+    const manifest = JSON.parse(readAtRef(release.commit, file));
+    if (manifest.version !== baseVersion) {
+      throw new Error(`Tagged ${file} must match the requested release base version ${baseVersion}.`);
+    }
+  }
+  return release;
+}
+
 async function main() {
   const result = prepareElectronWindowsRelease({
     releaseRef: process.env.CPS_RELEASE_REF,
@@ -44,6 +60,12 @@ async function main() {
     channel: process.env.CPS_RELEASE_CHANNEL,
     expectedSha: process.env.CPS_EXPECTED_SHA
   });
+  if (process.argv.includes("--verify-source-manifests")) {
+    verifyTaggedSourceVersions({
+      releaseRef: result.releaseRef, version: result.version,
+      expectedSha: result.commit, channel: result.channel
+    });
+  }
   if (process.env.GITHUB_OUTPUT) {
     await fs.appendFile(path.resolve(process.env.GITHUB_OUTPUT), [
       `release_ref=${result.releaseRef}`,

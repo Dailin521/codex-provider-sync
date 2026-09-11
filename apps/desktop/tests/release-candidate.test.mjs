@@ -11,7 +11,7 @@ import {
   parseMacInfoPlist,
   RELEASE_TARGETS
 } from "../scripts/release-audit.mjs";
-import { prepareElectronWindowsRelease } from "../scripts/prepare-electron-windows-release.mjs";
+import { prepareElectronWindowsRelease, verifyTaggedSourceVersions } from "../scripts/prepare-electron-windows-release.mjs";
 import { assertDesktopArtifactVersion } from "../scripts/desktop-artifact-version.mjs";
 import { readReleaseMetadata } from "../../../scripts/read-release-metadata.js";
 import { DESKTOP_RELEASE_BASE_VERSION, resolveCandidateBuild } from "../scripts/resolve-candidate-build.mjs";
@@ -148,11 +148,41 @@ test("artifact build, stage and smoke accept stable only for explicit Windows ma
   }
 });
 
+test("release preparation verifies both manifests at the tagged SHA, not dispatch HEAD", async () => {
+  for (const [version, channel] of [["1.0.1", "stable-manual"], ["1.0.1-rc.42", "rc"]]) {
+    const input = { releaseRef: `refs/tags/v${version}`, version, expectedSha: "a".repeat(40), channel };
+    const files = [];
+    const readAtRef = (ref, file) => {
+      assert.equal(ref, input.expectedSha);
+      files.push(file);
+      return JSON.stringify({ version: "1.0.1" });
+    };
+    assert.equal(verifyTaggedSourceVersions(input, readAtRef).version, version);
+    assert.deepEqual(files, ["package.json", "apps/desktop/package.json"]);
+    for (const badFile of files) {
+      for (const badVersion of ["1.0.0", "1.0.2", "1.0.1-rc.42", undefined]) {
+        assert.throws(() => verifyTaggedSourceVersions(input, (_ref, file) =>
+          JSON.stringify({ version: file === badFile ? badVersion : "1.0.1" })), /Tagged .* must match/);
+      }
+    }
+    assert.throws(() => verifyTaggedSourceVersions(input, () => "{"));
+  }
+  const workflow = await read(".github/workflows/publish-electron-windows.yml");
+  assert.equal(workflow.match(/--verify-source-manifests/g).length, 2);
+});
+
 test("existing stable releases cannot be overwritten and ambiguous API errors fail closed", async () => {
   const input = { repository: "Dailin521/codex-provider-sync", releaseTag: "v1.0.0", token: "test-token" };
   await assertNoExistingRelease({ ...input, fetchImpl: async () => ({ ok: false, status: 404 }) });
   await assert.rejects(() => assertNoExistingRelease({ ...input, fetchImpl: async () => ({ ok: true, status: 200 }) }), /already exists/);
   await assert.rejects(() => assertNoExistingRelease({ ...input, fetchImpl: async () => ({ ok: false, status: 403 }) }), /HTTP 403/);
+  for (const releaseTag of ["v1.0.1", "v1.0.1-rc.42", "v1.0.12"]) {
+    await assertNoExistingRelease({ ...input, releaseTag, fetchImpl: async () => ({ ok: false, status: 404 }) });
+    await assert.rejects(() => assertNoExistingRelease({ ...input, releaseTag, fetchImpl: async () => ({ ok: true, status: 200 }) }), /already exists/);
+  }
+  for (const releaseTag of ["v1.0.01", "v1.1.0", "v1.0.1-rc.01", "v1.0.1-beta.1"]) {
+    await assert.rejects(() => assertNoExistingRelease({ ...input, releaseTag, fetchImpl: async () => assert.fail("invalid tag must not request GitHub") }), /supported Windows/);
+  }
 });
 
 test("release preparation requires a same-SHA push ci-gate, never a PR result", async () => {
