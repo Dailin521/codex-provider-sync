@@ -54,16 +54,54 @@ export function c10BusinessJobs(needs) {
   return jobs;
 }
 
+function readLinkDestination(text, start) {
+  let end = start;
+  const angled = text[start] === "<";
+  if (angled) end++;
+  const contentStart = end;
+  let depth = 0;
+  for (; end < text.length; end++) {
+    const char = text[end];
+    if (char === "\\" && /[!"#$%&'()*+,\-./:;<=>?@[\]\\^_`{|}~]/.test(text[end + 1] ?? "")) { end++; continue; }
+    if (angled) {
+      if (char === ">") return { target: text.slice(contentStart, end), end: end + 1 };
+      if (char === "\n" || char === "<") return null;
+    } else {
+      if (/\s/.test(char) || (char === ")" && depth === 0)) break;
+      if (char === "(") depth++;
+      if (char === ")") depth--;
+    }
+  }
+  return !angled && depth === 0 && end > start ? { target: text.slice(start, end), end } : null;
+}
+
+function linkTargets(body) {
+  const targets = [];
+  for (const match of body.matchAll(/\]\(\s*/g)) {
+    let backslashes = 0;
+    for (let i = match.index - 1; i >= 0 && body[i] === "\\"; i--) backslashes++;
+    if (backslashes % 2) continue;
+    const destination = readLinkDestination(body, match.index + match[0].length);
+    if (!destination) continue;
+    // A destination must be followed by the link terminator or a quoted title.
+    if (/^(?:\s*\)|\s+["'][^\n]*?["']\s*\))/.test(body.slice(destination.end))) targets.push(destination.target);
+  }
+  for (const match of body.matchAll(/^\s*\[[^\]]+\]:\s*/gm)) {
+    const destination = readLinkDestination(body, match.index + match[0].length);
+    if (destination) targets.push(destination.target);
+  }
+  return targets;
+}
+
 export function verifyLocalLinks(root, file) {
   const absolute = path.join(root, file);
-  if (!fs.existsSync(absolute)) return; // A deleted ordinary document has no outgoing links.
+  assert.ok(fs.existsSync(absolute), `${file}: missing document; deleted documents cannot pass the lightweight check`);
   assert.ok(fs.lstatSync(absolute).isFile(), `${file} must be a regular document`);
   const body = fs.readFileSync(absolute, "utf8").replace(/^\s*(```|~~~)[\s\S]*?^\s*\1.*$/gm, "");
   // Inline links/images and reference destinations; remote URLs and anchors are not fetched.
-  const targets = [...body.matchAll(/\]\(\s*(<[^>]+>|[^\s)]+)(?:\s+["'][^\n]*?["'])?\s*\)/g)].map((m) => m[1]);
-  targets.push(...[...body.matchAll(/^\s*\[[^\]]+\]:\s*(<[^>]+>|\S+)/gm)].map((m) => m[1]));
+  const targets = linkTargets(body);
   for (let target of targets) {
-    target = target.replace(/^<|>$/g, "");
+    target = target.replace(/\\([!"#$%&'()*+,\-./:;<=>?@[\]\\^_`{|}~])/g, "$1");
     if (/^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(target)) continue;
     target = decodeURIComponent(target.split(/[?#]/)[0]);
     if (!target) continue;
@@ -89,7 +127,7 @@ function main() {
     for (const file of files) verifyLocalLinks(root, file);
     const version = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).version;
     verifyReleaseVersion({ rootDir: root, tag: `v${version}` });
-    for (const file of files.filter((entry) => entry.startsWith("docs/release-notes/") && fs.existsSync(path.join(root, entry)))) {
+    for (const file of files.filter((entry) => entry.startsWith("docs/release-notes/"))) {
       readReleaseMetadata({ rootDir: root, tag: path.basename(file, "-zh.md") });
     }
     console.log("Documentation links, version consistency and changed release announcements passed.");

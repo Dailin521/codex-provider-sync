@@ -6,11 +6,11 @@ import { execFileSync } from "node:child_process";
 import test from "node:test";
 import { changedFiles, classifyChanges, c10BusinessJobs, HEAVY_JOBS, verifyGate, verifyLocalLinks } from "../scripts/ci-docs.mjs";
 
-function fixture(t) {
+function fixture(run) {
   const base = process.platform === "win32" && fs.existsSync("D:/Temp") ? "D:/Temp" : os.tmpdir();
   const root = fs.mkdtempSync(path.join(base, "cps-docs-ci-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  return root;
+  try { return run(root); }
+  finally { fs.rmSync(root, { recursive: true, force: true }); }
 }
 
 test("only explicit ordinary docs in a nonempty whole PR permit the light path", () => {
@@ -25,8 +25,7 @@ test("only explicit ordinary docs in a nonempty whole PR permit the light path",
   for (const files of [[], undefined, null, [""]]) assert.equal(classifyChanges("pull_request", files), "full");
 });
 
-test("whole PR comparison retains earlier code changes and both sides of renames", (t) => {
-  const root = fixture(t);
+test("whole PR comparison retains earlier code changes and both sides of renames", () => fixture((root) => {
   const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
   git("init", "--quiet");
   git("config", "core.autocrlf", "false");
@@ -45,7 +44,7 @@ test("whole PR comparison retains earlier code changes and both sides of renames
   assert.deepEqual(changedFiles(root, beforeRename, git("rev-parse", "HEAD")).sort(), ["CHANGELOG.md", "code.js"]);
   assert.throws(() => changedFiles(root, "invalid", beforeRename));
   assert.throws(() => changedFiles(root, "a".repeat(40), beforeRename));
-});
+}));
 
 function results(mode) {
   return { "change-scope": { result: "success", outputs: { mode } },
@@ -77,8 +76,7 @@ test("gate accepts documented skips only for a verified PR docs run", () => {
   assert.throws(() => verifyGate("push", missing));
 });
 
-test("local links validate existing destinations without remote requests", (t) => {
-  const root = fixture(t);
+test("local links validate existing destinations without remote requests", () => fixture((root) => {
   fs.writeFileSync(path.join(root, "target.md"), "# target\n");
   const readme = path.join(root, "README.md");
   fs.writeFileSync(readme, "[local](target.md#section)\n[remote](https://example.invalid/no-network)\n[ref]: target.md\n");
@@ -87,7 +85,41 @@ test("local links validate existing destinations without remote requests", (t) =
   assert.throws(() => verifyLocalLinks(root, "README.md"), /missing local link/);
   fs.writeFileSync(readme, "[escape](../outside.md)\n");
   assert.throws(() => verifyLocalLinks(root, "README.md"), /escapes repository/);
-});
+}));
+
+test("deleted ordinary release notes fail even when their incoming links are unchanged", () => fixture((root) => {
+  const note = "docs/release-notes/v1.0.1-zh.md";
+  fs.mkdirSync(path.join(root, "docs/release-notes"), { recursive: true });
+  fs.writeFileSync(path.join(root, "README.md"), `[Release](${note})\n`);
+  fs.writeFileSync(path.join(root, note), "Release notes\n");
+  verifyLocalLinks(root, note);
+  fs.unlinkSync(path.join(root, note));
+  assert.equal(classifyChanges("pull_request", [note]), "docs");
+  assert.throws(() => verifyLocalLinks(root, note), /missing document/);
+}));
+
+test("local destinations preserve balanced, escaped and angle-bracket parentheses", () => fixture((root) => {
+  const readme = path.join(root, "README.md");
+  for (const file of ["guide(v2).md", "guide(v2(nested)).md", "guide).md", "guide (v2).md"]) {
+    fs.writeFileSync(path.join(root, file), "guide\n");
+  }
+  fs.writeFileSync(readme, [
+    '[guide](guide(v2).md "Title")',
+    "![nested](guide(v2(nested)).md)",
+    String.raw`[escaped](guide\(v2\).md)`,
+    String.raw`[escaped close](guide\).md)`,
+    '[angle](<guide (v2).md> "Title")',
+    "[reference]: guide(v2(nested)).md",
+    String.raw`[escaped-reference]: guide\).md`,
+    '[angle-reference]: <guide (v2).md> "Title"',
+  ].join("\n"));
+  verifyLocalLinks(root, "README.md");
+  for (const link of ["[broken](missing(v2).md)", String.raw`[broken](missing\).md)`,
+    "[broken](<missing (v2).md>)", "[ref]: missing(v2).md"]) {
+    fs.writeFileSync(readme, link);
+    assert.throws(() => verifyLocalLinks(root, "README.md"), /missing local link/);
+  }
+}));
 
 test("C10 retains exactly the original business results including failures", () => {
   const needs = results("full");
