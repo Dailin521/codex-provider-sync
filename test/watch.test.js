@@ -12,6 +12,9 @@ import { OperationCoordinator } from "../src/operation-coordinator.js";
 delete process.env.CODEX_SQLITE_HOME;
 
 const testTempDir = process.platform === "win32" ? os.tmpdir() : "/tmp";
+// These integration tests include cold PowerShell/native workers on hosted Windows.
+// Retention and the completed result are the gate, not a five-second startup budget.
+const retentionSyncTimeoutMs = process.platform === "win32" ? 30000 : 5000;
 
 const cleanups = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -137,7 +140,7 @@ test("runWatch forwards keepCount to automatic Provider Sync retention", async (
   });
 
   await fs.appendFile(configPath, "\n# trigger automatic sync\n", "utf8");
-  await waitUntil(() => events.some((event) => event.event === "finished"), "Watch retention sync did not finish", 5000);
+  await waitUntil(() => events.some((event) => event.event === "finished"), "Watch retention sync did not finish", retentionSyncTimeoutMs);
   assert.equal(events.find((event) => event.event === "finished").outcome, "completed");
   assert.equal((await getBackupSummary(codexHome)).count, 1);
   assert.match(await fs.readFile(rolloutPath, "utf8"), /"model_provider":"openai"/);
@@ -155,7 +158,7 @@ test("runWatch keeps the default automatic backup retention at two", async (t) =
   });
 
   await fs.appendFile(configPath, "\n# trigger automatic sync\n", "utf8");
-  await waitUntil(() => events.some((event) => event.event === "finished"), "Watch retention sync did not finish", 5000);
+  await waitUntil(() => events.some((event) => event.event === "finished"), "Watch retention sync did not finish", retentionSyncTimeoutMs);
   assert.equal(events.find((event) => event.event === "finished").outcome, "completed");
   assert.equal((await getBackupSummary(codexHome)).count, 2);
   assert.match(await fs.readFile(rolloutPath, "utf8"), /"model_provider":"openai"/);
