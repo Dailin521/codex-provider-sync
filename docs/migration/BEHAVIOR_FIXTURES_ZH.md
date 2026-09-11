@@ -1,5 +1,13 @@
 # vNext 行为兼容 Fixture 清单
 
+## ADR-0043：正常聊天不阻断 Status
+
+`test/status-coordination.test.js`：持续正文追加、非 Provider SQLite 更新/WAL checkpoint 仍返回完整 Provider 状态；不整读正文/数据库。持续 Provider/archived/config 漂移、revision 故障、实际锁仍阻断；HTTP DTO 一致。Sync Plan/Apply 和完整 Diagnostics 的原门禁保留。
+
+## ADR-0042：安装版更新与提醒
+
+`apps/desktop/tests/update-reminder.test.mjs`、`updater.test.mjs`、`ipc-router.test.mjs`、`packages/app-ui/tests/settings-updates.vitest.tsx`：精确版本持久化、重启、后续新版、手动更新、白名单、失败提示、原生弹窗关闭与忽略分离。`windows-update-artifacts.test.mjs`、`release-candidate.test.mjs`：显式渠道、安装器 metadata/SHA512/blockmap 与发布边界。单元测试不替代线上跨版本安装证据。
+
 ## ADR-0041：失效锁恢复
 
 - `test/lock-inspection.test.js`：canonical/全部 claims、Node/.NET owner、代际竞争、未知 owner、只读不改字节与写入时回收。

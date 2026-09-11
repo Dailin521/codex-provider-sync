@@ -5,6 +5,8 @@
 
 ## 1. 文档职责与变更规则
 
+普通 Status 的相关性校验遵循 [ADR-0043](../adr/0043-status-provider-relevant-revisions.md)：正文追加、非 Provider SQLite 更新和 WAL/SHM 变化不再单独导致状态失效；首行/物理身份/集合、Provider/archived/schema 及配置路径仍核对。完整诊断和写入计划规则不变，不把“忽略非相关变化”解释为跳过写前检查。
+
 失效 Home 锁恢复遵循 [ADR-0041](../adr/0041-stale-home-lock-status-recovery.md)：Status 只读验证全部锁 owner/claims，确认失效时允许正常预览/同步，由 Apply 既有 acquireLock 重验并回收；未知或真实活动锁继续阻断且分别提示。Status/Diagnostics 不清锁，不新增解锁 API，不改变 Provider I/O。
 
 备份只读与失败诊断遵循 [ADR-0040](../adr/0040-backup-read-races-and-failure-diagnostics.md)：只读枚举遇到清理导致的 ENOENT 整条省略，写入/恢复验证不放宽；普通操作按真实调用边界附加安全阶段和底层码，经 CLI/Host 日志透传，不改变 PIO、取消、partial 或进度合同。
@@ -126,6 +128,7 @@ Sync 不改根 config、历史 model、cwd、user-event、workspace roots、titl
 - **Restore**：独立恢复前快照、耐久 journal、hash 验证与补偿；见 [ADR-0013](../adr/0013-restore-v2-recovery-state-machine.md)。旧普通 journal 兼容读取，不阻断新 Sync，但 Restore/Prune 仍保护关联证据；未解决 Restore journal 继续阻断普通写。
 - **History**：显式只读、项目/父子树/独立分页见 [ADR-0022](../adr/0022-history-project-roots-and-child-pagination.md)。正文不进入日志、诊断包、持久缓存或列表 DTO；项目别名只属 Host 偏好。
 - **Host**：Profile 目录选择、剪贴板、操作日志、更新属于 Desktop Host，不加入 Core 业务方法；Main 不处理 Provider SQL/rollout 算法。
+  - [ADR-0042](../adr/0042-windows-updater-and-version-reminders.md)：安装版显式更新渠道及精确版本提醒偏好，只改 Host/UI/发布配置，不改变 Core 写入；提醒忽略不阻止手动更新，也不等于安装授权。
 - **统一备份策略**：[ADR-0027](../adr/0027-unified-backup-retention.md) 规定“备份与恢复”为唯一管理入口；Host 保存数量，UI 在 Prepare/Watch 启动时注入。Core 继续共用 Home 备份池、UndoBackup 和清理算法；Restore 的恢复前快照和受保护证据不受强制数量裁剪。
 - **状态与结果作用域**：[ADR-0024](../adr/0024-profile-scoped-controls-and-actionable-feedback.md) 约束 Watch 的 Profile/revision 查询与物理 Home 别名去重、受管备份选项和 partial 日志/跳转。全局 Watch 查询仍供 Host 守卫，不能被 UI 当前配置过滤替代；日志重试入口只导航，不重放已消费 Plan。
 - **刷新**：首次加载和手动刷新，无数据轮询。用户明确开启的 Watch 与每天首次启动的更新检查是独立能力，不授权后台 Diagnostics/History 扫描。

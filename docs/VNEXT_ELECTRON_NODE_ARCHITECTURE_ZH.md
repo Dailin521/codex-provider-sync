@@ -2779,6 +2779,8 @@ Node CLI ──────────►│     唯一 Node Core     │◄─
 
 ## 38. 参考依据
 
+当前本地增量以 [ADR-0042](adr/0042-windows-updater-and-version-reminders.md)（Windows 安装版更新、按版本提醒）和 [ADR-0043](adr/0043-status-provider-relevant-revisions.md)（普通 Status 排除非 Provider 变化）为准；这不代表已覆盖线上 v1.0.1 附件或完成线上升级验收。
+
 ### 仓库内部
 
 - `README.md`

@@ -10,6 +10,8 @@
 
 ## 决策
 
+2026-09-11：[ADR-0043](0043-status-provider-relevant-revisions.md) 修订普通 Status 的 revision 范围，正常正文增长、非 Provider SQLite/WAL 变化不再导致漂移；真实相关变化、未知和实际锁仍遵守以下阻断/有限重试语义。完整 Diagnostics 不采用此放宽。
+
 2026-09-11：[ADR-0041](0041-stale-home-lock-status-recovery.md) 进一步区分已证明失效的锁与未知锁；前者允许只读状态/正常同步重新验证，后者仍阻断。下文活动锁、revision 和最后完整快照规则保持有效。
 
 1. 只有进程内 OperationRuntime 或实际 Home lock 检查才能产生 `operationInProgress`。实际活动/无法验证的 Home lock 仍按现有规则阻断；不删除锁、不根据文件变化推断工具操作。

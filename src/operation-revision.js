@@ -83,7 +83,7 @@ async function physicalFileIdentity(filePath, fsImpl, reason) {
   };
 }
 
-async function captureProviderHeader(filePath, fsImpl, minimumSize, onProviderHeader) {
+async function captureProviderHeader(filePath, fsImpl, minimumSize, onProviderHeader, allowIncomplete = false) {
   const before = await physicalFileIdentity(filePath, fsImpl, "rollout");
   if (minimumSize !== undefined && BigInt(before.size) < BigInt(minimumSize)) {
     throw new CoreError("STALE_STATE", "A planned rollout was truncated.", { details: { reason: "rollout" } });
@@ -94,8 +94,11 @@ async function captureProviderHeader(filePath, fsImpl, minimumSize, onProviderHe
     record = await readProviderRevisionHeader(filePath, { fsImpl });
     header = { headerHash: sha256Revision(record.firstLine + record.separator) };
   } catch (error) {
-    if (!LOCKED_FILE_CODES.has(error?.code)) throw error;
-    header = { locked: true, causeCode: error.code };
+    if (allowIncomplete && error?.name === "RolloutMetadataLimitError") header = { incomplete: true };
+    else {
+      if (!LOCKED_FILE_CODES.has(error?.code)) throw error;
+      header = { locked: true, causeCode: error.code };
+    }
   }
   const after = await physicalFileIdentity(filePath, fsImpl, "rollout");
   if (stableStringify(before.identity) !== stableStringify(after.identity)
@@ -208,7 +211,7 @@ async function listRolloutFiles(rootDir, fsImpl) {
 }
 
 export async function captureRolloutRevision(codexHome, { fsImpl = fs, mode = "content", minimumSizes = {} } = {}, onProviderHeader = undefined) {
-  if (!["content", "metadata", "provider"].includes(mode)) {
+  if (!["content", "metadata", "provider", "status"].includes(mode)) {
     throw new CoreError("INVALID_INPUT", "Unsupported rollout revision mode.");
   }
   const manifest = [];
@@ -218,8 +221,8 @@ export async function captureRolloutRevision(codexHome, { fsImpl = fs, mode = "c
     const scopeRoot = path.join(codexHome, scope);
     for (const filePath of await listRolloutFiles(scopeRoot, fsImpl)) {
       const relativePath = path.relative(codexHome, filePath).split(path.sep).join("/");
-      const revision = mode === "provider"
-        ? await captureProviderHeader(filePath, fsImpl, minimumSizes[relativePath], onProviderHeader)
+      const revision = mode === "provider" || mode === "status"
+        ? await captureProviderHeader(filePath, fsImpl, minimumSizes[relativePath], onProviderHeader, mode === "status")
         : mode === "metadata"
         ? await captureStableMetadata(filePath, fsImpl, { allowLocked: true })
         : await captureStableFile(filePath, fsImpl, { allowLocked: true });
@@ -235,7 +238,7 @@ export async function captureRolloutRevision(codexHome, { fsImpl = fs, mode = "c
     fileCount: manifest.length,
     rolloutScanComplete: lockedRolloutFiles.length === 0,
     lockedRolloutFiles,
-    ...(mode === "provider" ? { observedSizes } : {})
+    ...(["provider", "status"].includes(mode) ? { observedSizes } : {})
   };
 }
 
@@ -264,9 +267,20 @@ export async function captureStateDbRevision(storage, { fsImpl = fs, platform = 
   if (!stateDbPath) {
     return sha256Revision(stableStringify({ stateDb: null }));
   }
-  if (mode === "provider") {
+  if (mode === "provider" || mode === "status") {
     const before = await physicalFileIdentity(stateDbPath, fsImpl, "state-db");
-    const state = await readSqliteProviderRevisionState(stateDbPath);
+    let state;
+    // Status is a Provider/archived snapshot, not a hash of changing chat/WAL bytes.
+    // Unsupported WSL remains diagnostic-only; do not open its SQLite database.
+    if (mode === "status" && storage.sqliteAccess?.supported === false) state = { unsupported: true };
+    else {
+      try { state = await readSqliteProviderRevisionState(stateDbPath, { includeArchived: mode === "status" }); }
+      catch (error) {
+        // Preserve Status's unreadable index presentation, never fabricate healthy counts.
+        if (mode !== "status" || error?.code !== "SQLITE_UNREADABLE") throw error;
+        state = { unreadable: true };
+      }
+    }
     const after = await physicalFileIdentity(stateDbPath, fsImpl, "state-db");
     if (stableStringify(before.identity) !== stableStringify(after.identity)) {
       throw new CoreError("STALE_STATE", "The planned State DB was replaced.", { details: { reason: "state-db" } });
@@ -358,7 +372,7 @@ export async function captureOperationRevisions({
   const configRevision = captureConfigRevision(configText);
   const [rollout, stateDbRevision, backupRevision] = await Promise.all([
     preparedRollout ?? captureRolloutRevision(codexHome, { fsImpl, mode: rolloutRevisionMode, minimumSizes: minimumRolloutSizes }),
-    captureStateDbRevision(storage, { fsImpl, platform, mode: rolloutRevisionMode === "provider" ? "provider" : "content" }),
+    captureStateDbRevision(storage, { fsImpl, platform, mode: ["provider", "status"].includes(rolloutRevisionMode) ? rolloutRevisionMode : "content" }),
     backupDir ? captureBackupRevision(backupDir, { fsImpl }) : Promise.resolve(null)
   ]);
   return {
