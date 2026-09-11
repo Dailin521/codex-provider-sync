@@ -90,6 +90,18 @@ On Windows, `\\wsl.localhost\...` and `\\wsl$\...` SQLite Homes are diagnostic-o
 - Run `npm run architecture:check` and `npm test` for Core changes; platform skips and failures must be reported. The first command reuses workspace boundary checks and Provider I/O tests, not a second rule engine.
 - Behavior changes require an explicit ADR/contract/fixture update and matching user docs. Do not weaken an invariant test to bless accidental drift. README is not a substitute for the current Core guide.
 
+## Mandatory local preflight and release flow
+
+Follow this order: **local preflight passes → CI cross-platform and real installation acceptance passes → publish with explicit authorization**. See [Windows release procedure](docs/WINDOWS_ELECTRON_RELEASE_ZH.md) for commands and evidence requirements.
+
+- Before pushing, review all affected contracts, test expectations and build modes together, then run the relevant local tests. Do not use Actions as the first check for failures reproducible locally. Report unavailable local checks explicitly and leave them to the matching CI environment.
+- Desktop changes require relevant production-bundle checks, not just development-mode tests. Update changes must cover both portable/manual and authorized installed-updater modes; derive expectations from the intended channel/container, never from the application's returned value.
+- Reuse an existing build for repeated local checks only when its product sources, dependencies, build configuration and version are unchanged. Test-script or documentation-only edits do not require another local package build. Record the build provenance; an old local package is not release evidence for a new SHA.
+- Use isolated fixtures under D-drive temporary directories on this Windows workstation; keep desktop tests hidden or on a secondary monitor. Never test against a real Codex Home. An installed-layout fixture is not proof of real installation or upgrade; run actual installer/uninstaller tests in an isolated environment, since a custom installation directory may still affect the user's registered app.
+- CI must validate the final source SHA on the required platforms and exercise real release containers, including installation/extraction, startup, SQLite loading, fixture Sync → Restore, graceful exit and applicable uninstall cleanup. All applicable gates must pass before publication; local success does not replace them.
+- Diagnose failed jobs before rerunning. For a verified transient failure on unchanged code, rerun only failed jobs and reuse successful same-run/same-SHA artifacts where the release procedure permits. Do not repeatedly rebuild everything, weaken assertions or increase timeouts merely to obtain a green run.
+- Publish only artifacts tied to the accepted final SHA, version and build configuration, with verified hashes. Product/build changes require rebuilding affected artifacts and rerunning affected acceptance checks. Preserve the required final-SHA gates even when reducing redundant local builds.
+
 ## Reporting
 
 State the current Provider, whether rollout and SQLite metadata are aligned, the resolved database path, the backup created by a write operation, and whether the result was complete, partial, or blocked. Distinguish automated tests from real-machine validation and list anything not run.
