@@ -37,9 +37,9 @@
 
 ## 下载 Windows 桌面版
 
-**v1.0.0 · Windows x64**，无需 Node.js。
+**Windows x64**，无需 Node.js。
 
-[安装版](https://github.com/Dailin521/codex-provider-sync/releases/download/v1.0.0/CodexProviderSync-1.0.0-windows-x64-setup.exe) · [便携 ZIP](https://github.com/Dailin521/codex-provider-sync/releases/download/v1.0.0/CodexProviderSync-1.0.0-windows-x64-portable.zip) · [版本说明与校验](https://github.com/Dailin521/codex-provider-sync/releases/tag/v1.0.0)
+[下载最新正式版：安装版 / 便携 ZIP、版本说明与校验](https://github.com/Dailin521/codex-provider-sync/releases/latest)
 
 未签名，手动安装更新；便携版须完整解压。旧 .NET 版需重新下载安装，不能通过旧更新按钮迁移。
 

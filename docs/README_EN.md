@@ -19,11 +19,11 @@ After a Provider switch, existing sessions may still reference the previous Prov
 
 ## Download for Windows
 
-Current stable desktop release: **v1.0.0 · Windows x64**. No Node.js installation required.
+**Windows x64**. No Node.js installation required.
 
-- [Installer (about 100 MiB)](https://github.com/Dailin521/codex-provider-sync/releases/download/v1.0.0/CodexProviderSync-1.0.0-windows-x64-setup.exe)
-- [Portable ZIP (about 123 MiB)](https://github.com/Dailin521/codex-provider-sync/releases/download/v1.0.0/CodexProviderSync-1.0.0-windows-x64-portable.zip): extract the entire folder; do not copy only the EXE.
-- [Release notes and checksums](https://github.com/Dailin521/codex-provider-sync/releases/tag/v1.0.0)
+[Download the latest stable release: installer / portable ZIP, release notes and checksums](https://github.com/Dailin521/codex-provider-sync/releases/latest).
+
+Extract the entire portable folder; do not copy only the EXE.
 
 This release is unsigned and requires manual installation for updates. The old .NET updater cannot migrate to Electron; download the full new package. macOS/Linux Electron packages are not yet published. CLI / Web npm versions are released independently and do not match the desktop version automatically.
 
