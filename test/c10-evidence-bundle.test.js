@@ -38,24 +38,24 @@ const expectedAssets = {
   "linux-x64": ["CodexProviderSync-1.0.0-rc.42-linux-x64.AppImage", "CodexProviderSync-1.0.0-rc.42-linux-x64.deb"]
 };
 
-function candidateIndex() {
+function candidateIndex(version = "1.0.0-rc.42") {
   return {
     schemaVersion: 1,
     scope: "ci-candidate-index",
     releaseAuthorized: false,
-    version: "1.0.0-rc.42",
+    version,
     commit: sha,
     targets: REQUIRED_TARGETS.map((target) => ({
       target,
-      version: "1.0.0-rc.42",
+      version,
       commit: sha,
-      buildId: `1.0.0-rc.42-${target}`,
+      buildId: `${version}-${target}`,
       lockfileSha256: hash,
       toolVersions: { electron: "44.0.0" },
       fusePolicy: "c9-v1",
       artifactAuditPolicy: { schemaVersion: 1, sha256: hash },
       manifestSha256: hash,
-      assets: expectedAssets[target].map((name, index) => ({ name, sizeBytes: 10 + index, sha256: hash }))
+      assets: expectedAssets[target].map((name, index) => ({ name: name.replace("1.0.0-rc.42", version), sizeBytes: 10 + index, sha256: hash }))
     }))
   };
 }
@@ -326,6 +326,34 @@ test("C10 JSON schema compiles in strict mode and rejects an incomplete bundle",
     assertEvidenceSchema({}, rootDir),
     /does not match its JSON Schema/
   );
+});
+
+test("C10 candidate evidence validates patch versions through the actual JSON Schema", {
+  skip: Number(process.versions.node.split(".")[0]) < 24
+}, async () => {
+  const { default: Ajv2020 } = await import("ajv/dist/2020.js");
+  const schema = JSON.parse(fs.readFileSync(path.join(rootDir, "docs", "migration", "evidence", "C10_EVIDENCE_BUNDLE.v1.schema.json"), "utf8"));
+  const validate = new Ajv2020({ strict: true }).compile({
+    $defs: schema.$defs,
+    ...schema.properties.candidateSet
+  });
+  const evidenceForVersion = (version) => ({
+    artifactName: "electron-release-candidate-set",
+    indexSha256: hash,
+    ...normalizeCandidateIndex(candidateIndex(version), sha)
+  });
+  for (const version of ["1.0.0-rc.42", "1.0.1-alpha.0", "1.0.1-beta.42", "1.0.1-rc.42", "1.0.12-rc.123"]) {
+    const evidence = evidenceForVersion(version);
+    assertCandidateMatchesSourceVersion(version, normalizeSourceVersions({
+      rootPackage: version.split("-")[0], desktopPackage: version.split("-")[0]
+    }));
+    assert.equal(validate(evidence), true, `${version}: ${JSON.stringify(validate.errors)}`);
+  }
+  const valid = evidenceForVersion("1.0.1-rc.42");
+  for (const version of ["1.0.1", "1.0.01-rc.1", "1.0.1-rc.01", "1.1.0-rc.1", "1.0.1-dev.1", "1.0.1-rc.1+local"]) {
+    assert.equal(validate({ ...valid, version }), false, version);
+  }
+  assert.equal(validate({ ...valid, unexpected: true }), false);
 });
 
 test("C10 evidence schema validates source attempt and remains compatible with older bundles", {

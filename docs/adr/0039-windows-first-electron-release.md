@@ -42,3 +42,5 @@
 ## 2026-09-11：Windows 1.0.x 补丁发布兼容
 
 上述 `1.0.0` 是首发批准的历史事实。后续 Windows Electron 补丁候选以根 `package.json` 的实际严格 `1.0.x` 基础版本生成，仅允许 `1.0.x-rc.N`；`x` 与 `N` 都是无前导零整数。`stable-manual` 仅接受 Windows x64 的严格 `1.0.x` 和完全匹配的现有 tag。每个新 stable 版本仍须独立发布批准，且不改变 exact main push `ci-gate`、不可变 tag/SHA、拒绝覆盖已有 Release、Draft 复核、资产白名单、未签名手动安装及不上传生产更新 metadata 的边界。
+
+C10 的机器可读 JSON Schema 同步接受严格 `1.0.x-alpha/beta/rc.N` CI 证据，并通过实际 Schema 验证补丁候选。正式版本不直接作为 CI 候选，来源版本一致性仍由生成器核验；历史 `1.0.0` 候选证据继续兼容。
