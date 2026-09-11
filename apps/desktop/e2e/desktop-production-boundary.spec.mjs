@@ -638,7 +638,7 @@ test("production Provider switch records model history and refreshes recent choi
       await expect(detail.getByRole("heading", { name: "File update timing" })).toBeVisible();
       await expect(detail.getByText("Restore file timestamps", { exact: true })).toBeVisible();
     }
-    await page.screenshot({ path: test.info().outputPath("switch-history-details.png") });
+    await captureViewport(page, { path: test.info().outputPath("switch-history-details.png") });
     expect((await fixture.inspect()).backupIds).toHaveLength(1);
   } finally {
     try { await electronApp?.close(); } finally { await fixture.close(); }

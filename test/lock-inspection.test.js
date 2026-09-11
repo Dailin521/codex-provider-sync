@@ -2,11 +2,18 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import { acquireLock, inspectPathLock } from "../src/locking.js";
 
 const startedAt = "2024-01-02T03:04:05.000Z";
 const marker = "test:2024-01-02T03:04:05.000Z";
+const tempHomes = new Set();
+afterEach(async () => {
+  for (const home of tempHomes) {
+    await fs.rm(home, { recursive: true, force: true });
+    tempHomes.delete(home);
+  }
+});
 const owner = (instanceId, pid = 42, runtime = "node") => ({
   protocolVersion: 2, runtime, pid, processId: pid, instanceId,
   processStartMarker: marker, processStartedAt: startedAt, scope: "codex-home"
@@ -14,7 +21,7 @@ const owner = (instanceId, pid = 42, runtime = "node") => ({
 
 async function fixture(t, canonical = null, claims = []) {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "cps-lock-inspection-"));
-  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  tempHomes.add(home);
   const lock = path.join(home, "tmp", "provider-sync.lock");
   await fs.mkdir(`${lock}.claims`, { recursive: true });
   if (canonical) {
