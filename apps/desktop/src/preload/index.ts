@@ -46,6 +46,7 @@ import type {
   DesktopDiagnosticsExportResult
 } from "../shared/diagnostics-types.js";
 import type { DesktopUpdateStatus } from "../shared/update-types.js";
+import { validateUpdateReminderInput } from "../shared/update-preferences.js";
 import {
   validateDesktopHistoryRevealInput,
   validateDesktopHistoryRevealResult
@@ -308,6 +309,7 @@ function validateUpdateStatus(value: unknown): DesktopUpdateStatus {
     "installAllowed",
     "reason",
     "version",
+    "reminderIgnored",
     "progressPercent",
     "installBlockedReason"
   ]);
@@ -347,6 +349,9 @@ function validateUpdateStatus(value: unknown): DesktopUpdateStatus {
     throw new TypeError("Invalid update status response.");
   }
   const versioned = ["available", "downloading", "downloaded", "installing"].includes(state);
+  if (status.reminderIgnored !== undefined && (typeof status.reminderIgnored !== "boolean" || !versioned)) {
+    throw new TypeError("Invalid update reminder state.");
+  }
   if ((versioned
       && (typeof status.version !== "string"
         || !/^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/.test(status.version)))
@@ -534,6 +539,11 @@ const api: DesktopBridgeApi = {
     }
   },
   updates: {
+    async setReminder(input) {
+      return validateUpdateStatus(await ipcRenderer.invoke(
+        DESKTOP_IPC_CHANNELS.updateReminder, validateUpdateReminderInput(input)
+      ));
+    },
     subscribe(listener) {
       if (typeof listener !== "function") throw new TypeError("Invalid update listener.");
       const receive = (_event: unknown, value: unknown) => {

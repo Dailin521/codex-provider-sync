@@ -54,6 +54,7 @@ import type {
   DesktopDiagnosticsExportResult
 } from "../shared/diagnostics-types.js";
 import type { DesktopUpdateStatus } from "../shared/update-types.js";
+import { validateUpdateReminderInput } from "../shared/update-preferences.js";
 import { validateDesktopHistoryRevealInput } from "../shared/history-reveal.js";
 import { validateDesktopClipboardInput } from "../shared/clipboard.js";
 import type { RuntimeWatchStopped } from "../shared/runtime-protocol.js";
@@ -75,7 +76,7 @@ export interface DesktopIpcRouterOptions {
   selectDiagnosticsTarget(): Promise<string | null>;
   updates: Pick<
     DesktopUpdateController,
-    "status" | "restartPending" | "check" | "download" | "install"
+    "status" | "restartPending" | "check" | "download" | "install" | "setReminder"
   >;
   onActiveWatchCountChanged?(count: number): void;
 }
@@ -1121,6 +1122,11 @@ export function registerDesktopIpc(options: DesktopIpcRouterOptions): DesktopIpc
   register(DESKTOP_IPC_CHANNELS.updateCheck, updateAction("check"));
   register(DESKTOP_IPC_CHANNELS.updateDownload, updateAction("download"));
   register(DESKTOP_IPC_CHANNELS.updateInstall, updateAction("install"));
+  register(DESKTOP_IPC_CHANNELS.updateReminder, async (event, value) => {
+    if (!isTrustedSender(event, options.getWindow(), options.rendererOrigin)
+        || encodedSize(value) > MAX_DESKTOP_IPC_BYTES) throw new Error("Update reminder rejected.");
+    return options.updates.setReminder(validateUpdateReminderInput(value));
+  });
 
   const cleanup = (() => {
     unsubscribeOperations();

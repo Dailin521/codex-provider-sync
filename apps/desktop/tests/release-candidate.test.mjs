@@ -359,7 +359,7 @@ test("builder and candidate scripts enforce native fallback, fuses, audit metada
   assert.match(buildScript, /if \(target === "windows-x64"\) \{[\s\S]*?verify-size-budget\.mjs[\s\S]*?"--output", outputRoot,[\s\S]*?"--version", version/);
   assert.match(buildScript, /if \(sizeCheck\.status !== 0\) throw/);
   assert.doesNotMatch(buildScript, /"--directory"/);
-  assert.match(buildScript, /CPS_DESKTOP_RELEASE_AUTHORIZED:\s*"false"/);
+  assert.match(buildScript, /CPS_DESKTOP_RELEASE_AUTHORIZED: process\.env\.CPS_RELEASE_CHANNEL === "stable-updater" \? "true" : "false"/);
   assert.match(attributes, /^package-lock\.json text eol=lf$/m);
   assert.match(attributes, /^apps\/desktop\/release\/artifact-audit-policy\.v1\.json text eol=lf$/m);
   assert.match(

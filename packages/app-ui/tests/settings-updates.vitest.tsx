@@ -11,6 +11,41 @@ function mount(host: Partial<HostClient>) {
 }
 
 describe("Desktop updates in Settings", () => {
+  it("ignores/restores only the displayed version and keeps explicit installer download/install usable", async () => {
+    const user = userEvent.setup();
+    let status: HostUpdateStatus = { currentVersion: "1.0.1", state: "available", version: "1.0.2", installAllowed: false };
+    const reminder = vi.fn(async (version: string, ignored: boolean) => {
+      expect(version).toBe("1.0.2");
+      return status = { ...status, reminderIgnored: ignored };
+    });
+    const download = vi.fn(async () => status = { ...status, state: "downloaded", progressPercent: 100, installAllowed: true });
+    const install = vi.fn(async () => ({ ...status, state: "installing" as const, progressPercent: undefined, installAllowed: false }));
+    mount({ getUpdateStatus: async () => status, setUpdateReminder: reminder, downloadUpdate: download, installUpdate: install });
+    await user.click(await screen.findByRole("button", { name: "Settings", exact: true }));
+    await user.click(await screen.findByRole("button", { name: "Don't remind me about this version" }));
+    expect(await screen.findByText("Reminders for this version are off. You can still update now.")).toBeVisible();
+    expect(download).not.toHaveBeenCalled();
+    expect(install).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Remind me about this version" }));
+    await waitFor(() => expect(reminder).toHaveBeenLastCalledWith("1.0.2", false));
+    await user.click(screen.getByRole("button", { name: "Download update", exact: true }));
+    const installButton = await screen.findByRole("button", { name: "Restart and install" });
+    expect(install).not.toHaveBeenCalled();
+    await user.click(installButton);
+    await waitFor(() => expect(install).toHaveBeenCalledOnce());
+  });
+
+  it("shows reminder save failure and leaves the reminder enabled", async () => {
+    const user = userEvent.setup();
+    mount({ getUpdateStatus: async () => ({ state: "available", version: "1.0.2", installAllowed: false }),
+      setUpdateReminder: async () => { throw new Error("private userData path"); } });
+    await user.click(await screen.findByRole("button", { name: "Settings", exact: true }));
+    await user.click(await screen.findByRole("button", { name: "Don't remind me about this version" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not save your preference");
+    expect(screen.queryByText(/private userData/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Don't remind me about this version" })).toBeEnabled();
+  });
+
   it("offers manual check and official downloads for portable builds without installing", async () => {
     const user = userEvent.setup();
     const base: HostUpdateStatus = { currentVersion: "1.0.0", mode: "manual", state: "idle", installAllowed: false };

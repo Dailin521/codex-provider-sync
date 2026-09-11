@@ -94,6 +94,9 @@ const host: HostClient = Object.freeze({
   },
   async installUpdate() {
     return { ...await bridge.updates.install() };
+  },
+  async setUpdateReminder(version: string, ignored: boolean) {
+    return { ...await bridge.updates.setReminder({ schemaVersion: 1, version, ignored }) };
   }
 });
 

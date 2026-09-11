@@ -88,8 +88,12 @@ export function SettingsPage({ props, profile, capabilities, recoveryBlocked, wr
     mutationFn: () => props.host.installUpdate?.() ?? Promise.reject(new Error("Update install unavailable.")),
     onSuccess: storeUpdate
   });
+  const reminder = useMutation({
+    mutationFn: ({ version, ignored }: { version: string; ignored: boolean }) => props.host.setUpdateReminder?.(version, ignored) ?? Promise.reject(new Error("Update preference unavailable.")),
+    onSuccess: storeUpdate
+  });
   const updateRequestFailed = update.isError || checkUpdate.isError || downloadUpdate.isError || installUpdate.isError;
-  const updateBusy = checkUpdate.isPending || downloadUpdate.isPending || installUpdate.isPending;
+  const updateBusy = checkUpdate.isPending || downloadUpdate.isPending || installUpdate.isPending || reminder.isPending;
   const setLocale = async (locale: "zh-CN" | "en") => {
     props.preferences.setLocale(locale);
     await i18n.changeLanguage(locale);
@@ -150,14 +154,17 @@ export function SettingsPage({ props, profile, capabilities, recoveryBlocked, wr
             <div className="mt-3">
               <Badge tone={update.data?.state === "error" || Boolean(update.data?.installBlockedReason) ? "warning" : update.data?.state === "downloaded" ? "success" : "neutral"}>{update.isPending ? t("common.loading") : update.data ? t(`settings.updateStatus.${update.data.state}`) : t("common.unknown")}</Badge>
               {update.data?.version ? <p className="mt-3 text-sm">{t("settings.updateVersion", { version: update.data.version })}</p> : null}
+              {update.data?.reminderIgnored ? <p className="mt-2 text-sm text-[var(--muted)]" role="status">{t("settings.updateIgnored")}</p> : null}
               {update.data?.progressPercent !== undefined ? <p className="mt-2 text-sm text-[var(--muted)]">{t("settings.updateProgress", { percent: update.data.progressPercent })}</p> : null}
               {update.data?.reason ? <p className="mt-3 text-sm text-[var(--muted)]">{t(`settings.updateReason.${update.data.reason}`)}</p> : null}
               {update.data?.installBlockedReason ? <p className="mt-3 text-sm text-[var(--danger)]">{t(`settings.updateBlocked.${update.data.installBlockedReason}`)}</p> : null}
               <div className="mt-4 flex flex-wrap gap-2">
                 {updateRequestFailed ? <p className="w-full text-sm text-[var(--danger)]" role="alert">{t("settings.updateRequestFailed")}</p> : null}
+                {reminder.isError ? <p className="w-full text-sm text-[var(--danger)]" role="alert">{t("settings.updateReminderFailed")}</p> : null}
                 {update.data && ["idle", "not-available", "error", "available"].includes(update.data.state) && props.host.checkForUpdates ? <Button disabled={updateBusy} onClick={() => checkUpdate.mutate()} type="button" variant="secondary">{checkUpdate.isPending ? t("settings.updateStatus.checking") : t("settings.updateCheck")}</Button> : null}
                 {update.data?.state === "available" && props.host.downloadUpdate ? <Button disabled={updateBusy} onClick={() => downloadUpdate.mutate()} type="button">{t(update.data.mode === "manual" ? "settings.updateOpenDownload" : "settings.updateDownload")}</Button> : null}
                 {update.data?.state === "downloaded" && props.host.installUpdate ? <Button disabled={!update.data.installAllowed || updateBusy || writeBlocked || recoveryBlocked || currentWatch?.status === "running"} onClick={() => installUpdate.mutate()} type="button">{t("settings.updateInstall")}</Button> : null}
+                {update.data?.version && ["available", "downloaded"].includes(update.data.state) && props.host.setUpdateReminder ? <Button disabled={updateBusy} onClick={() => reminder.mutate({ version: update.data!.version!, ignored: !update.data!.reminderIgnored })} type="button" variant="secondary">{t(update.data.reminderIgnored ? "settings.updateRestoreReminder" : "settings.updateIgnore")}</Button> : null}
               </div>
             </div>
           </Card>

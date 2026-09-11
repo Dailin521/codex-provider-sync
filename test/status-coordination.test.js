@@ -323,7 +323,7 @@ test("Core and Web Status block on the Home lock and ignore legacy State DB reso
 });
 
 // Model a writer appending just after the header is read, without timers,
-// production hooks or any real Codex data. Revision capture itself uses stat.
+// production hooks or any real Codex data. Status revisions also read bounded headers.
 function afterHeaderRead(t, fixture, callback) {
   const open = fs.open;
   let reads = 0;
@@ -340,6 +340,13 @@ function afterHeaderRead(t, fixture, callback) {
 
 const syntheticAppend = (fixture) => fs.appendFile(fixture.rolloutPath,
   '{"type":"event_msg","payload":{"type":"user_message","message":"synthetic append"}}\n');
+
+async function syntheticProviderChange(fixture) {
+  const text = await fs.readFile(fixture.rolloutPath, "utf8");
+  fixture.providerMutations = (fixture.providerMutations ?? 0) + 1;
+  const provider = `p${String(fixture.providerMutations).padStart(5, "0")}`;
+  await fs.writeFile(fixture.rolloutPath, text.replace(/"model_provider":"[^"]+"/, `"model_provider":"${provider}"`));
+}
 
 for (const lockState of ["active", "unverifiable"]) {
   test(`Diagnostics under ${lockState} lock exports safety without opening any rollout`, async () => {
@@ -494,9 +501,9 @@ for (const cached of [false, true]) {
     try {
       const options = { codexHome: fixture.codexHome, includeSessionActivity: false };
       const baseline = cached ? await getStatus(options) : null;
-      const reads = afterHeaderRead(t, fixture, () => syntheticAppend(fixture));
+      const reads = afterHeaderRead(t, fixture, () => syntheticProviderChange(fixture));
       const blocked = await getStatus(options);
-      assert.equal(reads(), 2, "exactly one bounded retry, no polling");
+      assert.equal(reads(), 5, "two bounded scans plus three header revisions, no polling");
       assert.equal(blocked.operationInProgress, null);
       assert.deepEqual(blocked.statusReadBlocked, { reason: "state-changed-during-status", revision: "rollout" });
       assert.equal(blocked.rolloutScanComplete, false);
@@ -514,7 +521,7 @@ for (const cached of [false, true]) {
       assert.equal(refreshed.statusReadBlocked, undefined);
       assert.equal(refreshed.rolloutScanComplete, true);
       assert.equal(refreshed.backupSummary.count, 0);
-      assert.deepEqual(refreshed.rolloutCounts.sessions, { openai: 1 });
+      assert.deepEqual(refreshed.rolloutCounts.sessions, { p00005: 1 });
     } finally {
       methodMocks.restoreAll();
       await fs.rm(fixture.root, { recursive: true, force: true });
@@ -522,12 +529,12 @@ for (const cached of [false, true]) {
   });
 }
 
-test("Status's one retry can settle an ordinary append", async (t) => {
+test("Status remains available throughout ordinary appends without a retry", async (t) => {
   const fixture = await makeFixture();
   try {
-    const reads = afterHeaderRead(t, fixture, (count) => count === 1 ? syntheticAppend(fixture) : undefined);
+    const reads = afterHeaderRead(t, fixture, () => syntheticAppend(fixture));
     const status = await getStatus({ codexHome: fixture.codexHome, includeSessionActivity: false });
-    assert.equal(reads(), 2);
+    assert.equal(reads(), 3, "one scan and two bounded Provider revisions, no retry for appends");
     assert.equal(status.operationInProgress, null);
     assert.equal(status.statusReadBlocked, undefined);
     assert.equal(status.rolloutScanComplete, true);
@@ -537,13 +544,120 @@ test("Status's one retry can settle an ordinary append", async (t) => {
   }
 });
 
-for (const phase of [0, 1, 2]) {
+test("Status tolerates non-Provider SQLite WAL churn and never hashes database or chat bodies", async (t) => {
+  const fixture = await makeFixture();
+  const db = await openDatabase(fixture.stateDbPath);
+  try {
+    db.exec("PRAGMA journal_mode=WAL");
+    // A body much larger than the metadata read budget; never parse/hash it for Status.
+    await fs.appendFile(fixture.rolloutPath, "x".repeat(2 * 1024 * 1024));
+    const readFile = fs.readFile;
+    methodMocks.method(fs, "readFile", async (file, ...args) => {
+      assert.ok(![fixture.rolloutPath, fixture.stateDbPath, `${fixture.stateDbPath}-wal`, `${fixture.stateDbPath}-shm`].includes(file),
+        "Status must not read whole rollout/SQLite/WAL/SHM files");
+      return readFile(file, ...args);
+    });
+    const reads = afterHeaderRead(t, fixture, async count => {
+      await syntheticAppend(fixture);
+      db.prepare("UPDATE threads SET first_user_message = ?, cwd = ?, model = ? WHERE id = ?")
+        .run(`fixture-${count}`, `project-${count}`, `model-${count}`, "status-thread");
+      db.exec("PRAGMA wal_checkpoint(PASSIVE)");
+    });
+    const status = await getStatus({ codexHome: fixture.codexHome, includeSessionActivity: false });
+    assert.equal(reads(), 3);
+    assert.equal(status.statusReadBlocked, undefined);
+    assert.equal(status.operationInProgress, null);
+    assert.equal(status.rolloutScanComplete, true);
+    assert.deepEqual(status.rolloutCounts.sessions, { openai: 1 });
+    assert.deepEqual(status.sqliteCounts.sessions, { openai: 1 });
+    assert.equal(status.backupSummary.count, 0);
+  } finally {
+    methodMocks.restoreAll();
+    db.close();
+    await fs.rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("Status still rejects archived index drift rather than returning a mixed distribution", async (t) => {
+  const fixture = await makeFixture();
+  const db = await openDatabase(fixture.stateDbPath);
+  try {
+    afterHeaderRead(t, fixture, async count => {
+      db.prepare("UPDATE threads SET archived = ? WHERE id = ?").run(count, "status-thread");
+    });
+    const status = await getStatus({ codexHome: fixture.codexHome, includeSessionActivity: false });
+    assert.equal(status.statusReadBlocked?.revision, "state-db");
+    assert.equal(status.rolloutScanComplete, false);
+    assert.equal(status.operationInProgress, null);
+  } finally {
+    methodMocks.restoreAll();
+    db.close();
+    await fs.rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("HTTP Status stays usable during normal chatting", async (t) => {
+  const fixture = await makeFixture();
+  const web = await startRealWeb(fixture.codexHome, path.join(fixture.root, "web"));
+  try {
+    afterHeaderRead(t, fixture, () => syntheticAppend(fixture));
+    const response = await web.status();
+    assert.equal(response.status, 200);
+    assert.equal(response.payload.status.statusReadBlocked, undefined);
+    assert.equal(response.payload.status.rolloutScanComplete, true);
+    assert.equal(response.payload.status.alignment.aligned, true);
+  } finally {
+    methodMocks.restoreAll();
+    await web.close();
+    await fs.rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("Status keeps oversized metadata incomplete rather than claiming a healthy empty scan", async () => {
+  const fixture = await makeFixture();
+  try {
+    await fs.writeFile(fixture.rolloutPath, JSON.stringify({ type: "session_meta", payload: {
+      id: "status-thread", model_provider: "openai", title: "x".repeat(1024 * 1024)
+    } }) + "\n");
+    const status = await getStatus({ codexHome: fixture.codexHome, includeSessionActivity: false });
+    assert.equal(status.rolloutScanComplete, false);
+    assert.equal(status.operationInProgress, null);
+    assert.deepEqual(status.rolloutCounts.sessions, {});
+  } finally { await fs.rm(fixture.root, { recursive: true, force: true }); }
+});
+
+for (const change of ["replace", "truncate"]) {
+  test(`Status still refuses a ${change} during header inspection`, async t => {
+    const fixture = await makeFixture();
+    try {
+      const header = await fs.readFile(fixture.rolloutPath);
+      await syntheticAppend(fixture);
+      afterHeaderRead(t, fixture, async count => {
+        if (count !== 1) return;
+        if (change === "truncate") await fs.truncate(fixture.rolloutPath, header.length);
+        else {
+          await fs.rename(fixture.rolloutPath, `${fixture.rolloutPath}.old`);
+          await fs.writeFile(fixture.rolloutPath, header);
+        }
+      });
+      const status = await getStatus({ codexHome: fixture.codexHome, includeSessionActivity: false });
+      assert.equal(status.statusReadBlocked?.reason, "revision-unverifiable");
+      assert.equal(status.rolloutScanComplete, false);
+      assert.equal(status.operationInProgress, null);
+    } finally {
+      methodMocks.restoreAll();
+      await fs.rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const phase of [0, 2, 4]) {
   test(`Status revision capture failure at phase ${phase} stays unverified, not busy`, async (t) => {
     const fixture = await makeFixture();
     try {
-      const reads = afterHeaderRead(t, fixture, () => syntheticAppend(fixture));
-      const stat = fs.stat;
-      methodMocks.method(fs, "stat", async (filePath, ...args) => {
+      const reads = afterHeaderRead(t, fixture, () => syntheticProviderChange(fixture));
+      const stat = fs.lstat;
+      methodMocks.method(fs, "lstat", async (filePath, ...args) => {
         if (filePath === fixture.rolloutPath && reads() >= phase) {
           throw Object.assign(new Error("synthetic revision failure"), { code: "EIO" });
         }
@@ -568,8 +682,8 @@ test("A real Home lock acquired during the retry takes priority over revision dr
   let release;
   try {
     afterHeaderRead(t, fixture, async (count) => {
-      await syntheticAppend(fixture);
-      if (count === 2) release = await acquireLock(fixture.codexHome, "synthetic-sync");
+      await syntheticProviderChange(fixture);
+      if (count === 4) release = await acquireLock(fixture.codexHome, "synthetic-sync");
     });
     const status = await getStatus({ codexHome: fixture.codexHome, includeSessionActivity: false });
     assert.equal(status.statusReadBlocked.reason, "codex-home-lock");
@@ -586,7 +700,7 @@ test("Core facade and HTTP preserve the refresh-needed state without a busy oper
   const fixture = await makeFixture();
   const web = await startRealWeb(fixture.codexHome, path.join(fixture.root, "web"));
   try {
-    afterHeaderRead(t, fixture, () => syntheticAppend(fixture));
+    afterHeaderRead(t, fixture, () => syntheticProviderChange(fixture));
     const response = await web.status();
     assert.equal(response.status, 200);
     assert.equal(response.payload.status.operationInProgress, null);

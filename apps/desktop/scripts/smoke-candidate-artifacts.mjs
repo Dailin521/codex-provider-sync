@@ -12,6 +12,7 @@ import {
 } from "./release-audit.mjs";
 
 import { assertDesktopArtifactVersion } from "./desktop-artifact-version.mjs";
+import { updateAssetNames, auditWindowsUpdateAssets, auditWindowsUpdateConfiguration } from "./windows-update-artifacts.mjs";
 const LINUX_SANDBOX_HELPER = fileURLToPath(new URL("./configure-linux-sandbox.mjs", import.meta.url));
 const target = process.env.CPS_CANDIDATE_TARGET;
 const version = process.env.CPS_DESKTOP_VERSION;
@@ -28,6 +29,9 @@ const metadataRoot = path.join(candidateRoot, "metadata");
 const stagingPath = path.join(metadataRoot, "candidate-staging.v1.json");
 const auditPath = path.join(metadataRoot, "audit-report.v1.json");
 const staging = JSON.parse(await fs.readFile(stagingPath, "utf8"));
+const updateAssets = updateAssetNames({ target, version, releaseChannel: process.env.CPS_RELEASE_CHANNEL });
+assert.equal(staging.updaterAuthorized ?? false, updateAssets.length > 0);
+if (updateAssets.length) await auditWindowsUpdateAssets({ assetsRoot, version });
 const expectedAudit = JSON.parse(await fs.readFile(auditPath, "utf8"));
 assert.equal(staging.schemaVersion, 1);
 assert.equal(staging.scope, "ci-candidate-staging");
@@ -39,7 +43,7 @@ assert.equal(expectedAudit.version, version);
 assert.equal(expectedAudit.buildId, staging.buildId);
 assert.deepEqual(
   staging.assets.map((asset) => asset.name).sort(),
-  descriptor.assets(version).sort(),
+  [...descriptor.assets(version), ...updateAssets].sort(),
   "Staged candidate assets do not match the release target."
 );
 const containerRecords = [];
@@ -178,6 +182,10 @@ async function inspectAndSmokeContainer({ appRoot, executable, assetName, contai
     buildId: staging.buildId
   });
   assert.deepEqual(audit, expectedAudit, `Final ${containerKind} container differs from the audited app.`);
+  if (updateAssets.length) {
+    const config = await auditWindowsUpdateConfiguration(path.join(appRoot, "resources"));
+    assert.equal(config.signaturePolicy, staging.updateAudit.signaturePolicy);
+  }
   await configureLinuxSandbox(appRoot);
   runProductSmoke(executable);
   return Object.freeze({

@@ -7,6 +7,7 @@ import {
   getDesktopUpdateUnavailableReason
 } from "./update-policy.js";
 import type { CoreRuntimeSupervisor } from "./runtime-supervisor.js";
+import { isUpdateVersion, validateUpdateReminderInput, type DesktopUpdateReminderInput } from "../shared/update-preferences.js";
 
 type UpdaterEvent =
   | "checking-for-update"
@@ -29,6 +30,8 @@ export interface DesktopUpdaterPort {
 export type DesktopRecoveryVerification = "clear" | "blocked" | "unverifiable";
 
 export interface DesktopUpdateControllerOptions {
+  ignoredVersion?: string | null;
+  saveIgnoredVersion?(version: string | null): Promise<void>;
   claimStartupCheck?(): Promise<boolean>;
   runStartupCheck?(check: () => Promise<DesktopUpdateStatus>): Promise<DesktopUpdateStatus>;
   onStartupUpdateAvailable?(status: DesktopUpdateStatus): Promise<void>;
@@ -98,6 +101,9 @@ export async function createProductionUpdaterPort(options: {
 }
 
 export class DesktopUpdateController {
+  #ignoredVersion: string | null;
+  readonly #saveIgnoredVersion: DesktopUpdateControllerOptions["saveIgnoredVersion"];
+  #reminderWrite: Promise<void> = Promise.resolve();
   readonly #claimStartupCheck: DesktopUpdateControllerOptions["claimStartupCheck"];
   readonly #runStartupCheck: DesktopUpdateControllerOptions["runStartupCheck"];
   readonly #onStartupUpdateAvailable: DesktopUpdateControllerOptions["onStartupUpdateAvailable"];
@@ -121,6 +127,7 @@ export class DesktopUpdateController {
   #progressPercent: number | undefined;
   #recoveryVerification: "unknown" | "clear" | "blocked" = "unknown";
   #restartPending = false;
+  #releaseFailedInstall: (() => void) | null = null;
   #port: DesktopUpdaterPort | null = null;
   #portPromise: Promise<DesktopUpdaterPort> | null = null;
   #checkPromise: Promise<DesktopUpdateStatus> | null = null;
@@ -130,6 +137,8 @@ export class DesktopUpdateController {
   #disposed = false;
 
   constructor(options: DesktopUpdateControllerOptions) {
+    this.#ignoredVersion = isUpdateVersion(options.ignoredVersion) ? options.ignoredVersion : null;
+    this.#saveIgnoredVersion = options.saveIgnoredVersion;
     this.#claimStartupCheck = options.claimStartupCheck;
     this.#runStartupCheck = options.runStartupCheck;
     this.#onStartupUpdateAvailable = options.onStartupUpdateAvailable;
@@ -166,6 +175,7 @@ export class DesktopUpdateController {
       installAllowed: false,
       ...(this.#reason ? { reason: this.#reason } : {}),
       ...(this.#version ? { version: this.#version } : {}),
+      ...(this.#version && this.#version === this.#ignoredVersion ? { reminderIgnored: true } : {}),
       ...(this.#progressPercent !== undefined ? { progressPercent: this.#progressPercent } : {})
     };
     if (this.#state !== "downloaded") return status;
@@ -199,7 +209,8 @@ export class DesktopUpdateController {
     try {
       if (!await this.#claimStartupCheck?.() || this.#disposed) return;
       const result = await (this.#runStartupCheck ? this.#runStartupCheck(() => this.check()) : this.check());
-      if (!this.#disposed && result.state === "available" && result.version) {
+      if (!this.#disposed && result.state === "available" && result.version
+          && this.#state === "available" && this.#version === result.version && this.#ignoredVersion !== result.version) {
         await this.#onStartupUpdateAvailable?.(result);
       }
     } catch {
@@ -251,6 +262,22 @@ export class DesktopUpdateController {
     } finally {
       if (this.#checkPromise === pending) this.#checkPromise = null;
     }
+  }
+
+  async setReminder(value: DesktopUpdateReminderInput): Promise<DesktopUpdateStatus> {
+    const input = validateUpdateReminderInput(value);
+    const pending = this.#reminderWrite.then(async () => {
+      // A stale UI/dialog cannot mute a different version. Preferences never download/install.
+      if (this.#disposed || !this.#saveIgnoredVersion || this.#version !== input.version
+          || !["available", "downloaded"].includes(this.#state)) throw new Error("Update reminder unavailable.");
+      const ignored = input.ignored ? input.version : null;
+      await this.#saveIgnoredVersion(ignored);
+      this.#ignoredVersion = ignored;
+      this.#notify();
+    });
+    this.#reminderWrite = pending.catch(() => {});
+    await pending;
+    return this.status;
   }
 
   async download(): Promise<DesktopUpdateStatus> {
@@ -328,12 +355,19 @@ export class DesktopUpdateController {
           this.#recoveryVerification = "unknown";
           return this.status;
         }
+        this.#releaseFailedInstall = () => {
+          this.#releaseFailedInstall = null;
+          restartLease.release();
+          this.#restartPending = false;
+        };
         port.quitAndInstall(false, true);
-        retainRestartGate = true;
+        // electron-updater can report failure by event instead of throwing.
+        retainRestartGate = this.#restartPending && this.#state === "installing";
       } catch {
         this.#fail("install-failed");
       } finally {
         if (!retainRestartGate) {
+          this.#releaseFailedInstall = null;
           restartLease.release();
           this.#restartPending = false;
         }
@@ -454,6 +488,11 @@ export class DesktopUpdateController {
       void this.#refreshRecoveryVerification();
     });
     bind("error", () => {
+      if (this.#state === "installing" && this.#releaseFailedInstall) {
+        this.#releaseFailedInstall();
+        this.#fail("install-failed");
+        return;
+      }
       if (this.#restartPending) return;
       this.#fail(this.#state === "downloading" ? "download-failed" : "check-failed");
     });

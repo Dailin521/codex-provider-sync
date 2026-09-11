@@ -59,6 +59,7 @@ export interface DesktopBridgeApi {
     check(): Promise<DesktopUpdateStatus>;
     download(): Promise<DesktopUpdateStatus>;
     install(): Promise<DesktopUpdateStatus>;
+    setReminder(input: import("./update-preferences.js").DesktopUpdateReminderInput): Promise<DesktopUpdateStatus>;
   };
   readonly test?: {
     crashRuntime(): Promise<{ crashed: boolean }>;

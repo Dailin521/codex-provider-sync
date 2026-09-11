@@ -142,7 +142,7 @@ test("secure desktop exposes the C8 surface and treats old ordinary journals as 
         "requestSyncSwitch",
         "subscribeOperation"
       ],
-      updateKeys: ["check", "download", "getStatus", "install", "subscribe"],
+      updateKeys: ["check", "download", "getStatus", "install", "setReminder", "subscribe"],
       watchKeys: ["subscribeStopped"],
       frozen: true
     });

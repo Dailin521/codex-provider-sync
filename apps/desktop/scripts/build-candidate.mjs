@@ -49,7 +49,7 @@ if (process.platform !== config.platform || process.arch !== config.arch) {
 const buildEnvironment = {
   ...process.env,
   CPS_DESKTOP_BUILD_ID: buildId,
-  CPS_DESKTOP_RELEASE_AUTHORIZED: "false"
+  CPS_DESKTOP_RELEASE_AUTHORIZED: process.env.CPS_RELEASE_CHANNEL === "stable-updater" ? "true" : "false"
 };
 runNpm(["run", "workspaces:build"], { env: buildEnvironment });
 runNpm(["run", "build:electron"], { cwd: desktopRoot, env: buildEnvironment });

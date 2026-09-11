@@ -55,6 +55,7 @@ export interface HostClient {
   checkForUpdates?(signal?: AbortSignal): Promise<HostUpdateStatus>;
   downloadUpdate?(signal?: AbortSignal): Promise<HostUpdateStatus>;
   installUpdate?(signal?: AbortSignal): Promise<HostUpdateStatus>;
+  setUpdateReminder?(version: string, ignored: boolean): Promise<HostUpdateStatus>;
 }
 
 /** Host-only desktop lifecycle hint; it is never Core method input. */
@@ -71,6 +72,7 @@ export type HostDiagnosticsExportResult =
   | { status: "failed" };
 
 export interface HostUpdateStatus {
+  reminderIgnored?: boolean;
   currentVersion?: string;
   mode?: "manual";
   state:

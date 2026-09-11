@@ -356,7 +356,7 @@ export async function readSqliteProviderCounts(storageOrLocation) {
 // A Provider plan depends on row identity / Provider, not message previews,
 // activity timestamps, or the physical WAL/SHM representation. One read
 // transaction binds the schema and rows to the same SQLite snapshot.
-export async function readSqliteProviderRevisionState(dbPath) {
+export async function readSqliteProviderRevisionState(dbPath, { includeArchived = false } = {}) {
   let db;
   try {
     db = await openDatabase(dbPath, { readOnly: true });
@@ -366,7 +366,8 @@ export async function readSqliteProviderRevisionState(dbPath) {
       throw new CoreError("SQLITE_UNREADABLE", "The thread index does not support Provider synchronization.");
     }
     const key = tableHasColumn(db, "threads", "id") ? "id" : "rowid";
-    const rows = db.prepare(`SELECT ${key} AS id, model_provider FROM threads ORDER BY ${key}`).all();
+    const archived = includeArchived && tableHasColumn(db, "threads", "archived") ? ", archived" : "";
+    const rows = db.prepare(`SELECT ${key} AS id, model_provider${archived} FROM threads ORDER BY ${key}`).all();
     db.exec("COMMIT");
     return { schema, rows };
   } catch (error) {

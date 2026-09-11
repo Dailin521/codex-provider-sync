@@ -299,7 +299,7 @@ async function readStatus(options = {}, diagnostic = false) {
   const codexHome = options.storage?.codexHome ?? normalizeCodexHome(options.codexHome);
   const platform = options.platform ?? process.platform;
   const sqliteHome = explicitSqliteHomeFromOptions(options);
-  const rolloutRevisionMode = !diagnostic && options.rolloutScanMode === "full" ? "content" : "metadata";
+  const rolloutRevisionMode = diagnostic ? "metadata" : options.rolloutScanMode === "full" ? "content" : "status";
   const profile = profileFromOptions(options, codexHome, sqliteHome, platform);
   const activeSnapshot = operationCoordinator.statusDuringWrite(
     codexHome,
@@ -382,6 +382,7 @@ async function readStatus(options = {}, diagnostic = false) {
       configText: latestConfigText,
       storage,
       rolloutRevisionMode,
+      minimumRolloutSizes: beforeRevision.providerRolloutSizes,
       platform
     });
   } catch {
@@ -397,9 +398,8 @@ async function readStatus(options = {}, diagnostic = false) {
   }
   let driftReason = revisionUnverifiable ? null : revisionMismatch(beforeRevision, afterRevision);
   if (!diagnostic && (driftReason === "state-db" || driftReason === "rollout")) {
-    // Opening a WAL database for read-only Status can legitimately create or
-    // refresh its SHM sidecar. Retry once from that new complete baseline; a
-    // real concurrent writer will either expose its lock or drift again.
+    // Retry one relevant Provider/file-set change. Ordinary appends and WAL
+    // churn no longer invalidate a lightweight Status; they are not write locks.
     snapshot = await scanStatus({
       ...options,
       codexHome,
@@ -418,6 +418,7 @@ async function readStatus(options = {}, diagnostic = false) {
         configText: retryConfigText,
         storage,
         rolloutRevisionMode,
+        minimumRolloutSizes: afterRevision.providerRolloutSizes,
         platform
       });
       driftReason = revisionMismatch(afterRevision, retryRevision);

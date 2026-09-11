@@ -12,13 +12,14 @@ on:
         required: true
         type: string
       release_channel:
-        description: Stable manual release requires maintainer acceptance of unsigned Windows-only installation
+        description: Explicit stable-updater enables user-confirmed installer updates; stable-manual keeps manual installation
         required: true
         default: rc
         type: choice
         options:
           - rc
           - stable-manual
+          - stable-updater
       expected_sha:
         description: Full 40-character commit SHA resolved by the existing tag
         required: true
@@ -139,6 +140,8 @@ jobs:
           path: |
             artifacts/c9/windows-x64/assets/CodexProviderSync-${{ needs.verify-input.outputs.version }}-windows-x64-setup.exe
             artifacts/c9/windows-x64/assets/CodexProviderSync-${{ needs.verify-input.outputs.version }}-windows-x64-portable.zip
+            ${{ needs.verify-input.outputs.channel == 'stable-updater' && 'artifacts/c9/windows-x64/assets/latest.yml' || '' }}
+            ${{ needs.verify-input.outputs.channel == 'stable-updater' && format('artifacts/c9/windows-x64/assets/CodexProviderSync-{0}-windows-x64-setup.exe.blockmap', needs.verify-input.outputs.version) || '' }}
             artifacts/c9/windows-x64/metadata/audit-report.v1.json
             artifacts/c9/windows-x64/metadata/sbom.cyclonedx.json
             artifacts/c9/windows-x64/metadata/candidate-staging.v1.json
@@ -209,12 +212,21 @@ jobs:
           if [ "$CPS_RELEASE_CHANNEL" = stable-manual ]; then
             release_flags=(--prerelease=false)
           fi
+          update_assets=()
+          update_note="Manual installation only."
+          if [ "$CPS_RELEASE_CHANNEL" = stable-updater ]; then
+            release_flags=(--prerelease=false)
+            update_assets=(assets/latest.yml "assets/CodexProviderSync-$CPS_RELEASE_VERSION-windows-x64-setup.exe.blockmap")
+            test -s "${update_assets[0]}" && test -s "${update_assets[1]}"
+            update_note="Installer updates require explicit download and restart/install; portable remains manual."
+          fi
           gh release create "$CPS_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
             --verify-tag --target "$CPS_EXPECTED_SHA" --draft "${release_flags[@]}" --latest=false \
             --title "Codex Provider Sync $CPS_RELEASE_VERSION (Windows x64)" \
-            --notes "Windows x64 Electron. Channel: $CPS_RELEASE_CHANNEL. Draft awaiting artifact verification and explicit publication. Unsigned; manual installation only. Signing and online upgrade acceptance remain unverified. Legacy .NET users must install or fully extract Electron; the old single-EXE updater is incompatible. Source: $CPS_EXPECTED_SHA." \
+            --notes "Windows x64 Electron. Channel: $CPS_RELEASE_CHANNEL. Draft awaiting artifact verification and explicit publication. Unsigned; $update_note Signing and online upgrade acceptance remain unverified. Legacy .NET users must install or fully extract Electron; the old single-EXE updater is incompatible. Source: $CPS_EXPECTED_SHA." \
             "assets/CodexProviderSync-$CPS_RELEASE_VERSION-windows-x64-setup.exe" \
             "assets/CodexProviderSync-$CPS_RELEASE_VERSION-windows-x64-portable.zip" \
+            "${update_assets[@]}" \
             metadata/SHA256SUMS.txt metadata/sbom.cyclonedx.json \
             metadata/audit-report.v1.json metadata/candidate-staging.v1.json \
             metadata/container-verification.v1.json metadata/release-manifest.v1.json

@@ -1,5 +1,9 @@
 # Node Core 外部行为兼容合同
 
+## 2026-09-11：轻量状态相关性（ADR-0043）
+
+普通 Status 使用内部 `status` revision：正文追加、非 Provider SQLite 列及 WAL/SHM 变化不导致失效；仍校验首行、文件身份/链接数/集合/最小大小、threads schema/ID/Provider/archived 和配置路径。Provider 状态不再整读/哈希数据库文件。真实漂移最多重试一次，实际锁与 pending Restore 继续优先阻断。超限/非法首行仍不完整、不可读数据库仍不可读，WSL 不执行 SQL。完整 Diagnostics、显式 full Status、Plan/Apply、Repair/Restore 与 PIO 不变。见 [ADR-0043](../../adr/0043-status-provider-relevant-revisions.md)。
+
 ## 2026-09-11：失效锁观察与恢复（ADR-0041）
 
 Status 三次 Home 锁检查只读区分 absent/stale/active/unverifiable。所有 owner 与 claims 均已证明失效时允许正常扫描，可选返回 `staleLockDetected:true`，不产生 operationInProgress；revision/pending Restore 门禁不变。真正清理由后续 Apply 的 acquireLock 重验执行，不新增方法、不允许直接删除。未知 owner/权限/身份变化继续阻断，UI 不再与 active 共用“执行中”文案。Diagnostics safety 可选投影同一 boolean；已有 operationInProgress 时不继续完整性扫描，省略可选 historyIntegrity 并标记未完整，脱敏状态与日志仍可导出。见 [ADR-0041](../../adr/0041-stale-home-lock-status-recovery.md)。
@@ -1013,6 +1017,8 @@ V1/C3 已实现上述边界；`runSync/runSwitch/runRepair/runRestore/runWatch` 
 - pending recovery 阻断 Sync/Switch。apply lifecycle 必须以 requestId/operationId 关联进度与取消；Runtime crash/timeout 立即拒绝 pending，下一请求重新 Status preflight。
 
 ### 16.7 C8 Electron Restore / Watch / Diagnostics / Update 候选边界
+
+ADR-0042 补充：`stable-updater` 显式启用 Windows 安装版应用内下载/重启安装，便携版保持手动。新增 Host `updates.setReminder({schemaVersion:1,version,ignored})` 窄 IPC，版本只用于当前版本提醒偏好，不指定下载/安装目标；schema v2 可选 `reminderIgnored`。Main 原子保存偏好，设置页和新版弹窗共用；手动检查/更新仍可用，下个新版继续提醒，保存失败不能假报成功。详见 [ADR-0042](../../adr/0042-windows-updater-and-version-reminders.md)。CoreFacade 与既有安装守卫不变。
 
 - DesktopCoreClient、Preload、Main IPC、Supervisor 与 Utility 只按精确方法组增加 `prepareRestore/applyRestore`、`pruneBackups/startWatch/stopWatch/getWatchStatus`。Main 持有 Restore Plan 与 Watch ID；Renderer 只提交 profile、受管 backupId、Restore options、keepCount 或有限 Watch 输入。
 - Recovery Required 时，Sync/Switch/startWatch 继续阻断；Restore 与 Prune 可作为 recovery-safe 操作进入 Core，stop/get Watch status 仍可用。Restore Apply 属于 cancellable write lifecycle，完成后使 Supervisor 的 Status preflight 失效并重新读取。

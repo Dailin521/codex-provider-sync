@@ -34,7 +34,8 @@ export const DESKTOP_IPC_CHANNELS = Object.freeze({
   updateEvent: "cps:v1:update:event",
   updateCheck: "cps:v1:update:check",
   updateDownload: "cps:v1:update:download",
-  updateInstall: "cps:v1:update:install"
+  updateInstall: "cps:v1:update:install",
+  updateReminder: "cps:v1:update:reminder"
 });
 
 export const DESKTOP_CSP = [

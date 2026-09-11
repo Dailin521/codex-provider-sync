@@ -32,6 +32,7 @@ export type DesktopUpdateStatus = {
   installAllowed: boolean;
   reason?: DesktopUpdateReason;
   version?: string;
+  reminderIgnored?: boolean;
   progressPercent?: number;
   installBlockedReason?: DesktopUpdateInstallBlockedReason;
 };
