@@ -6,11 +6,30 @@ import { AppUi } from "../src/App.js";
 import type { HostClient, HostUpdateStatus } from "../src/types.js";
 import { statusFor } from "./helpers/app-fixtures.js";
 
-function mount(host: Partial<HostClient>) {
-  render(<AppUi surface="desktop" core={new MockCoreClient({ getStatus: async () => statusFor() })} capabilities={{ watch: false }} host={{ listProfiles: async () => [{ id: "default", name: "Default", revision: "profile-r1" }], ...host }} initialLocale="en" initialTheme="system" preferences={{ getLocale: () => "en", setLocale: () => {}, getTheme: () => "system", setTheme: () => {} }} />);
+function mount(host: Partial<HostClient>, core = new MockCoreClient({ getStatus: async () => statusFor() }), watch = false) {
+  render(<AppUi surface="desktop" core={core} capabilities={{ watch }} host={{ listProfiles: async () => [{ id: "default", name: "Default", revision: "profile-r1" }], ...host }} initialLocale="en" initialTheme="system" preferences={{ getLocale: () => "en", setLocale: () => {}, getTheme: () => "system", setTheme: () => {} }} />);
 }
 
 describe("Desktop updates in Settings", () => {
+  it.each(["write", "recovery", "watch", "status-error"])("allows explicit installation during %s", async (scenario) => {
+    const user = userEvent.setup();
+    const status = statusFor();
+    if (scenario === "write") status.operationInProgress = { operationId: "held-operation", operation: "sync", actor: "external" };
+    if (scenario === "recovery") status.pendingRecovery = true;
+    const core = new MockCoreClient({
+      getStatus: async () => { if (scenario === "status-error") throw { code: "INTERNAL_ERROR" }; return status; },
+      getWatchStatus: async () => ({ schemaVersion: 1, watchId: "watch-default", status: "running", startedAt: "2026-09-15T00:00:00.000Z", stoppedAt: null, stopReason: null, includeStateDb: true, once: false })
+    });
+    const install = vi.fn(async (): Promise<HostUpdateStatus> => ({ state: "installing", installAllowed: false }));
+    mount({ getUpdateStatus: async () => ({ state: "downloaded", version: "1.0.4", installAllowed: true }), installUpdate: install }, core, scenario === "watch");
+    await user.click(await screen.findByRole("button", { name: "Settings", exact: true }));
+    if (scenario === "watch") await screen.findByRole("button", { name: "Disable automatic sync" });
+    const button = await screen.findByRole("button", { name: "Restart and install" });
+    expect(button).toBeEnabled();
+    await user.click(button);
+    await waitFor(() => expect(install).toHaveBeenCalledOnce());
+  });
+
   it("ignores/restores only the displayed version and keeps explicit installer download/install usable", async () => {
     const user = userEvent.setup();
     let status: HostUpdateStatus = { currentVersion: "1.0.1", state: "available", version: "1.0.2", installAllowed: false };

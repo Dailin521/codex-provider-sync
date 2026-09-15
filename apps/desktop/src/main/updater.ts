@@ -3,7 +3,6 @@ import type {
   DesktopUpdateStatus
 } from "../shared/update-types.js";
 import {
-  getDesktopInstallBlockedReason,
   getDesktopUpdateUnavailableReason
 } from "./update-policy.js";
 import type { CoreRuntimeSupervisor } from "./runtime-supervisor.js";
@@ -27,8 +26,6 @@ export interface DesktopUpdaterPort {
   quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean): void;
 }
 
-export type DesktopRecoveryVerification = "clear" | "blocked" | "unverifiable";
-
 export interface DesktopUpdateControllerOptions {
   ignoredVersion?: string | null;
   saveIgnoredVersion?(version: string | null): Promise<void>;
@@ -47,10 +44,7 @@ export interface DesktopUpdateControllerOptions {
   appVersion: string;
   releaseAuthorized: boolean;
   configured: boolean;
-  supervisor: Pick<CoreRuntimeSupervisor, "snapshot" | "tryBeginRestartInstall">;
-  hasActiveWatches(): boolean;
-  verifyNoActiveWatches(): Promise<boolean>;
-  verifyRecoveryState(): Promise<DesktopRecoveryVerification>;
+  supervisor: Pick<CoreRuntimeSupervisor, "tryBeginRestartInstall">;
   beforeInstall?(): Promise<void>;
   createPort?: () => Promise<DesktopUpdaterPort>;
   setTimeoutImpl?: typeof setTimeout;
@@ -113,10 +107,7 @@ export class DesktopUpdateController {
   readonly #appVersion: string;
   readonly #manualUpdates: DesktopUpdateControllerOptions["manualUpdates"];
   readonly #onStatus: DesktopUpdateControllerOptions["onStatus"];
-  readonly #supervisor: Pick<CoreRuntimeSupervisor, "snapshot" | "tryBeginRestartInstall">;
-  readonly #hasActiveWatches: () => boolean;
-  readonly #verifyNoActiveWatches: () => Promise<boolean>;
-  readonly #verifyRecoveryState: () => Promise<DesktopRecoveryVerification>;
+  readonly #supervisor: Pick<CoreRuntimeSupervisor, "tryBeginRestartInstall">;
   readonly #beforeInstall: () => Promise<void>;
   readonly #createPort: () => Promise<DesktopUpdaterPort>;
   readonly #setTimeout: typeof setTimeout;
@@ -127,7 +118,6 @@ export class DesktopUpdateController {
   #reason: DesktopUpdateReason | undefined;
   #version: string | undefined;
   #progressPercent: number | undefined;
-  #recoveryVerification: "unknown" | "clear" | "blocked" = "unknown";
   #restartPending = false;
   #releaseFailedInstall: (() => void) | null = null;
   #port: DesktopUpdaterPort | null = null;
@@ -147,9 +137,6 @@ export class DesktopUpdateController {
     this.#appVersion = options.appVersion;
     this.#onStatus = options.onStatus;
     this.#supervisor = options.supervisor;
-    this.#hasActiveWatches = options.hasActiveWatches;
-    this.#verifyNoActiveWatches = options.verifyNoActiveWatches;
-    this.#verifyRecoveryState = options.verifyRecoveryState;
     this.#beforeInstall = options.beforeInstall ?? (async () => {});
     this.#createPort = options.createPort ?? (() => createProductionUpdaterPort({
       allowPrerelease: options.appVersion.includes("-")
@@ -181,21 +168,10 @@ export class DesktopUpdateController {
       ...(this.#progressPercent !== undefined ? { progressPercent: this.#progressPercent } : {})
     };
     if (this.#state !== "downloaded") return status;
-    const blocked = this.#recoveryVerification === "blocked"
-      ? "pending-recovery"
-      : getDesktopInstallBlockedReason({
-        supervisor: this.#supervisor,
-        hasActiveWatches: this.#hasActiveWatches(),
-        recoveryVerified: this.#recoveryVerification === "clear"
-      });
-    return {
-      ...status,
-      installAllowed: blocked === null,
-      ...(blocked ? { installBlockedReason: blocked } : {})
-    };
+    return { ...status, installAllowed: true };
   }
 
-  scheduleInitialCheck(delayMs = 15_000): void {
+  scheduleInitialCheck(delayMs = 5_000): void {
     if (this.#disposed || this.#unavailableReason || !this.#claimStartupCheck || this.#startupScheduled) return;
     this.#startupScheduled = true;
     const timer = this.#setTimeout(() => {
@@ -231,7 +207,6 @@ export class DesktopUpdateController {
       this.#reason = undefined;
       this.#version = undefined;
       this.#progressPercent = undefined;
-      this.#recoveryVerification = "unknown";
       this.#notify();
       try {
         if (this.#manualUpdates) {
@@ -308,7 +283,6 @@ export class DesktopUpdateController {
           this.#state = "downloaded";
           this.#progressPercent = 100;
         }
-        if (this.#state === "downloaded") await this.#refreshRecoveryVerification();
       } catch {
         this.#fail("download-failed");
       }
@@ -328,38 +302,18 @@ export class DesktopUpdateController {
     if (this.#installPromise) return this.#installPromise;
     const pending = (async () => {
       const restartLease = this.#supervisor.tryBeginRestartInstall();
-      if (!restartLease) {
-        this.#recoveryVerification = "unknown";
-        return this.status;
-      }
       this.#restartPending = true;
       let retainRestartGate = false;
       try {
-        await restartLease.waitForWrites();
-        if (this.#hasActiveWatches()) {
-          let noActiveWatches = false;
-          try {
-            noActiveWatches = await this.#verifyNoActiveWatches();
-          } catch {}
-          if (!noActiveWatches) return this.status;
-        }
-        this.#recoveryVerification = "unknown";
-        const recoveryVerification = await this.#refreshRecoveryVerification();
-        if (this.#immediateInstallBlock() || recoveryVerification !== "clear") {
-          return this.status;
-        }
+        // Installation is the user's decision. Storage checks and write draining
+        // belong to Core operations / normal shutdown, never update admission.
         this.#state = "installing";
         this.#notify();
         const port = await this.#ensurePort();
         await this.#beforeInstall();
-        if (this.#immediateInstallBlock()) {
-          this.#state = "downloaded";
-          this.#recoveryVerification = "unknown";
-          return this.status;
-        }
         this.#releaseFailedInstall = () => {
           this.#releaseFailedInstall = null;
-          restartLease.release();
+          restartLease?.release();
           this.#restartPending = false;
         };
         port.quitAndInstall(false, true);
@@ -370,7 +324,7 @@ export class DesktopUpdateController {
       } finally {
         if (!retainRestartGate) {
           this.#releaseFailedInstall = null;
-          restartLease.release();
+          restartLease?.release();
           this.#restartPending = false;
         }
       }
@@ -395,33 +349,6 @@ export class DesktopUpdateController {
       for (const [event, listener] of this.#listeners) this.#port.off(event, listener);
     }
     this.#listeners.clear();
-  }
-
-  #immediateInstallBlock(): boolean {
-    return this.#supervisor.snapshot.recoveryBlocked
-      || this.#supervisor.snapshot.writeInProgress
-      || this.#hasActiveWatches();
-  }
-
-  async #refreshRecoveryVerification(): Promise<"unknown" | "clear" | "blocked"> {
-    if (this.#immediateInstallBlock()) {
-      this.#recoveryVerification = this.#supervisor.snapshot.recoveryBlocked
-        ? "blocked"
-        : "unknown";
-      return this.#recoveryVerification;
-    }
-    try {
-      const result = await this.#verifyRecoveryState();
-      this.#recoveryVerification = result === "clear"
-        ? "clear"
-        : result === "blocked"
-          ? "blocked"
-          : "unknown";
-    } catch {
-      this.#recoveryVerification = "unknown";
-    }
-    this.#notify();
-    return this.#recoveryVerification;
   }
 
   async #ensurePort(): Promise<DesktopUpdaterPort> {
@@ -461,7 +388,6 @@ export class DesktopUpdateController {
       this.#reason = undefined;
       this.#version = version;
       this.#progressPercent = undefined;
-      this.#recoveryVerification = "unknown";
     });
     bind("update-not-available", () => {
       if (this.#restartPending) return;
@@ -469,7 +395,6 @@ export class DesktopUpdateController {
       this.#reason = undefined;
       this.#version = undefined;
       this.#progressPercent = undefined;
-      this.#recoveryVerification = "unknown";
     });
     bind("download-progress", (progress) => {
       if (this.#state !== "downloading") return;
@@ -487,7 +412,6 @@ export class DesktopUpdateController {
       this.#reason = undefined;
       this.#version = version;
       this.#progressPercent = 100;
-      void this.#refreshRecoveryVerification();
     });
     bind("error", () => {
       if (this.#state === "installing" && this.#releaseFailedInstall) {
@@ -505,7 +429,6 @@ export class DesktopUpdateController {
     this.#reason = reason;
     this.#version = undefined;
     this.#progressPercent = undefined;
-    this.#recoveryVerification = "unknown";
     this.#notify();
   }
 

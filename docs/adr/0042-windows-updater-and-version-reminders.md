@@ -1,5 +1,8 @@
 # ADR-0042：Windows 安装版更新与按版本提醒
 
+> 2026-09-15 修订：[ADR-0046](0046-user-directed-update-install.md) 取消本文件历史条款中的更新安装前存储、写操作、Watch 与恢复状态拦截；已下载更新由用户决定安装。
+
+
 - Status: Accepted
 - Date: 2026-09-11
 - Scope: Desktop Host、共享设置界面、显式 Windows 发布渠道；Core/CLI/Provider I/O 不变。

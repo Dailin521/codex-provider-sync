@@ -4,6 +4,7 @@
 
 ## 用户指南
 
+- [常见问题（FAQ）](../README.md#常见问题faq)：切换后同步、部分完成与恢复
 - Electron 桌面版：[中文](README_DESKTOP_ZH.md) · [English](README_DESKTOP_EN.md)
 - [Web UI：启动、配对、同步与 SSH](README_WEB_UI_ZH.md)
 - [CLI：命令、模型策略、路径、备份与 JSON](README_CLI_ZH.md)
