@@ -127,66 +127,54 @@ test("updater exposes a redacted Main-only check, download and install state mac
   assert.equal(port.listenerCount("update-available"), 0);
 });
 
-test("updater blocks install for writes, Watch, recovery and unverifiable preflight", async () => {
-  for (const scenario of ["write", "watch", "blocked", "unverifiable"]) {
-    const { controller, port, snapshot, state } = fixture();
+test("downloaded updates install without consulting writes, Watch or recovery", async () => {
+  for (const scenario of ["write", "watch", "blocked", "unverifiable", "failed-query"]) {
+    let checks = 0;
+    const forbidden = () => { checks++; throw new Error("storage must not be queried"); };
+    const { controller, port, snapshot, state } = fixture({
+      hasActiveWatches: forbidden,
+      verifyNoActiveWatches: forbidden,
+      verifyRecoveryState: forbidden
+    });
+    snapshot.writeInProgress = scenario === "write";
+    snapshot.recoveryBlocked = scenario === "blocked";
+    state.watches = scenario === "watch";
+    state.verification = scenario;
+    state.waitForWrites = forbidden;
     await controller.check();
-    await controller.download();
-    if (scenario === "write") snapshot.writeInProgress = true;
-    if (scenario === "watch") state.watches = true;
-    if (scenario === "blocked") state.verification = "blocked";
-    if (scenario === "unverifiable") state.verification = "unverifiable";
+    const downloaded = await controller.download();
+    assert.equal(downloaded.installAllowed, true, scenario);
+    assert.equal(downloaded.installBlockedReason, undefined, scenario);
     const result = await controller.install();
-    assert.equal(result.state, "downloaded", scenario);
-    assert.equal(result.installAllowed, false, scenario);
-    assert.equal(result.installBlockedReason, scenario === "write"
-      ? "write-in-progress"
-      : scenario === "watch"
-        ? "watch-active"
-        : scenario === "blocked"
-          ? "pending-recovery"
-          : "recovery-unverified");
-    assert.equal(controller.restartPending, false, scenario);
-    assert.equal(port.installs, 0, scenario);
+    assert.equal(result.state, "installing", scenario);
+    assert.equal(port.installs, 1, scenario);
+    assert.equal(checks, 0, scenario);
     controller.dispose();
   }
 });
 
-test("updater closes admission, drains an already admitted Watch, and reopens without installing", async () => {
-  const { controller, port, snapshot, state } = fixture();
+test("unavailable runtime lease does not veto an explicit installation", async () => {
+  const { controller, port } = fixture({ supervisor: { tryBeginRestartInstall: () => null } });
   await controller.check();
   await controller.download();
-  let releaseWrite;
-  state.waitForWrites = () => new Promise((resolve) => { releaseWrite = resolve; });
-  snapshot.writeInProgress = true;
-  const installing = controller.install();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(controller.restartPending, true);
-  assert.equal(state.gateClosed, true);
-  assert.equal(port.installs, 0);
-  state.watches = true;
-  snapshot.writeInProgress = false;
-  releaseWrite();
-  const result = await installing;
-  assert.equal(result.state, "downloaded");
-  assert.equal(result.installBlockedReason, "watch-active");
-  assert.equal(port.installs, 0);
-  assert.equal(controller.restartPending, false);
-  assert.equal(state.gateClosed, false);
-  assert.equal(state.gateReleases, 1);
+  assert.equal((await controller.install()).state, "installing");
+  assert.equal(port.installs, 1);
+  controller.dispose();
 });
 
-test("updater rechecks an autonomously stopped Watch after closing restart admission", async () => {
-  const { controller, port, state } = fixture();
+test("repeated install clicks call the installer once", async () => {
+  let resume;
+  const { controller, port } = fixture({ beforeInstall: () => new Promise(resolve => { resume = resolve; }) });
   await controller.check();
   await controller.download();
-  state.watches = true;
-  state.watchVerification = "clear";
-  const result = await controller.install();
-  assert.equal(result.state, "installing");
-  assert.equal(state.watchVerificationCalls, 1);
-  assert.equal(state.watches, false);
+  const first = controller.install();
+  await new Promise(resolve => setImmediate(resolve));
+  await controller.install();
+  resume();
+  await first;
+  await controller.install();
   assert.equal(port.installs, 1);
+  controller.dispose();
 });
 
 test("updater reopens write admission when the installer fails synchronously", async () => {
@@ -382,21 +370,22 @@ test("daily startup check runs once, notifies only for a newer version and leave
     claimStartupCheck: async () => { if (claimed) return false; claimed = true; return true; },
     onStartupUpdateAvailable: async status => { notices.push(status.version); },
     manualUpdates: { check: async () => { checks++; return { version: "1.1.0" }; }, openDownloadPage: async () => {} },
-    setTimeoutImpl: callback => { callbacks.push(callback); return { unref() {} }; }
+    setTimeoutImpl: (callback, delay) => { callbacks.push({ callback, delay }); return { unref() {} }; }
   };
-  const first = fixture(options).controller;
-  first.scheduleInitialCheck();
-  first.scheduleInitialCheck();
-  assert.equal(callbacks.length, 1);
-  callbacks.shift()();
+    const first = fixture(options).controller;
+    first.scheduleInitialCheck();
+    first.scheduleInitialCheck();
+    assert.equal(callbacks.length, 1);
+    assert.equal(callbacks[0].delay, 5_000);
+    callbacks.shift().callback();
   for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
   assert.equal(checks, 1);
   assert.deepEqual(notices, ["1.1.0"]);
   first.scheduleInitialCheck();
   assert.equal(callbacks.length, 0);
-  const second = fixture(options).controller;
-  second.scheduleInitialCheck();
-  callbacks.shift()();
+    const second = fixture(options).controller;
+    second.scheduleInitialCheck();
+    callbacks.shift().callback();
   for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
   assert.equal(checks, 1);
   await second.check();

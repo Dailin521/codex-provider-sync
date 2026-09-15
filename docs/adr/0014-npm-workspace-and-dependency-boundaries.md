@@ -1,5 +1,8 @@
 # vNext/ADR-0014：npm Workspace、根发布包与依赖边界
 
+> 2026-09-15 修订：[ADR-0046](0046-user-directed-update-install.md) 取消本文件历史条款中的更新安装前存储、写操作、Watch 与恢复状态拦截；已下载更新由用户决定安装。
+
+
 - Status: Accepted
 - Date: 2026-08-25
 - Amended: 2026-09-03 (Node Core ownership transfer and compatibility-adapter boundary)

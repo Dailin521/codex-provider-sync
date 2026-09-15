@@ -1024,7 +1024,7 @@ V1/C3 已实现上述边界；`runSync/runSwitch/runRepair/runRestore/runWatch` 
 
 ### 16.7 C8 Electron Restore / Watch / Diagnostics / Update 候选边界
 
-ADR-0042 补充：`stable-updater` 显式启用 Windows 安装版应用内下载/重启安装，便携版保持手动。新增 Host `updates.setReminder({schemaVersion:1,version,ignored})` 窄 IPC，版本只用于当前版本提醒偏好，不指定下载/安装目标；schema v2 可选 `reminderIgnored`。Main 原子保存偏好，设置页和新版弹窗共用；手动检查/更新仍可用，下个新版继续提醒，保存失败不能假报成功。详见 [ADR-0042](../../adr/0042-windows-updater-and-version-reminders.md)。CoreFacade 与既有安装守卫不变。
+ADR-0042 补充：`stable-updater` 显式启用 Windows 安装版应用内下载/重启安装，便携版保持手动。新增 Host `updates.setReminder({schemaVersion:1,version,ignored})` 窄 IPC，版本只用于当前版本提醒偏好，不指定下载/安装目标；schema v2 可选 `reminderIgnored`。Main 原子保存偏好，设置页和新版弹窗共用；手动检查/更新仍可用，下个新版继续提醒，保存失败不能假报成功。详见 [ADR-0042](../../adr/0042-windows-updater-and-version-reminders.md)。CoreFacade 不变；安装前置条件由 ADR-0046 修订。
 
 - DesktopCoreClient、Preload、Main IPC、Supervisor 与 Utility 只按精确方法组增加 `prepareRestore/applyRestore`、`pruneBackups/startWatch/stopWatch/getWatchStatus`。Main 持有 Restore Plan 与 Watch ID；Renderer 只提交 profile、受管 backupId、Restore options、keepCount 或有限 Watch 输入。
 - Recovery Required 时，Sync/Switch/startWatch 继续阻断；Restore 与 Prune 可作为 recovery-safe 操作进入 Core，stop/get Watch status 仍可用。Restore Apply 属于 cancellable write lifecycle，完成后使 Supervisor 的 Status preflight 失效并重新读取。
@@ -1032,7 +1032,7 @@ ADR-0042 补充：`stable-updater` 显式启用 Windows 安装版应用内下载
 - Watch 每次 apply 都重新 Prepare/Apply 并获取 Codex Home 锁；SQLite 竞争由该次原生事务裁决。已 Prepare 的人工 Plan 具有优先级；Watch 合并重复事件并等待人工 intent 释放或过期，只运行一次 follow-up。首次遇到 `RECOVERY_REQUIRED/PENDING_TRANSACTION` 即停止，不继续自动写。同一物理 Codex Home 只能有一个 active/pending Watch；停止后释放 scope，终态历史有界。
 - Diagnostics Renderer 请求严格只有 `{schemaVersion:1, profile}`。输出目标由 Main 原生文件选择器产生并转换为 5 分钟、单次消费的随机 capability；最多保留 32 个未消费 capability，同一规范化目标只能被一个 capability 保留，写入前还必须按父目录 realpath 拒绝指向同一物理 ZIP 的并发路径别名。过期、显式 revoke、消费成功或失败都会释放目标 reservation；同 token 并发导出最多一方成功。token 和目标路径不跨 Renderer。ZIP 条目固定且再次执行共享 Diagnostics DTO exact validation，排除 `auth.json`、凭据、token、路径、rollout/DB、消息正文与 `encrypted_content`。
 - Update 只由 Main 的 `electron-updater` controller 管理，固定使用打包 metadata 中的 GitHub provider；不得调用 `setFeedURL`，Renderer 不得提交 URL、channel、路径、版本、silent/force 参数或接收 release notes、下载 URL、缓存路径和原始异常。Preload 仅暴露无参数的 `getStatus/check/download/install`，响应为脱敏 schema v2 状态。
-- `autoDownload` 与 `autoInstallOnAppQuit` 均关闭。检查、下载或更新错误不得改变 Core 结果。安装意图必须在 Supervisor 内同步关闭 restart gate，将已经入场但尚处于 preflight/dispatch 前的写请求计入 admission，并等待这些请求排空；此后新的 Sync/Switch/Restore/Prune/startWatch 立即返回 busy，只有 `getWatchStatus` 仍为只读。排空后，Main 必须通过既有 Utility `getWatchStatus` 重新核对其持有的 Watch ownership，清除已自动停止的缓存；查询失败或仍有 active Watch 时 fail closed。随后还必须确认 update 已下载、无写操作，并对全部已知 Profile 强制刷新 Status、证明无 pending recovery，最后才可调用 `quitAndInstall`；任一 Profile 无法验证、installer 抛错或安装未启动时均 fail closed 并重新开放 gate。
+- ADR-0046 修订：`autoDownload` 与 `autoInstallOnAppQuit` 均关闭。下载完成后安装由用户决定，不以写操作、Watch、pending recovery 或全部 Profile Status 复核为前提。Main 不执行安装前存储扫描或等待写队列排空；restart lease 只阻止安装开始后的新业务操作，无法取得 lease 不否决安装。保留正常退出清理、重复点击去重及安装器失败后的 lease 释放。Host Update schema v2 不变，旧拦截原因字段仅保留兼容解析。详见 [ADR-0046](../../adr/0046-user-directed-update-install.md)。
 - C8 只接入受控状态机和门禁。只有 Main 编译期 `releaseAuthorized=true`、packaged、受支持目标且版本/通道已配置时才允许创建 updater port、排定检查或执行任何网络/安装动作；缺省及所有未授权候选固定为 `disabled/not-authorized`。C9 候选显式注入 `releaseAuthorized=false`；签名、Update metadata、跨版本 packaged smoke，以及覆盖外部 CLI/Web/Watch 的跨运行时 maintenance lease 仍属于发布前门禁，未获得发布授权前不得把通道描述为已上线。
 
 ### 16.8 C9 Electron 候选产物与 CI 边界
@@ -1054,9 +1054,9 @@ ADR-0040：Prepare/普通写内部失败可携带白名单 `failureStage/causeCo
 
 - ADR-0027：保留数量仅在“备份与恢复”设置，范围 1–1000、默认 2；Host 持久化一份应用偏好，各 Codex Home 分别应用，不按操作类型分池。共享 UI 的 Sync/Switch/Repair 表单不再带 keepCount，由 App 在 Prepare 时注入，Watch 在启动时注入。保存只查本 Core 全部 Watch 并写 Host 偏好，不清理备份；活动 Watch/读取失败/持久化失败不保存。手动清理采用已保存值，草稿未保存时不允许清理；高级“删除全部可清理备份”仍在确认后调用 keep=0，自动策略不能设为 0。Restore 快照/journal/受保护备份及 CLI `--keep` 不变。
 
-- 更新检查启动策略补充：每天首次启动后延迟15秒尝试一次，使用userData本地日历日期标记跨启动去重；失败也消耗当天自动检查资格，持久化失败则跳过自动检查，手动检查不限。只有发现新版才由Main显示原生提示，不自动下载或安装；日常Status/Diagnostics/History仍无后台刷新。启动检查记操作日志，更新推送由UI根级接收。
+- 更新检查启动策略补充：每天首次启动后延迟5秒尝试一次，使用userData本地日历日期标记跨启动去重；失败也消耗当天自动检查资格，持久化失败则跳过自动检查，手动检查不限。只有发现新版才由Main显示原生提示，不自动下载或安装；日常Status/Diagnostics/History仍无后台刷新。启动检查记操作日志，更新推送由UI根级接收。
 
-- ADR-0020补充16.7：便携/未授权本地打包版允许用户手动检查固定公开GitHub Releases（15秒/2MiB/最多30项），只筛选较新正式版及当前平台Electron资产；不实例化electron-updater、不自动下载/安装。下载按钮在此模式仅由Main打开固定官方版本页。授权安装版继续既有安装门禁；currentVersion/mode为schema v2可选字段，Preload增加只读subscribe更新状态，UI接收推送而非轮询。检查失败明确显示且可重试；不更改发布授权。
+- ADR-0020补充16.7：便携/未授权本地打包版允许用户手动检查固定公开GitHub Releases（15秒/2MiB/最多30项），只筛选较新正式版及当前平台Electron资产；不实例化electron-updater、不自动下载/安装。下载按钮在此模式仅由Main打开固定官方版本页。授权安装版按 ADR-0046 由用户决定安装；currentVersion/mode为schema v2可选字段，Preload增加只读subscribe更新状态，UI接收推送而非轮询。检查失败明确显示且可重试；不更改发布授权。
 
 - Overview 新增“直接同步”，点击即授权执行，无二次确认；内部连续调用 prepareSync/applySync，Apply 仍仅传 schemaVersion/planId。保留“预览同步”。Prepare 阶段的取消/失败不进入 Apply；运行中阻止重复提交与 Profile 切换，沿用进度、取消、结果及默认 2 份备份。
 - Desktop 完整诊断独立请求预算为 15 分钟，不沿用普通只读的 30 秒。UI 显示扫描中、失败、重试和成功时间；重试失败时保留并明确标记上次成功结果。仍按 Profile/revision 隔离、无后台扫描。

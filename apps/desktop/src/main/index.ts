@@ -269,17 +269,7 @@ if (!app.requestSingleInstanceLock()) {
       onStatus: (status) => {
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(DESKTOP_IPC_CHANNELS.updateEvent, status);
       },
-      supervisor,
-      hasActiveWatches: () => activeWatchCount > 0,
-      verifyNoActiveWatches: async () => (
-        (await ipcRegistration?.verifyNoActiveWatchesForRestart()) === "clear"
-      ),
-      verifyRecoveryState: () => supervisor!.verifyProfilesSafeForRestart(
-        profiles.list().map((profile) => ({
-          profileId: profile.id,
-          profileRevision: profile.revision
-        }))
-      )
+      supervisor
     });
     ipcRegistration = registerDesktopIpc({
       ipcMain,

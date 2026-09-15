@@ -1,9 +1,5 @@
 # Codex Provider Sync Desktop
 
-Invalid UTF-8, array payloads, and metadata exceeding processing capacity are skipped with specific reasons; associated index rows stay unchanged. Resolve the data issue and preview again. No automatic transcoding or fixed nesting limit is introduced.
-
-Node Sync/Switch/Watch skip isolated invalid, oversized, unreadable or changed sessions and preserve their associated index rows. Healthy data continues; partial results show counts and up to 200 local details. A new preview can include repaired data. Switch can still back up and change configuration when all history is skipped. Global storage/database/backup failures stop the operation. Diagnostic exports remove local paths and row identifiers.
-
 V1 Electron is the primary desktop interface for aligning Provider metadata in local Codex session files and the chat index, helping reuse sessions affected by Provider mismatches after switching. Sync does not guarantee cross-provider decryption or continuation. Build targets are Windows, macOS, and Linux; available downloads depend on actual Release assets. Local builds do not imply public release, signing, or an enabled update channel.
 
 ## First use
@@ -50,6 +46,12 @@ The Provider business scan only parses first-line metadata. Safe, uniquely locat
 Overview's **How to speed up sync** is optional guidance, not a mode switch. Renaming Providers is unnecessary. If you choose to change an ID, keep config and your Provider manager consistent; changing a display name alone does not help.
 
 Backups, flushing and file modification-time restoration remain enabled. Prepare shares bounded header facts within that request; Apply checks files afresh. Message timestamps and thread-index update times are not changed. See [working principles](WORKING_PRINCIPLE_ZH.md).
+
+## Problem sessions and large headers
+
+Node Electron supports first-line metadata up to **128 MiB** of UTF-8 content, excluding line endings; this is not a limit on the entire conversation file.
+
+When one session has an invalid encoding, format or header size, the app skips it, preserves its associated index rows and reports why in preview, results and operation logs. Healthy sessions continue to sync or switch. Fix the data and prepare again to include it. Repeatedly closing Codex cannot fix a permanent format error; global storage, database and backup failures still stop the operation.
 
 ## Backups and Restore
 
@@ -123,7 +125,7 @@ Record renumbering, history display-index rebuilding and encrypted-content modif
 - **Not verified / Refresh needed:** retry the status read. This is not evidence of an active write; do not delete lock files.
 - **Sessions currently in use:** Codex writer-held sessions in this Home, including idle/child/already-aligned chats. Currently available for the Windows writer mechanism; unavailable observations show Unknown, not zero. It is not a count of replies being generated.
 - **Sessions to skip this time:** blocked targets for this sync, separate from session activity.
-- **Partial:** inspect the failed stage, error and backup, then prepare/retry or manually Restore. Ordinary writes do not automatically roll back everything.
+- **Partial:** inspect the reason and backup. Fix invalid/oversized metadata before preparing again; retry locked/changing files after writing stops, or manually Restore. Ordinary writes do not automatically roll back everything.
 - **Final Provider check incomplete:** manually refresh Overview rather than assuming alignment.
 - **Old chat cannot continue:** return to its original Provider/account or start a new chat when encryption is incompatible.
 
@@ -141,9 +143,9 @@ The UI supports Chinese/English, system/light/dark themes, keyboard navigation, 
 
 **Settings → Updates** checks for higher stable Electron versions, not Legacy .NET EXEs.
 
-- The first launch each local date checks once and only announces an available update. Later launches do not check again, nor does continuous running schedule a new-day check. Manual retry remains available; no automatic download/install.
+- The first launch each local date checks about five seconds after startup and only announces an available update. Later launches do not check again, nor does continuous running schedule a new-day check. Manual retry remains available; no automatic download/install.
 - Portable/local packaged builds open the official download page. Close the app and extract the complete new version into a new directory.
-- Installer builds with an enabled channel can download on request, then restart on confirmation. Writes, Watch and unresolved recovery block installation.
+- Installer builds with an enabled channel can download on request, then restart on confirmation. Installation is the user's decision; storage state, writes, Watch and unresolved recovery do not disable it.
 - **Legacy .NET's single-EXE updater cannot directly upgrade to Electron.** Initial migration needs the full new package. An NSIS installer must not masquerade as the old EXE; online cross-version upgrade validation is separate.
 - Updating the program does not replace Codex data. Actual release notes determine availability, signing and update support.
 
@@ -166,7 +168,3 @@ npm run desktop:test:e2e
 ```
 
 [Home](../README.md) · [CLI guide (Chinese)](README_CLI_ZH.md) · [Current Core architecture](architecture/NODE_CORE_ARCHITECTURE_ZH.md)
-
-### Large session metadata
-
-Electron supports first-line metadata up to 128 MiB, excluding line endings. Oversized or invalid headers are skipped with distinct reasons while healthy sessions continue; resolve the cause and prepare again to include them.
