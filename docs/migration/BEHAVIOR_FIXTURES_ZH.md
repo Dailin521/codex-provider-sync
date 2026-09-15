@@ -8,6 +8,8 @@
 
 占用错误包装回归覆盖 Status/Provider 扫描明细保留路径、原因和重试提示；Node 流式写入的写前读取保留原始错误码，EBUSY/EPERM 明确未写入后跳过，后续健康文件继续。Repair 共享读取的默认错误包装不变。
 
+`provider-skip-data.test.js` 验证预览时已对齐的 SQLite 行在执行前改 Provider 或消失：有/无 `rollout_path`、无写目标/混合健康目标均返回部分完成，变化行和对应 rollout 保持原样，空写集合不创建备份。
+
 ## ADR-0044：大首行与明确错误
 
 `test/large-session-metadata.test.js` 覆盖 8 MiB 完整 Status→Sync/Switch→Restore、原地/变长正文不变、128 MiB LF/CRLF/EOF 读取边界与线性合并、超限/无效 Prepare 零写入及安全错误。`CPS_LARGE_HEADER_MIB=128` 可显式运行完整近上限读写。`provider-preparation-facts.test.js`、`status-coordination.test.js` 保留无效/超限拒绝及 Status 不完整检查。生产 Electron smoke 使用 8 MiB 首行验证大首行同步与恢复。

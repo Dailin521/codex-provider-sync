@@ -162,6 +162,66 @@ test("a row whose rollout_path changes after preview is preserved", async t => {
   assert.ok(result.result.skipSummary.items.some(item => item.kind === "sqlite" && item.id === "good"));
 });
 
+test("initially aligned SQLite rows that change or disappear make Apply partial without expanding the plan", async t => {
+  for (const withPath of [false, true]) for (const mixed of [false, true]) for (const drift of ["provider", "missing"]) {
+    const f = await fixture(t, withPath);
+    await fs.writeFile(f.good, line("good").replace('"custom"', '"openai"'));
+    await fs.writeFile(f.bad, line("bad").replace('"custom"', mixed ? '"custom"' : '"openai"'));
+    const setupDb = await openDatabase(f.dbPath);
+    try {
+      setupDb.exec("UPDATE threads SET model_provider='openai'");
+      if (mixed) setupDb.exec("UPDATE threads SET model_provider='custom' WHERE id='bad'");
+    } finally { setupDb.close(); }
+    const original = await fs.readFile(f.good);
+    const plan = await prepareSync({ codexHome: f.home });
+    assert.equal(plan.impact.rolloutFilesToChange, mixed ? 1 : 0);
+    assert.equal(plan.impact.sqliteRowsToChange, mixed ? 1 : 0);
+    const changedDb = await openDatabase(f.dbPath);
+    try {
+      changedDb.exec(drift === "missing" ? "DELETE FROM threads WHERE id='good'" : "UPDATE threads SET model_provider='custom' WHERE id='good'");
+    } finally { changedDb.close(); }
+    const result = await apply(plan);
+    assert.equal(result.outcome, "partial");
+    assert.equal(result.result.changedSessionFiles, mixed ? 1 : 0);
+    assert.equal(result.result.sqliteRowsUpdated, mixed ? 1 : 0);
+    assert.equal(Boolean(result.backup), mixed);
+    assert.deepEqual(result.result.skipSummary.items.filter(item => item.id === "good"), [{
+      kind: "sqlite", id: "good", reason: drift === "missing" ? "row-missing" : "row-changed", stage: "revalidate", retryable: true
+    }]);
+    assert.deepEqual(await fs.readFile(f.good), original);
+    assert.deepEqual(await f.rows(), { ...(drift === "missing" ? {} : { good: "custom" }), bad: "openai", "sqlite-only": "openai" });
+  }
+});
+
+test("SQLite transaction reports initially aligned row drift during rollout writes", async t => {
+  for (const drift of ["provider", "missing"]) {
+    const f = await fixture(t);
+    await fs.writeFile(f.good, line("good").replace('"custom"', '"openai"'));
+    await fs.writeFile(f.bad, line("bad"));
+    const setupDb = await openDatabase(f.dbPath);
+    try { setupDb.exec("UPDATE threads SET model_provider='openai' WHERE id <> 'bad'"); } finally { setupDb.close(); }
+    const original = await fs.readFile(f.good);
+    let changed = false;
+    const plan = await prepareSync({ codexHome: f.home, faultInjector: async ({ point }) => {
+      if (point !== "after_rollout_apply" || changed) return;
+      changed = true;
+      const db = await openDatabase(f.dbPath);
+      try { db.exec(drift === "missing" ? "DELETE FROM threads WHERE id='good'" : "UPDATE threads SET model_provider='custom' WHERE id='good'"); }
+      finally { db.close(); }
+    } });
+    const result = await apply(plan);
+    assert.equal(changed, true);
+    assert.equal(result.outcome, "partial");
+    assert.equal(result.result.changedSessionFiles, 1);
+    assert.equal(result.result.sqliteRowsUpdated, 1);
+    assert.deepEqual(result.result.skipSummary.items.filter(item => item.id === "good"), [{
+      kind: "sqlite", id: "good", reason: drift === "missing" ? "row-missing" : "row-changed", stage: "sqlite", retryable: true
+    }]);
+    assert.deepEqual(await fs.readFile(f.good), original);
+    assert.deepEqual(await f.rows(), { ...(drift === "missing" ? {} : { good: "custom" }), bad: "openai", "sqlite-only": "openai" });
+  }
+});
+
 test("a file disappearing after backup is excluded from physical Restore validation", async t => {
   const f = await fixture(t);
   await fs.writeFile(f.bad, line("bad"));

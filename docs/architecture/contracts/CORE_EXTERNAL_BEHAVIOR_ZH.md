@@ -4,6 +4,8 @@
 
 ADR-0045 当前增量：Provider Sync/Switch/Watch 将单条首行无效、128 MiB 输入/输出超限、占用/不可读、消失/变化及明确未损坏源文件的写入失败列为跳过，正常候选继续；对应 SQLite 行及不确定关联保持原样。计划排除集合冻结，新增数据留待下次；全局安全、目录枚举、配置/存储、数据库和备份故障仍停止。部分完成新增有界 `skipSummary`（最多 200 项本机完整路径/安全行标识、原因/阶段/可重试性及总数/省略/未确认数）；诊断导出单独移除路径和标识。全部跳过的 Sync 无备份，Switch 仍备份并切换配置。JSON 部分完成退出 3，Human 保持既有行为；协议结构版本不变。保留 128 MiB 与 PIO，Repair/Restore 边界不变。详见 [ADR-0045](../../adr/0045-isolated-provider-data-skips.md)。
 
+预览时已对齐的 SQLite 行也参与执行前复核：Provider/关联路径变化或行消失时保留现场并报告部分完成。已有 SQLite 写事务内再次核对完整预览快照，实际 UPDATE 始终限于原确认候选；纯观察不新增写事务或备份。
+
 ## 2026-09-11：轻量状态相关性（ADR-0043）
 
 普通 Status 使用内部 `status` revision：正文追加、非 Provider SQLite 列及 WAL/SHM 变化不导致失效；仍校验首行、文件身份/链接数/集合/最小大小、threads schema/ID/Provider/archived 和配置路径。Provider 状态不再整读/哈希数据库文件。真实漂移最多重试一次，实际锁与 pending Restore 继续优先阻断。超限/非法首行仍不完整、不可读数据库仍不可读，WSL 不执行 SQL。完整 Diagnostics、显式 full Status、Plan/Apply、Repair/Restore 与 PIO 不变。见 [ADR-0043](../../adr/0043-status-provider-relevant-revisions.md)。

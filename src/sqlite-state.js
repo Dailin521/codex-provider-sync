@@ -709,7 +709,18 @@ export async function updateSqliteProvider(storageOrLocation, targetProvider, af
       const read = db.prepare(`SELECT model_provider${hasPath ? ", rollout_path" : ""} FROM threads WHERE ${key} = ?`);
       const update = db.prepare(`UPDATE threads SET model_provider = ? WHERE ${key} = ? AND model_provider IS ?${hasPath ? " AND rollout_path IS ?" : ""}`);
       let changes = 0;
+      const changedRows = new Set();
+      if (Array.isArray(options.expectedRows)) {
+        for (const row of options.expectedRows) {
+          const current = read.get(row.id);
+          if (!current || current.model_provider !== row.model_provider || (hasPath && current.rollout_path !== row.rollout_path)) {
+            changedRows.add(String(row.id));
+            skippedItems.push({ kind: "sqlite", id: String(row.id), reason: current ? "row-changed" : "row-missing", stage: "sqlite", retryable: true });
+          }
+        }
+      }
       for (const row of options.plannedRows) {
+        if (changedRows.has(String(row.id))) continue;
         const current = read.get(row.id);
         if (!current || current.model_provider !== row.model_provider || (hasPath && current.rollout_path !== row.rollout_path)) {
           skippedItems.push({ kind: "sqlite", id: String(row.id), reason: current ? "row-changed" : "row-missing", stage: "sqlite", retryable: true });

@@ -162,6 +162,17 @@ export async function buildProviderWriteProgram(context, settings = {}) {
     if (currentState.schema !== sqliteState.schema || JSON.stringify(currentState.identity) !== JSON.stringify(sqliteState.identity)) {
       throw new CoreError("STALE_STATE", "The thread index changed before backup.", { details: { reason: "state-db" } });
     }
+    const currentRows = new Map(currentState.rows.map(row => [String(row.id), row]));
+    const changedRows = new Set();
+    for (const expected of sqliteState.rows) {
+      const id = String(expected.id);
+      const row = currentRows.get(id);
+      if (!row || row.model_provider !== expected.model_provider || row.rollout_path !== expected.rollout_path) {
+        changedRows.add(id);
+        selection.skippedItems.push({ kind: "sqlite", id, reason: row ? "row-changed" : "row-missing", stage: "revalidate", retryable: true });
+      }
+    }
+    selection.rows = selection.rows.filter(row => !changedRows.has(String(row.id)));
     for (const row of currentState.rows) if (!expectedRowIds.has(String(row.id)) && row.model_provider !== targetProvider) {
       selection.skippedItems.push({ kind: "sqlite", id: String(row.id), reason: "deferred", stage: "revalidate", retryable: true });
     }
@@ -310,6 +321,7 @@ export async function buildProviderWriteProgram(context, settings = {}) {
                 const result = await sqliteTransaction.updateProvider(writeContext.storage, targetProvider, {
                   busyTimeoutMs: writeContext.sqliteBusyTimeoutMs,
                   plannedRows: finalSelection.rows,
+                  expectedRows: sqliteState.rows,
                   expectedSchema: sqliteState.schema,
                   expectedIdentity: sqliteState.identity,
                   expectedRowIds: [...expectedRowIds],
