@@ -59,6 +59,15 @@ test("reads the current repository Chinese release metadata", () => {
   assert.equal(result.relativeBodyPath, "docs/release-notes/v0.5.0-zh.md");
 });
 
+test("reads the current user-facing v1.0.3 announcement", () => {
+  const testDirectory = path.dirname(fileURLToPath(import.meta.url));
+  const rootDir = path.resolve(testDirectory, "..");
+
+  const result = readReleaseMetadata({ rootDir, tag: "v1.0.3" });
+
+  assert.equal(result.title, "v1.0.3 - 会话同步与更新体验改进");
+});
+
 test("reads one validated release title and body path", () =>
   withFixture((rootDir) => {
     writeAnnouncement(
@@ -114,14 +123,42 @@ test("rejects duplicate, mismatched, and placeholder release metadata", () =>
     );
   }));
 
-test("rejects a release announcement missing required safety content", () =>
+test("accepts user-facing sections without fixed internal boilerplate", () =>
   withFixture((rootDir) => {
-    const incomplete = completeAnnouncement("v1.2.3", "标题").replace("`auth.json`", "认证文件");
+    writeAnnouncement(
+      rootDir,
+      "v1.2.3",
+      `<!-- release-title: v1.2.3 - 用户向标题 -->
+
+${"发布内容。".repeat(50)}
+
+## 📦 下载
+下载说明。
+
+## ⬆️ 升级说明
+升级说明。
+
+## 🗂 会话同步怎么处理
+使用说明。
+
+## 🔒 数据处理方式
+数据说明。
+
+## 🔍 本版验证
+验证说明。`,
+    );
+
+    assert.doesNotThrow(() => readReleaseMetadata({ rootDir, tag: "v1.2.3" }));
+  }));
+
+test("rejects a release announcement missing required user-facing sections", () =>
+  withFixture((rootDir) => {
+    const incomplete = completeAnnouncement("v1.2.3", "标题").replace("## 🛡 安全保障", "## 处理细节");
     writeAnnouncement(rootDir, "v1.2.3", incomplete);
 
     assert.throws(
       () => readReleaseMetadata({ rootDir, tag: "v1.2.3" }),
-      /missing required release or safety content: `auth\.json`/,
+      /missing required user-facing sections: 数据处理方式/,
     );
   }));
 

@@ -7,19 +7,18 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const RELEASE_TAG_PATTERN =
   /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
 const TITLE_PATTERN = /^<!-- release-title: ([^\r\n]+) -->$/gm;
-const REQUIRED_ANNOUNCEMENT_MARKERS = [
-  "## 📦 下载",
-  "## ⬆️ 升级说明",
-  "## 🛡 安全保障",
-  "## ⚠️ 重要说明",
-  "## 🔍 验证结果",
-  "SmartScreen",
-  "SHA-256",
-  "`auth.json`",
-  "`updated_at`",
-  "`encrypted_content`",
-  "回滚",
-  "WSL UNC",
+const REQUIRED_ANNOUNCEMENT_SECTION_GROUPS = [
+  { label: "下载", markers: ["## 📦 下载"] },
+  { label: "升级说明", markers: ["## ⬆️ 升级说明"] },
+  {
+    label: "使用说明",
+    markers: ["## ⚠️ 重要说明", "## 🗂 会话同步怎么处理", "## 使用提示"],
+  },
+  {
+    label: "数据处理方式",
+    markers: ["## 🛡 安全保障", "## 🔒 数据处理方式"],
+  },
+  { label: "验证", markers: ["## 🔍 验证结果", "## 🔍 本版验证"] },
 ];
 
 function displayPath(rootDir, targetPath) {
@@ -57,12 +56,14 @@ export function readReleaseMetadata({ rootDir, tag }) {
   if (/\b(?:TODO|TBD)\b/.test(body)) {
     throw new Error(`${relativeBodyPath} still contains a TODO or TBD placeholder.`);
   }
-  const missingMarkers = REQUIRED_ANNOUNCEMENT_MARKERS.filter(
-    (marker) => !body.includes(marker),
+  const missingSections = REQUIRED_ANNOUNCEMENT_SECTION_GROUPS.filter(
+    ({ markers }) => !markers.some((marker) => body.includes(marker)),
+  ).map(
+    ({ label }) => label,
   );
-  if (missingMarkers.length > 0) {
+  if (missingSections.length > 0) {
     throw new Error(
-      `${relativeBodyPath} is missing required release or safety content: ${missingMarkers.join(", ")}`,
+      `${relativeBodyPath} is missing required user-facing sections: ${missingSections.join(", ")}`,
     );
   }
 
