@@ -58,8 +58,9 @@ export async function verifyExpectedPlanState({
     backupDir,
     rolloutRevisionMode: expectedPlanState.rolloutRevisionMode ?? "content",
     minimumRolloutSizes: expectedPlanState.revisions.providerRolloutSizes,
+    providerScoped: Boolean(expectedPlanState.providerScope),
     platform
-  });
+  }, expectedPlanState.providerScope ? { revision: expectedPlanState.revisions.rolloutRevision } : null);
   const reason = revisionMismatch(expectedPlanState.revisions, actual);
   if (reason) {
     throw new CoreError("STALE_STATE", "Protected state changed after the operation was prepared.", {
@@ -112,7 +113,7 @@ export async function preparePlanContext(options, operation, { backupDir = null,
     // Actual write targets are still probed separately by the use case.
     includeSessionActivity: operation === "sync" || operation === "switch",
     platform: options.platform
-  }, providerFacts ? { ...providerFacts.scan, incompletePaths: [] } : null));
+  }, providerFacts ? providerFacts.scan : null));
   const rolloutRevisionMode = (operation === "sync" || operation === "switch" ? "provider" : options.rolloutRevisionMode)
     ?? (options.rolloutScanMode === "full" ? "content" : "metadata");
   const revisions = await withFailureStage("prepare_revisions", () => captureOperationRevisions({
@@ -122,9 +123,10 @@ export async function preparePlanContext(options, operation, { backupDir = null,
     storage,
     backupDir,
     rolloutRevisionMode,
+    providerScoped: Boolean(providerFacts),
     platform: options.platform
   }, providerFacts?.rollout));
   operationCoordinator.cacheStatus(codexHome, status, options.platform);
   return { codexHome, sqliteHome, configText, storage, profile, revisions, status, rolloutRevisionMode,
-    providerScan: providerFacts?.scan };
+    providerScan: providerFacts?.scan, providerFiles: providerFacts?.rollout.fileBindings };
 }

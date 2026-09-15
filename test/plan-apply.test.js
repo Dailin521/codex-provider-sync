@@ -297,7 +297,7 @@ test("applySync rejects config drift under the write locks before backup", async
   }
 });
 
-test("applySync rejects rollout header and State DB Provider drift before backup", async () => {
+test("applySync skips individual rollout and Provider row drift", async () => {
   for (const drift of ["rollout", "state-db"]) {
     const value = await makeFixture();
     try {
@@ -312,12 +312,11 @@ test("applySync rejects rollout header and State DB Provider drift before backup
           db.close();
         }
       }
-      await assert.rejects(
-        applySync({ schemaVersion: 1, planId: plan.planId }),
-        (error) => error?.code === "STALE_STATE" && error?.details?.reason === drift,
-        drift
-      );
-      assert.equal(await backupCount(value.codexHome), 0, drift);
+      const result = await applySync({ schemaVersion: 1, planId: plan.planId });
+      assert.equal(result.outcome, "partial", drift);
+      const db = await openDatabase(value.stateDbPath);
+      try { assert.equal(db.prepare("SELECT model_provider FROM threads WHERE id = 'thread-a'").get().model_provider, drift === "rollout" ? "custom" : "changed"); } finally { db.close(); }
+      assert.equal(await backupCount(value.codexHome), drift === "rollout" ? 0 : 1, drift);
     } finally {
       await fs.rm(value.root, { recursive: true, force: true });
     }
@@ -351,7 +350,7 @@ test("Sync and Switch allow body appends and non-Provider WAL updates between pr
   }
 });
 
-test("Provider plans still reject replacement, truncation, inventory and schema changes before backup", async (t) => {
+test("Provider plans skip changed targets and defer new targets but reject schema drift", async (t) => {
   for (const drift of ["replace", "truncate", "new-rollout", "new-row", "schema"]) {
     const value = await makeFixture();
     cleanups.push(() => fs.rm(value.root, { recursive: true, force: true }));
@@ -371,8 +370,22 @@ test("Provider plans still reject replacement, truncation, inventory and schema 
         db.exec(drift === "schema" ? "ALTER TABLE threads ADD COLUMN extra TEXT" : "INSERT INTO threads (id, model_provider) VALUES ('thread-b', 'custom')");
       } finally { db.close(); }
     }
-    await assert.rejects(applySync({ schemaVersion: 1, planId: plan.planId }), (error) => error.code === "STALE_STATE", drift);
-    assert.equal(await backupCount(value.codexHome), 0, drift);
+    if (drift === "schema") {
+      await assert.rejects(applySync({ schemaVersion: 1, planId: plan.planId }), error => error.code === "STALE_STATE");
+      assert.equal(await backupCount(value.codexHome), 0);
+    } else {
+      const result = await applySync({ schemaVersion: 1, planId: plan.planId });
+      if (["replace", "truncate"].includes(drift)) {
+        assert.equal(result.outcome, "partial");
+        assert.equal(result.result.changedSessionFiles, 0);
+        assert.equal(result.result.sqliteRowsUpdated, 0);
+      } else if (drift === "new-row") {
+        const db = await openDatabase(value.stateDbPath);
+        try { assert.equal(db.prepare("SELECT model_provider FROM threads WHERE id='thread-b'").get().model_provider, "custom"); } finally { db.close(); }
+      } else {
+        assert.match(await fs.readFile(path.join(path.dirname(value.rolloutPath), "rollout-new.jsonl"), "utf8"), /"custom"/);
+      }
+    }
   }
 });
 
@@ -521,7 +534,8 @@ test("different Codex Homes sharing one State DB rely on native SQLite transacti
 
     release();
     const firstApplied = await firstApply;
-    assert.equal(firstApplied.outcome, "completed");
+    assert.equal(firstApplied.outcome, "partial");
+    assert.ok(firstApplied.result.skipSummary.items.some(item => item.reason === "row-changed"));
   } finally {
     release?.();
     await fs.rm(value.root, { recursive: true, force: true });

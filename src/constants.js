@@ -1,6 +1,8 @@
 import os from "node:os";
 import path from "node:path";
 
+export const PROVIDER_SESSION_META_MAX_BYTES = 128 * 1024 * 1024;
+
 export const DEFAULT_PROVIDER = "openai";
 export const DEFAULT_LOCK_NAME = "provider-sync.lock";
 export const BACKUP_NAMESPACE = "provider-sync";

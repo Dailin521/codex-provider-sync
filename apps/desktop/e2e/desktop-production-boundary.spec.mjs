@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
@@ -782,5 +783,78 @@ test("production or unpacked desktop completes real Sync and Restore through Uti
     }
     await fixture.close();
     if (closeError) throw closeError;
+  }
+});
+
+
+for (const mixed of [false, true]) test(mixed ? "production desktop syncs healthy mixed data and restores" : "production desktop syncs and restores large session metadata", async () => {
+  test.setTimeout(PRODUCTION_SMOKE_TIMEOUT_MS);
+  const fixture = await createDesktopSyncSwitchFixture();
+  const source = await fs.readFile(fixture.rolloutPath, "utf8");
+  const newline = source.indexOf("\n");
+  const metadata = JSON.parse(source.slice(0, newline));
+  metadata.payload.instructions = "x".repeat(8 * 1024 * 1024);
+  await fs.writeFile(fixture.rolloutPath, JSON.stringify(metadata) + source.slice(newline));
+  const badPath = path.join(path.dirname(fixture.rolloutPath), "rollout-bad.jsonl");
+  const badHeaders = new Map();
+  if (mixed) {
+    await fs.writeFile(badPath, "invalid metadata\n");
+    badHeaders.set(path.join(path.dirname(badPath), "rollout-utf8.jsonl"), Buffer.concat([
+      Buffer.from('{"type":"session_meta","payload":{"extra":"'), Buffer.from([255]), Buffer.from('"}}\n')
+    ]));
+    badHeaders.set(path.join(path.dirname(badPath), "rollout-array.jsonl"), Buffer.from('{"type":"session_meta","payload":[]}\n'));
+    badHeaders.set(path.join(path.dirname(badPath), "rollout-complex.jsonl"), Buffer.from(
+      // Newer Electron V8 can serialize deep JSON iteratively. Equal-byte
+      // Providers also exercise semantic comparison's independent capacity.
+      '{"type":"session_meta","payload":{"id":"bad-row","model_provider":"custom","extra":'
+      + '['.repeat(20000) + '0' + ']'.repeat(20000) + '}}\n'));
+    for (const [file, content] of badHeaders) await fs.writeFile(file, content);
+    const db = new DatabaseSync(fixture.stateDbPath);
+    try { db.prepare("INSERT INTO threads(id, model_provider) VALUES ('bad-row', 'legacy-provider')").run(); } finally { db.close(); }
+  }
+  await claimDailyUpdateCheck(fixture.userData);
+  const baseline = await fixture.snapshotTargets();
+  let app;
+  try {
+    app = await launchProductionDesktop({
+      args: [...(packagedExecutable ? [] : [path.join(desktopRoot, "out", "main", "index.js")]), `--user-data-dir=${fixture.userData}`, "--lang=en-US"],
+      env: { ...process.env, CODEX_HOME: fixture.codexHome, CPS_DESKTOP_E2E: "1", CPS_DESKTOP_WINDOW_DISPLAY: "hidden", ELECTRON_ENABLE_SECURITY_WARNINGS: "true" }
+    });
+    const page = await app.firstWindow();
+    await waitForProductionReady(page);
+    await page.getByRole("button", { name: "Sync now" }).click();
+    const result = page.getByRole("dialog", { name: "Operation result" });
+    await expect(result.getByRole("heading", { name: mixed ? "Partially completed" : "Completed", exact: true })).toBeVisible({ timeout: PRODUCTION_OPERATION_TIMEOUT_MS });
+    if (mixed) {
+      await expect(result.getByText("Skipped data", { exact: true })).toBeVisible();
+      await result.getByText("Show local details", { exact: true }).click();
+      await expect(result.getByText(badPath, { exact: true })).toBeVisible();
+      expect(await fs.readFile(badPath, "utf8")).toBe("invalid metadata\n");
+      for (const [file, content] of badHeaders) {
+        await expect(result.getByText(file, { exact: true })).toBeVisible();
+        expect(await fs.readFile(file)).toEqual(content);
+      }
+      await expect(result.getByText("First-line metadata is not valid UTF-8", { exact: false }).first()).toBeVisible();
+      await expect(result.getByText("Metadata exceeds the processing capacity", { exact: false }).first()).toBeVisible();
+      const db = new DatabaseSync(fixture.stateDbPath, { readOnly: true });
+      try { expect(db.prepare("SELECT model_provider FROM threads WHERE id='bad-row'").get().model_provider).toBe("legacy-provider"); } finally { db.close(); }
+    }
+    await result.getByRole("button", { name: "Close", exact: true }).last().click();
+    const synced = await fixture.inspect();
+    expect(synced.rollout.model_provider).toBe("openai");
+    expect(synced.sqlite.provider).toBe("openai");
+    expect(synced.backupIds).toHaveLength(1);
+    await page.getByRole("button", { name: "Backups / Restore" }).click();
+    await page.getByRole("button", { name: new RegExp(synced.backupIds[0]) }).click();
+    await page.getByRole("button", { name: "Preview restore" }).click();
+    const confirmation = page.getByRole("dialog", { name: "Confirm restore" });
+    await expect(confirmation).toBeVisible();
+    await confirmation.getByRole("button", { name: "Confirm restore" }).click();
+    await expect(confirmation).toBeHidden({ timeout: PRODUCTION_OPERATION_TIMEOUT_MS });
+    await expect(result.getByRole("heading", { name: "Completed", exact: true })).toBeVisible({ timeout: PRODUCTION_OPERATION_TIMEOUT_MS });
+    expect((await fixture.snapshotTargets()).hash).toBe(baseline.hash);
+    for (const [file, content] of badHeaders) expect(await fs.readFile(file)).toEqual(content);
+  } finally {
+    try { await app?.close(); } finally { await fixture.close(); }
   }
 });

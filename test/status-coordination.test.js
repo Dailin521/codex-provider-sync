@@ -616,9 +616,9 @@ test("HTTP Status stays usable during normal chatting", async (t) => {
 test("Status keeps oversized metadata incomplete rather than claiming a healthy empty scan", async () => {
   const fixture = await makeFixture();
   try {
-    await fs.writeFile(fixture.rolloutPath, JSON.stringify({ type: "session_meta", payload: {
-      id: "status-thread", model_provider: "openai", title: "x".repeat(1024 * 1024)
-    } }) + "\n");
+    // A sparse, unterminated header exceeds the limit without allocating its text.
+    await fs.writeFile(fixture.rolloutPath, "x");
+    await fs.truncate(fixture.rolloutPath, 128 * 1024 * 1024 + 1);
     const status = await getStatus({ codexHome: fixture.codexHome, includeSessionActivity: false });
     assert.equal(status.rolloutScanComplete, false);
     assert.equal(status.operationInProgress, null);
@@ -627,12 +627,12 @@ test("Status keeps oversized metadata incomplete rather than claiming a healthy 
 });
 
 for (const change of ["replace", "truncate"]) {
-  test(`Status still refuses a ${change} during header inspection`, async t => {
+  test(`Status rechecks a ${change} once and accepts the fresh stable snapshot`, async t => {
     const fixture = await makeFixture();
     try {
       const header = await fs.readFile(fixture.rolloutPath);
       await syntheticAppend(fixture);
-      afterHeaderRead(t, fixture, async count => {
+      const reads = afterHeaderRead(t, fixture, async count => {
         if (count !== 1) return;
         if (change === "truncate") await fs.truncate(fixture.rolloutPath, header.length);
         else {
@@ -641,8 +641,10 @@ for (const change of ["replace", "truncate"]) {
         }
       });
       const status = await getStatus({ codexHome: fixture.codexHome, includeSessionActivity: false });
-      assert.equal(status.statusReadBlocked?.reason, "revision-unverifiable");
-      assert.equal(status.rolloutScanComplete, false);
+      assert.equal(status.statusReadBlocked, undefined);
+      assert.equal(reads(), 5, "one bounded fresh scan verifies the replacement; no polling");
+      assert.equal(status.rolloutScanComplete, true);
+      assert.deepEqual(status.rolloutCounts.sessions, { openai: 1 });
       assert.equal(status.operationInProgress, null);
     } finally {
       methodMocks.restoreAll();

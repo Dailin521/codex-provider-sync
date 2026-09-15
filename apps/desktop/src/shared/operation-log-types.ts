@@ -1,4 +1,4 @@
-import type { FileUpdateTiming } from "@codex-provider-sync/contracts";
+import type { SkipSummary, FileUpdateTiming } from "@codex-provider-sync/contracts";
 
 export type OperationLogStatus =
   | "running"
@@ -37,7 +37,7 @@ export interface OperationLogEntry {
   errorReason?: "profile" | "config" | "storage" | "rollout" | "state-db" | "backup" | "provider-not-configured";
   failedStage?: string;
   failureCode?: string;
-  partialReason?: "locked-session" | "rollout-changed" | "mutation-failed";
+  partialReason?: "locked-session" | "rollout-changed" | "mutation-failed" | "skipped-data";
   retryRecommended?: boolean;
   requestIds: string[];
   planId?: string;
@@ -60,7 +60,7 @@ export interface OperationLogEntry {
     modelMode: "provider-default" | "keep-root-model" | "explicit";
   };
   counts: Record<string, number>;
-  fileUpdateTiming?: FileUpdateTiming;
+  skipSummary?: SkipSummary; fileUpdateTiming?: FileUpdateTiming;
   warnings: string[];
   stages: OperationLogStage[];
 }

@@ -1,5 +1,9 @@
 <div align="center">
 
+Invalid UTF-8, array payloads, and metadata exceeding processing capacity are skipped with specific reasons; associated index rows stay unchanged. Resolve the data issue and preview again. No automatic transcoding or fixed nesting limit is introduced.
+
+Node Sync/Switch/Watch skip isolated invalid, oversized, unreadable or changed sessions and preserve their associated index rows. Healthy data continues; partial results show counts and up to 200 local details. A new preview can include repaired data. Switch can still back up and change configuration when all history is skipped. Global storage/database/backup failures stop the operation. Diagnostic exports remove local paths and row identifiers.
+
 # codex-provider-sync
 
 ### Help reuse existing Codex sessions after switching providers
@@ -84,3 +88,7 @@ CLI, Web and Electron share Node Core; installing the CLI does not install Elect
 Thanks to [@tangquanwei](https://github.com/tangquanwei) for the Local Web UI, history browsing and multilingual documentation foundation, brought into v0.5.0 through [PR #80](https://github.com/Dailin521/codex-provider-sync/pull/80), and to everyone contributing code, documentation and issue investigation.
 
 [Contributors](../CONTRIBUTORS.md) · [GitHub Contributors](https://github.com/Dailin521/codex-provider-sync/graphs/contributors) · [LINUX DO community](https://linux.do/) · [MIT License](../LICENSE)
+
+### Large session metadata
+
+Node Electron, CLI and Web support first-line metadata up to 128 MiB of UTF-8 content, excluding line endings. Oversized or invalid headers are skipped with distinct reasons while healthy sessions continue; resolve the cause and prepare again to include them. This is not a limit on the entire conversation file.

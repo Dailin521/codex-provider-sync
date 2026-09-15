@@ -176,7 +176,15 @@ public static class ProviderByteFile
             {
                 throw new AggregateException("Provider write and immediate recovery failed.", failure, recovery);
             }
-            throw;
+            // The original header and identity were verified after restoration.
+            // Disk exhaustion remains an operation-level stop even after recovery.
+            int code = failure.HResult & 65535;
+            if (code == 39 || code == 112)
+            {
+                failure.Data["providerSyncSourceUnchanged"] = true;
+                throw;
+            }
+            return Complete("SKIP_NOT_APPLIED", timing, total);
         }
         return Complete("APPLIED_IN_PLACE", timing, total);
         }

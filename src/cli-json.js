@@ -2,7 +2,7 @@ import path from "node:path";
 import {
   OPERATION_FAILURE_STAGES,
   SAFE_CAUSE_CODES,
-  publicFileUpdateTiming
+  publicFileUpdateTiming, publicSkipSummary
 } from "../packages/contracts/dist/index.js";
 import { publicHistoryIntegrity } from "./history-integrity-dto.js";
 
@@ -79,6 +79,8 @@ const CLI_ERROR_MESSAGES = Object.freeze({
   SQLITE_UNREADABLE: "The state database is unreadable or malformed.",
   ROLLOUT_LOCKED: "One or more rollout files are locked.",
   ROLLOUT_CHANGED: "One or more rollout files changed during the operation.",
+  ROLLOUT_METADATA_TOO_LARGE: "Session metadata must stay within 128 MiB before and after syncing. Resolve the oversized header before syncing again.",
+  ROLLOUT_METADATA_INVALID: "The first rollout record is not valid session metadata. Resolve the invalid header before syncing again.",
   PENDING_TRANSACTION: "An unfinished transaction must be resolved before another write.",
   BACKUP_FAILED: "The required backup could not be completed.",
   SYNC_FAILED_ROLLED_BACK: "The operation failed and its changes were rolled back.",
@@ -244,6 +246,9 @@ function sanitizeModelSync(value) {
 
 function sanitizeSyncResult(value) {
   const result = {};
+  put(result, "unconfirmedSessionFiles", safeNumber(value.unconfirmedSessionFiles, { integer: true, minimum: 0 }));
+  put(result, "skipSummary", publicSkipSummary(value.skipSummary));
+  put(result, "configUpdated", typeof value.configUpdated === "boolean" ? value.configUpdated : undefined);
   put(result, "fileUpdateTiming", publicFileUpdateTiming(value.fileUpdateTiming));
   for (const key of ["codexHome", "sqliteHome", "backupDir"]) {
     put(result, key, safeString(value[key], 32768));
@@ -266,7 +271,7 @@ function sanitizeSyncResult(value) {
   put(result, "sqlitePresent", safeBoolean(value.sqlitePresent));
   put(result, "partial", safeBoolean(value.partial));
   putNullable(result, "partialReason", value.partialReason, (entry) => (
-    ["locked-session", "rollout-changed", "mutation-failed", "verification-remaining", "verification-unavailable"].includes(entry) ? entry : undefined
+    ["locked-session", "rollout-changed", "mutation-failed", "skipped-data", "verification-remaining", "verification-unavailable"].includes(entry) ? entry : undefined
   ));
   putNullable(result, "failedStage", value.failedStage, (entry) => (
     PARTIAL_FAILURE_STAGES.has(entry) ? entry : undefined
@@ -279,6 +284,7 @@ function sanitizeSyncResult(value) {
   put(result, "skippedChangedRolloutFiles", sanitizeFileNameArray(value.skippedChangedRolloutFiles));
   put(result, "rolloutCountsBefore", sanitizeDistribution(value.rolloutCountsBefore));
   putNullable(result, "autoPruneResult", value.autoPruneResult, sanitizePruneResult);
+  if (value.backupScopeWarning) result.backupScopeWarning = "Backup restore scope could not be narrowed; exclusions are not confirmed.";
   if (value.autoPruneWarning) result.autoPruneWarning = WARNING_MESSAGES.autoPruneWarning;
   else if (value.autoPruneWarning === null) result.autoPruneWarning = null;
   put(result, "modelSync", sanitizeModelSync(value.modelSync));
@@ -321,6 +327,7 @@ function sanitizeRepairResult(value) {
 
 function sanitizeStatusResult(value) {
   const result = {};
+  put(result, "skipSummary", publicSkipSummary(value.skipSummary));
   put(result, "schemaVersion", safeNumber(value.schemaVersion, { integer: true, minimum: 1 }));
   put(result, "snapshotAt", safeString(value.snapshotAt, 64));
   put(result, "storageRevision", safeString(value.storageRevision, 256));
@@ -690,7 +697,7 @@ export function normalizeCliErrorDto(dto) {
       code,
       message,
       severity: canonicalErrorSeverity(code),
-      retryable: true,
+      retryable: code !== "ROLLOUT_METADATA_TOO_LARGE" && code !== "ROLLOUT_METADATA_INVALID",
       recoveryRequired: RECOVERY_CODES.has(code),
       ...(operationId ? { operationId } : {}),
       ...(details ? { details } : {})

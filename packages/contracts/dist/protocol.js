@@ -1,5 +1,6 @@
 import { CORE_METHODS, CORE_PROTOCOL_VERSION } from "./dto.js";
 import { CORE_ERROR_CODES, isCanonicalPublicCoreErrorDto } from "./errors.js";
+import { isSkipSummary } from "./skip-summary.js";
 import { isFileUpdateTiming } from "./file-update-timing.js";
 const METHOD_SET = new Set(CORE_METHODS);
 const ERROR_CODE_SET = new Set(CORE_ERROR_CODES);
@@ -528,6 +529,7 @@ export function assertCoreMethodOutput(method, value) {
                 || !isNonEmptyString(profile.id)
                 || !isNonEmptyString(profile.revision)
                 || !isNonEmptyString(status.currentProvider)
+                || (status.skipSummary !== undefined && !isSkipSummary(status.skipSummary))
                 || (status.sessionActivity !== undefined && !isSessionActivity(status.sessionActivity))
                 || (usage !== undefined && (!isRecord(usage)
                     || Object.keys(usage).sort().join(",") !== "count,state"
@@ -608,6 +610,7 @@ export function assertCoreMethodOutput(method, value) {
                 || !isJsonValue(plan.target)
                 || !isRecord(plan.impact)
                 || !isJsonValue(plan.impact)
+                || (plan.impact.skipSummary !== undefined && !isSkipSummary(plan.impact.skipSummary))
                 || (plan.impact.sessionActivity !== undefined && !isSessionActivity(plan.impact.sessionActivity))
                 || !Array.isArray(plan.warnings)
                 || plan.warnings.some((entry) => typeof entry !== "string")
@@ -647,6 +650,9 @@ export function assertCoreMethodOutput(method, value) {
             requireStringArray(result.warnings, "OperationResult warnings");
             if (!("result" in result) || !isJsonValue(result.result)) {
                 throw new ContractValidationError("INVALID_INPUT", "OperationResult result is required.");
+            }
+            if (isRecord(result.result) && result.result.skipSummary !== undefined && !isSkipSummary(result.result.skipSummary)) {
+                throw new ContractValidationError("INVALID_INPUT", "Invalid skip summary.");
             }
             if (isRecord(result.result) && result.result.fileUpdateTiming !== undefined && !isFileUpdateTiming(result.result.fileUpdateTiming)) {
                 throw new ContractValidationError("INVALID_INPUT", "Invalid file update timing.");

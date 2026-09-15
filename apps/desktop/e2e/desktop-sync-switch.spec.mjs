@@ -548,8 +548,8 @@ test("Electron reports a locked rollout as partial without rewriting the locked 
     const state = await fixture.inspect();
     expect(await fs.readFile(fixture.rolloutPath)).toEqual(rolloutBefore);
     expect(state.rollout.model_provider).toBe("legacy-provider");
-    expect(state.sqlite.provider).toBe("openai");
-    expect(state.backupIds).toHaveLength(1);
+    expect(state.sqlite.provider).toBe("legacy-provider");
+    expect(state.backupIds).toHaveLength(0);
   } finally {
     try {
       await releaseChild(lockProcess);

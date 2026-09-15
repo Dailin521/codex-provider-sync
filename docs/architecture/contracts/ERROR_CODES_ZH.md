@@ -1,5 +1,9 @@
 # vNext Error Code 合同
 
+首行校验补充：非法 UTF-8 使用 `metadata-invalid-utf8`，数组 payload 使用 `metadata-invalid`，序列化或原地资格语义比较的明确容量失败使用 `metadata-too-complex`；三者均逐文件跳过、保留关联索引，固定数据问题不建议稍后重试。不新增固定嵌套层数限制，其他异常仍中止。合法 U+FFFD 支持及 BOM 拒绝规则不变；写前非法编码变化按已变化且未写入处理。
+
+ADR-0045 当前增量：Provider Sync/Switch/Watch 将单条首行无效、128 MiB 输入/输出超限、占用/不可读、消失/变化及明确未损坏源文件的写入失败列为跳过，正常候选继续；对应 SQLite 行及不确定关联保持原样。计划排除集合冻结，新增数据留待下次；全局安全、目录枚举、配置/存储、数据库和备份故障仍停止。部分完成新增有界 `skipSummary`（最多 200 项本机完整路径/安全行标识、原因/阶段/可重试性及总数/省略/未确认数）；诊断导出单独移除路径和标识。全部跳过的 Sync 无备份，Switch 仍备份并切换配置。JSON 部分完成退出 3，Human 保持既有行为；协议结构版本不变。保留 128 MiB 与 PIO，Repair/Restore 边界不变。详见 [ADR-0045](../../adr/0045-isolated-provider-data-skips.md)。
+
 ADR-0041 修订：全部 owner 已证明失效时，内部锁观察返回 `stale`，不再把该情形当作 `LOCK_UNVERIFIABLE`；Status 不创建虚假的进行中操作。任何未知、变动或不可验证 owner 仍按原码阻止写入，未新增错误码。
 
 > **状态：Accepted（阶段 0 合同；ADR-0016 C2/C3 轻量写增量已实施）**

@@ -1,5 +1,9 @@
 # ADR-0037：切换历史、单轮预览首行事实与时间戳保留
 
+> 后续修订：[ADR-0045](0045-isolated-provider-data-skips.md) 取代 Provider 单条问题全局拒绝及集合漂移整体失效规则，保留其余边界。
+
+> 后续修订：首行上限及错误分类以 [ADR-0044](0044-large-session-metadata.md) 为准；下文 1 MiB 记录原决策。
+
 - 状态：Accepted
 - 日期：2026-09-08
 - 范围：V1 Provider Prepare、Desktop 日志/最近使用；不改普通写算法、Restore 或 Legacy

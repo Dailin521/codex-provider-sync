@@ -102,7 +102,7 @@ test("native Windows helper recovers short writes and flush failures", {
 });
 
 test("Windows rewrite worker reuses one process and preserves the closed result set", async () => {
-  const expectedResults = ["APPLIED", "APPLIED_IN_PLACE", "SKIP_BUSY", "SKIP_CHANGED"];
+  const expectedResults = ["APPLIED", "APPLIED_IN_PLACE", "SKIP_BUSY", "SKIP_CHANGED", "SKIP_MISSING", "SKIP_UNREADABLE", "SKIP_NOT_APPLIED"];
   const fake = createFakeSpawn({
     respond(request) {
       return {

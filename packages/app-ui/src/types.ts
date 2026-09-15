@@ -1,4 +1,4 @@
-import type { FileUpdateTiming, WatchSnapshot } from "@codex-provider-sync/contracts";
+import type { SkipSummary, FileUpdateTiming, WatchSnapshot } from "@codex-provider-sync/contracts";
 import type { CoreClient } from "@codex-provider-sync/core-client";
 import type { SupportedLocale, ThemeMode } from "@codex-provider-sync/design-system";
 
@@ -29,8 +29,8 @@ export type HostDirectorySelection =
 
 export type OperationLogStatus = "running" | "awaiting-confirmation" | "completed" | "partial" | "failed" | "cancelled" | "dismissed" | "interrupted";
 export interface OperationLogStage { stage: string; status: "running" | "completed" | "failed"; startedAt: string; completedAt?: string; durationMs?: number; progress?: number; count?: number; }
-export interface OperationLogEntry { fileUpdateTiming?: FileUpdateTiming; }
-export interface OperationLogEntry { schemaVersion: 1; id: string; operation: string; profileId?: string; profileRevision?: string; startedAt: string; completedAt?: string; activeDurationMs: number; wallDurationMs?: number; status: OperationLogStatus; outcome?: string; errorCode?: string; errorReason?: "profile" | "config" | "storage" | "rollout" | "state-db" | "backup" | "provider-not-configured"; failedStage?: string; failureCode?: string; partialReason?: "locked-session" | "rollout-changed" | "mutation-failed"; retryRecommended?: boolean; requestIds: string[]; planId?: string; operationId?: string; backupId?: string; targetProvider?: string; previewCounts?: { rolloutFilesToChange: number; sqliteRowsToChange: number; lockedRolloutFiles: number; }; switchPlan?: { previousProvider: string; targetProvider: string; previousRootModel: string | null; targetRootModel: string | null; modelMode: "provider-default" | "keep-root-model" | "explicit"; }; counts: Record<string, number>; warnings: string[]; stages: OperationLogStage[]; }
+export interface OperationLogEntry { skipSummary?: SkipSummary; fileUpdateTiming?: FileUpdateTiming; }
+export interface OperationLogEntry { schemaVersion: 1; id: string; operation: string; profileId?: string; profileRevision?: string; startedAt: string; completedAt?: string; activeDurationMs: number; wallDurationMs?: number; status: OperationLogStatus; outcome?: string; errorCode?: string; errorReason?: "profile" | "config" | "storage" | "rollout" | "state-db" | "backup" | "provider-not-configured"; failedStage?: string; failureCode?: string; partialReason?: "locked-session" | "rollout-changed" | "mutation-failed" | "skipped-data"; retryRecommended?: boolean; requestIds: string[]; planId?: string; operationId?: string; backupId?: string; targetProvider?: string; previewCounts?: { rolloutFilesToChange: number; sqliteRowsToChange: number; lockedRolloutFiles: number; }; switchPlan?: { previousProvider: string; targetProvider: string; previousRootModel: string | null; targetRootModel: string | null; modelMode: "provider-default" | "keep-root-model" | "explicit"; }; counts: Record<string, number>; warnings: string[]; stages: OperationLogStage[]; }
 export interface OperationLogPage { schemaVersion: 1; page: number; pageSize: number; total: number; hasNextPage: boolean; entries: OperationLogEntry[]; }
 
 export interface HostClient {

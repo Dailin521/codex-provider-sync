@@ -21,6 +21,17 @@ const ENVELOPE_KEYS = [
   "error"
 ];
 
+test("CLI JSON retains new metadata skip reasons with partial exit 3 and no raw exception", () => {
+  const skipSummary = { total: 2, rolloutFiles: 2, sqliteRows: 0, unconfirmed: 0, omitted: 0, retryRecommended: false,
+    items: ["metadata-invalid-utf8", "metadata-too-complex"].map(reason => ({ kind: "rollout", path: `/fixture/${reason}.jsonl`, reason, stage: "scan", retryable: false })) };
+  const envelope = createCliSuccessEnvelope("sync", { partial: true, partialReason: "skipped-data", retryRecommended: false,
+    skipSummary, rawException: "RangeError private source text" });
+  assert.equal(cliJsonExitCode(envelope), 3);
+  assert.deepEqual(envelope.result.skipSummary, skipSummary);
+  assert.equal(envelope.result.retryRecommended, false);
+  assert.doesNotMatch(JSON.stringify(envelope), /RangeError|private source/);
+});
+
 function dto(code, overrides = {}) {
   return {
     code,

@@ -3,9 +3,11 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import {
-  assertCoreMethodOutput,
+  assertCoreMethodOutput, redactSkipSummary,
   type DiagnosticsSnapshot
 } from "@codex-provider-sync/contracts";
+
+import { validateOperationLogEntry } from "../shared/operation-log-validation.js";
 
 import {
   DESKTOP_BUILD_ID,
@@ -220,7 +222,7 @@ export class DesktopDiagnosticsExporter {
         }),
         {
           name: "recent-redacted-logs/operations.jsonl",
-          data: Buffer.from(`${this.#recentLogs()}\n`, "utf8")
+          data: Buffer.from(`${redactOperationLogs(this.#recentLogs())}\n`, "utf8")
         },
         {
           name: "recent-redacted-logs/README.txt",
@@ -287,4 +289,15 @@ export class DesktopDiagnosticsExporter {
       this.#reservedTargets.delete(capability.reservationKey);
     }
   }
+}
+
+/** Export only validated local records, with session identities removed. */
+export function redactOperationLogs(jsonl: string): string {
+  return jsonl.split("\n").filter(Boolean).slice(0, 200).flatMap(line => {
+    try {
+      const entry = validateOperationLogEntry(JSON.parse(line));
+      if (entry.skipSummary) entry.skipSummary = redactSkipSummary(entry.skipSummary);
+      return [JSON.stringify(entry)];
+    } catch { return []; }
+  }).join("\n");
 }

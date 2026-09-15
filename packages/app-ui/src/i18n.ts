@@ -715,6 +715,7 @@ export const resources = {
         cancelling: "Cancelling…",
         cancelPending: "Cancellation will take effect at the next safe point."
       },
+      skips: {"title":"Skipped data","counts":"Skipped {{total}} items: {{files}} files, {{rows}} index rows; {{unknown}} unconfirmed.","details":"Show local details","unidentified":"Unidentified index row","shown":"Showing {{shown}} of {{total}}; {{omitted}} omitted.","retry":"Some files are in use or have changed. Retry those with a fresh preview; fix other listed issues first.","fix":"Resolve the listed issues, then create a fresh preview to include these items.","configSwitched":"Configuration switched; history files updated: {{count}}.","incomplete":"Some session data could not be verified. You can preview and synchronize the healthy portion.","reasons":{"metadata-invalid":"Invalid first-line metadata","metadata-invalid-utf8":"First-line metadata is not valid UTF-8","metadata-too-complex":"Metadata exceeds the processing capacity","metadata-too-large":"Metadata exceeds the 128 MiB input/output limit","locked":"File is in use","unreadable":"File cannot be read","missing":"File disappeared","changed":"File changed","write-not-applied":"Write failed; source confirmed unchanged","association-unknown":"Cannot confirm session association","association-conflict":"Session associations conflict","row-changed":"Index Provider changed","row-missing":"Index row disappeared","deferred":"New item deferred to the next preview"},"stages":{"scan":"Scan","plan":"Preview","revalidate":"Recheck","write":"Write","sqlite":"Index update"}},
       operationResult: {
         title: "Operation result",
         operationId: "Operation ID",
@@ -737,12 +738,14 @@ export const resources = {
           skippedSessions: "Skipped chat records"
         },
         partialReasons: {
+          "skipped-data": "Some session data was skipped",
           "locked-session": "A chat is still in use",
           "rollout-changed": "A chat changed during the operation",
           "mutation-failed": "The operation stopped after some changes were saved"
         },
         resolveBeforeClose: "Resolve the pending recovery before closing this result.",
         fields: {
+          unconfirmedSessionFiles: "Files with unconfirmed write outcome",
           inPlaceSessionFiles: "In-place rollout updates",
           rewrittenSessionFiles: "Fully rewritten rollouts",
           targetProvider: "Target Provider",
@@ -819,6 +822,8 @@ export const resources = {
         SQLITE_UNREADABLE: "The local chat index could not be read. Run diagnostics or restore a backup.",
         ROLLOUT_LOCKED: "Some chats are in use. Close the active Codex sessions and try again.",
         ROLLOUT_CHANGED: "Some chats changed during the operation. Review and try again.",
+        ROLLOUT_METADATA_TOO_LARGE: "Session metadata must stay within 128 MiB before and after syncing. Resolve the oversized header before syncing again.",
+        ROLLOUT_METADATA_INVALID: "The first rollout record is not valid session metadata. Resolve the invalid header before syncing again.",
         PENDING_TRANSACTION: "A previous restore must be completed before continuing.",
         BACKUP_FAILED: "A backup could not be created, so no changes were made.",
         SYNC_FAILED_ROLLED_BACK: "The sync did not finish. The previous data was restored.",
@@ -1559,6 +1564,7 @@ export const resources = {
         cancelling: "正在取消…",
         cancelPending: "取消将在下一个安全点生效。"
       },
+      skips: {"title":"已跳过的问题数据","counts":"跳过 {{total}} 项：文件 {{files}} 个、索引 {{rows}} 条；未确认 {{unknown}} 项。","details":"查看本机明细","unidentified":"无法安全标识的索引行","shown":"共 {{total}} 项，展示 {{shown}} 项，省略 {{omitted}} 项。","retry":"部分文件正在使用或已变化，可稍后重新预览同步；其他问题请按明细处理后再试。","fix":"请先处理明细中的问题，再重新预览，将修好的数据纳入同步。","configSwitched":"配置已切换，历史成功 {{count}} 条。","incomplete":"存在无法确认的问题数据。可以继续预览并同步正常部分。","reasons":{"metadata-invalid":"首行元数据格式无效","metadata-invalid-utf8":"首行元数据不是有效的 UTF-8 编码","metadata-too-complex":"首行元数据超出处理能力","metadata-too-large":"首行元数据在同步前或同步后超过 128 MiB","locked":"文件正在使用","unreadable":"文件无法读取","missing":"文件已消失","changed":"文件已变化","write-not-applied":"写入失败，已确认源文件未受损","association-unknown":"无法确认会话归属","association-conflict":"会话关联冲突","row-changed":"索引 Provider 已变化","row-missing":"索引行已消失","deferred":"新数据留待下一次预览"},"stages":{"scan":"扫描","plan":"预览","revalidate":"执行前复核","write":"写入","sqlite":"索引更新"}},
       operationResult: {
         title: "操作结果",
         operationId: "操作 ID",
@@ -1581,12 +1587,14 @@ export const resources = {
           skippedSessions: "跳过的会话记录"
         },
         partialReasons: {
+          "skipped-data": "部分会话数据已跳过",
           "locked-session": "有聊天仍在使用",
           "rollout-changed": "操作期间聊天记录发生变化",
           "mutation-failed": "部分更改保存后操作中断"
         },
         resolveBeforeClose: "请先完成待处理的恢复，再关闭此结果。",
         fields: {
+          unconfirmedSessionFiles: "写入结果未确认的文件",
           inPlaceSessionFiles: "原地更新的 rollout",
           rewrittenSessionFiles: "完整重写的 rollout",
           targetProvider: "目标 Provider",
@@ -1663,6 +1671,8 @@ export const resources = {
         SQLITE_UNREADABLE: "无法读取本地聊天索引，请运行诊断或从备份恢复。",
         ROLLOUT_LOCKED: "部分会话正在使用中，请关闭相关 Codex 会话后重试。",
         ROLLOUT_CHANGED: "部分会话在操作期间发生变化，请重新检查后重试。",
+        ROLLOUT_METADATA_TOO_LARGE: "会话首行元数据必须在同步前后均不超过 128 MiB，请处理超限问题后再同步。",
+        ROLLOUT_METADATA_INVALID: "会话首行不是有效的会话元数据，请处理格式问题后再同步。",
         PENDING_TRANSACTION: "上一次恢复需要先完成，才能继续操作。",
         BACKUP_FAILED: "无法创建备份，因此没有修改任何数据。",
         SYNC_FAILED_ROLLED_BACK: "同步未能完成，原有数据已经恢复。",

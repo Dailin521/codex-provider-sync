@@ -1,5 +1,5 @@
 import type { OperationLogEntry, OperationLogStage, OperationLogStatus } from "./operation-log-types.js";
-import { isFileUpdateTiming } from "@codex-provider-sync/contracts";
+import { isSkipSummary, isFileUpdateTiming } from "@codex-provider-sync/contracts";
 
 export const operationLogStatuses = new Set<OperationLogStatus>(["running", "awaiting-confirmation", "completed", "partial", "failed", "cancelled", "dismissed", "interrupted"]);
 // A new DTO field must also be consciously admitted at the transport boundary.
@@ -9,7 +9,7 @@ const entryFields = {
   status: true, outcome: true, errorCode: true, failedStage: true, failureCode: true,
   partialReason: true, retryRecommended: true, requestIds: true, planId: true,
   operationId: true, backupId: true, targetProvider: true, previewCounts: true,
-  errorReason: true, switchPlan: true, fileUpdateTiming: true, counts: true, warnings: true, stages: true
+  errorReason: true, switchPlan: true, skipSummary: true, fileUpdateTiming: true, counts: true, warnings: true, stages: true
 } satisfies Record<keyof OperationLogEntry, true>;
 const stageFields = { stage: true, status: true, startedAt: true, completedAt: true, durationMs: true, progress: true, count: true } satisfies Record<keyof OperationLogStage, true>;
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -38,6 +38,7 @@ export function validateOperationLogEntry(value: unknown): OperationLogEntry {
   if ((value.targetProvider !== undefined && (typeof value.targetProvider !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(value.targetProvider)))
       || (value.errorReason !== undefined && !["profile", "config", "storage", "rollout", "state-db", "backup", "provider-not-configured"].includes(String(value.errorReason)))) return fail();
   const planned = value.previewCounts;
+  if (value.skipSummary !== undefined && !isSkipSummary(value.skipSummary)) return fail();
   if (value.fileUpdateTiming !== undefined && !isFileUpdateTiming(value.fileUpdateTiming)) return fail();
   if (planned !== undefined
       && (!record(planned)
@@ -54,7 +55,7 @@ export function validateOperationLogEntry(value: unknown): OperationLogEntry {
   if ((value.completedAt !== undefined && !date(value.completedAt))
       || (value.wallDurationMs !== undefined && !number(value.wallDurationMs))
       || (value.retryRecommended !== undefined && typeof value.retryRecommended !== "boolean")
-      || (value.partialReason !== undefined && !["locked-session", "rollout-changed", "mutation-failed"].includes(String(value.partialReason)))) return fail();
+      || (value.partialReason !== undefined && !["locked-session", "rollout-changed", "mutation-failed", "skipped-data"].includes(String(value.partialReason)))) return fail();
   for (const stage of value.stages) {
     if (!record(stage) || Object.keys(stage).some((key) => !Object.hasOwn(stageFields, key))
         || !text(stage.stage, 120) || !["running", "completed", "failed"].includes(String(stage.status)) || !date(stage.startedAt)

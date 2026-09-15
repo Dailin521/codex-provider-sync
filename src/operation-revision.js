@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { CoreError } from "./core-error.js";
+import { fileReadSkipReason, rolloutSkip, providerPathKey } from "./provider-skips.js";
 import { collectProviderChanges, readProviderRevisionHeader } from "./session-files.js";
 import { readSqliteProviderRevisionState } from "./sqlite-state.js";
 
@@ -64,7 +65,7 @@ async function physicalFileIdentity(filePath, fsImpl, reason) {
     stats = await fsImpl.lstat(filePath, { bigint: true });
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
-    throw new CoreError("STALE_STATE", "A revision target disappeared.", { details: { reason } });
+    throw error;
   }
   if (!stats.isFile() || stats.isSymbolicLink() || stats.ino === 0n) {
     throw new CoreError("STALE_STATE", "The revision file identity cannot be verified.", { details: { reason } });
@@ -86,7 +87,7 @@ async function physicalFileIdentity(filePath, fsImpl, reason) {
 async function captureProviderHeader(filePath, fsImpl, minimumSize, onProviderHeader, allowIncomplete = false) {
   const before = await physicalFileIdentity(filePath, fsImpl, "rollout");
   if (minimumSize !== undefined && BigInt(before.size) < BigInt(minimumSize)) {
-    throw new CoreError("STALE_STATE", "A planned rollout was truncated.", { details: { reason: "rollout" } });
+    throw new CoreError("STALE_STATE", "A planned rollout was truncated.", { details: { reason: "rollout", fileChanged: true } });
   }
   let header;
   let record;
@@ -97,13 +98,14 @@ async function captureProviderHeader(filePath, fsImpl, minimumSize, onProviderHe
     if (allowIncomplete && error?.name === "RolloutMetadataLimitError") header = { incomplete: true };
     else {
       if (!LOCKED_FILE_CODES.has(error?.code)) throw error;
-      header = { locked: true, causeCode: error.code };
+      const reason = fileReadSkipReason(error);
+      header = { locked: reason === "locked", skipReason: reason, causeCode: error.code };
     }
   }
   const after = await physicalFileIdentity(filePath, fsImpl, "rollout");
   if (stableStringify(before.identity) !== stableStringify(after.identity)
       || BigInt(after.size) < BigInt(before.size)) {
-    throw new CoreError("STALE_STATE", "A planned rollout was replaced or truncated.", { details: { reason: "rollout" } });
+    throw new CoreError("STALE_STATE", "A planned rollout was replaced or truncated.", { details: { reason: "rollout", fileChanged: true } });
   }
   onProviderHeader?.(filePath, {
     record, beforeSnapshot: before.snapshot, afterSnapshot: after.snapshot,
@@ -185,12 +187,18 @@ async function captureStableMetadata(filePath, fsImpl, { allowLocked = false } =
   });
 }
 
-async function listRolloutFiles(rootDir, fsImpl) {
+async function listRolloutFiles(rootDir, fsImpl, optionalRoot = true) {
+  try {
+    const info = await fsImpl.lstat(rootDir);
+    if (info.isSymbolicLink() || !info.isDirectory()) throw new CoreError("STALE_STATE", "A rollout directory is unsafe.", { details: { reason: "rollout" } });
+  } catch (error) {
+    if (optionalRoot && error?.code === "ENOENT") return [];
+    throw error;
+  }
   let entries;
   try {
     entries = await fsImpl.readdir(rootDir, { withFileTypes: true });
   } catch (error) {
-    if (error?.code === "ENOENT") return [];
     throw error;
   }
   entries.sort((left, right) => left.name.localeCompare(right.name));
@@ -198,7 +206,7 @@ async function listRolloutFiles(rootDir, fsImpl) {
   for (const entry of entries) {
     const fullPath = path.join(rootDir, entry.name);
     if (entry.isDirectory()) {
-      files.push(...await listRolloutFiles(fullPath, fsImpl));
+      files.push(...await listRolloutFiles(fullPath, fsImpl, false));
     } else if (entry.isFile() && entry.name.startsWith("rollout-") && entry.name.endsWith(".jsonl")) {
       files.push(fullPath);
     } else if (entry.isSymbolicLink()) {
@@ -210,33 +218,69 @@ async function listRolloutFiles(rootDir, fsImpl) {
   return files;
 }
 
-export async function captureRolloutRevision(codexHome, { fsImpl = fs, mode = "content", minimumSizes = {} } = {}, onProviderHeader = undefined) {
+export async function captureRolloutRevision(codexHome, { fsImpl = fs, mode = "content", minimumSizes = {}, expectedFiles = null } = {}, onProviderHeader = undefined) {
   if (!["content", "metadata", "provider", "status"].includes(mode)) {
     throw new CoreError("INVALID_INPUT", "Unsupported rollout revision mode.");
   }
   const manifest = [];
   const lockedRolloutFiles = [];
   const observedSizes = {};
+  const fileBindings = [];
+  const seen = new Set();
+  const expected = expectedFiles ? new Map(expectedFiles.map(file => [providerPathKey(file.path), file])) : null;
   for (const scope of SESSION_SCOPES) {
     const scopeRoot = path.join(codexHome, scope);
-    for (const filePath of await listRolloutFiles(scopeRoot, fsImpl)) {
+    const rootPreviouslyPresent = expectedFiles?.some(file => path.relative(codexHome, file.path).split(path.sep)[0] === scope);
+    for (const filePath of await listRolloutFiles(scopeRoot, fsImpl, !rootPreviouslyPresent)) {
       const relativePath = path.relative(codexHome, filePath).split(path.sep).join("/");
-      const revision = mode === "provider" || mode === "status"
-        ? await captureProviderHeader(filePath, fsImpl, minimumSizes[relativePath], onProviderHeader, mode === "status")
-        : mode === "metadata"
-        ? await captureStableMetadata(filePath, fsImpl, { allowLocked: true })
-        : await captureStableFile(filePath, fsImpl, { allowLocked: true });
+      const key = providerPathKey(filePath);
+      seen.add(key);
+      const prior = expected?.get(key);
+      let record;
+      let revision;
+      if (expected && (!prior || prior.skip)) {
+        const skip = prior?.skip ?? rolloutSkip(filePath, "deferred", "revalidate");
+        revision = { skipped: skip.reason };
+        record = { skip };
+      } else {
+        try {
+          revision = mode === "provider" || mode === "status"
+            ? await captureProviderHeader(filePath, fsImpl, minimumSizes[relativePath], (_, value) => { record = value; })
+            : mode === "metadata"
+            ? await captureStableMetadata(filePath, fsImpl, { allowLocked: true })
+            : await captureStableFile(filePath, fsImpl, { allowLocked: true });
+          if (revision.skipReason) record = { skip: rolloutSkip(filePath, revision.skipReason, expected ? "revalidate" : "scan", prior?.id) };
+          if (prior && (prior.headerHash !== revision.headerHash || prior.realPath !== revision.realPath
+              || prior.ino !== revision.ino || prior.dev !== revision.dev || prior.nlink !== revision.nlink
+              || BigInt(revision.observedSize ?? 0) < BigInt(prior.observedSize ?? 0))) {
+            record = { skip: rolloutSkip(filePath, "changed", "revalidate", prior.id) };
+          }
+        } catch (error) {
+          const reason = ["provider", "status"].includes(mode) ? fileReadSkipReason(error) : null;
+          if (!reason) throw error;
+          record = { skip: rolloutSkip(filePath, reason, expected ? "revalidate" : "scan", prior?.id) };
+          revision = { skipped: reason };
+        }
+      }
+      onProviderHeader?.(filePath, record);
+      fileBindings.push({ path: filePath, ...revision, ...(record?.skip ? { skip: record.skip } : {}) });
       const { observedSize, ...binding } = revision;
       if (observedSize !== undefined) observedSizes[relativePath] = observedSize;
       manifest.push({ path: relativePath, ...binding });
       if (revision.locked) lockedRolloutFiles.push(relativePath);
     }
   }
+  if (expected) for (const [key, prior] of expected) if (!seen.has(key)) {
+    const skip = prior.skip ?? rolloutSkip(prior.path, "missing", "revalidate", prior.id);
+    onProviderHeader?.(prior.path, { skip });
+    fileBindings.push({ ...prior, skip });
+  }
   manifest.sort((left, right) => left.path.localeCompare(right.path));
   return {
     revision: sha256Revision(stableStringify(manifest)),
     fileCount: manifest.length,
-    rolloutScanComplete: lockedRolloutFiles.length === 0,
+    fileBindings,
+    rolloutScanComplete: lockedRolloutFiles.length === 0 && !fileBindings.some(file => file.skip),
     lockedRolloutFiles,
     ...(["provider", "status"].includes(mode) ? { observedSizes } : {})
   };
@@ -245,16 +289,22 @@ export async function captureRolloutRevision(codexHome, { fsImpl = fs, mode = "c
 // Keep the revision reader/manifest authoritative. Its private callback lends
 // first-line facts to the existing Provider-only collector during this call.
 // No body read, persistent cache, new manifest algorithm or Apply descriptor.
-export async function collectProviderPreparationFacts(codexHome, targetProvider, { fsImpl = fs } = {}) {
+export async function collectProviderPreparationFacts(codexHome, targetProvider, { fsImpl = fs, expectedFiles = null } = {}) {
   const records = new Map();
   try {
-    const rollout = await captureRolloutRevision(codexHome, { fsImpl, mode: "provider" },
+    const rollout = await captureRolloutRevision(codexHome, { fsImpl, mode: "provider", expectedFiles },
       (filePath, record) => records.set(filePath, record));
     const scan = await collectProviderChanges(codexHome, targetProvider, { skipLockedReads: true }, records);
+    const skips = new Map(scan.skippedItems.map(item => [providerPathKey(item.path), item]));
+    const files = new Map(scan.files.map(file => [providerPathKey(file.path), file]));
+    rollout.fileBindings = rollout.fileBindings.map(binding => ({ ...binding,
+      id: files.get(providerPathKey(binding.path))?.id ?? binding.id ?? null,
+      ...(skips.has(providerPathKey(binding.path)) ? { skip: skips.get(providerPathKey(binding.path)) } : {}) }));
+    rollout.rolloutScanComplete = scan.skippedItems.length === 0;
     return { rollout, scan };
   } catch (error) {
     if (error?.name === "RolloutMetadataLimitError") {
-      throw new CoreError("ROLLOUT_CHANGED", "Provider sync requires a session metadata header no larger than 1 MiB.", { cause: error });
+      throw new CoreError("ROLLOUT_METADATA_TOO_LARGE", "Session metadata exceeds the 128 MiB supported limit.", { cause: error });
     }
     throw error;
   } finally {
@@ -262,7 +312,7 @@ export async function collectProviderPreparationFacts(codexHome, targetProvider,
   }
 }
 
-export async function captureStateDbRevision(storage, { fsImpl = fs, platform = process.platform, mode = "content" } = {}) {
+export async function captureStateDbRevision(storage, { fsImpl = fs, platform = process.platform, mode = "content", schemaOnly = false } = {}) {
   const stateDbPath = storage.stateDbLocation?.path ?? null;
   if (!stateDbPath) {
     return sha256Revision(stableStringify({ stateDb: null }));
@@ -274,7 +324,8 @@ export async function captureStateDbRevision(storage, { fsImpl = fs, platform = 
     // Unsupported WSL remains diagnostic-only; do not open its SQLite database.
     if (mode === "status" && storage.sqliteAccess?.supported === false) state = { unsupported: true };
     else {
-      try { state = await readSqliteProviderRevisionState(stateDbPath, { includeArchived: mode === "status" }); }
+      try { state = await readSqliteProviderRevisionState(stateDbPath, { includeArchived: mode === "status" });
+        if (schemaOnly) state = { schema: state.schema, key: state.key }; }
       catch (error) {
         // Preserve Status's unreadable index presentation, never fabricate healthy counts.
         if (mode !== "status" || error?.code !== "SQLITE_UNREADABLE") throw error;
@@ -366,13 +417,14 @@ export async function captureOperationRevisions({
   backupDir = null,
   rolloutRevisionMode = "content",
   minimumRolloutSizes = {},
+  providerScoped = false,
   platform = process.platform,
   fsImpl = fs
 }, preparedRollout = null) {
   const configRevision = captureConfigRevision(configText);
   const [rollout, stateDbRevision, backupRevision] = await Promise.all([
     preparedRollout ?? captureRolloutRevision(codexHome, { fsImpl, mode: rolloutRevisionMode, minimumSizes: minimumRolloutSizes }),
-    captureStateDbRevision(storage, { fsImpl, platform, mode: ["provider", "status"].includes(rolloutRevisionMode) ? rolloutRevisionMode : "content" }),
+    captureStateDbRevision(storage, { fsImpl, platform, schemaOnly: providerScoped, mode: ["provider", "status"].includes(rolloutRevisionMode) ? rolloutRevisionMode : "content" }),
     backupDir ? captureBackupRevision(backupDir, { fsImpl }) : Promise.resolve(null)
   ]);
   return {
