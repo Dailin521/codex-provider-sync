@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { publicSkipSummary } from "../packages/contracts/dist/index.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -283,6 +284,14 @@ function summarizeSync(result, label) {
     lines.push(`Skipped changed rollout files: ${result.skippedChangedRolloutFiles.length}`);
     lines.push(`Changed file(s): ${preview}${extraCount > 0 ? ` (+${extraCount} more)` : ""}`);
   }
+  const skipped = publicSkipSummary(result.skipSummary);
+  if (skipped?.total) {
+    lines.push(`Partial: skipped ${skipped.total} (${skipped.rolloutFiles} files, ${skipped.sqliteRows} rows); unconfirmed ${skipped.unconfirmed}.`);
+    for (const item of skipped.items) lines.push(`[${item.kind}/${item.stage}/${item.reason}] ${item.path ?? item.id ?? "unidentified"}`);
+    lines.push(`Showing ${skipped.items.length} of ${skipped.total}; omitted ${skipped.omitted}.`);
+    if (!skipped.retryRecommended) lines.push("Resolve the listed issues, then prepare again.");
+  }
+  if (result.configUpdated) lines.push(`Configuration switched; history files updated: ${result.changedSessionFiles}.`);
   if (result.retryRecommended) {
     lines.push(result.partialReason === "locked-session"
       ? "Retry recommendation: after the active session ends, prepare a fresh operation and retry to converge."
@@ -296,6 +305,7 @@ function summarizeSync(result, label) {
       `Backup cleanup: deleted ${result.autoPruneResult.deletedCount}, remaining ${result.autoPruneResult.remainingCount}, freed ${formatBytes(result.autoPruneResult.freedBytes)}`
     );
   }
+  if (result.backupScopeWarning) lines.push("Backup warning: restore exclusions could not be confirmed; conservative coverage may remain.");
   if (result.autoPruneWarning) {
     lines.push(`Backup cleanup warning: ${result.autoPruneWarning}`);
   }

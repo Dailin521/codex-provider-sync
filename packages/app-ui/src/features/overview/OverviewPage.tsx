@@ -1,3 +1,4 @@
+import { SkipDetails } from "../operations/SkipDetails.js";
 import type { StatusSnapshot } from "@codex-provider-sync/contracts";
 import { AlertTriangle, CheckCircle2, RefreshCw } from "lucide-react";
 import { Fragment } from "react";
@@ -92,6 +93,8 @@ export function OverviewPage({ status, loading, refresh, profileName, profileKey
           <div className="mt-1 text-xl font-bold">{sessionUsageKnown ? status.sessionActivity?.count : t("overview.usageUnknown")}</div>
         </Card>
       </div>
+      {hasSnapshot && !status.rolloutScanComplete ? <p className="mt-3 text-sm text-[var(--warning)]" role="status">{t("skips.incomplete")}</p> : null}
+      <SkipDetails value={status?.skipSummary} />
       {loading && hasSnapshot ? <p className="mt-2 text-xs text-[var(--muted)]" role="status">{t("ux.previousSnapshot")}</p> : null}
       {hasSnapshot ? <div className="mt-4 grid gap-4 lg:grid-cols-2">
         <Distribution counts={status.rolloutCounts} current={status.currentProvider} title={t("overview.rollout")} />

@@ -49,6 +49,8 @@ const ERROR_DEFINITIONS = Object.freeze({
   SQLITE_BUSY: { severity: "warning", retryable: true, recoveryRequired: false },
   SQLITE_UNREADABLE: { severity: "error", retryable: true, recoveryRequired: false },
   ROLLOUT_LOCKED: { severity: "warning", retryable: true, recoveryRequired: false },
+  ROLLOUT_METADATA_TOO_LARGE: { severity: "error", retryable: false, recoveryRequired: false },
+  ROLLOUT_METADATA_INVALID: { severity: "error", retryable: false, recoveryRequired: false },
   ROLLOUT_CHANGED: { severity: "warning", retryable: true, recoveryRequired: false },
   PENDING_TRANSACTION: { severity: "error", retryable: true, recoveryRequired: true },
   BACKUP_FAILED: { severity: "error", retryable: true, recoveryRequired: false },

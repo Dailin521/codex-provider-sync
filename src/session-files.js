@@ -7,19 +7,37 @@ import path from "node:path";
 import readline from "node:readline";
 import { isDeepStrictEqual, promisify } from "node:util";
 
-import { SESSION_DIRS } from "./constants.js";
+import { SESSION_DIRS, PROVIDER_SESSION_META_MAX_BYTES } from "./constants.js";
 import { syncDirectory } from "./atomic-file.js";
 import { CoreError } from "./core-error.js";
+import { fileReadSkipReason, rolloutSkip, summarizeSkips } from "./provider-skips.js";
 import { WINDOWS_LOCK_PROBE_SCRIPT, parseWindowsLockProbeResult } from "./windows-lock-probe.js";
 
 const execFileAsync = promisify(execFile);
 const ROLLOUT_SCAN_CHUNK_BYTES = 1024 * 1024;
-const STATUS_SESSION_META_MAX_BYTES = 1024 * 1024;
-const PROVIDER_SESSION_META_MAX_BYTES = 1024 * 1024;
+const STATUS_SESSION_META_MAX_BYTES = PROVIDER_SESSION_META_MAX_BYTES;
+const REPAIR_SESSION_META_MAX_BYTES = 1024 * 1024;
+
+class RolloutMetadataEncodingError extends Error {
+  constructor() {
+    super("Rollout session metadata is not valid UTF-8.");
+    this.name = "RolloutMetadataEncodingError";
+  }
+}
+
+const providerMetadataDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+function decodeFirstLine(bytes, strictMetadata) {
+  if (!strictMetadata) return bytes.toString("utf8");
+  try { return providerMetadataDecoder.decode(bytes); }
+  catch (error) {
+    if (error?.code === "ERR_ENCODING_INVALID_ENCODED_DATA") throw new RolloutMetadataEncodingError();
+    throw error;
+  }
+}
 
 class RolloutMetadataLimitError extends Error {
   constructor() {
-    super("Rollout session metadata exceeds the read-only Status limit.");
+    super("Rollout session metadata exceeds the bounded header limit.");
     this.name = "RolloutMetadataLimitError";
   }
 }
@@ -153,42 +171,47 @@ async function listJsonlFiles(rootDir) {
   return files;
 }
 
-async function readFirstLineRecord(filePath, { maxBytes = Number.POSITIVE_INFINITY, fsImpl = fsp, wrapBusyErrors = true } = {}) {
+async function readFirstLineRecord(filePath, { maxBytes = Number.POSITIVE_INFINITY, fsImpl = fsp, wrapBusyErrors = true, strictMetadata = false } = {}) {
   let handle;
   try {
     handle = await fsImpl.open(filePath, "r");
     let position = 0;
-    let collected = Buffer.alloc(0);
+    let length = 0;
+    const chunks = [];
+    const bounded = Number.isSafeInteger(maxBytes) && maxBytes >= 0;
     while (true) {
-      const bounded = Number.isSafeInteger(maxBytes) && maxBytes >= 0;
-      const remaining = bounded ? (maxBytes + 1) - position : 64 * 1024;
-      const chunkLength = bounded ? Math.min(64 * 1024, remaining) : 64 * 1024;
+      // Two lookahead bytes allow a boundary-sized header followed by CRLF.
+      const remaining = bounded ? maxBytes + 2 - position : 64 * 1024;
+      const chunkLength = Math.min(64 * 1024, remaining);
       if (chunkLength <= 0) throw new RolloutMetadataLimitError();
       const chunk = Buffer.alloc(chunkLength);
       const { bytesRead } = await handle.read(chunk, 0, chunk.length, position);
-      if (bytesRead === 0) {
-        break;
-      }
-      position += bytesRead;
-      collected = Buffer.concat([collected, chunk.subarray(0, bytesRead)]);
-      const newlineIndex = collected.indexOf(0x0a);
+      if (bytesRead === 0) break;
+      const bytes = chunk.subarray(0, bytesRead);
+      const newlineIndex = bytes.indexOf(0x0a);
       if (newlineIndex !== -1) {
-        if (bounded && newlineIndex > maxBytes) throw new RolloutMetadataLimitError();
-        const crlf = newlineIndex > 0 && collected[newlineIndex - 1] === 0x0d;
-        const lineBuffer = crlf ? collected.subarray(0, newlineIndex - 1) : collected.subarray(0, newlineIndex);
+        const preceding = newlineIndex > 0 ? bytes[newlineIndex - 1] : chunks.at(-1)?.at(-1);
+        const crlf = preceding === 0x0d;
+        const lineLength = length + newlineIndex - (crlf ? 1 : 0);
+        if (bounded && lineLength > maxBytes) throw new RolloutMetadataLimitError();
+        chunks.push(bytes.subarray(0, newlineIndex));
+        const collected = Buffer.concat(chunks, length + newlineIndex);
         return {
-          firstLine: lineBuffer.toString("utf8"),
+          firstLine: decodeFirstLine(collected.subarray(0, lineLength), strictMetadata),
           separator: crlf ? "\r\n" : "\n",
-          offset: newlineIndex + 1
+          offset: position + newlineIndex + 1
         };
       }
-      if (bounded && collected.length > maxBytes) throw new RolloutMetadataLimitError();
+      chunks.push(bytes);
+      length += bytesRead;
+      position += bytesRead;
+      if (bounded && length > maxBytes
+          && !(length === maxBytes + 1 && bytes[bytesRead - 1] === 0x0d)) {
+        throw new RolloutMetadataLimitError();
+      }
     }
-    return {
-      firstLine: collected.toString("utf8"),
-      separator: "",
-      offset: collected.length
-    };
+    if (bounded && length > maxBytes) throw new RolloutMetadataLimitError();
+    return { firstLine: decodeFirstLine(Buffer.concat(chunks, length), strictMetadata), separator: "", offset: length };
   } catch (error) {
     throw wrapBusyErrors ? wrapRolloutFileBusyError(error, filePath, "read") : error;
   } finally {
@@ -196,13 +219,14 @@ async function readFirstLineRecord(filePath, { maxBytes = Number.POSITIVE_INFINI
   }
 }
 
-function parseSessionMetaRecord(firstLine) {
+function parseSessionMetaRecord(firstLine, strictMetadata = false) {
   if (!firstLine) {
     return null;
   }
   try {
     const parsed = JSON.parse(firstLine);
-    if (parsed?.type !== "session_meta" || typeof parsed?.payload !== "object" || parsed.payload === null) {
+    if (parsed?.type !== "session_meta" || typeof parsed?.payload !== "object" || parsed.payload === null
+        || (strictMetadata && (Array.isArray(parsed) || Array.isArray(parsed.payload)))) {
       return null;
     }
     return parsed;
@@ -405,7 +429,10 @@ function isValidWindowsRewriteResult(result) {
   return result === "APPLIED"
     || result === "APPLIED_IN_PLACE"
     || result === "SKIP_BUSY"
-    || result === "SKIP_CHANGED";
+    || result === "SKIP_CHANGED"
+    || result === "SKIP_MISSING"
+    || result === "SKIP_UNREADABLE"
+    || result === "SKIP_NOT_APPLIED";
 }
 
 async function restoreOriginalMtime(filePath, mtimeMs) {
@@ -446,20 +473,39 @@ function getInPlaceProviderMutation(change) {
     return null;
   }
 
-  // Tokenize strings first: a regex on raw field text can match inside a JSON
-  // string or miss an escaped duplicate key. Only one literal provider key and
-  // one payload key anywhere in the header are eligible.
-  const keys = [...change.originalFirstLine.matchAll(/"(?:[^"\\]|\\.)*"/g)]
-    .filter((token) => /^\s*:/.test(change.originalFirstLine.slice(token.index + token[0].length)));
-  const named = (name) => keys.filter((key) => JSON.parse(key[0]) === name);
-  const fields = named("model_provider");
-  if (fields.length !== 1 || named("payload").length !== 1
-      || !fields[0][0].startsWith('"model_provider"')) {
-    return null;
+  // Walk JSON string tokens once. A repeated-alternative regexp can exhaust
+  // V8's stack on a large, otherwise valid instruction string.
+  const text = change.originalFirstLine;
+  let payloadCount = 0;
+  let providerCount = 0;
+  let valueOffset = -1;
+  for (let index = 0; index < text.length; index += 1) {
+    if (text.charCodeAt(index) !== 34) continue;
+    const start = index;
+    index += 1;
+    for (; index < text.length; index += 1) {
+      const code = text.charCodeAt(index);
+      if (code === 92) { index += 1; continue; }
+      if (code === 34) break;
+    }
+    if (index >= text.length) return null;
+    const end = index + 1;
+    let after = end;
+    while (after < text.length && /\s/.test(text[after])) after += 1;
+    if (text[after] !== ":") continue;
+    // Even a fully Unicode-escaped model_provider key fits in this bound.
+    if (end - start > 2 + 6 * "model_provider".length) continue;
+    const literal = text.slice(start, end);
+    const name = JSON.parse(literal);
+    if (name === "payload") payloadCount += 1;
+    if (name !== "model_provider") continue;
+    providerCount += 1;
+    if (literal !== '"model_provider"') return null;
+    after += 1;
+    while (after < text.length && /\s/.test(text[after])) after += 1;
+    valueOffset = after;
   }
-  const field = fields[0];
-  const valueOffset = field.index + field[0].length
-    + change.originalFirstLine.slice(field.index + field[0].length).match(/^\s*:\s*/)[0].length;
+  if (providerCount !== 1 || payloadCount !== 1) return null;
   if (!change.originalFirstLine.startsWith(originalLiteral, valueOffset)) {
     return null;
   }
@@ -675,10 +721,11 @@ async function tryRewriteProviderInPlace(change, options = {}) {
     mutation, change.path, change.originalFirstLine, change.originalSeparator);
   const writeImpl = options.inPlaceWrite ?? defaultInPlaceWrite;
   let handle;
+  let mutationAttempted = false;
   try {
     const pathStat = await fsp.lstat(change.path);
     if (pathStat.isSymbolicLink() || !pathStat.isFile()) {
-      return "SKIP_CHANGED";
+      throw new CoreError("STALE_STATE", "An unsafe rollout target cannot be written.", { details: { reason: "rollout" } });
     }
     handle = await fsp.open(change.path, "r+");
     const identity = await handle.stat({ bigint: true });
@@ -688,7 +735,7 @@ async function tryRewriteProviderInPlace(change, options = {}) {
       dev: String(identity.dev),
       ino: String(identity.ino)
     };
-    if (!snapshotMatches(change, snapshot)
+    if (identity.nlink !== 1n || !snapshotMatches(change, snapshot)
         || mutation.originalSize !== change.originalSize
         || mutation.originalMtimeMs !== change.originalMtimeMs) {
       return "SKIP_CHANGED";
@@ -701,11 +748,14 @@ async function tryRewriteProviderInPlace(change, options = {}) {
     try {
       await assertInPlaceIdentity(handle, change.path, mutation);
       if (!snapshotMatches(change, await getFileSnapshot(change.path))) return "SKIP_CHANGED";
-    } catch {
-      return "SKIP_CHANGED";
+    } catch (error) {
+      const reason = fileReadSkipReason(error);
+      if (reason) return reason === "missing" ? "SKIP_MISSING" : reason === "unreadable" ? "SKIP_UNREADABLE" : "SKIP_BUSY";
+      throw error;
     }
 
     try {
+      mutationAttempted = true;
       await writeBytesFully(handle, replacementBytes, mutation.byteOffset, writeImpl);
       await finishInPlaceWrite(handle, change, replacementBytes, options);
     } catch (error) {
@@ -719,10 +769,17 @@ async function tryRewriteProviderInPlace(change, options = {}) {
         failure.code = "IN_PLACE_RESTORE_FAILED";
         throw failure;
       }
-      throw error;
+      error.sourceUnchanged = true;
+      if (error?.code === "ENOSPC" || error?.code === "EDQUOT") throw error;
+      return "SKIP_NOT_APPLIED";
     }
     return "APPLIED_IN_PLACE";
   } catch (error) {
+    if (!mutationAttempted) {
+      const reason = fileReadSkipReason(error);
+      if (reason) return reason === "missing" ? "SKIP_MISSING" : reason === "unreadable" ? "SKIP_UNREADABLE" : "SKIP_BUSY";
+      error.sourceUnchanged = true;
+    }
     throw wrapRolloutFileBusyError(error, change.path, "rewrite provider bytes in place");
   } finally {
     await handle?.close();
@@ -802,37 +859,63 @@ ${WINDOWS_PROVIDER_BYTES_SOURCE}
     return $null
   }
 
-  function Read-FirstLineRecord([System.IO.FileStream]$stream) {
+  function Has-VerifiedSourceUnchanged($exception) {
+    for ($depth = 0; $null -ne $exception -and $depth -lt 8; $depth++) {
+      if ($exception.Data["providerSyncSourceUnchanged"] -eq $true) { return $true }
+      $exception = $exception.InnerException
+    }
+    return $false
+  }
+
+  function Read-FirstLineRecord([System.IO.FileStream]$stream, [long]$maxBytes = [long]::MaxValue, [bool]$strictMetadata = $false) {
+    $decoder = [System.Text.UTF8Encoding]::new($false, $strictMetadata)
     $stream.Seek(0, [System.IO.SeekOrigin]::Begin) | Out-Null
     $buffer = New-Object byte[] (64 * 1024)
     $collected = New-Object System.IO.MemoryStream
     try {
       while ($true) {
-        $bytesRead = $stream.Read($buffer, 0, $buffer.Length)
-        if ($bytesRead -le 0) {
-          break
+        $readLength = $buffer.Length
+        if ($maxBytes -ne [long]::MaxValue) {
+          $readLength = [int][Math]::Min($readLength, $maxBytes + 2 - $collected.Length)
+          if ($readLength -le 0) { return $null }
         }
-
-        $collected.Write($buffer, 0, $bytesRead)
-        $bytes = $collected.ToArray()
-        $newlineIndex = [Array]::IndexOf($bytes, [byte]10)
+        $bytesRead = $stream.Read($buffer, 0, $readLength)
+        if ($bytesRead -le 0) { break }
+        $newlineIndex = [Array]::IndexOf($buffer, [byte]10, 0, $bytesRead)
         if ($newlineIndex -ge 0) {
-          $crlf = $newlineIndex -gt 0 -and $bytes[$newlineIndex - 1] -eq [byte]13
-          $lineLength = if ($crlf) { $newlineIndex - 1 } else { $newlineIndex }
+          $collected.Write($buffer, 0, $newlineIndex)
+          $bytes = $collected.GetBuffer()
+          $count = [int]$collected.Length
+          $crlf = $count -gt 0 -and $bytes[$count - 1] -eq [byte]13
+          $lineLength = if ($crlf) { $count - 1 } else { $count }
+          if ($lineLength -gt $maxBytes) { return $null }
           return @{
-            firstLine = [System.Text.Encoding]::UTF8.GetString($bytes, 0, $lineLength)
-            offset = $newlineIndex + 1
+            firstLine = $decoder.GetString($bytes, 0, $lineLength)
+            offset = $count + 1
           }
         }
+        $collected.Write($buffer, 0, $bytesRead)
+        if ($collected.Length -gt $maxBytes -and
+            -not ($collected.Length -eq $maxBytes + 1 -and $buffer[$bytesRead - 1] -eq [byte]13)) { return $null }
       }
-
+      if ($collected.Length -gt $maxBytes) { return $null }
       return @{
-        firstLine = [System.Text.Encoding]::UTF8.GetString($collected.ToArray())
+        firstLine = $decoder.GetString($collected.GetBuffer(), 0, [int]$collected.Length)
         offset = [int]$collected.Length
       }
     } finally {
       $collected.Dispose()
     }
+  }
+
+  function Safe-OpenSkip($exception) {
+    $cause = $exception
+    while ($null -ne $cause.InnerException) { $cause = $cause.InnerException }
+    $code = $cause.HResult -band 65535
+    if ($code -eq 2 -or $code -eq 3) { return "SKIP_MISSING" }
+    if ($code -eq 5) { return "SKIP_UNREADABLE" }
+    if ($code -eq 32 -or $code -eq 33) { return "SKIP_BUSY" }
+    return $null
   }
 
   function Invoke-RewriteChange($change) {
@@ -842,26 +925,28 @@ ${WINDOWS_PROVIDER_BYTES_SOURCE}
     $encoding = [System.Text.UTF8Encoding]::new($false)
     $source = $null
     $writer = $null
+    $sourceMayHaveChanged = $false
     $timing = New-RewriteTiming
     $total = [System.Diagnostics.Stopwatch]::StartNew()
 
     try {
       try {
         $sourceOpen = [System.Diagnostics.Stopwatch]::StartNew()
+        if (([System.IO.File]::GetAttributes($path) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Unsafe rollout link." }
         $source = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
         $timing.sourceOpenMs += $sourceOpen.Elapsed.TotalMilliseconds
       } catch {
         $timing.sourceOpenMs += $sourceOpen.Elapsed.TotalMilliseconds
-        if (Test-Path -LiteralPath $path) {
-          return Complete-RewriteChange "SKIP_BUSY" $timing $total
-        }
-        return Complete-RewriteChange "SKIP_CHANGED" $timing $total
+        $skip = Safe-OpenSkip $_.Exception
+        if ($null -ne $skip) { return Complete-RewriteChange $skip $timing $total }
+        throw
       }
 
       if ($null -ne $change.inPlaceMutation) {
         $m = $change.inPlaceMutation
         $header = $encoding.GetBytes([string]$change.originalFirstLine + [string]$change.originalSeparator)
         try {
+          $sourceMayHaveChanged = $true
           $native = [ProviderByteFile]::ApplyWithTiming($source, $header,
             [Convert]::FromBase64String([string]$m.originalBase64),
             [Convert]::FromBase64String([string]$m.replacementBase64),
@@ -881,9 +966,17 @@ ${WINDOWS_PROVIDER_BYTES_SOURCE}
         }
 
         $readHeader = [System.Diagnostics.Stopwatch]::StartNew()
-        try { $record = Read-FirstLineRecord $source }
+        try { $record = Read-FirstLineRecord $source ($encoding.GetByteCount([string]$change.originalFirstLine)) ([bool]$change.strictProviderMetadata) }
+        catch {
+          $cause = $_.Exception
+          while ($null -ne $cause.InnerException) { $cause = $cause.InnerException }
+          if ([bool]$change.strictProviderMetadata -and $cause -is [System.Text.DecoderFallbackException]) {
+            return Complete-RewriteChange "SKIP_CHANGED" $timing $total
+          }
+          throw
+        }
         finally { $timing.readHeaderMs += $readHeader.Elapsed.TotalMilliseconds }
-        if ($record.firstLine -ne [string]$change.originalFirstLine -or $record.offset -ne [int]$change.originalOffset) {
+        if ($null -eq $record -or $record.firstLine -cne [string]$change.originalFirstLine -or $record.offset -ne [int]$change.originalOffset) {
           return Complete-RewriteChange "SKIP_CHANGED" $timing $total
         }
 
@@ -928,20 +1021,23 @@ ${WINDOWS_PROVIDER_BYTES_SOURCE}
       $source = $null
       try {
         $replace = [System.Diagnostics.Stopwatch]::StartNew()
+        $sourceMayHaveChanged = $true
         [System.IO.File]::Replace($tmpPath, $path, $replaceBackupPath, $true)
         $timing.replaceMs += $replace.Elapsed.TotalMilliseconds
       } catch {
         $timing.replaceMs += $replace.Elapsed.TotalMilliseconds
-        if (Test-Path -LiteralPath $path) {
-          return Complete-RewriteChange "SKIP_BUSY" $timing $total
-        }
-        return Complete-RewriteChange "SKIP_CHANGED" $timing $total
+        throw
       }
 
       return Complete-RewriteChange "APPLIED" $timing $total
     } catch {
+      if (-not $sourceMayHaveChanged) {
+        $skip = Safe-OpenSkip $_.Exception
+        if ($null -ne $skip) { return Complete-RewriteChange $skip $timing $total }
+      }
       $timing.workerMs = [Math]::Max(0.0, $total.Elapsed.TotalMilliseconds)
       $_.Exception.Data["providerSyncTiming"] = $timing
+      $_.Exception.Data["providerSyncSourceUnchanged"] = ((-not $sourceMayHaveChanged) -or (Has-VerifiedSourceUnchanged $_.Exception))
       throw
     } finally {
       if ($writer) {
@@ -1005,6 +1101,7 @@ ${WINDOWS_PROVIDER_BYTES_SOURCE}
         id = $errorId
         path = $errorPath
         message = $_.Exception.Message
+        sourceUnchanged = ($_.Exception.Data["providerSyncSourceUnchanged"] -eq $true)
         timing = $failureTiming
       })
       exit 1
@@ -1156,6 +1253,7 @@ export async function createWindowsExclusiveRewriteWorker(options = {}) {
       try {
         await writeWorkerRequest(child.stdin, {
           ...change,
+          ...(change.inPlaceMutation ? { updatedFirstLine: undefined } : {}),
           protocolVersion: WINDOWS_REWRITE_PROTOCOL_VERSION,
           type: "rewrite",
           id,
@@ -1167,6 +1265,12 @@ export async function createWindowsExclusiveRewriteWorker(options = {}) {
         // payload must never turn an otherwise valid rewrite into a failure.
         if (response?.type === "result" || response?.type === "error") {
           lastTiming = timing ? { timing, complete: response.type === "result" } : null;
+        }
+        if (response?.protocolVersion === WINDOWS_REWRITE_PROTOCOL_VERSION && response?.type === "error"
+            && response?.id === id && response?.path === change.path && response.sourceUnchanged === true) {
+          const failure = new Error("Windows rewrite worker failed before source mutation.");
+          failure.sourceUnchanged = true;
+          throw failure;
         }
         if (response?.protocolVersion !== WINDOWS_REWRITE_PROTOCOL_VERSION
             || response?.type !== "result"
@@ -1180,17 +1284,11 @@ export async function createWindowsExclusiveRewriteWorker(options = {}) {
       } catch (error) {
         child.stdin.destroy();
         child.kill();
-        throw wrapRolloutFileBusyError(
-          new Error(
-            formatWindowsRewriteWorkerError(
-              `Windows rewrite worker failed for ${change.path}: ${stdinError?.message ?? error.message}`,
-              stderr
-            ),
-            { cause: error }
-          ),
-          change.path,
-          "rewrite"
-        );
+        const failure = wrapRolloutFileBusyError(new Error(
+          formatWindowsRewriteWorkerError(`Windows rewrite worker failed for ${change.path}: ${stdinError?.message ?? error.message}`, stderr),
+          { cause: error }), change.path, "rewrite");
+        if (error.sourceUnchanged === true) failure.sourceUnchanged = true;
+        throw failure;
       } finally {
         inFlight = false;
       }
@@ -1326,17 +1424,42 @@ async function tryRewriteCollectedFirstLine(change, options = {}) {
     return tryRewriteProviderInPlace(change, options);
   }
 
-  const beforeSnapshot = await getFileSnapshot(change.path);
+  let beforeSnapshot;
+  try {
+    const info = await fsp.lstat(change.path);
+    if (info.isSymbolicLink() || !info.isFile()) throw new CoreError("STALE_STATE", "An unsafe rollout target cannot be written.", { details: { reason: "rollout" } });
+    beforeSnapshot = await getFileSnapshot(change.path);
+  }
+  catch (error) {
+    const reason = fileReadSkipReason(error);
+    if (reason) return reason === "missing" ? "SKIP_MISSING" : reason === "unreadable" ? "SKIP_UNREADABLE" : "SKIP_BUSY";
+    error.sourceUnchanged = true;
+    throw error;
+  }
   if (!snapshotMatches(change, beforeSnapshot)) {
     return "SKIP_CHANGED";
   }
 
-  const current = await readFirstLineRecord(change.path);
+  let current;
+  try {
+    current = await readFirstLineRecord(change.path, {
+      maxBytes: Buffer.byteLength(change.originalFirstLine, "utf8"),
+      strictMetadata: change.strictProviderMetadata === true,
+      wrapBusyErrors: change.strictProviderMetadata !== true
+    });
+  } catch (error) {
+    if (error instanceof RolloutMetadataLimitError || error instanceof RolloutMetadataEncodingError) return "SKIP_CHANGED";
+    const reason = fileReadSkipReason(error);
+    if (reason) return reason === "missing" ? "SKIP_MISSING" : reason === "unreadable" ? "SKIP_UNREADABLE" : "SKIP_BUSY";
+    error.sourceUnchanged = true;
+    throw error;
+  }
   if (current.firstLine !== change.originalFirstLine || current.offset !== change.originalOffset) {
     return "SKIP_CHANGED";
   }
 
   const tmpPath = `${change.path}.provider-sync.${process.pid}.${Date.now()}.tmp`;
+  let replaceAttempted = false;
   const writer = fs.createWriteStream(tmpPath, { encoding: "utf8" });
 
   try {
@@ -1369,11 +1492,18 @@ async function tryRewriteCollectedFirstLine(change, options = {}) {
 
     await fsp.chmod(tmpPath, beforeSnapshot.mode);
     await syncStagedFile(tmpPath);
+    replaceAttempted = true;
     await fsp.rename(tmpPath, change.path);
     await syncDirectory(path.dirname(change.path));
     return "APPLIED";
   } catch (error) {
-    await fsp.rm(tmpPath, { force: true });
+    writer.destroy();
+    await fsp.rm(tmpPath, { force: true }).catch(() => {});
+    if (!replaceAttempted) {
+      const reason = fileReadSkipReason(error);
+      if (reason) return reason === "missing" ? "SKIP_MISSING" : reason === "unreadable" ? "SKIP_UNREADABLE" : "SKIP_BUSY";
+      error.sourceUnchanged = true;
+    }
     throw wrapRolloutFileBusyError(error, change.path, "rewrite");
   }
 }
@@ -1552,6 +1682,7 @@ export async function collectStatusRolloutMetadata(codexHome, options = {}) {
   const { skipLockedReads = false } = options;
   const lockedPaths = [];
   const incompletePaths = [];
+  const skippedItems = [];
   const providerChangeCandidates = [];
   const providerCounts = {
     sessions: new Map(),
@@ -1562,27 +1693,38 @@ export async function collectStatusRolloutMetadata(codexHome, options = {}) {
     const rootDir = path.join(codexHome, dirName);
     try {
       await fsp.access(rootDir);
-    } catch {
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
       continue;
     }
     const rolloutPaths = await listJsonlFiles(rootDir);
     for (const rolloutPath of rolloutPaths) {
       let record;
       try {
-        record = await readFirstLineRecord(rolloutPath, { maxBytes: STATUS_SESSION_META_MAX_BYTES });
+        record = await readFirstLineRecord(rolloutPath, { maxBytes: STATUS_SESSION_META_MAX_BYTES, strictMetadata: true });
       } catch (error) {
+        const reason = fileReadSkipReason(error);
+        if (reason) {
+          skippedItems.push(rolloutSkip(rolloutPath, reason));
+          incompletePaths.push(rolloutPath);
+          if (reason === "locked") lockedPaths.push(rolloutPath);
+          continue;
+        }
         if (error instanceof RolloutMetadataLimitError) {
           incompletePaths.push(rolloutPath);
           continue;
         }
         if (skipLockedReads && isRolloutFileBusyError(error)) {
+          skippedItems.push(rolloutSkip(rolloutPath, "locked"));
+          incompletePaths.push(rolloutPath);
           lockedPaths.push(rolloutPath);
           continue;
         }
         throw error;
       }
-      const parsed = parseSessionMetaRecord(record.firstLine);
+      const parsed = parseSessionMetaRecord(record.firstLine, true);
       if (!parsed) {
+        skippedItems.push(rolloutSkip(rolloutPath, "metadata-invalid"));
         incompletePaths.push(rolloutPath);
         continue;
       }
@@ -1597,7 +1739,7 @@ export async function collectStatusRolloutMetadata(codexHome, options = {}) {
     }
   }
 
-  return { incompletePaths, lockedPaths, providerCounts, providerChangeCandidates };
+  return { skippedItems, skipSummary: summarizeSkips(skippedItems), incompletePaths, lockedPaths, providerCounts, providerChangeCandidates };
 }
 
 export async function collectSessionChanges(codexHome, targetProvider, options = {}, preparationRecords = null) {
@@ -1620,6 +1762,12 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
     );
   }
   const summaries = [];
+  const skippedItems = [];
+  const files = [];
+  const skip = (filePath, reason, id = null, stage = "scan") => {
+    skippedItems.push(rolloutSkip(filePath, reason, stage, id));
+    if (reason === "locked") lockedPaths.push(filePath);
+  };
   const lockedPaths = [];
   const providerCounts = {
     sessions: new Map(),
@@ -1635,7 +1783,8 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
     if (!preparationRecords) {
       try {
         await fsp.access(rootDir);
-      } catch {
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
         continue;
       }
     }
@@ -1646,8 +1795,14 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
       ? trackScanFiles(rolloutPaths, { ...options, stage: `scan_${dirName}` }) : rolloutPaths;
     for (const rolloutPath of trackedPaths) {
       const prepared = preparationRecords?.get(rolloutPath);
+      if (prepared?.skip) {
+        skippedItems.push(prepared.skip);
+        files.push({ path: rolloutPath, id: prepared.skip.id ?? null });
+        if (prepared.skip.reason === "locked") lockedPaths.push(rolloutPath);
+        continue;
+      }
       if (prepared?.locked) {
-        lockedPaths.push(rolloutPath);
+        skip(rolloutPath, "locked");
         continue;
       }
       let record;
@@ -1655,33 +1810,36 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
       try {
         scanStart = prepared?.beforeSnapshot ?? await getFileSnapshot(rolloutPath);
         record = prepared?.record ?? await readFirstLineRecord(rolloutPath, {
-          maxBytes: maxSessionMetaBytes
+          maxBytes: maxSessionMetaBytes, strictMetadata: rejectInvalidMetadata
         });
       } catch (error) {
+        if (rejectInvalidMetadata && fileReadSkipReason(error)) {
+          skip(rolloutPath, fileReadSkipReason(error));
+          continue;
+        }
         if (skipLockedReads && isRolloutFileBusyError(error)) {
-          lockedPaths.push(rolloutPath);
+          if (rejectInvalidMetadata) skip(rolloutPath, "locked");
+          else lockedPaths.push(rolloutPath);
           continue;
         }
         if (rejectInvalidMetadata && error instanceof RolloutMetadataLimitError) {
           throw new CoreError(
-            "ROLLOUT_CHANGED",
-            `Provider sync requires a session metadata header no larger than 1 MiB: ${rolloutPath}`,
+            "ROLLOUT_METADATA_TOO_LARGE",
+            "Session metadata exceeds the 128 MiB supported limit.",
             { cause: error }
           );
         }
         throw error;
       }
-      const parsed = parseSessionMetaRecord(record.firstLine);
+      const parsed = parseSessionMetaRecord(record.firstLine, rejectInvalidMetadata);
       if (!parsed) {
         if (rejectInvalidMetadata) {
-          throw new CoreError(
-            "ROLLOUT_CHANGED",
-            `Provider sync cannot validate session metadata: ${rolloutPath}`
-          );
+          skip(rolloutPath, "metadata-invalid");
         }
         continue;
       }
       const currentProvider = parsed.payload.model_provider ?? "(missing)";
+      files.push({ path: rolloutPath, id: typeof parsed.payload.id === "string" && parsed.payload.id ? parsed.payload.id : null, provider: currentProvider });
       if (typeof parsed.payload.id === "string" && parsed.payload.id) nativeSessionIds.add(parsed.payload.id);
       // Selected repair work is addressed by Codex's native session id, never
       // by a rollout filename/path. Files without that identity stay out.
@@ -1709,8 +1867,13 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
           userEventThreadIds.add(parsed.payload.id);
         }
       } catch (error) {
+        if (rejectInvalidMetadata && fileReadSkipReason(error)) {
+          skip(rolloutPath, fileReadSkipReason(error));
+          continue;
+        }
         if (skipLockedReads && isRolloutFileBusyError(error)) {
-          lockedPaths.push(rolloutPath);
+          if (rejectInvalidMetadata) skip(rolloutPath, "locked");
+          else lockedPaths.push(rolloutPath);
           continue;
         }
         throw error;
@@ -1735,7 +1898,8 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
         const snapshot = prepared?.afterSnapshot ?? await getFileSnapshot(rolloutPath);
         if (snapshot.size !== scanStart.size || snapshot.mtimeMs !== scanStart.mtimeMs
             || snapshot.dev !== scanStart.dev || snapshot.ino !== scanStart.ino) {
-          lockedPaths.push(rolloutPath);
+          if (rejectInvalidMetadata) skip(rolloutPath, "changed", parsed.payload.id);
+          else lockedPaths.push(rolloutPath);
           continue;
         }
         if (providerChanged) {
@@ -1759,15 +1923,33 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
           originalTurnContextModels: modelSnapshot.originalTurnContextModels,
           modelRewriteRequired: modelChanged,
           modelOnlyChange: !providerChanged && modelChanged,
-          updatedFirstLine: providerChanged ? JSON.stringify(parsed) : record.firstLine
+          strictProviderMetadata: rejectInvalidMetadata,
+          updatedFirstLine: record.firstLine
         };
-        change.inPlaceMutation = getInPlaceProviderMutation(change);
+        // Only these pure JSON operations may turn a capacity failure into a
+        // data skip. I/O, snapshots and writes remain outside this boundary.
+        try {
+          if (providerChanged) change.updatedFirstLine = JSON.stringify(parsed);
+          change.inPlaceMutation = getInPlaceProviderMutation(change);
+        } catch (error) {
+          if (!rejectInvalidMetadata || !(error instanceof RangeError)) throw error;
+          skip(rolloutPath, "metadata-too-complex", parsed.payload.id);
+          const count = providerCounts[dirName].get(currentProvider) - 1;
+          if (count) providerCounts[dirName].set(currentProvider, count);
+          else providerCounts[dirName].delete(currentProvider);
+          continue;
+        }
+        if (rejectInvalidMetadata && !change.inPlaceMutation
+            && Buffer.byteLength(change.updatedFirstLine, "utf8") > maxSessionMetaBytes) {
+          skip(rolloutPath, "metadata-too-large", parsed.payload.id);
+          continue;
+        }
         summaries.push(change);
       }
     }
   }
 
-  return { changes: summaries, lockedPaths, providerCounts, encryptedContentCounts, userEventThreadIds, threadCwdById, nativeSessionIds };
+  return { changes: summaries, files, skippedItems, skipSummary: summarizeSkips(skippedItems), incompletePaths: skippedItems.map(item => item.path), lockedPaths, providerCounts, encryptedContentCounts, userEventThreadIds, threadCwdById, nativeSessionIds };
 }
 
 const WINDOWS_FIRST_LINE_TIMING_FIELDS = [
@@ -1839,7 +2021,7 @@ function addWindowsRewriteTiming(target, source) {
 // header reader; never open a body stream or expose this through the Facade.
 export async function readProviderRevisionHeader(filePath, { fsImpl = fsp } = {}) {
   return readFirstLineRecord(filePath, {
-    maxBytes: PROVIDER_SESSION_META_MAX_BYTES, fsImpl, wrapBusyErrors: false
+    maxBytes: PROVIDER_SESSION_META_MAX_BYTES, fsImpl, wrapBusyErrors: false, strictMetadata: true
   });
 }
 
@@ -1870,7 +2052,7 @@ export async function collectRepairChanges(codexHome, targets, options = {}) {
     sessionIds: options.sessionIds,
     onProgress: options.onProgress,
     signal: options.signal,
-    maxSessionMetaBytes: PROVIDER_SESSION_META_MAX_BYTES,
+    maxSessionMetaBytes: REPAIR_SESSION_META_MAX_BYTES,
     rejectInvalidMetadata: false
   });
 }
@@ -1951,6 +2133,7 @@ export async function applySessionChanges(changes, options = {}) {
     onMutation,
     onApplied,
     onSkipped,
+    onUnwritten,
     onTiming,
     windowsRewriteWorkerFactory = createWindowsExclusiveRewriteWorker,
     inPlaceWrite,
@@ -2000,7 +2183,8 @@ export async function applySessionChanges(changes, options = {}) {
         const requestStart = timingNow();
         let result;
         try {
-          result = await worker.rewrite(change, { requireOriginalMatch: true });
+          try { result = await worker.rewrite(change, { requireOriginalMatch: true }); }
+          catch (error) { if (error.sourceUnchanged === true) await onUnwritten?.(change); throw error; }
         } finally {
           timing.requestRoundTripMs += elapsedTimingMs(requestStart);
           let observedTiming = null;
@@ -2038,7 +2222,7 @@ export async function applySessionChanges(changes, options = {}) {
           timing.skippedFiles += 1;
           skippedPaths.push(change.path);
           if (result === "SKIP_BUSY") skippedLockedPaths.push(change.path);
-          else skippedChangedPaths.push(change.path);
+          else if (result === "SKIP_CHANGED" || result === "SKIP_MISSING") skippedChangedPaths.push(change.path);
           await onSkipped?.(change, result);
         }
       }
@@ -2072,11 +2256,9 @@ export async function applySessionChanges(changes, options = {}) {
   } else {
     for (const change of firstLineChanges) {
       await onBeforeApply?.(change);
-      const result = await tryRewriteCollectedFirstLine(change, {
-        inPlaceWrite,
-        inPlaceRestoreWrite,
-        inPlaceSync
-      });
+      let result;
+      try { result = await tryRewriteCollectedFirstLine(change, { inPlaceWrite, inPlaceRestoreWrite, inPlaceSync }); }
+      catch (error) { if (error.sourceUnchanged === true) await onUnwritten?.(change); throw error; }
       if (result === "APPLIED" || result === "APPLIED_IN_PLACE") {
         appliedChanges += 1;
         inPlaceChanges += result === "APPLIED_IN_PLACE" ? 1 : 0;
@@ -2095,7 +2277,7 @@ export async function applySessionChanges(changes, options = {}) {
       } else {
         skippedPaths.push(change.path);
         if (result === "SKIP_BUSY") skippedLockedPaths.push(change.path);
-        else skippedChangedPaths.push(change.path);
+        else if (result === "SKIP_CHANGED" || result === "SKIP_MISSING") skippedChangedPaths.push(change.path);
         await onSkipped?.(change, result);
       }
     }

@@ -7,7 +7,7 @@ import {
   CORE_ERROR_CODES,
   OPERATION_FAILURE_STAGES,
   SAFE_CAUSE_CODES,
-  publicFileUpdateTiming,
+  publicFileUpdateTiming, publicSkipSummary, redactSkipSummary,
   type CoreResponseEnvelope,
   type ProgressEvent
 } from "@codex-provider-sync/contracts";
@@ -34,10 +34,10 @@ const FAILURE_CODES = new Set<string>([
   "SQLITE_READONLY",
   "SQLITE_FULL"
 ]);
-const PARTIAL_REASONS = new Set(["locked-session", "rollout-changed", "mutation-failed"]);
+const PARTIAL_REASONS = new Set(["locked-session", "rollout-changed", "mutation-failed", "skipped-data"]);
 const ERROR_REASONS = new Set(["profile", "config", "storage", "rollout", "state-db", "backup", "provider-not-configured"]);
 const COUNT_FIELDS = new Set([
-  "changedSessionFiles", "inPlaceSessionFiles", "rewrittenSessionFiles", "sqliteRowsUpdated",
+  "unconfirmedSessionFiles", "changedSessionFiles", "inPlaceSessionFiles", "rewrittenSessionFiles", "sqliteRowsUpdated",
   "sqliteProviderRowsUpdated", "sqliteModelRowsUpdated", "sqliteUserEventRowsUpdated", "sqliteCwdRowsUpdated",
   "skippedLockedRolloutFiles", "skippedChangedRolloutFiles", "updatedWorkspaceRoots", "savedWorkspaceRootCount",
   "resolvedOperationCount", "deletedCount", "remainingCount", "freedBytes"
@@ -60,6 +60,7 @@ interface BeginInput {
 interface PreparedSummary {
   target?: { provider?: unknown; model?: unknown; modelMode?: unknown; previousProvider?: unknown; previousRootModel?: unknown };
   impact?: {
+    skipSummary?: unknown;
     rolloutFilesToChange?: unknown;
     sqliteRowsToChange?: unknown;
     lockedRolloutFiles?: unknown;
@@ -229,6 +230,8 @@ export class OperationLogService {
     const plannedCounts = previewCounts(summary);
     if (targetProvider) entry.targetProvider = targetProvider;
     if (plannedCounts) entry.previewCounts = plannedCounts;
+    const skipped = publicSkipSummary(summary?.impact?.skipSummary);
+    if (skipped) entry.skipSummary = skipped;
     const plannedSwitch = switchPlan(summary);
     if (plannedSwitch) entry.switchPlan = plannedSwitch;
     entry.status = "awaiting-confirmation";
@@ -328,6 +331,7 @@ export class OperationLogService {
         outcome,
         backupId: safeText(backup?.backupId, 180),
         counts: { ...resultCounts(result), ...resultCounts(details) },
+        skipSummary: details.skipSummary,
         fileUpdateTiming: details.fileUpdateTiming,
         failedStage: typeof details.failedStage === "string" ? details.failedStage : undefined,
         failureCode: typeof details.failureCode === "string" ? details.failureCode : undefined,
@@ -351,13 +355,15 @@ export class OperationLogService {
     });
   }
 
-  async finish(id: string, fields: { status: OperationLogStatus; outcome?: string; errorCode?: string; errorReason?: string; backupId?: string; profileId?: string; counts?: Record<string, number>; fileUpdateTiming?: unknown; warnings?: unknown[]; failedStage?: string; failureCode?: string; partialReason?: string; retryRecommended?: boolean }): Promise<void> {
+  async finish(id: string, fields: { status: OperationLogStatus; outcome?: string; errorCode?: string; errorReason?: string; backupId?: string; profileId?: string; counts?: Record<string, number>; skipSummary?: unknown; fileUpdateTiming?: unknown; warnings?: unknown[]; failedStage?: string; failureCode?: string; partialReason?: string; retryRecommended?: boolean }): Promise<void> {
     const entry = this.#require(id);
     this.#pause(entry);
     for (const running of entry.stages.filter((stage) => stage.status === "running")) {
       this.#completeStage(entry, running.stage, running.stage === fields.failedStage || (fields.status !== "completed" && fields.status !== "partial") ? "failed" : "completed");
     }
     entry.status = fields.status;
+    const skipped = publicSkipSummary(fields.skipSummary);
+    if (skipped) entry.skipSummary = skipped;
     const fileUpdateTiming = publicFileUpdateTiming(fields.fileUpdateTiming);
     if (fileUpdateTiming) entry.fileUpdateTiming = fileUpdateTiming;
     if (safeText(fields.profileId, 80)) entry.profileId = safeText(fields.profileId, 80);
@@ -398,6 +404,14 @@ export class OperationLogService {
   get(id: string): OperationLogEntry | null {
     const entry = this.#entries.get(id);
     return entry ? clone(entry) : null;
+  }
+
+  recentRedactedJsonLines(limit = 200): string {
+    return this.recentJsonLines(limit).split("\n").filter(Boolean).map(line => {
+      const entry = JSON.parse(line);
+      if (entry.skipSummary) entry.skipSummary = redactSkipSummary(entry.skipSummary);
+      return JSON.stringify(entry);
+    }).join("\n");
   }
 
   recentJsonLines(limit = 200): string {

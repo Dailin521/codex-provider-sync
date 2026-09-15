@@ -139,6 +139,7 @@ export async function executeOrdinaryWrite({
       platform,
       faultInjector,
       signal,
+      expectedPlanState,
       emitProgress: (event) => emitProgress(onProgress, event),
       markMutation() {
         state.mutationStarted = true;
@@ -205,11 +206,13 @@ export async function executeOrdinaryWrite({
         }
       }
     } catch (error) {
+      await program.finalize?.({ context, state, error });
       if (!state.mutationStarted) throw error;
       await tryRefreshBackupInventory(state.backupDir);
       return await program.toResult({ context, state, outcome: "partial", error });
     }
 
+    await program.finalize?.({ context, state, error: null });
     try {
       await undoBackup.refreshInventory(state.backupDir, { faultInjector });
     } catch {

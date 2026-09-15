@@ -1,3 +1,5 @@
+import { SkipDetails } from "./SkipDetails.js";
+import { publicSkipSummary } from "@codex-provider-sync/contracts";
 import type { OperationOutcome, OperationResult } from "@codex-provider-sync/contracts";
 import { Fragment } from "react";
 import { useTranslation } from "react-i18next";
@@ -37,6 +39,7 @@ function publicResultEntries(value: OperationResult["result"]): Array<[string, s
     "partialReason", "failedStage", "failureCode"
   ]);
   const numbers = new Set([
+    "unconfirmedSessionFiles",
     "changedSessionFiles",
     "sqliteRowsUpdated",
     "sqliteProviderRowsUpdated",
@@ -122,7 +125,8 @@ export function OperationResultDialog({ result, postWriteStatus, close, closeDis
   const entries = result ? publicResultEntries(result.result) : [];
   const skipped = result ? skippedRollouts(result.result) : [];
   const skippedChanged = result ? skippedChangedRollouts(result.result) : [];
-  const skippedCount = skipped.length + skippedChanged.length;
+  const summary = publicSkipSummary(result?.result && typeof result.result === "object" && !Array.isArray(result.result) ? result.result.skipSummary : undefined);
+  const skippedCount = summary ? 0 : skipped.length + skippedChanged.length;
   const partialReason = result?.result
     && typeof result.result === "object"
     && !Array.isArray(result.result)
@@ -161,8 +165,10 @@ export function OperationResultDialog({ result, postWriteStatus, close, closeDis
           </Card> : null}
           {hasManyRewrittenSessions(result.operation, result.result) ? <SyncPerformanceTip key={result.operationId} afterOperation /> : null}
           {result.warnings.length ? <div><h3 className="font-semibold">{t("common.warnings")}</h3><ul className="mt-2 list-disc space-y-1 pl-5 text-sm">{result.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{displayWarningText(warning, t)}</li>)}</ul></div> : null}
+          <SkipDetails value={summary} />
+          {result.operation === "switch" && result.result && typeof result.result === "object" && !Array.isArray(result.result) && result.result.configUpdated === true ? <p>{t("skips.configSwitched", { count: result.result.changedSessionFiles ?? 0 })}</p> : null}
           {skippedCount ? <p className="rounded-lg border border-[var(--warning)] bg-[var(--warning-soft)] p-3 text-sm">{t("operationResult.skippedCount", { count: skippedCount })}</p> : null}
-          {retryRecommended ? <p className="text-sm text-[var(--warning)]">{t(partialReason === "locked-session" ? "operationResult.retryAfterSession" : "operationResult.retryFreshPlan")}</p> : null}
+          {retryRecommended && (partialReason === "mutation-failed" || !summary || (!summary.total && !summary.unconfirmed)) ? <p className="text-sm text-[var(--warning)]">{t(partialReason === "locked-session" ? "operationResult.retryAfterSession" : "operationResult.retryFreshPlan")}</p> : null}
           {retryRecommended && reviewOperation ? <Button onClick={reviewOperation} type="button" variant="secondary">{t("operationResult.reviewOperation")}</Button> : null}
           {resultVerification ? <Card><h3 className="text-sm font-semibold">{t("operationResult.verification.title")}</h3><p className="mt-1 text-sm text-[var(--muted)]">{t(`operationResult.verification.status.${resultVerification.status}`)}</p>{resultVerification.status === "remaining" ? <dl className="mt-3 grid gap-2 text-sm sm:grid-cols-2"><div><dt className="text-[var(--muted)]">{t("operationResult.verification.remainingRolloutFiles")}</dt><dd>{resultVerification.remainingRolloutFiles}</dd></div><div><dt className="text-[var(--muted)]">{t("operationResult.verification.remainingSqliteRows")}</dt><dd>{resultVerification.remainingSqliteRows}</dd></div><div><dt className="text-[var(--muted)]">{t("operationResult.verification.remainingWorkspaceRoots")}</dt><dd>{resultVerification.remainingWorkspaceRoots}</dd></div><div><dt className="text-[var(--muted)]">{t("operationResult.verification.skippedSessions")}</dt><dd>{resultVerification.skippedSessions}</dd></div></dl> : null}</Card> : null}
           {entries.length ? <p className="text-xs text-[var(--muted)]">{t("operationResult.changeCountersHint")}</p> : null}

@@ -1,5 +1,9 @@
 <div align="center">
 
+非法 UTF-8、数组 payload 或超出首行处理能力的数据会跳过并显示具体原因，关联索引保留；请处理后重新预览。不会自动转码或增加固定嵌套层数限制。
+
+问题会话会被跳过，其关联索引保留原样；正常会话继续同步/切换。有跳过会显示“部分完成”，在预览、结果和操作日志可查看原因及本机完整路径（最多 200 项）。处理问题后重新预览即可纳入；全部历史跳过时，切换仍会备份并更新配置。数据库/目录/备份等全局故障仍停止，已写入时保留备份。诊断导出移除路径和索引标识。
+
 # codex-provider-sync
 
 ### 切换 Provider 后，帮助 Codex 旧会话重新可用
@@ -41,7 +45,7 @@
 
 [下载最新正式版：安装版 / 便携 ZIP、版本说明与校验](https://github.com/Dailin521/codex-provider-sync/releases/latest)
 
-未签名。安装版支持下载后确认安装更新；便携版须手动完整解压。1.0.2 修复安装版检查更新立即失败的问题，受影响的 1.0.1 用户需手动安装 1.0.2 一次，详见[升级说明](docs/release-notes/v1.0.2-zh.md)。旧 .NET 版不能通过旧更新按钮迁移。
+未签名。安装版支持下载后确认安装更新；便携版须手动完整解压。1.0.3 支持大首行并跳过问题会话，让正常数据继续同步；1.0.1 用户需手动安装新版一次，详见[升级说明](docs/release-notes/v1.0.3-zh.md)。旧 .NET 版不能通过旧更新按钮迁移。
 
 macOS/Linux Electron 包尚未发布；CLI / Web 的 npm 版本独立发布。
 
@@ -166,3 +170,7 @@ npm run desktop:build
 感谢 [@tangquanwei](https://github.com/tangquanwei) 贡献本地 Web UI、聊天记录浏览和多语言文档基础，并通过 [PR #80](https://github.com/Dailin521/codex-provider-sync/pull/80) 带入 v0.5.0；感谢所有参与贡献和问题调查的朋友。
 
 [贡献者](CONTRIBUTORS.md) · [GitHub Contributors](https://github.com/Dailin521/codex-provider-sync/graphs/contributors) · [LINUX DO 社区](https://linux.do/) · [MIT License](LICENSE)
+
+### 大首行会话
+
+Node 版本（Electron、CLI、Web）支持最高 128 MiB 的会话首行元数据（UTF-8 字节，不含换行）；超限或格式无效的数据会跳过并记录原因，正常部分继续同步。此限制不是整个聊天记录的大小限制。

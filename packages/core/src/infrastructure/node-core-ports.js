@@ -12,6 +12,7 @@ import {
   defaultBackupRoot
 } from "../../../../src/constants.js";
 import { CoreError } from "../../../../src/core-error.js";
+export { summarizeSkips, rolloutSkip, uniqueSkips, selectProviderRows, providerPathKey } from "../../../../src/provider-skips.js";
 export { annotateFailureStage, withFailureStage } from "../../../../src/core-error.js";
 import {
   configDeclaresProvider,
@@ -32,6 +33,7 @@ import {
   listBackups,
   pruneBackups as pruneManagedBackups,
   refreshBackupInventory,
+  updateSessionBackupManifest,
   resolveRestoreStateDbTargetPath,
   restoreBackup
 } from "../../../../src/backup.js";
@@ -68,6 +70,7 @@ import {
   assertSqliteWritable,
   detectStateDb,
   readSqliteProviderCounts,
+  readSqliteProviderRevisionState,
   readSqliteRepairStats,
   updateSqliteProvider
 } from "../../../../src/sqlite-state.js";
@@ -138,6 +141,7 @@ export const codexStorage = createCodexStorage({
     assertSqliteWritable,
     detectStateDb,
     readSqliteProviderCounts,
+  readSqliteProviderRevisionState,
     readSqliteRepairStats,
     updateSqliteProvider
   },
@@ -163,6 +167,7 @@ export {
   listBackups,
   pruneManagedBackups,
   refreshBackupInventory,
+  updateSessionBackupManifest,
   resolveRestoreStateDbTargetPath,
   restoreBackup,
   acquireLock,

@@ -1,5 +1,9 @@
 # Node Core 当前架构与开发约束
 
+Provider 首行新增严格 UTF-8 和对象 payload 校验；处理容量失败仅在序列化/语义比较边界逐文件跳过，不设固定嵌套上限。默认共享 Repair/Restore 读取规则不变。
+
+当前 Provider 跳过合同见 [ADR-0045](../adr/0045-isolated-provider-data-skips.md)：内部逐文件/逐行计划绑定、关联索引排除、已知未写恢复范围及有界本机日志。`test/provider-skip-data.test.js` 覆盖混合数据、未知归属、冻结排除、删除及全部跳过。全局故障和 Repair/Restore 仍严格；不完整状态不能宣称对齐。
+
 > 状态：Accepted，适用于 V1 当前代码；最近校对：2026-09-08（已纳入 ADR-0038）。
 > 本文是 Node Core 日常开发入口，不是发布证明。Electron 总体路线仍见 [vNext 架构基线](../VNEXT_ELECTRON_NODE_ARCHITECTURE_ZH.md)，阶段及发布状态只记在[执行索引](../migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md)。
 
@@ -68,7 +72,7 @@ Windows 写目标占用探测的私有协议位于 `src/windows-lock-probe.js`�
 
 ### PIO-1：只改 Provider
 
-Sync 目标始终取 `config.toml` 根级 `model_provider`，缺失时为 `openai`。公共输入不接受 `provider/model/fast/syncMode`。正常扫描经 `collectProviderChanges`，只解析第一行 `session_meta`（上限 1 MiB）；不得为模型、cwd、用户事件、加密字段、会话序号或历史显示索引扫描正文。
+Sync 目标始终取 `config.toml` 根级 `model_provider`，缺失时为 `openai`。公共输入不接受 `provider/model/fast/syncMode`。正常扫描经 `collectProviderChanges`，只解析第一行 `session_meta`（上限 128 MiB UTF-8 内容字节，不含 LF/CRLF；见 [ADR-0044](../adr/0044-large-session-metadata.md)）；不得为模型、cwd、用户事件、加密字段、会话序号或历史显示索引扫描正文。
 
 这里“只读首行”指**业务扫描边界**：底层按 64 KiB 分块，可能在包含换行的块中预读少量尾部。按 [ADR-0037](../adr/0037-switch-history-and-provider-preparation-facts.md)，Sync/Switch Prepare 的分布、revision 和 change descriptor 复用同一次首行事实，短期记录不进入计划 ledger/公开输入/持久缓存。Apply 锁内复核、实际目标重扫和落盘前仍重新读取。不能声称整个 Sync 只读一次或只读取 Provider 的几个字节。备份/哈希及变长复制有各自 I/O，但不能借此恢复正文业务扫描。
 

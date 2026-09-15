@@ -14,6 +14,7 @@ import {
   type CoreErrorDto,
   type CoreErrorSeverity
 } from "./errors.js";
+import { isSkipSummary } from "./skip-summary.js";
 import { isFileUpdateTiming } from "./file-update-timing.js";
 
 export interface CoreRequestEnvelope<M extends CoreMethodName = CoreMethodName> {
@@ -647,6 +648,7 @@ export function assertCoreMethodOutput<M extends CoreMethodName>(
           || !isNonEmptyString(profile.id)
           || !isNonEmptyString(profile.revision)
           || !isNonEmptyString(status.currentProvider)
+          || (status.skipSummary !== undefined && !isSkipSummary(status.skipSummary))
           || (status.sessionActivity !== undefined && !isSessionActivity(status.sessionActivity))
           || (usage !== undefined && (!isRecord(usage)
             || Object.keys(usage).sort().join(",") !== "count,state"
@@ -727,6 +729,7 @@ export function assertCoreMethodOutput<M extends CoreMethodName>(
           || !isJsonValue(plan.target)
           || !isRecord(plan.impact)
           || !isJsonValue(plan.impact)
+          || (plan.impact.skipSummary !== undefined && !isSkipSummary(plan.impact.skipSummary))
           || (plan.impact.sessionActivity !== undefined && !isSessionActivity(plan.impact.sessionActivity))
           || !Array.isArray(plan.warnings)
           || plan.warnings.some((entry) => typeof entry !== "string")
@@ -766,6 +769,9 @@ export function assertCoreMethodOutput<M extends CoreMethodName>(
       requireStringArray(result.warnings, "OperationResult warnings");
       if (!("result" in result) || !isJsonValue(result.result)) {
         throw new ContractValidationError("INVALID_INPUT", "OperationResult result is required.");
+      }
+      if (isRecord(result.result) && result.result.skipSummary !== undefined && !isSkipSummary(result.result.skipSummary)) {
+        throw new ContractValidationError("INVALID_INPUT", "Invalid skip summary.");
       }
       if (isRecord(result.result) && result.result.fileUpdateTiming !== undefined && !isFileUpdateTiming(result.result.fileUpdateTiming)) {
         throw new ContractValidationError("INVALID_INPUT", "Invalid file update timing.");

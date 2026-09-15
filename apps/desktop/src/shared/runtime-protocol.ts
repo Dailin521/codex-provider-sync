@@ -3,6 +3,8 @@ import {
   assertCoreRequestProgressEnvelope,
   assertCoreRequestEnvelope,
   assertCoreResponseEnvelope,
+  isSkipSummary,
+  type SkipSummary,
   isFileUpdateTiming,
   type FileUpdateTiming,
   type CoreMethodName,
@@ -87,6 +89,7 @@ export interface RuntimeWatchActivity {
   changedSessionFiles?: number;
   sqliteRowsUpdated?: number;
   skippedLockedRolloutFiles?: number;
+  skipSummary?: SkipSummary;
   fileUpdateTiming?: FileUpdateTiming;
 }
 
@@ -281,7 +284,8 @@ export function assertRuntimeWatchActivityFrame(value: unknown): asserts value i
       || !isRecord(value.activity)) throw new TypeError("Invalid desktop Watch activity frame.");
   assertGeneration(value.generation);
   const activity = value.activity;
-  const allowed = ["schemaVersion", "event", "activityId", "watchId", "profileId", "profileRevision", "backupId", "failedStage", "failureCode", "partialReason", "retryRecommended", "startedAt", "finishedAt", "reason", "outcome", "errorCode", "changedSessionFiles", "sqliteRowsUpdated", "skippedLockedRolloutFiles", "fileUpdateTiming"];
+  const allowed = ["schemaVersion", "event", "activityId", "watchId", "profileId", "profileRevision", "backupId", "failedStage", "failureCode", "partialReason", "retryRecommended", "startedAt", "finishedAt", "reason", "outcome", "errorCode", "changedSessionFiles", "sqliteRowsUpdated", "skippedLockedRolloutFiles", "fileUpdateTiming", "skipSummary"];
+  if (activity.skipSummary !== undefined && (activity.event !== "finished" || !isSkipSummary(activity.skipSummary))) throw new Error("Invalid skip summary.");
   if (activity.fileUpdateTiming !== undefined && (activity.event !== "finished" || !isFileUpdateTiming(activity.fileUpdateTiming))) throw new Error("Invalid file update timing.");
   if (Object.keys(activity).some((key) => !allowed.includes(key)) || activity.schemaVersion !== 1
       || (activity.event !== "started" && activity.event !== "finished")

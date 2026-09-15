@@ -356,9 +356,28 @@ export async function readSqliteProviderCounts(storageOrLocation) {
 // A Provider plan depends on row identity / Provider, not message previews,
 // activity timestamps, or the physical WAL/SHM representation. One read
 // transaction binds the schema and rows to the same SQLite snapshot.
+async function sqlitePhysicalIdentity(dbPath) {
+  const stats = await fs.lstat(dbPath, { bigint: true });
+  if (!stats.isFile() || stats.isSymbolicLink() || stats.ino === 0n) {
+    throw new CoreError("STALE_STATE", "The thread index identity cannot be verified.", { details: { reason: "state-db" } });
+  }
+  const realPath = await fs.realpath(dbPath);
+  return { dev: String(stats.dev), ino: String(stats.ino), nlink: String(stats.nlink),
+    realPath: process.platform === "win32" ? realPath.toLowerCase() : realPath };
+}
+
+async function assertSqlitePhysicalIdentity(dbPath, expected) {
+  if (!expected) return;
+  const actual = await sqlitePhysicalIdentity(dbPath);
+  if (Object.keys(expected).some(key => expected[key] !== actual[key])) {
+    throw new CoreError("STALE_STATE", "The thread index was replaced before its transaction.", { details: { reason: "state-db" } });
+  }
+}
+
 export async function readSqliteProviderRevisionState(dbPath, { includeArchived = false } = {}) {
   let db;
   try {
+    const identity = await sqlitePhysicalIdentity(dbPath);
     db = await openDatabase(dbPath, { readOnly: true });
     db.exec("BEGIN");
     const schema = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'threads'").get()?.sql;
@@ -367,9 +386,11 @@ export async function readSqliteProviderRevisionState(dbPath, { includeArchived 
     }
     const key = tableHasColumn(db, "threads", "id") ? "id" : "rowid";
     const archived = includeArchived && tableHasColumn(db, "threads", "archived") ? ", archived" : "";
-    const rows = db.prepare(`SELECT ${key} AS id, model_provider${archived} FROM threads ORDER BY ${key}`).all();
+    const rolloutPath = tableHasColumn(db, "threads", "rollout_path") ? ", rollout_path" : "";
+    const rows = db.prepare(`SELECT ${key} AS id, model_provider${archived}${rolloutPath} FROM threads ORDER BY ${key}`).all();
     db.exec("COMMIT");
-    return { schema, rows };
+    await assertSqlitePhysicalIdentity(dbPath, identity);
+    return { schema, key, rows, identity };
   } catch (error) {
     if (isSqliteBusyError(error)) throw wrapSqliteBusyError(error, "read Provider revision");
     if (error instanceof CoreError) throw error;
@@ -635,6 +656,7 @@ export async function updateSqliteProvider(storageOrLocation, targetProvider, af
   const targetModel = options.targetModel ?? null;
 
   const dbPath = await existingStateDbPath(storageOrLocation);
+  if (!dbPath && options.expectedIdentity) throw new CoreError("STALE_STATE", "The planned thread index disappeared.", { details: { reason: "state-db" } });
   if (!dbPath) {
     if (afterUpdate) {
       await afterUpdate({
@@ -659,11 +681,13 @@ export async function updateSqliteProvider(storageOrLocation, targetProvider, af
   let db;
   let transactionOpen = false;
   try {
+    await assertSqlitePhysicalIdentity(dbPath, options.expectedIdentity);
     db = await openDatabase(dbPath);
     setBusyTimeout(db, options.busyTimeoutMs);
     configureSqliteWriteDurability(db);
     db.exec("BEGIN IMMEDIATE");
     transactionOpen = true;
+    await assertSqlitePhysicalIdentity(dbPath, options.expectedIdentity);
     // When a target model is provided, align every thread's `model` column
     // with it alongside `model_provider`. This is what makes the bottom-right
     // of the Codex UI show the active model for old sessions, instead of the
@@ -675,11 +699,49 @@ export async function updateSqliteProvider(storageOrLocation, targetProvider, af
     // Keep the update shape and counters identical to .NET: provider and
     // optional model are independent writes, and a row changed in both
     // columns contributes two to updatedRows.
-    const providerResult = db.prepare(`
-      UPDATE threads
-      SET model_provider = ?
-      WHERE COALESCE(model_provider, '') <> ?
-    `).run(targetProvider, targetProvider);
+    const skippedItems = [];
+    let providerResult;
+    if (Array.isArray(options.plannedRows)) {
+      const key = tableHasColumn(db, "threads", "id") ? "id" : "rowid";
+      const schema = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'threads'").get()?.sql;
+      if (options.expectedSchema && schema !== options.expectedSchema) throw new CoreError("STALE_STATE", "The thread index schema changed.", { details: { reason: "state-db" } });
+      const hasPath = tableHasColumn(db, "threads", "rollout_path");
+      const read = db.prepare(`SELECT model_provider${hasPath ? ", rollout_path" : ""} FROM threads WHERE ${key} = ?`);
+      const update = db.prepare(`UPDATE threads SET model_provider = ? WHERE ${key} = ? AND model_provider IS ?${hasPath ? " AND rollout_path IS ?" : ""}`);
+      let changes = 0;
+      const changedRows = new Set();
+      if (Array.isArray(options.expectedRows)) {
+        for (const row of options.expectedRows) {
+          const current = read.get(row.id);
+          if (!current || current.model_provider !== row.model_provider || (hasPath && current.rollout_path !== row.rollout_path)) {
+            changedRows.add(String(row.id));
+            skippedItems.push({ kind: "sqlite", id: String(row.id), reason: current ? "row-changed" : "row-missing", stage: "sqlite", retryable: true });
+          }
+        }
+      }
+      for (const row of options.plannedRows) {
+        if (changedRows.has(String(row.id))) continue;
+        const current = read.get(row.id);
+        if (!current || current.model_provider !== row.model_provider || (hasPath && current.rollout_path !== row.rollout_path)) {
+          skippedItems.push({ kind: "sqlite", id: String(row.id), reason: current ? "row-changed" : "row-missing", stage: "sqlite", retryable: true });
+          continue;
+        }
+        changes += update.run(targetProvider, row.id, row.model_provider, ...(hasPath ? [row.rollout_path] : [])).changes ?? 0;
+      }
+      if (Array.isArray(options.expectedRowIds)) {
+        const expected = new Set(options.expectedRowIds);
+        for (const row of db.prepare(`SELECT ${key} AS id FROM threads WHERE COALESCE(model_provider, '') <> ?`).all(targetProvider)) {
+          if (!expected.has(String(row.id))) skippedItems.push({ kind: "sqlite", id: String(row.id), reason: "deferred", stage: "sqlite", retryable: true });
+        }
+      }
+      providerResult = { changes };
+    } else {
+      providerResult = db.prepare(`
+        UPDATE threads
+        SET model_provider = ?
+        WHERE COALESCE(model_provider, '') <> ?
+      `).run(targetProvider, targetProvider);
+    }
     let modelUpdatedRows = 0;
     if (wantsModel) {
       modelUpdatedRows = db.prepare(`
@@ -718,6 +780,7 @@ export async function updateSqliteProvider(storageOrLocation, targetProvider, af
     const result = {
       updatedRows,
       providerRowsUpdated: providerUpdatedRows,
+      skippedItems,
       modelRowsUpdated: modelUpdatedRows,
       userEventRowsUpdated: userEventUpdatedRows,
       cwdRowsUpdated: cwdUpdatedRows,

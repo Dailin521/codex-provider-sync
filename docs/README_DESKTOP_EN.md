@@ -1,5 +1,9 @@
 # Codex Provider Sync Desktop
 
+Invalid UTF-8, array payloads, and metadata exceeding processing capacity are skipped with specific reasons; associated index rows stay unchanged. Resolve the data issue and preview again. No automatic transcoding or fixed nesting limit is introduced.
+
+Node Sync/Switch/Watch skip isolated invalid, oversized, unreadable or changed sessions and preserve their associated index rows. Healthy data continues; partial results show counts and up to 200 local details. A new preview can include repaired data. Switch can still back up and change configuration when all history is skipped. Global storage/database/backup failures stop the operation. Diagnostic exports remove local paths and row identifiers.
+
 V1 Electron is the primary desktop interface for aligning Provider metadata in local Codex session files and the chat index, helping reuse sessions affected by Provider mismatches after switching. Sync does not guarantee cross-provider decryption or continuation. Build targets are Windows, macOS, and Linux; available downloads depend on actual Release assets. Local builds do not imply public release, signing, or an enabled update channel.
 
 ## First use
@@ -162,3 +166,7 @@ npm run desktop:test:e2e
 ```
 
 [Home](../README.md) · [CLI guide (Chinese)](README_CLI_ZH.md) · [Current Core architecture](architecture/NODE_CORE_ARCHITECTURE_ZH.md)
+
+### Large session metadata
+
+Electron supports first-line metadata up to 128 MiB, excluding line endings. Oversized or invalid headers are skipped with distinct reasons while healthy sessions continue; resolve the cause and prepare again to include them.

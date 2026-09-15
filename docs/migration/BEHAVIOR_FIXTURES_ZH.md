@@ -1,5 +1,19 @@
 # vNext 行为兼容 Fixture 清单
 
+`test/provider-header-validation.test.js` 覆盖非法 UTF-8、数组 payload、序列化及语义比较容量失败、有效替换字符和跨块编码、BOM、普通/归档混合数据、冻结排除、写前变化、关联索引保留及恢复范围。日志/UI/生产 Electron 混合数据验收覆盖新增原因码，继续执行 128 MiB 和 PIO 门禁。
+
+当前 Provider 跳过合同见 [ADR-0045](../adr/0045-isolated-provider-data-skips.md)：内部逐文件/逐行计划绑定、关联索引排除、已知未写恢复范围及有界本机日志。`test/provider-skip-data.test.js` 覆盖混合数据、未知归属、冻结排除、删除及全部跳过。全局故障和 Repair/Restore 仍严格；不完整状态不能宣称对齐。
+
+`test/in-place-transaction.test.js` 的 POSIX 回归覆盖写前新增硬链接按变化跳过，以及短写、零进度、fsync 故障在验证恢复成功后返回 `SKIP_NOT_APPLIED`；同时断言原字节、inode、大小、mtime 和跳过原因。写后身份冲突或恢复失败仍停止，禁止回退整文件替换。
+
+占用错误包装回归覆盖 Status/Provider 扫描明细保留路径、原因和重试提示；Node 流式写入的写前读取保留原始错误码，EBUSY/EPERM 明确未写入后跳过，后续健康文件继续。Repair 共享读取的默认错误包装不变。
+
+`provider-skip-data.test.js` 验证预览时已对齐的 SQLite 行在执行前改 Provider 或消失：有/无 `rollout_path`、无写目标/混合健康目标均返回部分完成，变化行和对应 rollout 保持原样，空写集合不创建备份。
+
+## ADR-0044：大首行与明确错误
+
+`test/large-session-metadata.test.js` 覆盖 8 MiB 完整 Status→Sync/Switch→Restore、原地/变长正文不变、128 MiB LF/CRLF/EOF 读取边界与线性合并、超限/无效 Prepare 零写入及安全错误。`CPS_LARGE_HEADER_MIB=128` 可显式运行完整近上限读写。`provider-preparation-facts.test.js`、`status-coordination.test.js` 保留无效/超限拒绝及 Status 不完整检查。生产 Electron smoke 使用 8 MiB 首行验证大首行同步与恢复。
+
 ## ADR-0039 增补：普通文档 PR 的 CI 分流
 
 `test/ci-docs.test.js` 验证整个 PR 比较（早期代码改动不可被后续文档提交掩盖）、重命名两侧、白名单/未知/空差异、main 始终完整、分类失败、精确任务清单、非预期失败/取消/跳过拒绝，以及 C10 业务结果保真。链接夹具覆盖删除公告入链、括号路径/标题、非渲染示例、百分号及 HTML 目标。`test/release-packaging-contract.test.js` 继续验证四目标和稳定 gate；不以纯文档跳过结果生成或替代正式发布证据。

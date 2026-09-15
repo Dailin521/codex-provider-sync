@@ -1,5 +1,7 @@
 <div align="center">
 
+Node Sync/Switch/Watch는 형식 오류, 크기 초과, 읽기 불가 또는 변경된 세션을 개별적으로 건너뛰고 관련 인덱스 행을 유지합니다. 정상 데이터 처리는 계속하며 부분 완료 건수와 최대 200개의 로컬 상세 정보를 표시합니다. 수정한 데이터는 새 미리보기에서 포함할 수 있습니다. 모든 기록을 건너뛰어도 Switch는 백업과 설정 변경을 수행합니다. 저장소·데이터베이스·백업 전체의 오류가 발생하면 중단합니다. 진단 내보내기에서는 로컬 경로와 행 식별자를 제거합니다.
+
 # codex-provider-sync
 
 ### Provider 전환 후 기존 Codex 세션을 다시 사용할 수 있도록 돕습니다
@@ -190,3 +192,7 @@ dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.cs
 ## License
 
 MIT
+
+### 큰 세션 메타데이터
+
+Node 기반 Electron, CLI, Web은 줄바꿈을 제외한 UTF-8 기준 최대 128 MiB의 첫 줄 메타데이터를 지원합니다. 크기 초과나 잘못된 형식의 데이터는 원인을 기록하고 건너뛰며, 정상 세션의 동기화는 계속합니다. 원인을 해결한 후 새 미리보기로 다시 동기화하세요. 대화 파일 전체의 크기 제한은 아닙니다.

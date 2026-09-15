@@ -1,3 +1,4 @@
+import { SkipDetails } from "./SkipDetails.js";
 import type { PlanSummary, ProgressEvent } from "@codex-provider-sync/contracts";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -164,6 +165,7 @@ export function PlanReview({
         {cancelling ? <p className="mt-3 text-sm text-[var(--warning)]">{t("plan.cancelPending")}</p> : null}
       </Card> : plan ? (
         <div className="grid gap-4">
+          <SkipDetails value={plan.impact.skipSummary} />
           <Card>
             <h3 className="mb-2 text-sm font-semibold">{t("plan.target")}</h3>
             <dl>{modelTransition ? <KeyValue label={t("plan.fields.rootModelChange")} value={modelTransition} /> : null}{targetRows.map(([key, label]) => <KeyValue key={key} label={label} value={displayPlanValue(key, plan.target[key], t)} />)}</dl>

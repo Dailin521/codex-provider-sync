@@ -202,6 +202,7 @@ export async function scanStatus({
     pendingRecovery: pendingTransactions.some((transaction) => transaction.operationKind === "restore"),
     operationInProgress: null,
     rolloutScanComplete: lockedPaths.length === 0 && incompletePaths.length === 0,
+    ...(rolloutScan.skipSummary ? { skipSummary: rolloutScan.skipSummary } : {}),
     pendingTransactions: pendingTransactions.map((transaction) => ({
       operationId: transaction.operationId ?? null,
       operationKind: transaction.operationKind ?? "sync",

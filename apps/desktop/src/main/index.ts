@@ -201,6 +201,7 @@ if (!app.requestSingleInstanceLock()) {
           status: activity.outcome === "partial" ? "partial" : activity.outcome === "failed" ? "failed" : "completed",
           outcome: activity.outcome,
           backupId: activity.backupId,
+          skipSummary: activity.skipSummary,
           fileUpdateTiming: activity.fileUpdateTiming,
           failedStage: activity.failedStage,
           failureCode: activity.failureCode,
@@ -220,7 +221,7 @@ if (!app.requestSingleInstanceLock()) {
     const diagnosticsExporter = new DesktopDiagnosticsExporter({
       appVersion: app.getVersion(),
       isPackaged: app.isPackaged,
-      recentLogs: () => operationLogs.recentJsonLines()
+      recentLogs: () => operationLogs.recentRedactedJsonLines()
     });
     const updateReminders = new UpdateReminderStore(app.getPath("userData"));
     updates = new DesktopUpdateController({

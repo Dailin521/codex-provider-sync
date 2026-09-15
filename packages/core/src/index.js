@@ -4,7 +4,7 @@
 // application/ and storage adapters live in infrastructure/.
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { publicFileUpdateTiming } from "../../contracts/dist/index.js";
+import { publicFileUpdateTiming, publicSkipSummary } from "../../contracts/dist/index.js";
 
 import { createCoreApplication } from "./application/core-application.js";
 import { toPublicProgress } from "./progress.js";
@@ -34,6 +34,7 @@ import { CoreError, publicHistoryIntegrity } from "./infrastructure/node-core-po
  * changedSessionFiles?: number,
  * sqliteRowsUpdated?: number,
  * skippedLockedRolloutFiles?: number
+ * skipSummary?: import("../../contracts/dist/index.js").SkipSummary,
  * fileUpdateTiming?: import("../../contracts/dist/index.js").FileUpdateTiming
  * }} WatchActivityEvent */
 /** @typedef {{schemaVersion: 1, watchId: string, status: "stopped", startedAt: string, stoppedAt: string, stopReason: string, includeStateDb: boolean, once: boolean}} WatchStoppedSnapshot */
@@ -353,6 +354,7 @@ function publicStatus(value, includeLocalDisplayPaths = false) {
     ...(value.staleLockDetected === true ? { staleLockDetected: true } : {}),
     rolloutScanComplete: value.rolloutScanComplete === true && locked.length === 0,
     lockedRolloutFiles: locked,
+    ...(publicSkipSummary(value.skipSummary) ? { skipSummary: publicSkipSummary(value.skipSummary) } : {}),
     currentProviderImplicit: value.currentProviderImplicit === true,
     configuredProviders: Array.isArray(value.configuredProviders)
       ? value.configuredProviders.filter((entry) => typeof entry === "string")
@@ -409,6 +411,7 @@ function publicPlan(value) {
   }
   /** @type {Record<string, unknown>} */
   const publicImpact = {};
+  if (publicSkipSummary(impact.skipSummary)) publicImpact.skipSummary = publicSkipSummary(impact.skipSummary);
   if (isRecord(impact.sessionActivity)) publicImpact.sessionActivity = publicSessionActivity(impact.sessionActivity);
   for (const [key, candidate] of Object.entries(impact)) {
     if (typeof candidate === "boolean" || (Number.isSafeInteger(candidate) && Number(candidate) >= 0)) {
@@ -464,6 +467,8 @@ function publicOperationResult(value) {
   const source = isRecord(value.result) ? value.result : {};
   /** @type {Record<string, unknown>} */
   const result = {};
+  const skipSummary = publicSkipSummary(source.skipSummary);
+  if (skipSummary) result.skipSummary = skipSummary;
   const fileUpdateTiming = publicFileUpdateTiming(source.fileUpdateTiming);
   if (fileUpdateTiming) result.fileUpdateTiming = fileUpdateTiming;
   for (const key of [
@@ -486,7 +491,7 @@ function publicOperationResult(value) {
   if (typeof source.commitAcknowledgementRecovered === "boolean") {
     result.commitAcknowledgementRecovered = source.commitAcknowledgementRecovered;
   }
-  for (const key of ["noop", "retryRecommended"]) {
+  for (const key of ["noop", "retryRecommended", "configUpdated"]) {
     if (typeof source[key] === "boolean") result[key] = source[key];
   }
   if (Array.isArray(source.resolvedOperationIds)) {
@@ -495,6 +500,7 @@ function publicOperationResult(value) {
   }
   for (const key of [
     "backupDurationMs",
+    "unconfirmedSessionFiles",
     "changedSessionFiles",
     "inPlaceSessionFiles",
     "rewrittenSessionFiles",

@@ -223,7 +223,10 @@ async function assertNoLinkedPathSegments(root, target) {
   }
 }
 
-async function validateSessionManifestEntries(entries, codexHome) {
+async function validateSessionManifestEntries(entries, codexHome, physicalEntries = null) {
+  if (!Array.isArray(entries)) throw new Error("Backup session manifest has invalid entries.");
+  const physical = physicalEntries ? new Set(physicalEntries.map(entry => pathComparisonKey(entry.path))) : null;
+  const lexicalSeen = new Set();
   const roots = ["sessions", "archived_sessions"].map((name) => path.resolve(codexHome, name));
   const canonicalRoots = (await Promise.all(roots.map(async (root) => {
     try {
@@ -248,6 +251,19 @@ async function validateSessionManifestEntries(entries, codexHome) {
     const rawRoot = findRawRolloutRoot(target);
     if (!rawRoot) {
       throw new Error(`Backup session target is outside the allowed rollout roots: ${entry.path}`);
+    }
+    const lexicalKey = pathComparisonKey(target);
+    if (lexicalSeen.has(lexicalKey)) throw new Error("Backup session manifest contains a duplicate rollout target.");
+    lexicalSeen.add(lexicalKey);
+    if (entry.mutation) {
+      if (entry.modelOnlyChange) throw new Error("Provider byte mutation cannot describe a model-only change.");
+      validateProviderMutationDescriptor(entry.mutation, entry.path, entry.originalFirstLine, entry.originalSeparator);
+    }
+    if (physical && !physical.has(lexicalKey)) {
+      // Excluded entries retain syntax/boundary validation, but need not still
+      // exist: they were positively acknowledged as never written.
+      if (!roots.some(root => pathIsWithin(root, target))) throw new Error("Excluded rollout target is outside the backup Home.");
+      continue;
     }
     await assertNoLinkedPathSegments(rawRoot, target);
     const [canonicalRawRoot, canonicalTarget] = await Promise.all([
@@ -771,7 +787,9 @@ export async function getBackupRecoveryCoverage(backupDir, storageOrCodexHome) {
     if (!Array.isArray(sessionManifest.files)) {
       throw new Error(`Session backup manifest has an invalid files collection: ${sessionManifestPath}`);
     }
-    await validateSessionManifestEntries(sessionManifest.files, codexHome);
+    const selectedEntries = await selectSessionRestoreEntries(backupDir, sessionManifest);
+    await validateSessionManifestEntries(sessionManifest.files, codexHome, selectedEntries);
+    sessionManifest = { ...sessionManifest, files: selectedEntries };
   }
 
   let globalState = false;
@@ -854,7 +872,8 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
         || !await storagePathsEqualPhysical(sessionManifest.codexHome, codexHome)) {
       throw new Error(`Session backup was created for ${sessionManifest.codexHome}, not ${codexHome}.`);
     }
-    const validatedEntries = await validateSessionManifestEntries(sessionManifest.files ?? [], codexHome);
+    const selectedEntries = await selectSessionRestoreEntries(backupDir, sessionManifest);
+    const validatedEntries = await validateSessionManifestEntries(sessionManifest.files ?? [], codexHome, selectedEntries);
     if (sessionTargetPaths) {
       const selected = new Set(sessionTargetPaths.map(pathComparisonKey));
       for (const selectedPath of sessionTargetPaths) {
@@ -866,7 +885,6 @@ export async function restoreBackup(backupDir, storageOrCodexHome, options = {})
         )
         .map(({ entry }) => entry);
     } else {
-      const selectedEntries = await selectSessionRestoreEntries(backupDir, sessionManifest);
       const selected = new Set(selectedEntries.map((entry) => pathComparisonKey(entry.path)));
       sessionRestoreEntries = validatedEntries
         .filter(({ originalPath }) => selected.has(pathComparisonKey(originalPath)))

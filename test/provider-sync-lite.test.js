@@ -602,7 +602,7 @@ test("rollout changed during Apply is reported separately and a fresh retry conv
     await fs.readFile(value.file),
     Buffer.concat([beforeBytes, Buffer.from('{"type":"event_msg","payload":{"type":"assistant_message","message":"later"}}\n')])
   );
-  assert.equal((await row(value)).model_provider, "openai");
+  assert.equal((await row(value)).model_provider, "prov_a");
 
   const retryPlan = await prepareSync({ codexHome: value.home });
   const retry = await applySync({ schemaVersion: 1, planId: retryPlan.planId });

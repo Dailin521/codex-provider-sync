@@ -303,13 +303,14 @@ export async function runWatch({
           ...(typeof result.failureCode === "string" ? { failureCode: result.failureCode } : {}),
           ...(typeof result.partialReason === "string" ? { partialReason: result.partialReason } : {}),
           ...(typeof result.retryRecommended === "boolean" ? { retryRecommended: result.retryRecommended } : {}),
+          ...(result.skipSummary ? { skipSummary: result.skipSummary } : {}),
           changedSessionFiles: Number(result.changedSessionFiles) || 0,
           ...(publicFileUpdateTiming(result.fileUpdateTiming) ? { fileUpdateTiming: publicFileUpdateTiming(result.fileUpdateTiming) } : {}),
           sqliteRowsUpdated: Number(result.sqliteRowsUpdated) || 0,
           skippedLockedRolloutFiles: Number(result.skippedLockedRolloutFiles?.length) || 0,
           finishedAt: new Date().toISOString()
         });
-        log(`[${new Date().toISOString()}] Sync complete: provider=${result.targetProvider}, rollout_files=${result.changedSessionFiles}, sqlite_rows=${result.sqliteRowsUpdated}${result.skippedLockedRolloutFiles?.length ? `, skipped_locked=${result.skippedLockedRolloutFiles.length}` : ""}`);
+        log(`[${new Date().toISOString()}] Sync ${result.partial ? "partial" : "complete"}: provider=${result.targetProvider}, rollout_files=${result.changedSessionFiles}, sqlite_rows=${result.sqliteRowsUpdated}${result.skipSummary?.total ? `, skipped=${result.skipSummary.total}, unconfirmed=${result.skipSummary.unconfirmed}${result.retryRecommended ? ", retry after activity settles" : ", fix reported data before retrying"}` : ""}`);
         // A successful sync resets the consecutive-failure counter
         // so a transient error followed by recovery does not
         // poison subsequent invocations.

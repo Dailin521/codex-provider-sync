@@ -38,6 +38,7 @@ function safeString(value) {
 }
 
 function httpStatusForCode(code) {
+  if (code === "ROLLOUT_METADATA_TOO_LARGE" || code === "ROLLOUT_METADATA_INVALID") return 422;
   if (code === "INVALID_INPUT" || code === "PROTOCOL_VERSION_MISMATCH") return 400;
   if (code === "CODEX_HOME_NOT_FOUND" || code === "STATE_DB_NOT_FOUND") return 404;
   if (code === "PERMISSION_DENIED") return 403;

@@ -18,6 +18,19 @@ const entry: OperationLogEntry = {
 };
 
 describe("Partial operation feedback", () => {
+  it.each([0, 1])("keeps mutation failure retry guidance with %i fixed data skips", async count => {
+    const i18n = await createAppI18n("en");
+    const skipSummary = { total: count, rolloutFiles: count, sqliteRows: 0, unconfirmed: 0, omitted: 0, retryRecommended: false,
+      items: count ? [{ kind: "rollout", path: "/fixture/bad.jsonl", reason: "metadata-invalid", stage: "scan", retryable: false }] : [] };
+    render(<I18nextProvider i18n={i18n}><OperationResultDialog close={() => {}} restoreFocus={() => {}} result={{
+      schemaVersion: 1, operationId: "failed-switch", operation: "switch", outcome: "partial", backup: { backupId: "backup" }, warnings: [],
+      result: { partialReason: "mutation-failed", retryRecommended: true, skipSummary }
+    }} /></I18nextProvider>);
+    expect(screen.getByText(i18n.t("operationResult.retryFreshPlan"))).toBeVisible();
+    if (count) expect(screen.getByText(i18n.t("skips.fix"))).toBeVisible();
+    else expect(screen.queryByRole("region", { name: i18n.t("skips.title") })).not.toBeInTheDocument();
+  });
+
   it.each([
     { profileRevision: "r1", logRevision: "r1" },
     { profileRevision: "changed", logRevision: "r1" },

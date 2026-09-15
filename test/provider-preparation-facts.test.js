@@ -65,7 +65,7 @@ test("Provider facts reuse the exact revision and change algorithm with one boun
     assert.deepEqual(probe.counts(), { opens: 3, bytes: 3 * 64 * 1024 });
     const facts = await collectProviderPreparationFacts(value.home, "openai");
     assert.deepEqual(probe.counts(), { opens: 4, bytes: 4 * 64 * 1024 });
-    assert.deepEqual(facts.rollout, revision);
+    assert.deepEqual(withoutInternalBindings(facts.rollout), withoutInternalBindings(revision));
     assert.deepEqual(facts.scan, changes);
     assert.deepEqual(facts.scan.providerCounts, status.providerCounts);
   } finally { probe.restore(); }
@@ -106,8 +106,9 @@ test("merged Prepare retains locked cause/revision and never turns locked facts 
     } };
     const old = await captureRolloutRevision(value.home, { mode: "provider", fsImpl });
     const facts = await collectProviderPreparationFacts(value.home, "openai", { fsImpl });
-    assert.deepEqual(facts.rollout, old);
-    assert.deepEqual(facts.scan.lockedPaths, [value.file]);
+    assert.deepEqual(withoutInternalBindings(facts.rollout), withoutInternalBindings(old));
+    assert.deepEqual(facts.scan.lockedPaths, ["EACCES", "EPERM"].includes(code) ? [] : [value.file]);
+    assert.ok(facts.scan.skipSummary.items.some(item => item.reason === (["EACCES", "EPERM"].includes(code) ? "unreadable" : "locked")));
     assert.equal(facts.scan.changes.length, 0);
     assert.equal(facts.rollout.rolloutScanComplete, false);
   }
@@ -127,7 +128,7 @@ test("shared facts keep nested active and archived inventories separate and revi
   const expected = await collectProviderChanges(value.home, "openai", { skipLockedReads: true });
   const expectedRevision = await captureRolloutRevision(value.home, { mode: "provider" });
   const facts = await collectProviderPreparationFacts(value.home, "openai");
-  assert.deepEqual(facts.rollout, expectedRevision);
+  assert.deepEqual(withoutInternalBindings(facts.rollout), withoutInternalBindings(expectedRevision));
   assert.equal(facts.rollout.fileCount, 4);
   assert.deepEqual(facts.scan.providerCounts, expected.providerCounts);
   assert.deepEqual(facts.scan.changes.map(change => [change.path, change]).sort(), expected.changes.map(change => [change.path, change]).sort());
@@ -135,11 +136,13 @@ test("shared facts keep nested active and archived inventories separate and revi
   assert.equal(facts.scan.changes.filter(change => change.directory === "archived_sessions").length, 2);
 });
 
-test("merged Prepare rejects invalid, oversized and symlinked metadata without writing", async t => {
+test("merged Prepare excludes invalid metadata but rejects symlinks", async t => {
   const value = await fixture(t);
-  for (const content of ["not-json\n", '{"type":"event_msg","payload":{}}\n', "x".repeat(1024 * 1024 + 1) + "\n"]) {
+  for (const content of ["not-json\n", '{"type":"event_msg","payload":{}}\n']) {
     await fs.writeFile(value.file, content);
-    await assert.rejects(collectProviderPreparationFacts(value.home, "openai"), error => error.code === "ROLLOUT_CHANGED");
+    const facts = await collectProviderPreparationFacts(value.home, "openai");
+    assert.equal(facts.scan.changes.length, 0);
+    assert.ok(facts.scan.skipSummary.total > 0);
     assert.equal(await fs.readFile(value.file, "utf8"), content);
   }
   await fs.writeFile(value.file, value.line + "\n");
@@ -166,6 +169,9 @@ test("a candidate appended during the shared header read remains skipped, never 
   } };
   const facts = await collectProviderPreparationFacts(value.home, "openai", { fsImpl });
   assert.equal(facts.scan.changes.length, 0);
-  assert.deepEqual(facts.scan.lockedPaths, [value.file]);
+  assert.deepEqual(facts.scan.lockedPaths, []);
+  assert.ok(facts.scan.skipSummary.items.some(item => item.path === value.file && item.reason === "changed"));
   assert.equal(facts.rollout.observedSizes["sessions/rollout-fixture.jsonl"], String((await fs.stat(value.file)).size));
 });
+
+function withoutInternalBindings({ fileBindings, ...revision }) { return revision; }

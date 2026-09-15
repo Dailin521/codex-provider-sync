@@ -92,7 +92,7 @@ test("short writes preserve inode, size, content and original mtime", posix, asy
   assert.equal(await fs.readFile(f.file, "utf8"), f.original.toString().replace('"openai"', '"prov_a"'));
 });
 
-test("short-write exception, zero progress and fsync failure restore original bytes", posix, async (t) => {
+test("short-write exception, zero progress and fsync failure skip after verified byte restoration", posix, async (t) => {
   for (const kind of ["short", "zero", "sync"]) {
     const f = await fixture(t);
     const { changes } = await collectSessionChanges(f.codexHome, "prov_a");
@@ -105,9 +105,50 @@ test("short-write exception, zero progress and fsync failure restore original by
         return h.write(b, o, 3, p);
       }
     };
-    await assert.rejects(applySessionChanges(changes, options));
+    const skipped = [];
+    const result = await applySessionChanges(changes, {
+      ...options,
+      onSkipped(change, reason) { skipped.push({ path: change.path, reason }); }
+    });
+    assert.equal(result.appliedChanges, 0);
+    assert.equal(result.inPlaceChanges, 0);
+    assert.deepEqual(result.skippedPaths, [f.file]);
+    assert.deepEqual(skipped, [{ path: f.file, reason: "SKIP_NOT_APPLIED" }]);
+    assert.deepEqual(await fs.readFile(f.file), f.original);
+    const after = await fs.stat(f.file);
+    assert.equal(after.ino, before.ino);
+    assert.equal(after.size, before.size);
+    assert.equal(Math.round(after.mtimeMs), Math.round(before.mtimeMs));
+  }
+});
+
+test("Provider streaming prewrite busy reads skip without replacement and continue healthy files", posix, async (t) => {
+  for (const [code, reason] of [["EBUSY", "SKIP_BUSY"], ["EPERM", "SKIP_UNREADABLE"]]) {
+    const f = await fixture(t, header.replace('"openai"', '"old-provider"'));
+    const healthy = path.join(f.codexHome, "sessions", "rollout-z.jsonl");
+    await fs.writeFile(healthy, header + tail);
+    const { changes } = await collectSessionChanges(f.codexHome, "prov_a", {
+      rejectInvalidMetadata: true, includeModels: false, includeUserEvent: false, includeEncryptedContent: false
+    });
+    assert.equal(changes.find(change => change.path === f.file).inPlaceMutation, null);
+    const before = await fs.stat(f.file);
+    const originalOpen = fs.open;
+    const skipped = [];
+    fs.open = async (file, ...args) => {
+      if (String(file) === f.file) throw Object.assign(new Error("synthetic prewrite read failure"), { code });
+      return originalOpen(file, ...args);
+    };
+    try {
+      const result = await applySessionChanges(changes, { onSkipped(change, value) { skipped.push([change.path, value]); } });
+      assert.deepEqual(result.appliedPaths, [healthy]);
+      assert.deepEqual(result.skippedPaths, [f.file]);
+      assert.deepEqual(skipped, [[f.file, reason]]);
+    } finally { fs.open = originalOpen; }
     assert.deepEqual(await fs.readFile(f.file), f.original);
     assert.equal((await fs.stat(f.file)).ino, before.ino);
+    assert.equal((await fs.stat(f.file)).mtimeMs, before.mtimeMs);
+    assert.equal(await fs.readFile(healthy, "utf8"), (header + tail).replace('"openai"', '"prov_a"'));
+    assert.ok((await fs.readdir(path.dirname(f.file))).every(name => !name.endsWith(".tmp")));
   }
 });
 
@@ -281,8 +322,11 @@ test("hardlinked files are not eligible and late links prevent byte mutation", p
   const { changes } = await collectSessionChanges(f.codexHome, "prov_a");
   await fs.link(f.file, f.file + ".link");
   assert.equal((await collectSessionChanges(f.codexHome, "prov_a")).changes[0].inPlaceMutation, null);
-  assert.equal((await applySessionChanges(changes)).appliedChanges, 0);
+  const result = await applySessionChanges(changes);
+  assert.equal(result.appliedChanges, 0);
+  assert.deepEqual(result.skippedChangedPaths, [f.file]);
   assert.deepEqual(await fs.readFile(f.file), f.original);
+  assert.deepEqual(await fs.readFile(f.file + ".link"), f.original);
 });
 
 test("a post-mutation conflict returns partial and preserves the UndoBackup", async (t) => {

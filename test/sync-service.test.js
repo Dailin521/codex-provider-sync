@@ -3393,7 +3393,7 @@ test("assertSqliteWritable defaults to a fail-fast SQLite busy policy", async ()
   }
 });
 
-test("runSync skips locked rollout files and still updates sqlite", async () => {
+test("runSync skips locked rollout files and preserves uncertain sqlite rows", async () => {
   if (process.platform !== "win32") {
     return;
   }
@@ -3416,7 +3416,7 @@ test("runSync skips locked rollout files and still updates sqlite", async () => 
   }
 
   assert.equal(result.changedSessionFiles, 0);
-  assert.equal(result.sqliteRowsUpdated, 1);
+  assert.equal(result.sqliteRowsUpdated, 0);
   assert.deepEqual(result.skippedLockedRolloutFiles, [sessionPath]);
   assert.deepEqual(result.skippedChangedRolloutFiles, []);
   assert.equal(result.retryRecommended, true);
@@ -3429,7 +3429,7 @@ test("runSync skips locked rollout files and still updates sqlite", async () => 
     const row = db
       .prepare("SELECT model_provider FROM threads WHERE id = ?")
       .get("thread-a");
-    assert.equal(row.model_provider, "openai");
+    assert.equal(row.model_provider, "apigather");
   } finally {
     db.close();
   }
@@ -4393,9 +4393,10 @@ test("real cli sync JSON reports a locked rollout as partial", {
   assert.equal(envelope.ok, true);
   assert.equal(envelope.outcome, "partial");
   assert.deepEqual(envelope.result.skippedLockedRolloutFiles, [path.basename(sessionPath)]);
-  assert.equal(envelope.result.sqliteRowsUpdated, 1);
+  assert.equal(envelope.result.sqliteRowsUpdated, 0);
   assert.match(result.stderr, /\[1\/6\] Scanning rollout files/);
-  assert.equal(await readProvider(codexHome, "thread-json-locked"), "openai");
+  assert.equal(await readProvider(codexHome, "thread-json-locked"), "apigather");
+  assert.ok(envelope.result.skipSummary.items.some(item => item.path === sessionPath));
 });
 
 test("syncDirectory only downgrades known unsupported flush errors on Windows", async () => {

@@ -1,5 +1,9 @@
 # ADR-0043：状态读取只校验相关数据变化
 
+> 后续修订：[ADR-0045](0045-isolated-provider-data-skips.md) 取代 Provider 单条问题全局拒绝及集合漂移整体失效规则，保留其余边界。
+
+> 后续修订：首行上限及错误分类以 [ADR-0044](0044-large-session-metadata.md) 为准；下文 1 MiB 记录原决策。
+
 - Status: Accepted
 - Date: 2026-09-11
 - Scope: 普通轻量 Status；独立于 ADR-0042 更新功能。Core 写入算法不变。

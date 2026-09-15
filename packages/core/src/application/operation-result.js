@@ -7,6 +7,7 @@ export function operationWarnings(result) {
     result?.partialWarning,
     result?.autoPruneWarning,
     result?.backupInventoryWarning,
+    result?.backupScopeWarning,
     result?.modelSync?.warning,
     ...(Array.isArray(result?.restoreWarnings) ? result.restoreWarnings : [])
   ].filter((warning) => typeof warning === "string" && warning.trim());

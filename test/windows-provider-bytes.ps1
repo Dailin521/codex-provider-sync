@@ -4,6 +4,7 @@ Add-Type -Path $Source
 Add-Type -TypeDefinition @'
 using System;
 using System.IO;
+public sealed class SyntheticDiskFull : IOException { public SyntheticDiskFull() : base("Synthetic disk full") { HResult = unchecked((int)0x80070070); } }
 public sealed class FaultingProviderStream : FileStream {
     readonly string kind;
     int writes, syncs;
@@ -12,9 +13,10 @@ public sealed class FaultingProviderStream : FileStream {
         : base(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None) { this.kind = kind; }
     public override void Write(byte[] buffer, int offset, int count) {
         wrote = true;
-        if (kind == "write" || kind == "restore") {
+        if (kind == "write" || kind == "restore" || kind == "diskfull") {
             if (++writes == 1) {
                 base.Write(buffer, offset, Math.Min(3, count));
+                if (kind == "diskfull") throw new SyntheticDiskFull();
                 throw new IOException("Injected partial write failure");
             }
             if (kind == "restore") throw new IOException("Injected recovery failure");
@@ -106,7 +108,7 @@ try {
     if (-not $rejected) { throw "Truncated recovery was not rejected" }
   } finally { $s.Dispose() }
   Write-Output "PASS: native identity, exclusive handle, in-place write, mtime, partial recovery, idempotence, append, unknown-byte rejection"
-  foreach ($kind in @("write", "flush", "restore")) {
+  foreach ($kind in @("write", "flush", "restore", "diskfull")) {
     [IO.File]::WriteAllBytes($file, [byte[]]($header + $tail))
     $s = [FaultingProviderStream]::new($file, $kind)
     try {
@@ -117,9 +119,24 @@ try {
       $ino = [string](([uint64]$info.IndexHigh -shl 32) -bor [uint64]$info.IndexLow)
       $mtime = ([double]($info.WriteTime - 116444736000000000L)) / 10000
       $failed = $false
-      try { [ProviderByteFile]::Apply($s, $header, $old, $new, $offset, $size, $mtime, $dev, $ino, $false) | Out-Null }
-      catch { $failed = $true }
-      if (-not $failed) { throw "Injected $kind failure was ignored" }
+      $sourceUnchanged = $false
+      $outcome = $null
+      try { $outcome = [ProviderByteFile]::Apply($s, $header, $old, $new, $offset, $size, $mtime, $dev, $ino, $false) }
+      catch {
+        $failed = $true
+        $errorCursor = $_.Exception
+        while ($errorCursor) {
+          if ($errorCursor.Data["providerSyncSourceUnchanged"] -eq $true) { $sourceUnchanged = $true }
+          $errorCursor = $errorCursor.InnerException
+        }
+      }
+      if ($kind -eq "diskfull") {
+        if (-not $failed -or -not $sourceUnchanged) { throw "Recovered disk full did not stop with unchanged-source proof" }
+      } elseif ($kind -eq "restore") {
+        if (-not $failed) { throw "Unknown recovery failure was ignored" }
+      } elseif ($failed -or $outcome -ne "SKIP_NOT_APPLIED") {
+        throw "Verified recovered $kind failure did not return SKIP_NOT_APPLIED"
+      }
     } finally { $s.Dispose() }
     $isOriginal = $utf8.GetString([IO.File]::ReadAllBytes($file)) -eq $utf8.GetString([byte[]]($header + $tail))
     if (($kind -ne "restore") -and (-not $isOriginal)) { throw "Immediate recovery failed for $kind" }
