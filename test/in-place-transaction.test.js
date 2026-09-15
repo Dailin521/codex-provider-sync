@@ -92,7 +92,7 @@ test("short writes preserve inode, size, content and original mtime", posix, asy
   assert.equal(await fs.readFile(f.file, "utf8"), f.original.toString().replace('"openai"', '"prov_a"'));
 });
 
-test("short-write exception, zero progress and fsync failure restore original bytes", posix, async (t) => {
+test("short-write exception, zero progress and fsync failure skip after verified byte restoration", posix, async (t) => {
   for (const kind of ["short", "zero", "sync"]) {
     const f = await fixture(t);
     const { changes } = await collectSessionChanges(f.codexHome, "prov_a");
@@ -105,9 +105,20 @@ test("short-write exception, zero progress and fsync failure restore original by
         return h.write(b, o, 3, p);
       }
     };
-    await assert.rejects(applySessionChanges(changes, options));
+    const skipped = [];
+    const result = await applySessionChanges(changes, {
+      ...options,
+      onSkipped(change, reason) { skipped.push({ path: change.path, reason }); }
+    });
+    assert.equal(result.appliedChanges, 0);
+    assert.equal(result.inPlaceChanges, 0);
+    assert.deepEqual(result.skippedPaths, [f.file]);
+    assert.deepEqual(skipped, [{ path: f.file, reason: "SKIP_NOT_APPLIED" }]);
     assert.deepEqual(await fs.readFile(f.file), f.original);
-    assert.equal((await fs.stat(f.file)).ino, before.ino);
+    const after = await fs.stat(f.file);
+    assert.equal(after.ino, before.ino);
+    assert.equal(after.size, before.size);
+    assert.equal(Math.round(after.mtimeMs), Math.round(before.mtimeMs));
   }
 });
 
@@ -281,8 +292,11 @@ test("hardlinked files are not eligible and late links prevent byte mutation", p
   const { changes } = await collectSessionChanges(f.codexHome, "prov_a");
   await fs.link(f.file, f.file + ".link");
   assert.equal((await collectSessionChanges(f.codexHome, "prov_a")).changes[0].inPlaceMutation, null);
-  assert.equal((await applySessionChanges(changes)).appliedChanges, 0);
+  const result = await applySessionChanges(changes);
+  assert.equal(result.appliedChanges, 0);
+  assert.deepEqual(result.skippedChangedPaths, [f.file]);
   assert.deepEqual(await fs.readFile(f.file), f.original);
+  assert.deepEqual(await fs.readFile(f.file + ".link"), f.original);
 });
 
 test("a post-mutation conflict returns partial and preserves the UndoBackup", async (t) => {

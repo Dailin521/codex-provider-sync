@@ -735,7 +735,7 @@ async function tryRewriteProviderInPlace(change, options = {}) {
       dev: String(identity.dev),
       ino: String(identity.ino)
     };
-    if (!snapshotMatches(change, snapshot)
+    if (identity.nlink !== 1n || !snapshotMatches(change, snapshot)
         || mutation.originalSize !== change.originalSize
         || mutation.originalMtimeMs !== change.originalMtimeMs) {
       return "SKIP_CHANGED";

@@ -4,6 +4,8 @@
 
 当前 Provider 跳过合同见 [ADR-0045](../adr/0045-isolated-provider-data-skips.md)：内部逐文件/逐行计划绑定、关联索引排除、已知未写恢复范围及有界本机日志。`test/provider-skip-data.test.js` 覆盖混合数据、未知归属、冻结排除、删除及全部跳过。全局故障和 Repair/Restore 仍严格；不完整状态不能宣称对齐。
 
+`test/in-place-transaction.test.js` 的 POSIX 回归覆盖写前新增硬链接按变化跳过，以及短写、零进度、fsync 故障在验证恢复成功后返回 `SKIP_NOT_APPLIED`；同时断言原字节、inode、大小、mtime 和跳过原因。写后身份冲突或恢复失败仍停止，禁止回退整文件替换。
+
 ## ADR-0044：大首行与明确错误
 
 `test/large-session-metadata.test.js` 覆盖 8 MiB 完整 Status→Sync/Switch→Restore、原地/变长正文不变、128 MiB LF/CRLF/EOF 读取边界与线性合并、超限/无效 Prepare 零写入及安全错误。`CPS_LARGE_HEADER_MIB=128` 可显式运行完整近上限读写。`provider-preparation-facts.test.js`、`status-coordination.test.js` 保留无效/超限拒绝及 Status 不完整检查。生产 Electron smoke 使用 8 MiB 首行验证大首行同步与恢复。
