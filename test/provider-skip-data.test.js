@@ -8,6 +8,7 @@ const cleanups = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 import { prepareSync, applySync, prepareSwitch, applySwitch, prepareRestore, applyRestore, getStatus } from "../src/service.js";
 import { openDatabase } from "../src/sqlite.js";
+import { collectStatusRolloutMetadata, collectSessionChanges } from "../src/session-files.js";
 
 const line = id => JSON.stringify({ type: "session_meta", payload: { id, model_provider: "custom" } }) + '\n{"type":"event_msg","payload":{"message":"synthetic body"}}\n';
 async function fixture(t, withPath = true) {
@@ -36,6 +37,42 @@ async function fixture(t, withPath = true) {
   } };
 }
 const apply = plan => applySync({ schemaVersion: 1, planId: plan.planId });
+
+test("wrapped busy reads retain the path and retry reason in Status and Provider scan summaries", async t => {
+  for (const code of ["EBUSY", "EPERM"]) {
+    const f = await fixture(t);
+    const archived = path.join(f.home, "archived_sessions", "rollout-healthy.jsonl");
+    await fs.mkdir(path.dirname(archived), { recursive: true });
+    await fs.writeFile(archived, line("archived"));
+    const originalOpen = fs.open;
+    fs.open = async (file, ...args) => {
+      if (String(file) === f.good) throw Object.assign(new Error("synthetic busy read"), { code });
+      return originalOpen(file, ...args);
+    };
+    try {
+      const status = await collectStatusRolloutMetadata(f.home, { skipLockedReads: true });
+      assert.deepEqual(status.lockedPaths, [f.good]);
+      assert.ok(status.incompletePaths.includes(f.good));
+      assert.equal(status.providerCounts.archived_sessions.get("custom"), 1);
+      assert.equal(status.skipSummary.total, 2);
+      assert.equal(status.skipSummary.retryRecommended, true);
+      assert.deepEqual(status.skipSummary.items.filter(item => item.reason === "locked"), [
+        { kind: "rollout", path: f.good, reason: "locked", stage: "scan", retryable: true }
+      ]);
+      const scan = await collectSessionChanges(f.home, "openai", {
+        skipLockedReads: true, rejectInvalidMetadata: true,
+        includeModels: false, includeUserEvent: false, includeEncryptedContent: false
+      });
+      assert.deepEqual(scan.lockedPaths, [f.good]);
+      assert.equal(scan.skippedItems.filter(item => item.path === f.good && item.reason === "locked").length, 1);
+      assert.deepEqual(scan.changes.map(change => change.path), [archived]);
+      const plan = await prepareSync({ codexHome: f.home });
+      assert.equal(plan.impact.rolloutFilesToChange, 1);
+      assert.ok(plan.impact.skipSummary.items.some(item => item.path === f.good && item.reason === (code === "EPERM" ? "unreadable" : "locked")));
+    } finally { fs.open = originalOpen; }
+    assert.equal(await fs.readFile(f.good, "utf8"), line("good"));
+  }
+});
 
 test("mixed metadata preserves a bad file and its index, updates healthy data, and restores only written files", async t => {
   const f = await fixture(t);

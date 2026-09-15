@@ -1442,7 +1442,11 @@ async function tryRewriteCollectedFirstLine(change, options = {}) {
 
   let current;
   try {
-    current = await readFirstLineRecord(change.path, { maxBytes: Buffer.byteLength(change.originalFirstLine, "utf8"), strictMetadata: change.strictProviderMetadata === true });
+    current = await readFirstLineRecord(change.path, {
+      maxBytes: Buffer.byteLength(change.originalFirstLine, "utf8"),
+      strictMetadata: change.strictProviderMetadata === true,
+      wrapBusyErrors: change.strictProviderMetadata !== true
+    });
   } catch (error) {
     if (error instanceof RolloutMetadataLimitError || error instanceof RolloutMetadataEncodingError) return "SKIP_CHANGED";
     const reason = fileReadSkipReason(error);
@@ -1711,6 +1715,8 @@ export async function collectStatusRolloutMetadata(codexHome, options = {}) {
           continue;
         }
         if (skipLockedReads && isRolloutFileBusyError(error)) {
+          skippedItems.push(rolloutSkip(rolloutPath, "locked"));
+          incompletePaths.push(rolloutPath);
           lockedPaths.push(rolloutPath);
           continue;
         }
@@ -1812,7 +1818,8 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
           continue;
         }
         if (skipLockedReads && isRolloutFileBusyError(error)) {
-          lockedPaths.push(rolloutPath);
+          if (rejectInvalidMetadata) skip(rolloutPath, "locked");
+          else lockedPaths.push(rolloutPath);
           continue;
         }
         if (rejectInvalidMetadata && error instanceof RolloutMetadataLimitError) {
@@ -1865,7 +1872,8 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
           continue;
         }
         if (skipLockedReads && isRolloutFileBusyError(error)) {
-          lockedPaths.push(rolloutPath);
+          if (rejectInvalidMetadata) skip(rolloutPath, "locked");
+          else lockedPaths.push(rolloutPath);
           continue;
         }
         throw error;

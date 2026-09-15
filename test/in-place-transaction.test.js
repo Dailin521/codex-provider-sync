@@ -122,6 +122,36 @@ test("short-write exception, zero progress and fsync failure skip after verified
   }
 });
 
+test("Provider streaming prewrite busy reads skip without replacement and continue healthy files", posix, async (t) => {
+  for (const [code, reason] of [["EBUSY", "SKIP_BUSY"], ["EPERM", "SKIP_UNREADABLE"]]) {
+    const f = await fixture(t, header.replace('"openai"', '"old-provider"'));
+    const healthy = path.join(f.codexHome, "sessions", "rollout-z.jsonl");
+    await fs.writeFile(healthy, header + tail);
+    const { changes } = await collectSessionChanges(f.codexHome, "prov_a", {
+      rejectInvalidMetadata: true, includeModels: false, includeUserEvent: false, includeEncryptedContent: false
+    });
+    assert.equal(changes.find(change => change.path === f.file).inPlaceMutation, null);
+    const before = await fs.stat(f.file);
+    const originalOpen = fs.open;
+    const skipped = [];
+    fs.open = async (file, ...args) => {
+      if (String(file) === f.file) throw Object.assign(new Error("synthetic prewrite read failure"), { code });
+      return originalOpen(file, ...args);
+    };
+    try {
+      const result = await applySessionChanges(changes, { onSkipped(change, value) { skipped.push([change.path, value]); } });
+      assert.deepEqual(result.appliedPaths, [healthy]);
+      assert.deepEqual(result.skippedPaths, [f.file]);
+      assert.deepEqual(skipped, [[f.file, reason]]);
+    } finally { fs.open = originalOpen; }
+    assert.deepEqual(await fs.readFile(f.file), f.original);
+    assert.equal((await fs.stat(f.file)).ino, before.ino);
+    assert.equal((await fs.stat(f.file)).mtimeMs, before.mtimeMs);
+    assert.equal(await fs.readFile(healthy, "utf8"), (header + tail).replace('"openai"', '"prov_a"'));
+    assert.ok((await fs.readdir(path.dirname(f.file))).every(name => !name.endsWith(".tmp")));
+  }
+});
+
 test("failed immediate restoration never falls back and remains recoverable", posix, async (t) => {
   const f = await fixture(t);
   const { changes, entry } = await prepare(f);
