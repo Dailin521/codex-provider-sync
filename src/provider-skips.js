@@ -68,7 +68,8 @@ function rowRolloutPath(home, value) {
   if (comparableHome === null || comparableValue === null) return null;
   const absolute = path.resolve(comparableHome, comparableValue);
   const relative = path.relative(comparableHome, absolute).split(path.sep);
-  if (!["sessions", "archived_sessions"].includes(relative[0]) || relative.includes("..")) return null;
+  const scopeDirectory = process.platform === "win32" ? relative[0].toLowerCase() : relative[0];
+  if (!["sessions", "archived_sessions"].includes(scopeDirectory) || relative.includes("..")) return null;
   return providerPathKey(absolute);
 }
 

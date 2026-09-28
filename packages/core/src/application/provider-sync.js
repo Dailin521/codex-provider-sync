@@ -187,10 +187,6 @@ export async function buildProviderWriteProgram(context, settings = {}) {
     }
   }
   const sqliteRowsToWrite = selection.rows.length;
-  const paginatedPaths = new Set(scan.files.filter(file => file.historyMode === "paginated")
-    .map(file => providerPathKey(file.path)));
-  const protectedPaths = new Set(selection.rows.flatMap(row => row.paths)
-    .filter(filePath => paginatedPaths.has(providerPathKey(filePath))).map(providerPathKey));
   const finalBindings = new Map(facts.rollout.fileBindings.map(file => [providerPathKey(file.path), file]));
   selection.skippedItems.push(...(context.expectedPlanState?.providerScope?.excludedRows ?? []));
   const initialSkips = uniqueSkips([...(scan.skippedItems ?? []),
@@ -296,7 +292,7 @@ export async function buildProviderWriteProgram(context, settings = {}) {
                       if (mutation.result === "APPLIED_IN_PLACE") partialRollout.inPlaceChanges += 1;
                       writeContext.markMutation();
                       const key = providerPathKey(change.path);
-                      if (protectedPaths.size > 0) {
+                      if (sqliteRowsToWrite > 0) {
                         const binding = await captureAppliedProviderBinding(change, finalBindings.get(key), mutation.result);
                         finalBindings.set(key, binding);
                         if (binding.skip) {
@@ -340,9 +336,10 @@ export async function buildProviderWriteProgram(context, settings = {}) {
               run: async ({ context: writeContext, state }) => {
                 // Reuse the bounded reader/manifest. Only the originally
                 // admitted rows may survive; new files are association-only.
-                const finalScan = protectedPaths.size > 0
-                  ? (await collectProviderPreparationFacts(context.codexHome, targetProvider, { expectedFiles: [...finalBindings.values()] })).scan
-                  : scan;
+                // New IDs can also join legacy rows or invalidate SQLite-only
+                // associations, even when no paginated row was selected.
+                const finalScan = (await collectProviderPreparationFacts(context.codexHome, targetProvider,
+                  { expectedFiles: [...finalBindings.values()] })).scan;
                 const finalSelection = selectProviderRows(context.codexHome, finalScan, sqliteState, targetProvider,
                   [...initiallySkipped.map(filePath => rolloutSkip(filePath, "locked", "revalidate")), ...writeSkips]);
                 const eligible = new Set(selection.rows.map(row => String(row.id)));

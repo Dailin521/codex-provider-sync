@@ -115,6 +115,8 @@ Sync 不改根 config、历史 model、cwd、user-event、workspace roots、titl
 
 分页组的 SQLite 行只有全体成员均已对齐或本次成功写入才可更新。Apply 新增文件仅有界读首行并 deferred，不扩大写集合；提交前对已发现的 deferred 文件重新有界读首行，不沿用首次 Apply 的归属缓存，读取失败或无效时清除可信 ID/historyMode。已知同 ID 新增/变化阻止对应行，未知/坏新增保守阻止全部已知分页候选行。提交前重核相关整组，包含原先已对齐成员，并区分本轮流式替换和外部变化；这是重试收敛保护，不是外部并发原子隔离。
 
+只要有冻结 SQLite 写候选，SQLite 步骤提交前就执行有界首行终检，不依赖分页或已知 deferred 的存在。本轮所有成功写入成员先确认新的 binding，涵盖传统文件的原地/流式写；首轮 Apply 后才新增的已知同 ID 文件仍能保护对应传统行。无 SQLite 写候选时不额外确认 binding 或终检，不新增事务、备份或写目标；传统 unknown 正关联规则与候选只收缩的限制保持。
+
 路径归属在备份前和既有 SQLite 写事务内按全部当前行重验，包含已对齐行与新行。新增或改变 owner 导致争用时只缩减冻结候选，保留受影响行，不阻止无关健康组。
 
 只使用 `<Codex Home>/tmp/provider-sync.lock`；跨 Home 的 SQLite 竞争交给原生事务。预检不预留未来数据库写锁：之后仍可能 busy。首次 mutation 前失败零业务写入；mutation 后失败为带 backupId/failedStage/failureCode/retryRecommended 的 `partial`，重新 Prepare/执行收敛，或用户手动 Restore。

@@ -497,6 +497,133 @@ for (const mode of ["invalid", "unreadable"]) for (const indexedProvider of ["op
   });
 }
 
+for (const configProvider of ["prov_a", "provider_long"]) for (const mode of ["reassigned", "invalid", "unreadable", "unchanged"]) {
+  test(`legacy SQLite candidates revalidate a ${mode} deferred file after ${configProvider} rollout writes`, async () => {
+    const files = ["legacy-a", "legacy-healthy"].map(id => ({ name: `rollout-${id}.jsonl`, id, provider: "custom", historyMode: null }));
+    const value = await paginatedFixture({
+      configProvider,
+      files,
+      rows: [
+        ...files.map(file => ({ id: file.id, provider: "custom", file: file.name })),
+        { id: "index-only", provider: "custom" }
+      ]
+    });
+    const added = path.join(value.home, "sessions", "rollout-deferred-legacy.jsonl");
+    let changed = false;
+    let externalBytes;
+    const originalOpen = fs.open;
+    const plan = await prepareSync({
+      codexHome: value.home,
+      faultInjector: async ({ point }) => {
+        if (point !== "after_rollout_apply" || changed) return;
+        changed = true;
+        if (mode === "reassigned") await fs.writeFile(added, contents({ name: "reassigned", id: "legacy-a", provider: "custom", historyMode: null }));
+        if (mode === "invalid") await fs.writeFile(added, "invalid header\n");
+        externalBytes = await fs.readFile(added);
+      }
+    });
+    await fs.writeFile(added, contents({ name: "other", id: "legacy-other", provider: "custom", historyMode: null }));
+    fs.open = async (target, ...args) => {
+      if (changed && path.resolve(String(target)) === added && mode === "unreadable") {
+        throw Object.assign(new Error("synthetic unreadable legacy member"), { code: "EACCES" });
+      }
+      return originalOpen(target, ...args);
+    };
+    let result;
+    try { result = await apply(plan); }
+    finally { fs.open = originalOpen; }
+    assert.equal(changed, true);
+    assert.equal(result.outcome, "partial");
+    assert.equal(await value.provider("legacy-a"), mode === "reassigned" ? "custom" : configProvider);
+    assert.equal(await value.provider("legacy-healthy"), configProvider, "our own writes must not become changed-member skips");
+    assert.equal(await value.provider("index-only"), ["invalid", "unreadable"].includes(mode) ? "custom" : configProvider);
+    assert.equal(result.result.changedSessionFiles, 2);
+    assert.equal(result.result.inPlaceSessionFiles, configProvider === "prov_a" ? 2 : 0);
+    assert.equal(result.result.rewrittenSessionFiles, configProvider === "provider_long" ? 2 : 0);
+    assert.deepEqual(await fs.readFile(added), externalBytes, "the deferred file stays outside this write set");
+    for (const file of files) assert.equal(providerOf(await value.read(file.name)), configProvider);
+    if (["reassigned", "invalid"].includes(mode)) await fs.unlink(added);
+    const retry = await apply(await prepareSync({ codexHome: value.home }));
+    assert.equal(retry.outcome, "completed");
+    for (const id of ["legacy-a", "legacy-healthy", "index-only"]) assert.equal(await value.provider(id), configProvider);
+  });
+}
+
+for (const configProvider of ["prov_a", "provider_long"]) for (const mode of ["same-id", "other-id", "unknown"]) {
+  test(`an ${mode} file first appearing after ${configProvider} rollout writes revalidates an aligned legacy member's SQLite-only candidate`, async () => {
+    const aligned = { name: "rollout-legacy-aligned.jsonl", id: "legacy-aligned", provider: configProvider, historyMode: null };
+    const writer = { name: "rollout-legacy-writer.jsonl", id: "legacy-writer", provider: "custom", historyMode: null };
+    const value = await paginatedFixture({
+      configProvider,
+      files: [aligned, writer],
+      rows: [
+        { id: aligned.id, provider: "custom", file: aligned.name },
+        { id: writer.id, provider: configProvider, file: writer.name }
+      ]
+    });
+    const added = path.join(value.home, "sessions", "rollout-new-legacy.jsonl");
+    const addedBytes = mode === "unknown" ? "invalid header\n"
+      : contents({ name: "later", id: mode === "same-id" ? aligned.id : "legacy-other", provider: "custom", historyMode: null });
+    const plan = await prepareSync({
+      codexHome: value.home,
+      faultInjector: async ({ point }) => {
+        if (point === "after_rollout_apply") await fs.writeFile(added, addedBytes);
+      }
+    });
+    assert.equal(plan.impact.sqliteRowsToChange, 1);
+    assert.equal(plan.impact.rolloutFilesToChange, 1);
+    const result = await apply(plan);
+    assert.equal(result.outcome, "partial");
+    assert.equal(await value.provider(aligned.id), mode === "same-id" ? "custom" : configProvider);
+    assert.equal(await value.provider(writer.id), configProvider);
+    assert.equal(result.result.changedSessionFiles, 1);
+    assert.equal(result.result.inPlaceSessionFiles, configProvider === "prov_a" ? 1 : 0);
+    assert.equal(result.result.rewrittenSessionFiles, configProvider === "provider_long" ? 1 : 0);
+    assert.equal(await fs.readFile(added, "utf8"), addedBytes);
+    assert.ok(result.result.skipSummary.items.some(item => item.path === added && item.reason === "deferred"));
+    assert.ok(!result.result.skipSummary.items.some(item => item.path === value.file(writer.name)), "successful writes keep their new binding");
+  });
+}
+
+test("no SQLite candidates add no acknowledgement header reads or SQLite step, and the next noop adds no backup", async () => {
+  const file = { name: "rollout-legacy-no-sqlite-write.jsonl", id: "legacy", provider: "custom", historyMode: null };
+  const value = await paginatedFixture({ files: [file], rows: [{ id: file.id, provider: "prov_a", file: file.name }] });
+  let writing = false;
+  let readOnlyOpens = 0;
+  let backups = 0;
+  const stages = [];
+  const options = {
+    codexHome: value.home,
+    onProgress: event => stages.push(event.stage),
+    faultInjector: ({ point }) => {
+      if (point === "before_rollout_apply") writing = true;
+      if (point === "after_rollout_mutation_before_applied") writing = false;
+      if (point === "before_backup") backups += 1;
+    }
+  };
+  const plan = await prepareSync(options);
+  assert.equal(plan.impact.sqliteRowsToChange, 0);
+  const originalOpen = fs.open;
+  fs.open = async (target, ...args) => {
+    if (writing && path.resolve(String(target)) === value.file(file.name) && args[0] === "r") readOnlyOpens += 1;
+    return originalOpen(target, ...args);
+  };
+  let result;
+  try { result = await apply(plan); }
+  finally { fs.open = originalOpen; }
+  assert.equal(result.outcome, "completed");
+  assert.equal(result.result.inPlaceSessionFiles, 1);
+  assert.equal(result.result.sqliteRowsUpdated, 0);
+  assert.equal(readOnlyOpens, 0, "SQLite association acknowledgements are unnecessary without SQLite candidates");
+  assert.ok(!stages.includes("update_sqlite"));
+  assert.equal(backups, 1, "only the rollout mutation needs a backup");
+  const noop = await apply(await prepareSync(options));
+  assert.equal(noop.result.noop, true);
+  assert.equal(noop.backup, null);
+  assert.equal(backups, 1);
+  assert.ok(!stages.includes("update_sqlite"));
+});
+
 test("refreshing a deferred association cannot readmit a SQLite row excluded at the first Apply scan", async () => {
   const affected = twoFileGroup("thread-excluded");
   const healthy = twoFileGroup("thread-healthy");

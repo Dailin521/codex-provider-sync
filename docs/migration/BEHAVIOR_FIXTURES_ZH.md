@@ -14,6 +14,10 @@
 
 ADR-0047 的执行期重验补充：`provider-preparation-facts.test.js` 验证 deferred 文件每轮仅有界读取首行、重新确认归属且始终不纳入写集合；`provider-paginated-groups.test.js` 覆盖 Prepare 后、Apply 前新增 B 文件，rollout 写期间变为 A 或首行无效/不可读/消失时保留受影响分页索引，未知归属包括保护单文件分页候选，并验证重新预览后收敛。原计划成员变化后的冻结归属仍保持。
 
+同一 fixture 还覆盖没有分页候选的操作：传统文件等长/变长写入后的 binding 确认、已有 deferred 归属变更、首轮 Apply 后才新增的同 ID 文件、无关可信 ID 和未知首行。已知同 ID 保护对应行，新文件不写；传统 unknown 正关联、SQLite-only 收敛和无 SQLite 写候选的读取/事务/备份边界保持。PIO 的 Prepare 单轮读取次数、正文、mtime 与文件身份断言不放宽。
+
+`provider-skip-associations.test.js` 另覆盖 Windows DOS/UNC、普通/namespace 路径及 sessions/archived_sessions 大小写别名：锚点仍可关联，已经对齐的跨 ID owner 仍触发冲突，数据库原始路径保持。
+
 ## ADR-0044：大首行与明确错误
 
 `test/large-session-metadata.test.js` 覆盖 8 MiB 完整 Status→Sync/Switch→Restore、原地/变长正文不变、128 MiB LF/CRLF/EOF 读取边界与线性合并、超限/无效 Prepare 零写入及安全错误。`CPS_LARGE_HEADER_MIB=128` 可显式运行完整近上限读写。`provider-preparation-facts.test.js`、`status-coordination.test.js` 保留无效/超限拒绝及 Status 不完整检查。生产 Electron smoke 使用 8 MiB 首行验证大首行同步与恢复。

@@ -102,6 +102,25 @@ test("unknown bad metadata restricts updates to positive healthy associations", 
     assert.deepEqual(result.rows.map(r => r.id), ["good"]);
   }
 });
+for (const [layout, testHome] of [["DOS", home], ["UNC", "\\\\server\\share\\fixture"]]) {
+  test(`Windows ${layout} directory casing preserves anchors and foreign owner protection`, { skip: process.platform !== "win32" }, () => {
+    const files = ["sessions", "archived_sessions"].map(directory => ({
+      path: path.join(testHome, directory, "rollout-fixture.jsonl"), id: "same", historyMode: "paginated"
+    }));
+    for (const file of files) for (const alias of [file.path.toUpperCase(), path.toNamespacedPath(file.path).toUpperCase()]) {
+      assert.equal(providerPathKey(file.path), providerPathKey(alias));
+      const scan = { files, skippedItems: [] };
+      const anchored = selectProviderRows(testHome, scan, { key: "id", rows: [row("same", alias)] }, "openai");
+      assert.deepEqual(anchored.rows.map(item => item.id), ["same"]);
+      assert.equal(anchored.rows[0].rollout_path, alias);
+      const contested = selectProviderRows(testHome, scan, { key: "id", rows: [
+        row("same", files[0].path), { ...row("other", alias), model_provider: "openai" }, row("healthy", null)
+      ] }, "openai");
+      assert.deepEqual(contested.rows.map(item => item.id), ["healthy"]);
+      assert.deepEqual(contested.skippedItems.map(item => [item.id, item.reason]), [["same", "association-conflict"]]);
+    }
+  });
+}
 test("skip summaries deduplicate and bound detail bytes without exposing internal identifiers", () => {
   const items = Array.from({ length: 205 }, (_, n) => rolloutSkip(path.join(home, "sessions", `rollout-${n}.jsonl`), "changed", "revalidate", "unsafe/private-id"));
   const summary = summarizeSkips([...items, ...items]);

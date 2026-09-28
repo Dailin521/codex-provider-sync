@@ -10,6 +10,8 @@ ADR-0047 增量：同 ID 多文件只有所有首行明确 `payload.history_mode
 
 计划后新发现的 deferred 文件在 SQLite 提交前仍须重新有界读取首行，确认当前 ID/historyMode；旧的新增归属缓存不能绕过最终复核。读取失败或无效首行作为未知新增保护分页候选，SQLite 路径锚点不能消除这类未知归属；原计划成员的冻结归属和本轮写集合保持。
 
+有冻结 SQLite 写候选时始终执行提交前的有界首行终检，包含没有分页候选的操作，并记录本轮全部成功写入成员的新 binding，避免将自身原地/流式修改误判为外部变化。首轮 Apply 后才新增的可信同 ID 文件同样保护对应传统索引行；传统 unknown 正关联规则保持。没有 SQLite 写候选时不额外确认写后 binding，不新增终检、事务或备份；实际 UPDATE 仍只缩减原候选集合。
+
 ## 2026-09-11：轻量状态相关性（ADR-0043）
 
 普通 Status 使用内部 `status` revision：正文追加、非 Provider SQLite 列及 WAL/SHM 变化不导致失效；仍校验首行、文件身份/链接数/集合/最小大小、threads schema/ID/Provider/archived 和配置路径。Provider 状态不再整读/哈希数据库文件。真实漂移最多重试一次，实际锁与 pending Restore 继续优先阻断。超限/非法首行仍不完整、不可读数据库仍不可读，WSL 不执行 SQL。完整 Diagnostics、显式 full Status、Plan/Apply、Repair/Restore 与 PIO 不变。见 [ADR-0043](../../adr/0043-status-provider-relevant-revisions.md)。
