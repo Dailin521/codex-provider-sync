@@ -14,6 +14,7 @@ Thank you to everyone who has contributed code, documentation, testing, investig
 | [@Hccake](https://github.com/Hccake) | 独立 SQLite Home、恢复迁移保护和 WSL 路径安全 / Independent SQLite Home, restore relocation safeguards, and WSL path safety ([#55](https://github.com/Dailin521/codex-provider-sync/pull/55)) |
 | [@JoJoJoinme](https://github.com/JoJoJoinme) | Codex 状态数据库位置检测 / Codex state-database location detection ([#36](https://github.com/Dailin521/codex-provider-sync/pull/36)) |
 | [@Liuwei1125](https://github.com/Liuwei1125) | 嵌套 SQLite 状态数据库问题调查 / Nested SQLite state-database investigation |
+| [@Lorikein12138](https://github.com/Lorikein12138) | 分页会话同步冲突与 Windows 长路径关联问题的复现和根因分析 / Reproduction and root-cause analysis of paginated session sync conflicts and Windows long-path associations ([#107](https://github.com/Dailin521/codex-provider-sync/issues/107)) |
 | [@panjinhe](https://github.com/panjinhe) | Windows 同步性能、CLI 进度和瞬时锁重试 / Windows sync performance, CLI progress, and transient lock retries |
 | [@PaulDing98](https://github.com/PaulDing98) | Provider/model 同步、watch 和桌面端单实例流程 / Provider/model synchronization, watch mode, and desktop single-instance flow ([#41](https://github.com/Dailin521/codex-provider-sync/pull/41), [#42](https://github.com/Dailin521/codex-provider-sync/pull/42)) |
 | [@Plintun-Max](https://github.com/Plintun-Max) | 旧版 Node.js 的 SQLite fallback / SQLite fallback for older Node.js ([#40](https://github.com/Dailin521/codex-provider-sync/pull/40)) |

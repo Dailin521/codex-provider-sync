@@ -12,6 +12,8 @@
 
 `test/provider-paginated-groups.test.js` 是 ADR-0047 的专用合成 Home fixture（Windows 使用 `D:\Temp`，其他平台使用系统临时目录）：受锚定的同 ID `history_mode=paginated` 多文件须一次写全组及一条 SQLite 行；“文件已同步、SQLite 未同步”须只补该行、下一次 noop 且不建备份；重复 ordinal 仍可成功。传统重复 ID、缺 marker、错指/越界路径、跨 ID 和多 owner 必须保留冲突保护。锁定、删除、首行变化、写入失败、新增已知同 ID 与未知/坏新增分别验证 partial、关联行保留、重新预览后的收敛；预览后和 rollout 写期间新增/改变已对齐 owner 的路径争用保留受影响行，无关健康分页组继续。普通/归档目录覆盖 DOS/`\\?\` DOS、UNC/`\\?\UNC\` 等价路径及边界反例。配套 Provider facts/PIO fixture 覆盖等长原地、变长流式、Restore 的正文 byte、其他 metadata、文件身份和恢复范围。生产 Electron 验收要求隐藏窗口真实 Utility Core 的 Sync → noop → Restore；这些是要求的验证项目，不代表已执行。
 
+ADR-0047 的执行期重验补充：`provider-preparation-facts.test.js` 验证 deferred 文件每轮仅有界读取首行、重新确认归属且始终不纳入写集合；`provider-paginated-groups.test.js` 覆盖 Prepare 后、Apply 前新增 B 文件，rollout 写期间变为 A 或首行无效/不可读/消失时保留受影响分页索引，未知归属包括保护单文件分页候选，并验证重新预览后收敛。原计划成员变化后的冻结归属仍保持。
+
 ## ADR-0044：大首行与明确错误
 
 `test/large-session-metadata.test.js` 覆盖 8 MiB 完整 Status→Sync/Switch→Restore、原地/变长正文不变、128 MiB LF/CRLF/EOF 读取边界与线性合并、超限/无效 Prepare 零写入及安全错误。`CPS_LARGE_HEADER_MIB=128` 可显式运行完整近上限读写。`provider-preparation-facts.test.js`、`status-coordination.test.js` 保留无效/超限拒绝及 Status 不完整检查。生产 Electron smoke 使用 8 MiB 首行验证大首行同步与恢复。

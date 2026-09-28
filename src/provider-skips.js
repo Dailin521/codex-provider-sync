@@ -121,7 +121,12 @@ export function selectProviderRows(home, scan, state, targetProvider, additional
     const file = byPath.get(key);
     if (file?.id && (state.key !== "rowid" || (byId.get(file.id)?.length === 1 && !ownersByPath.has(key)))) associatedBadPaths.add(key);
   }
-  const unknown = [...skippedPaths].some(key => !associatedBadPaths.has(key));
+  // A path-only SQLite owner cannot establish the current identity of a new
+  // deferred file. Keep its unknown membership protective for paginated rows.
+  // Frozen Prepare members retain the existing positive-association rules.
+  const unknown = [...skippedPaths].some(key => !associatedBadPaths.has(key))
+    || skipped.some(item => item.kind === "rollout" && item.reason === "deferred"
+      && !byPath.get(providerPathKey(item.path))?.id);
   const selected = [];
   const rowSkips = [];
   for (const row of rows) {

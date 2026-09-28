@@ -236,15 +236,18 @@ export async function captureRolloutRevision(codexHome, { fsImpl = fs, mode = "c
       const key = providerPathKey(filePath);
       seen.add(key);
       const prior = expected?.get(key);
+      const deferred = prior?.skip?.reason === "deferred";
       let record;
       let revision;
       if (expected && (!prior || prior.skip)) {
         const skip = prior?.skip ?? rolloutSkip(filePath, "deferred", "revalidate");
         revision = { skipped: skip.reason };
-        record = { skip, id: prior?.id ?? null, historyMode: prior?.historyMode ?? null };
+        record = { skip, id: null, historyMode: null };
         // New targets stay deferred. A bounded header read establishes only
         // which existing index row must be protected, never write eligibility.
-        if (!prior && mode === "provider") {
+        // Refresh on every revalidation: unlike frozen Prepare members, their
+        // previously observed association cannot protect a later changed ID.
+        if ((!prior || deferred) && mode === "provider") {
           try {
             await captureProviderHeader(filePath, fsImpl, undefined, (_, value) => {
               record = { ...value, ...(value.record ? providerAssociationFromHeader(value.record.firstLine) : {}), skip };
@@ -273,7 +276,7 @@ export async function captureRolloutRevision(codexHome, { fsImpl = fs, mode = "c
           revision = { skipped: reason };
         }
       }
-      if (record?.skip && prior) record = { ...record, id: prior.id ?? null, historyMode: prior.historyMode ?? null };
+      if (record?.skip && prior && !deferred) record = { ...record, id: prior.id ?? null, historyMode: prior.historyMode ?? null };
       onProviderHeader?.(filePath, record);
       fileBindings.push({ path: filePath, ...revision, ...(record?.skip ? { skip: record.skip } : {}) });
       const { observedSize, ...binding } = revision;
@@ -284,8 +287,11 @@ export async function captureRolloutRevision(codexHome, { fsImpl = fs, mode = "c
   }
   if (expected) for (const [key, prior] of expected) if (!seen.has(key)) {
     const skip = prior.skip ?? rolloutSkip(prior.path, "missing", "revalidate", prior.id);
-    onProviderHeader?.(prior.path, { skip, id: prior.id ?? null, historyMode: prior.historyMode ?? null });
-    fileBindings.push({ ...prior, skip });
+    const association = skip.reason === "deferred"
+      ? { id: null, historyMode: null }
+      : { id: prior.id ?? null, historyMode: prior.historyMode ?? null };
+    onProviderHeader?.(prior.path, { skip, ...association });
+    fileBindings.push({ ...prior, skip, ...association });
   }
   manifest.sort((left, right) => left.path.localeCompare(right.path));
   return {

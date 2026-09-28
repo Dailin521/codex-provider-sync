@@ -64,6 +64,18 @@ test("a deferred known ID that makes its own group ambiguous does not block anot
   assert.deepEqual(result.skippedItems.map(r => [r.id, r.reason]), [["same", "association-conflict"]]);
 });
 
+test("only an unidentified deferred file overrides its SQLite path owner's positive association", () => {
+  const legacy = { path: path.join(home, "sessions", "rollout-legacy.jsonl"), id: "legacy", historyMode: null };
+  const files = [{ path: good, id: "paged", historyMode: "paginated" }, { path: bad, id: null, historyMode: null }, legacy];
+  for (const ownerProvider of ["old", "openai"]) for (const reason of ["deferred", "locked", "metadata-invalid"]) {
+    const scan = { files, skippedItems: [rolloutSkip(bad, reason)] };
+    const state = { key: "id", rows: [row("paged", good), { ...row("owner", bad), model_provider: ownerProvider }, row("legacy", legacy.path)] };
+    const result = selectProviderRows(home, scan, state, "openai");
+    assert.deepEqual(result.rows.map(r => r.id), reason === "deferred" ? ["legacy"] : ["paged", "legacy"], `${ownerProvider}: ${reason}`);
+    if (reason === "deferred") assert.ok(result.skippedItems.some(item => item.id === "paged" && item.reason === "association-unknown"));
+  }
+});
+
 test("Windows DOS and UNC namespace aliases associate without changing stored paths", { skip: process.platform !== "win32" }, () => {
   for (const testHome of [home, "\\\\server\\share\\fixture"]) {
     const file = path.join(testHome, "sessions", "rollout-fixture.jsonl");

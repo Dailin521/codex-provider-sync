@@ -65,6 +65,9 @@ test("paginated ID and history mode remain frozen when a member changes, disappe
   const changed = await collectProviderPreparationFacts(value.home, "openai", { expectedFiles });
   assert.deepEqual(changed.scan.files.map(file => [file.id, file.historyMode]), [["fixture", "paginated"]]);
   assert.equal(changed.scan.skippedItems[0].reason, "changed");
+  const frozen = await collectProviderPreparationFacts(value.home, "openai", { expectedFiles: changed.rollout.fileBindings });
+  assert.deepEqual(frozen.scan.files.map(file => [file.id, file.historyMode]), [["fixture", "paginated"]]);
+  assert.equal(frozen.scan.changes.length, 0);
   const locked = await collectProviderPreparationFacts(value.home, "openai", { expectedFiles, fsImpl: { ...fs,
     async open(target, ...args) {
       if (String(target) === value.file) throw Object.assign(new Error("synthetic locked member"), { code: "EBUSY" });
@@ -96,7 +99,52 @@ test("new files lend bounded association facts but never enter the frozen write 
   assert.ok(facts.scan.skippedItems.some(item => item.path === added && item.reason === "deferred"));
   assert.ok(facts.scan.changes.every(change => change.path !== added));
   assert.equal(facts.rollout.fileBindings.find(file => file.path === added).historyMode, "paginated");
+
+  await fs.writeFile(added, Buffer.concat([Buffer.from(JSON.stringify({ type: "session_meta", payload: {
+    id: "different", model_provider: "custom"
+  } }) + "\n"), value.body]));
+  const recheckProbe = headerReadProbe(added);
+  try {
+    for (let iteration = 1; iteration <= 2; iteration += 1) {
+      facts = await collectProviderPreparationFacts(value.home, "openai", { expectedFiles: facts.rollout.fileBindings });
+      assert.deepEqual(recheckProbe.counts(), { opens: iteration, bytes: iteration * 64 * 1024 });
+      assert.deepEqual(facts.scan.files.find(file => file.path === added), { path: added, id: "different", historyMode: null });
+      assert.ok(facts.scan.skippedItems.some(item => item.path === added && item.reason === "deferred"));
+      assert.ok(facts.scan.changes.every(change => change.path !== added));
+    }
+  } finally { recheckProbe.restore(); }
 });
+
+for (const mode of ["invalid", "unknown", "locked", "unreadable", "missing"]) {
+  test(`deferred association loses stale trust when its next header is ${mode}`, async t => {
+    const value = await fixture(t);
+    const original = await collectProviderPreparationFacts(value.home, "openai");
+    const added = path.join(value.home, "sessions", "rollout-added.jsonl");
+    await fs.writeFile(added, JSON.stringify({ type: "session_meta", payload: {
+      id: "different", history_mode: "paginated", model_provider: "custom"
+    } }) + "\n");
+    const discovered = await collectProviderPreparationFacts(value.home, "openai", { expectedFiles: original.rollout.fileBindings });
+    if (mode === "invalid") await fs.writeFile(added, "invalid header\n");
+    if (mode === "unknown") await fs.writeFile(added, '{"type":"event_msg","payload":{}}\n');
+    if (mode === "missing") await fs.unlink(added);
+    const fsImpl = { ...fs, async open(target, ...args) {
+      if (String(target) === added && ["locked", "unreadable"].includes(mode)) {
+        throw Object.assign(new Error("synthetic inaccessible new member"), { code: mode === "locked" ? "EBUSY" : "EACCES" });
+      }
+      return fs.open(target, ...args);
+    } };
+    let facts = discovered;
+    for (let iteration = 0; iteration < 2; iteration += 1) {
+      facts = await collectProviderPreparationFacts(value.home, "openai", { expectedFiles: facts.rollout.fileBindings, fsImpl });
+      assert.deepEqual(facts.scan.files.find(file => file.path === added), { path: added, id: null, historyMode: null });
+      const binding = facts.rollout.fileBindings.find(file => file.path === added);
+      assert.equal(binding.id, null);
+      assert.equal(binding.historyMode, null);
+      assert.equal(binding.skip.reason, "deferred");
+      assert.ok(facts.scan.changes.every(change => change.path !== added));
+    }
+  });
+}
 
 test("Provider facts reuse the exact revision and change algorithm with one bounded header read instead of three", async t => {
   const value = await fixture(t);

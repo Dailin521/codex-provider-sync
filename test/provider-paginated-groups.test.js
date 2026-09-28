@@ -382,6 +382,153 @@ test("an unknown rollout added during Apply conservatively preserves every known
   assert.equal(await value.provider("thread-single"), "prov_a");
 });
 
+for (const mode of ["reassigned", "invalid", "unknown", "locked", "unreadable", "missing"]) {
+  test(`a deferred different thread becoming ${mode} during rollout writes is revalidated before SQLite`, async () => {
+    const group = twoFileGroup("thread-recheck");
+    const single = { name: "rollout-thread-single.jsonl", id: "thread-single", provider: "openai" };
+    const value = await paginatedFixture({
+      files: [...group, single],
+      rows: [
+        { id: "thread-recheck", provider: "openai", file: group[0].name },
+        { id: "thread-single", provider: "openai", file: single.name }
+      ]
+    });
+    const added = path.join(value.home, "sessions", "rollout-deferred-other.jsonl");
+    let changed = false;
+    let externalBytes;
+    const originalOpen = fs.open;
+    const plan = await prepareSync({
+      codexHome: value.home,
+      faultInjector: async ({ point }) => {
+        if (point !== "after_rollout_apply" || changed) return;
+        changed = true;
+        if (mode === "reassigned") await fs.writeFile(added, contents({ name: "reassigned", id: "thread-recheck", provider: "openai" }));
+        if (mode === "invalid") await fs.writeFile(added, "invalid header\n");
+        if (mode === "unknown") await fs.writeFile(added, '{"type":"event_msg","payload":{}}\n');
+        if (mode === "missing") await fs.unlink(added);
+        else externalBytes = await fs.readFile(added);
+      }
+    });
+    // Discovery during the first Apply scan freezes this path as deferred with
+    // thread-other's ID. The subsequent write hook invalidates that evidence.
+    await fs.writeFile(added, contents({ name: "other", id: "thread-other", provider: "openai" }));
+    fs.open = async (target, ...args) => {
+      if (changed && path.resolve(String(target)) === added && ["locked", "unreadable"].includes(mode)) {
+        throw Object.assign(new Error("synthetic inaccessible deferred member"), { code: mode === "locked" ? "EBUSY" : "EACCES" });
+      }
+      return originalOpen(target, ...args);
+    };
+    let result;
+    try { result = await apply(plan); }
+    finally { fs.open = originalOpen; }
+    assert.equal(changed, true);
+    assert.equal(result.outcome, "partial");
+    assert.equal(await value.provider("thread-recheck"), "openai");
+    assert.equal(await value.provider("thread-single"), mode === "reassigned" ? "prov_a" : "openai");
+    assert.equal(result.result.changedSessionFiles, 3, "only the three prepared files may be written");
+    assert.ok(result.result.skipSummary.items.some(item => item.kind === "rollout" && item.path === added && item.reason === "deferred"));
+    if (mode === "missing") await assert.rejects(fs.stat(added), { code: "ENOENT" });
+    else assert.deepEqual(await fs.readFile(added), externalBytes, "the deferred file must remain untouched");
+
+    if (["invalid", "unknown"].includes(mode)) await fs.unlink(added);
+    const retry = await apply(await prepareSync({ codexHome: value.home }));
+    assert.equal(retry.outcome, "completed");
+    assert.equal(await value.provider("thread-recheck"), "prov_a");
+    assert.equal(await value.provider("thread-single"), "prov_a");
+    if (["reassigned", "locked", "unreadable"].includes(mode)) assert.equal(providerOf(await fs.readFile(added)), "prov_a");
+  });
+}
+
+for (const mode of ["invalid", "unreadable"]) for (const indexedProvider of ["openai", "prov_a"]) {
+  test(`a ${mode} deferred file with a ${indexedProvider} SQLite path owner still protects all paginated candidates`, async () => {
+    const group = twoFileGroup("thread-path-group");
+    const single = { name: "rollout-thread-path-single.jsonl", id: "thread-path-single", provider: "openai" };
+    const value = await paginatedFixture({
+      files: [...group, single],
+      rows: [
+        { id: "thread-path-group", provider: "openai", file: group[0].name },
+        { id: "thread-path-single", provider: "openai", file: single.name },
+        { id: "thread-path-other", provider: indexedProvider }
+      ]
+    });
+    const added = path.join(value.home, "sessions", "rollout-deferred-path-owner.jsonl");
+    await mutateRows(value.dbPath, database => {
+      database.prepare("UPDATE threads SET rollout_path = ? WHERE id = ?").run(added, "thread-path-other");
+    });
+    let changed = false;
+    let externalBytes;
+    const originalOpen = fs.open;
+    const plan = await prepareSync({
+      codexHome: value.home,
+      faultInjector: async ({ point }) => {
+        if (point !== "after_rollout_apply" || changed) return;
+        changed = true;
+        if (mode === "invalid") await fs.writeFile(added, "invalid header\n");
+        externalBytes = await fs.readFile(added);
+      }
+    });
+    await fs.writeFile(added, contents({ name: "other", id: "thread-path-other", provider: "openai" }));
+    fs.open = async (target, ...args) => {
+      if (changed && path.resolve(String(target)) === added && mode === "unreadable") {
+        throw Object.assign(new Error("synthetic unreadable deferred member"), { code: "EACCES" });
+      }
+      return originalOpen(target, ...args);
+    };
+    let result;
+    try { result = await apply(plan); }
+    finally { fs.open = originalOpen; }
+    assert.equal(changed, true);
+    assert.equal(result.outcome, "partial");
+    assert.equal(await value.provider("thread-path-group"), "openai");
+    assert.equal(await value.provider("thread-path-single"), "openai");
+    assert.equal(await value.provider("thread-path-other"), indexedProvider);
+    assert.equal(result.result.sqliteRowsUpdated, 0);
+    assert.equal(result.result.changedSessionFiles, 3);
+    assert.deepEqual(await fs.readFile(added), externalBytes);
+    for (const id of ["thread-path-group", "thread-path-single"]) {
+      assert.ok(result.result.skipSummary.items.some(item => item.kind === "sqlite" && item.id === id && item.reason === "association-unknown"));
+    }
+    await fs.writeFile(added, contents({ name: "other", id: "thread-path-other", provider: "openai" }));
+    const retry = await apply(await prepareSync({ codexHome: value.home }));
+    assert.equal(retry.outcome, "completed");
+    assert.equal(await value.provider("thread-path-group"), "prov_a");
+    assert.equal(await value.provider("thread-path-single"), "prov_a");
+    assert.equal(await value.provider("thread-path-other"), "prov_a");
+  });
+}
+
+test("refreshing a deferred association cannot readmit a SQLite row excluded at the first Apply scan", async () => {
+  const affected = twoFileGroup("thread-excluded");
+  const healthy = twoFileGroup("thread-healthy");
+  const value = await paginatedFixture({
+    files: [...affected, ...healthy],
+    rows: [
+      { id: "thread-excluded", provider: "openai", file: affected[0].name },
+      { id: "thread-healthy", provider: "openai", file: healthy[0].name }
+    ]
+  });
+  const added = path.join(value.home, "sessions", "rollout-deferred-moving.jsonl");
+  let changed = false;
+  const plan = await prepareSync({
+    codexHome: value.home,
+    faultInjector: async ({ point }) => {
+      if (point !== "after_rollout_apply" || changed) return;
+      changed = true;
+      await fs.writeFile(added, contents({ name: "moving", id: "thread-other", provider: "openai" }));
+    }
+  });
+  await fs.writeFile(added, contents({ name: "moving", id: "thread-excluded", provider: "openai" }));
+  const result = await apply(plan);
+  assert.equal(changed, true);
+  assert.equal(result.outcome, "partial");
+  assert.equal(await value.provider("thread-excluded"), "openai");
+  assert.equal(await value.provider("thread-healthy"), "prov_a");
+  assert.equal(providerOf(await fs.readFile(added)), "openai");
+  const retry = await apply(await prepareSync({ codexHome: value.home }));
+  assert.equal(retry.outcome, "completed");
+  assert.equal(await value.provider("thread-excluded"), "prov_a");
+});
+
 test("SQLite commit revalidates every group member, including an initially aligned member changed by another writer", async () => {
   const files = twoFileGroup("thread-revalidate", ["custom", "prov_a"]);
   const value = await paginatedFixture({
