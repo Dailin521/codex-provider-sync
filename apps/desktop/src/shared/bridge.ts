@@ -28,6 +28,10 @@ import type { DesktopWatchStoppedEvent } from "./runtime-protocol.js";
 
 export interface DesktopBridgeApi {
   readonly version: 1;
+  readonly project: {
+    openHome(): Promise<{ opened: boolean }>;
+    openReleases(): Promise<{ opened: boolean }>;
+  };
   readonly clipboard: {
     writeText(input: DesktopClipboardInput): Promise<DesktopClipboardResult>;
   };

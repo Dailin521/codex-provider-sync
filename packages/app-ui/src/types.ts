@@ -34,6 +34,8 @@ export interface OperationLogEntry { schemaVersion: 1; id: string; operation: st
 export interface OperationLogPage { schemaVersion: 1; page: number; pageSize: number; total: number; hasNextPage: boolean; entries: OperationLogEntry[]; }
 
 export interface HostClient {
+  openProjectHome?(): Promise<void>;
+  openReleasePage?(): Promise<void>;
   copyText?(text: string): Promise<void>;
   revealHistoryFile?(profile: { profileId: string; profileRevision?: string }, sessionId: string): Promise<{ revealed: boolean }>;
   listProfiles(signal?: AbortSignal): Promise<HostProfile[]>;

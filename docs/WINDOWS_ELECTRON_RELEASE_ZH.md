@@ -6,7 +6,7 @@
 
 1. 保留本地已有变更，核对源码、合同、配套生成物与测试清单。不要提交 `output/`、Playwright traces、真实数据或本地安装目录。
 2. 首次 V1 迁移使用 V1 分支；后续补丁从最新 `origin/main` 创建独立修复分支。以可审计提交推送并创建指向 main 的 PR，等待当前 head 对应的 `ci-gate` 成功；产品改动必须完整检查，普通文档例外见下文，旧 head 的绿灯不可复用。
-3. 处理所有未解决审查，采用 merge commit 合并，禁止 squash、rebase、force-push 或绕过失败门禁。
+3. 按 [AGENTS.md](../AGENTS.md) 的 Codex 审查规则，只检查 PR 已有审查一次，仅经确认的 P0 问题阻断；不主动触发复杂或反复 Codex 审查，P1/P2/P3 不阻断交付。采用 merge commit 合并，分支禁止 squash、rebase、force-push 或绕过失败门禁；明确授权的同版本标签更新例外见第 6 节。
 4. main 合入后的实际 SHA 必须再次通过 `ci-gate`。所有产物与测试结论记录实际 SHA，不以 PR 分支名代替。
 
 部分重跑：GitHub 的“仅重跑失败 job”会保留本次 workflow 中已成功 job 的产物。C10 可复用同一仓库、同一 `runId`、同一 tested commit 且来自当前或更早正整数 `runAttempt` 的历史 Release 验证证据；拒绝跨运行、跨提交、未来或无效次数。全部 required jobs 仍必须成功，Release 资产/二进制/备份哈希校验不变。新 bundle 的 `workflow.runAttempt` 记录当前次数，`historicalFormalRelease.sourceRunAttempt` 如实记录证据来源次数，不改写源证据；v1 schema 将该新增字段设为可选，仅为兼容历史 bundle。重跑成功不抹去之前失败的记录，也不授权发布。
@@ -25,7 +25,7 @@ main push 始终完整执行全部原有任务和 C10，最终 SHA 的发布门�
 
 新流程接受已经存在、与候选版本匹配的 tag、完整预期 SHA，以及是否创建 Draft 的显式选项。tag 必须解析到该 SHA，且在 main 历史中；对应 main push 的 `ci-gate` 必须成功。流程不创建 tag、不发布 stable、不设置 latest、不发布 npm。
 
-默认 `release_channel=rc`，候选版本使用根 `package.json` 的实际严格 `1.0.x-rc.N` 基础版本（`x` 为无前导零的补丁号，`N` 为本次唯一编号）。正式版批准后可显式选择 `stable-manual`，仅接受 Windows x64 严格 `1.0.x` 与同名 `refs/tags/v1.0.x`。默认只生成 Actions artifact；选择创建 Draft 后仍需核对产物与证据，再按维护者授权独立公开（RC 为 prerelease；正式版为 latest）。不要复用或覆盖已存在的 tag/Release。源码清单、构建注入版本与 tag 必须完全一致。
+默认 `release_channel=rc`，候选版本使用根 `package.json` 的实际严格 `1.0.x-rc.N` 基础版本（`x` 为无前导零的补丁号，`N` 为本次唯一编号）。正式版批准后可显式选择 `stable-manual`，仅接受 Windows x64 严格 `1.0.x` 与同名 `refs/tags/v1.0.x`。默认只生成 Actions artifact；选择创建 Draft 后仍需核对产物与证据，再按维护者授权独立公开（RC 为 prerelease；正式版为 latest）。默认不复用或覆盖已存在的 tag/Release；仅第 6 节的明确授权例外适用。源码清单、构建注入版本与 tag 必须完全一致。
 
 仅允许以下 Windows 安装资产及其审核文件：
 
@@ -41,7 +41,7 @@ main push 始终完整执行全部原有任务和 C10，最终 SHA 的发布门�
 
 应用内更新的显式渠道为 `stable-updater`，仅 Windows x64 严格 `1.0.x`；仍默认 RC。此渠道增加 `latest.yml` 与安装器 `.exe.blockmap`，两者必须来自同次构建并通过 metadata/大小/SHA512、blockmap、包内 GitHub 配置和 SHA256 清单审核。下载和安装均需用户确认，便携版仍手动。固定依赖对有 publisherName 的包继续校验签名；无发布者的未签名包不能冒充已签名更新。
 
-不得移动已有 tag 或覆盖既有 Release；后续版本使用新标签和新 Release，当前版本见第 6 节。历史 1.0.1 的单次覆盖例外已经结束。真实安装版跨版本下载/重启、数据保持、失败重试与安装门禁需独立记录，首批更新能力上线仍须在公告明确线上跨版本尚未验收，不以单元测试替代。
+默认不得移动已有 tag 或覆盖既有 Release；后续版本使用新标签和新 Release，当前版本及维护者明确授权的例外见第 6 节。历史 1.0.1 的单次覆盖例外已经结束。真实安装版跨版本下载/重启、数据保持、失败重试与安装门禁需独立记录，首批更新能力上线仍须在公告明确线上跨版本尚未验收，不以单元测试替代。
 
 - 核心回归、架构/Provider I/O 门禁、完整跨平台 CI、根包 Node 16 安装兼容通过。
 - 生产依赖无 moderate/high/critical，完整依赖树无 high/critical；其他告警如实列明。
@@ -78,7 +78,15 @@ main push 始终完整执行全部原有任务和 C10，最终 SHA 的发布门�
 
 ## 6. 当前 1.0.4 发布与历史例外
 
-维护者已于 2026-09-28 确认本地 1.0.4 测试包成功修复 #107，并明确授权发布新版及感谢报告者。本轮为 **Windows x64 Electron 1.0.4**，沿用 `stable-updater`：安装版由用户显式下载并确认重启安装，便携版手动更新。先处理 PR #108 的全部有效审查并通过当前 head CI，采用 merge commit 合并；最终 main SHA 再次通过完整 CI 后，创建新的 `v1.0.4` 标签，准备并验收同 SHA 的 10 项附件，再公开对应 Release。授权不替代门禁，不得移动旧标签或覆盖既有 Release。
+维护者已于 2026-09-28 确认本地 1.0.4 测试包成功修复 #107，并明确授权发布新版及感谢报告者。首次 **Windows x64 Electron 1.0.4** 发布沿用 `stable-updater`：安装版由用户显式下载并确认重启安装，便携版手动更新。PR #108 经 merge commit 合并；最终 main SHA 通过完整 CI 后创建 `v1.0.4` 标签，准备并验收同 SHA 的 10 项附件，再公开对应 Release。该次发布已完成，后续 Codex 审查采用 AGENTS.md 的 P0 规则。
+
+同日维护者验收项目主页与设置发布页两个入口后，明确要求“提交推送合并，发新包；版本不变，说明不变”。这是仅针对本次 **v1.0.4** 的重打授权：
+
+- 先在 AI 开发文档落实“Codex 审查仅 P0 阻断，不做反复审查”，再提交和发布；不主动追加 Codex 审查轮次。
+- 备份既有 tag SHA、Release 元数据及全部 10 项附件，并校验备份哈希；保留既有 Release、标题和功能说明。
+- 新 PR 与合并后的最终 main SHA 分别通过 CI；以最终 SHA 更新 `v1.0.4` 标签，选择 `create_draft_release=false` 构建并验收同 SHA 的 `stable-updater` 新包，不新建或删除 Release。
+- 仅用同次构建验收的 10 项附件替换旧附件，包括安装器、ZIP、`latest.yml`、blockmap 和全部校验/验收文件；发布说明只更新对应源码、验收链接及 SHA-256 技术事实，功能措辞与感谢内容保持。
+- 更新后下载复核全部附件、tag SHA、版本、哈希、渠道和 Release 元数据。授权不豁免 CI/容器验收，不扩大为以后版本的默认覆盖许可。
 
 发布说明与贡献者名单感谢 [@Lorikein12138](https://github.com/Lorikein12138) 在 [#107](https://github.com/Dailin521/codex-provider-sync/issues/107) 的复现和根因分析。本地手测仅确认 #107 修复，不能扩展为线上升级或真实安装验收；安装/退出/卸载和 ZIP 解压验收由隔离容器完成。仍需公开说明未签名、线上跨版本下载安装尚未独立验收；不发布 npm、Legacy 或其他平台包。
 

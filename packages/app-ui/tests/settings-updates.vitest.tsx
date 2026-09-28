@@ -11,6 +11,29 @@ function mount(host: Partial<HostClient>, core = new MockCoreClient({ getStatus:
 }
 
 describe("Desktop updates in Settings", () => {
+  it("opens the release page without checking or changing updates, and reports browser failure", async () => {
+    const user = userEvent.setup();
+    const getStatus = vi.fn(async (): Promise<HostUpdateStatus> => ({ currentVersion: "1.0.4", mode: "manual", state: "not-available", installAllowed: false }));
+    const openReleasePage = vi.fn(async () => {}).mockRejectedValueOnce(new Error("native failure"));
+    const check = vi.fn();
+    const download = vi.fn();
+    const install = vi.fn();
+    mount({ getUpdateStatus: getStatus, openReleasePage, checkForUpdates: check, downloadUpdate: download, installUpdate: install });
+    await user.click(await screen.findByRole("button", { name: "Settings", exact: true }));
+    await screen.findByText("Current version: 1.0.4");
+    const button = screen.getByRole("button", { name: "Open release page", exact: true });
+    expect(openReleasePage).not.toHaveBeenCalled();
+    await user.click(button);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not open the browser. Please try again.");
+    await user.click(button);
+    await waitFor(() => expect(openReleasePage).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(getStatus).toHaveBeenCalledOnce();
+    expect(check).not.toHaveBeenCalled();
+    expect(download).not.toHaveBeenCalled();
+    expect(install).not.toHaveBeenCalled();
+  });
+
   it.each(["write", "recovery", "watch", "status-error"])("allows explicit installation during %s", async (scenario) => {
     const user = userEvent.setup();
     const status = statusFor();

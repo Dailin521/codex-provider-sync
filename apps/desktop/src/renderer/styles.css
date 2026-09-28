@@ -5,3 +5,11 @@
 html { min-width: 320px; background: var(--surface); }
 body { margin: 0; min-width: 320px; min-height: 100vh; background: var(--surface); }
 button, input, select { font: inherit; }
+
+.cps-github-mark {
+  display: block;
+  width: 20px;
+  height: 20px;
+  background-color: currentColor;
+  mask: url("/github-mark.svg") center / contain no-repeat;
+}

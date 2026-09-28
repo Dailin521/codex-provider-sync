@@ -82,6 +82,15 @@ On Windows, `\\wsl.localhost\...` and `\\wsl$\...` SQLite Homes are diagnostic-o
 - V1 Electron is the primary desktop interface in this branch. .NET Windows/macOS remain Legacy fallback implementations with their own supported behavior; preserve their build, do not port new Node business capabilities back into them. Public release and phase completion still require their independent gates.
 - Legacy Windows uses Application/controllers; Legacy macOS calls .NET Core directly. Do not claim both use an Application layer.
 
+## Codex PR review policy
+
+**Codex 审查仅 P0 阻断，不做反复审查。**
+
+- Do not proactively request complex Codex reviews, repeated independent reviews, or review-fix-review loops. Inspect reviews already present on the current PR once before merging.
+- Only a verified P0 finding from a Codex PR review blocks merge or release. Fix that finding and run the checks relevant to the fix; do not trigger another full Codex review by default.
+- P1/P2/P3 findings and advisory suggestions do not block delivery or require repeated modifications. Record relevant follow-up items without expanding the approved scope.
+- This policy governs Codex review overhead. Required local checks, CI, release-container acceptance, and explicit publication authorization still apply; never weaken those gates to satisfy a review preference.
+
 ## Mandatory Provider I/O regression gate
 
 - Follow PIO-1 through PIO-6 in the current Core guide. Sync reads bounded first-line metadata, not full chat streams. No public `sync --provider`, `--fast` or `syncMode`.

@@ -133,7 +133,7 @@ test("secure desktop exposes the C8 surface and treats old ordinary journals as 
       process: "undefined",
       require: "undefined",
       buffer: "undefined",
-      bridgeKeys: ["clipboard", "core", "diagnostics", "history", "operationLogs", "profiles", "test", "updates", "version", "watch"],
+      bridgeKeys: ["clipboard", "core", "diagnostics", "history", "operationLogs", "profiles", "project", "test", "updates", "version", "watch"],
       coreKeys: [
         "cancelOperation",
         "requestMaintenance",
