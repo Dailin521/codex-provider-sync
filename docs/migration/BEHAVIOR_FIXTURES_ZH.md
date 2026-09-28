@@ -2,13 +2,21 @@
 
 `test/provider-header-validation.test.js` 覆盖非法 UTF-8、数组 payload、序列化及语义比较容量失败、有效替换字符和跨块编码、BOM、普通/归档混合数据、冻结排除、写前变化、关联索引保留及恢复范围。日志/UI/生产 Electron 混合数据验收覆盖新增原因码，继续执行 128 MiB 和 PIO 门禁。
 
-当前 Provider 跳过合同见 [ADR-0045](../adr/0045-isolated-provider-data-skips.md)：内部逐文件/逐行计划绑定、关联索引排除、已知未写恢复范围及有界本机日志。`test/provider-skip-data.test.js` 覆盖混合数据、未知归属、冻结排除、删除及全部跳过。全局故障和 Repair/Restore 仍严格；不完整状态不能宣称对齐。
+当前 Provider 跳过合同见 [ADR-0045](../adr/0045-isolated-provider-data-skips.md)，分页组选择见 [ADR-0047](../adr/0047-paginated-provider-associations.md)：内部逐文件/逐行计划绑定、可信 ID/historyMode、关联索引排除、已知未写恢复范围及有界本机日志。`test/provider-skip-data.test.js` 与 `test/provider-paginated-groups.test.js` 覆盖混合数据、未知归属、冻结排除、删除、受锚定分页组和 SQLite-only 收敛。全局故障和 Repair/Restore 仍严格；不完整状态不能宣称对齐。
 
 `test/in-place-transaction.test.js` 的 POSIX 回归覆盖写前新增硬链接按变化跳过，以及短写、零进度、fsync 故障在验证恢复成功后返回 `SKIP_NOT_APPLIED`；同时断言原字节、inode、大小、mtime 和跳过原因。写后身份冲突或恢复失败仍停止，禁止回退整文件替换。
 
 占用错误包装回归覆盖 Status/Provider 扫描明细保留路径、原因和重试提示；Node 流式写入的写前读取保留原始错误码，EBUSY/EPERM 明确未写入后跳过，后续健康文件继续。Repair 共享读取的默认错误包装不变。
 
 `provider-skip-data.test.js` 验证预览时已对齐的 SQLite 行在执行前改 Provider 或消失：有/无 `rollout_path`、无写目标/混合健康目标均返回部分完成，变化行和对应 rollout 保持原样，空写集合不创建备份。
+
+`test/provider-paginated-groups.test.js` 是 ADR-0047 的专用合成 Home fixture（Windows 使用 `D:\Temp`，其他平台使用系统临时目录）：受锚定的同 ID `history_mode=paginated` 多文件须一次写全组及一条 SQLite 行；“文件已同步、SQLite 未同步”须只补该行、下一次 noop 且不建备份；重复 ordinal 仍可成功。传统重复 ID、缺 marker、错指/越界路径、跨 ID 和多 owner 必须保留冲突保护。锁定、删除、首行变化、写入失败、新增已知同 ID 与未知/坏新增分别验证 partial、关联行保留、重新预览后的收敛；预览后和 rollout 写期间新增/改变已对齐 owner 的路径争用保留受影响行，无关健康分页组继续。普通/归档目录覆盖 DOS/`\\?\` DOS、UNC/`\\?\UNC\` 等价路径及边界反例。配套 Provider facts/PIO fixture 覆盖等长原地、变长流式、Restore 的正文 byte、其他 metadata、文件身份和恢复范围。生产 Electron 验收要求隐藏窗口真实 Utility Core 的 Sync → noop → Restore；这些是要求的验证项目，不代表已执行。
+
+ADR-0047 的执行期重验补充：`provider-preparation-facts.test.js` 验证 deferred 文件每轮仅有界读取首行、重新确认归属且始终不纳入写集合；`provider-paginated-groups.test.js` 覆盖 Prepare 后、Apply 前新增 B 文件，rollout 写期间变为 A 或首行无效/不可读/消失时保留受影响分页索引，未知归属包括保护单文件分页候选，并验证重新预览后收敛。原计划成员变化后的冻结归属仍保持。
+
+同一 fixture 还覆盖没有分页候选的操作：传统文件等长/变长写入后的 binding 确认、已有 deferred 归属变更、首轮 Apply 后才新增的同 ID 文件、无关可信 ID 和未知首行。已知同 ID 保护对应行，新文件不写；传统 unknown 正关联、SQLite-only 收敛和无 SQLite 写候选的读取/事务/备份边界保持。PIO 的 Prepare 单轮读取次数、正文、mtime 与文件身份断言不放宽。
+
+`provider-skip-associations.test.js` 另覆盖 Windows DOS/UNC、普通/namespace 路径及 sessions/archived_sessions 大小写别名：锚点仍可关联，已经对齐的跨 ID owner 仍触发冲突，数据库原始路径保持。
 
 ## ADR-0044：大首行与明确错误
 

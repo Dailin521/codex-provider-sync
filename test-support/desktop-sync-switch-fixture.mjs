@@ -85,7 +85,7 @@ async function sqliteFileDigests(stateDbPath) {
   ]));
 }
 
-function createSyntheticStateDatabase(stateDbPath, provider, model) {
+function createSyntheticStateDatabase(stateDbPath, provider, model, { sessionId = "c7-desktop-session", rolloutPath = null } = {}) {
   const database = new DatabaseSync(stateDbPath);
   try {
     database.exec(`
@@ -98,16 +98,16 @@ function createSyntheticStateDatabase(stateDbPath, provider, model) {
         model TEXT,
         has_user_event INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL DEFAULT 0,
-        updated_at_ms INTEGER NOT NULL DEFAULT 0
+        updated_at_ms INTEGER NOT NULL DEFAULT 0${rolloutPath === null ? "" : ",\n        rollout_path TEXT"}
       );
     `);
     database.prepare(`
       INSERT INTO threads (
         id, model_provider, cwd, archived, first_user_message, model,
-        has_user_event, updated_at, updated_at_ms
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        has_user_event, updated_at, updated_at_ms${rolloutPath === null ? "" : ", rollout_path"}
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?${rolloutPath === null ? "" : ", ?"})
     `).run(
-      "c7-desktop-session",
+      sessionId,
       provider,
       "C:\\synthetic\\desktop-project",
       0,
@@ -115,7 +115,8 @@ function createSyntheticStateDatabase(stateDbPath, provider, model) {
       model,
       1,
       1787702400,
-      1787702400000
+      1787702400000,
+      ...(rolloutPath === null ? [] : [rolloutPath])
     );
   } finally {
     database.close();
@@ -131,6 +132,15 @@ function readSessionMeta(text) {
   throw new Error("Writable desktop fixture has no session_meta entry.");
 }
 
+function readSessionOrdinal(text) {
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const entry = JSON.parse(line);
+    if (entry?.type === "session_meta") return entry.ordinal;
+  }
+  throw new Error("Writable desktop fixture has no session_meta entry.");
+}
+
 function readTurnContext(text) {
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -140,18 +150,31 @@ function readTurnContext(text) {
   throw new Error("Writable desktop fixture has no turn_context entry.");
 }
 
-export async function createDesktopSyncSwitchFixture() {
+function readEventMessage(text) {
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const entry = JSON.parse(line);
+    if (entry?.type === "event_msg") return entry.payload?.message;
+  }
+  throw new Error("Writable desktop fixture has no event_msg entry.");
+}
+
+export async function createDesktopSyncSwitchFixture({ paginatedGroup = false } = {}) {
   const fixtureRoot = await fs.mkdtemp(path.join(os.tmpdir(), "provider-sync-c7-desktop-"));
   const codexHome = path.join(fixtureRoot, "codex-home");
   const userData = path.join(fixtureRoot, "user-data");
-  const rolloutPath = path.join(
+  const rolloutDirectory = path.join(
     codexHome,
     "sessions",
     "2026",
     "08",
-    "26",
-    "rollout-c7-desktop.jsonl"
+    "26"
   );
+  const rolloutPath = path.join(rolloutDirectory, paginatedGroup ? "rollout-c7-paginated-a.jsonl" : "rollout-c7-desktop.jsonl");
+  const rolloutPaths = paginatedGroup
+    ? [rolloutPath, path.join(rolloutDirectory, "rollout-c7-paginated-b.jsonl")]
+    : [rolloutPath];
+  const sessionId = paginatedGroup ? "c7-desktop-paginated-session" : "c7-desktop-session";
   const stateDbPath = path.join(codexHome, "sqlite", "state_5.sqlite");
   const targetSqliteHome = path.join(fixtureRoot, "relocation-target-sqlite");
   const targetStateDbPath = path.join(targetSqliteHome, "state_5.sqlite");
@@ -174,7 +197,7 @@ export async function createDesktopSyncSwitchFixture() {
       };
     }
   });
-  await fs.mkdir(path.dirname(rolloutPath), { recursive: true });
+  await fs.mkdir(rolloutDirectory, { recursive: true });
   await fs.mkdir(path.join(codexHome, "archived_sessions"), { recursive: true });
   await fs.mkdir(path.dirname(stateDbPath), { recursive: true });
   await fs.mkdir(targetSqliteHome, { recursive: true });
@@ -198,7 +221,7 @@ export async function createDesktopSyncSwitchFixture() {
   await fs.writeFile(
     configPath,
     [
-      'model_provider = "openai"',
+      `model_provider = "${paginatedGroup ? "prov_a" : "openai"}"`,
       'model = "gpt-5"',
       "",
       "[model_providers.relay]",
@@ -217,16 +240,18 @@ export async function createDesktopSyncSwitchFixture() {
   }, null, 2)}\n`;
   await fs.writeFile(globalStatePath, globalState, "utf8");
   await fs.writeFile(globalStateBackupPath, globalState, "utf8");
-  await fs.writeFile(rolloutPath, `${[
+  const rolloutEntries = (bodyMarker = "C7_DESKTOP_BODY_ONLY_MARKER") => [
     {
       type: "session_meta",
       timestamp: "2026-08-26T00:00:00.000Z",
       payload: {
-        id: "c7-desktop-session",
+        id: sessionId,
         cwd: "C:\\synthetic\\desktop-project",
-        model_provider: "legacy-provider",
-        model: "legacy-model"
-      }
+        model_provider: paginatedGroup ? "openai" : "legacy-provider",
+        model: "legacy-model",
+        ...(paginatedGroup ? { history_mode: "paginated" } : {})
+      },
+      ...(paginatedGroup ? { ordinal: 7 } : {})
     },
     {
       type: "turn_context",
@@ -239,10 +264,19 @@ export async function createDesktopSyncSwitchFixture() {
     {
       type: "event_msg",
       timestamp: "2026-08-26T00:01:00.000Z",
-      payload: { type: "user_message", message: "C7_DESKTOP_BODY_ONLY_MARKER" }
+      payload: { type: "user_message", message: bodyMarker }
     }
-  ].map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf8");
-  createSyntheticStateDatabase(stateDbPath, "legacy-provider", "legacy-model");
+  ];
+  for (const [index, filePath] of rolloutPaths.entries()) {
+    const text = `${rolloutEntries(paginatedGroup ? `C7_PAGINATED_BODY_${index + 1}` : undefined).map((entry) => JSON.stringify(entry)).join("\n")}\n`;
+    await fs.writeFile(filePath, text, "utf8");
+  }
+  createSyntheticStateDatabase(
+    stateDbPath,
+    paginatedGroup ? "openai" : "legacy-provider",
+    "legacy-model",
+    { sessionId, rolloutPath: paginatedGroup ? rolloutPath : null }
+  );
   createSyntheticStateDatabase(targetStateDbPath, "target-before", "target-model");
   let closed = false;
   return {
@@ -250,6 +284,8 @@ export async function createDesktopSyncSwitchFixture() {
     codexHome,
     userData,
     rolloutPath,
+    rolloutPaths,
+    sessionId,
     stateDbPath,
     targetSqliteHome,
     targetStateDbPath,
@@ -325,6 +361,35 @@ export async function createDesktopSyncSwitchFixture() {
       });
       return core.applyRestore({ schemaVersion: 1, planId: plan.planId });
     },
+    async inspectPaginatedGroup() {
+      if (!paginatedGroup) throw new Error("The desktop fixture was not created with paginatedGroup enabled.");
+      const rollouts = await Promise.all(rolloutPaths.map(async (filePath) => {
+        const bytes = await fs.readFile(filePath);
+        const text = bytes.toString("utf8");
+        const headerWithoutProvider = JSON.parse(text.slice(0, text.indexOf("\n")));
+        delete headerWithoutProvider.payload.model_provider;
+        return {
+          path: filePath,
+          headerWithoutProvider,
+          bodyHash: digest(bytes.subarray(bytes.indexOf(0x0a) + 1)),
+          metadata: readSessionMeta(text),
+          ordinal: readSessionOrdinal(text),
+          turnContext: readTurnContext(text),
+          body: readEventMessage(text)
+        };
+      }));
+      const db = new DatabaseSync(stateDbPath, { readOnly: true });
+      let sqlite;
+      try {
+        sqlite = db.prepare(
+          "SELECT model_provider AS provider, model, updated_at AS updatedAt, updated_at_ms AS updatedAtMs, rollout_path AS rolloutPath FROM threads WHERE id = ?"
+        ).get(sessionId);
+      } finally {
+        db.close();
+      }
+      const { backupIds } = await this.inspect();
+      return { rollouts, sqlite, backupIds };
+    },
     async inspect() {
       const configText = await fs.readFile(configPath, "utf8");
       const rolloutText = await fs.readFile(rolloutPath, "utf8");
@@ -335,7 +400,7 @@ export async function createDesktopSyncSwitchFixture() {
       try {
         sqlite = db.prepare(
           "SELECT model_provider AS provider, model, updated_at AS updatedAt, updated_at_ms AS updatedAtMs FROM threads WHERE id = ?"
-        ).get("c7-desktop-session");
+        ).get(sessionId);
       } finally {
         db.close();
       }

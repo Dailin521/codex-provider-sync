@@ -76,7 +76,13 @@ main push 始终完整执行全部原有任务和 C10，最终 SHA 的发布门�
 
 正式版公告先通过 `node scripts/read-release-metadata.js --tag v1.0.x`，然后按该版本的明确授权执行 `gh release edit v1.0.x --draft=false --prerelease=false --latest=true --notes-file docs/release-notes/v1.0.x-zh.md`。公开后再次检查 `/releases/latest`、tag SHA、对应渠道的全部下载资产与哈希。RC 只公开 prerelease，不使用正式版命令，也不设 latest。
 
-## 6. 当前 1.0.3 发布与历史例外
+## 6. 当前 1.0.4 发布与历史例外
+
+维护者已于 2026-09-28 确认本地 1.0.4 测试包成功修复 #107，并明确授权发布新版及感谢报告者。本轮为 **Windows x64 Electron 1.0.4**，沿用 `stable-updater`：安装版由用户显式下载并确认重启安装，便携版手动更新。先处理 PR #108 的全部有效审查并通过当前 head CI，采用 merge commit 合并；最终 main SHA 再次通过完整 CI 后，创建新的 `v1.0.4` 标签，准备并验收同 SHA 的 10 项附件，再公开对应 Release。授权不替代门禁，不得移动旧标签或覆盖既有 Release。
+
+发布说明与贡献者名单感谢 [@Lorikein12138](https://github.com/Lorikein12138) 在 [#107](https://github.com/Dailin521/codex-provider-sync/issues/107) 的复现和根因分析。本地手测仅确认 #107 修复，不能扩展为线上升级或真实安装验收；安装/退出/卸载和 ZIP 解压验收由隔离容器完成。仍需公开说明未签名、线上跨版本下载安装尚未独立验收；不发布 npm、Legacy 或其他平台包。
+
+### 1.0.3 发布授权记录
 
 维护者已于 2026-09-15 授权提交、合并并发布新的 Windows 包。本次版本为 **1.0.3**，交付 128 MiB 首行、问题会话逐文件跳过和首行校验修复。遵循第 1～5 节：最终 main SHA 的 CI 通过后创建新的 `v1.0.3` 标签，以 `stable-updater` 准备并验收 10 项附件，再公开对应的新 Release。不得移动旧标签或覆盖既有 Release。
 

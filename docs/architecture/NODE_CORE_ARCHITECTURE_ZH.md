@@ -2,9 +2,9 @@
 
 Provider 首行新增严格 UTF-8 和对象 payload 校验；处理容量失败仅在序列化/语义比较边界逐文件跳过，不设固定嵌套上限。默认共享 Repair/Restore 读取规则不变。
 
-当前 Provider 跳过合同见 [ADR-0045](../adr/0045-isolated-provider-data-skips.md)：内部逐文件/逐行计划绑定、关联索引排除、已知未写恢复范围及有界本机日志。`test/provider-skip-data.test.js` 覆盖混合数据、未知归属、冻结排除、删除及全部跳过。全局故障和 Repair/Restore 仍严格；不完整状态不能宣称对齐。
+当前 Provider 跳过合同见 [ADR-0045](../adr/0045-isolated-provider-data-skips.md)，分页同线程多文件关联见 [ADR-0047](../adr/0047-paginated-provider-associations.md)：内部逐文件/逐行计划绑定、可信 ID/historyMode、关联索引排除、已知未写恢复范围及有界本机日志。分页组只在全部成员明确 `history_mode=paginated`、SQLite 同 ID 且规范化 `rollout_path` 唯一锚定组内成员时放行；ordinal 不用于身份或唯一性。任一成员跳过即保留该行，未知新增保守阻止已知分页候选行。`test/provider-skip-data.test.js` 与 `test/provider-paginated-groups.test.js` 覆盖混合数据、未知归属、冻结排除、删除及组收敛。全局故障和 Repair/Restore 仍严格；不完整状态不能宣称对齐。
 
-> 状态：Accepted，适用于 V1 当前代码；最近校对：2026-09-08（已纳入 ADR-0038）。
+> 状态：Accepted，适用于 V1 当前代码；最近校对：2026-09-28（已纳入 ADR-0047）。
 > 本文是 Node Core 日常开发入口，不是发布证明。Electron 总体路线仍见 [vNext 架构基线](../VNEXT_ELECTRON_NODE_ARCHITECTURE_ZH.md)，阶段及发布状态只记在[执行索引](../migration/VNEXT_MIGRATION_EXECUTION_INDEX_ZH.md)。
 
 ## 1. 文档职责与变更规则
@@ -74,6 +74,8 @@ Windows 写目标占用探测的私有协议位于 `src/windows-lock-probe.js`�
 
 Sync 目标始终取 `config.toml` 根级 `model_provider`，缺失时为 `openai`。公共输入不接受 `provider/model/fast/syncMode`。正常扫描经 `collectProviderChanges`，只解析第一行 `session_meta`（上限 128 MiB UTF-8 内容字节，不含 LF/CRLF；见 [ADR-0044](../adr/0044-large-session-metadata.md)）；不得为模型、cwd、用户事件、加密字段、会话序号或历史显示索引扫描正文。
 
+按 ADR-0047，首行事实保留可信 ID 与 `payload.history_mode`，只允许明确 `paginated` 的同 ID 多文件按受 SQLite `rollout_path` 唯一锚定的组归属；不以 `ordinal` 判断文件身份、先后或继承。Windows 等价路径先统一 DOS/`\\?\` DOS、UNC/`\\?\UNC\` 后做既有 Home 边界检查，原数据库路径不改写，设备/越界/WSL 仍拒绝。缺 marker、legacy、多 owner、跨 ID 或无锚点多文件保持冲突保护；单文件规则不变。
+
 这里“只读首行”指**业务扫描边界**：底层按 64 KiB 分块，可能在包含换行的块中预读少量尾部。按 [ADR-0037](../adr/0037-switch-history-and-provider-preparation-facts.md)，Sync/Switch Prepare 的分布、revision 和 change descriptor 复用同一次首行事实，短期记录不进入计划 ledger/公开输入/持久缓存。Apply 锁内复核、实际目标重扫和落盘前仍重新读取。不能声称整个 Sync 只读一次或只读取 Provider 的几个字节。备份/哈希及变长复制有各自 I/O，但不能借此恢复正文业务扫描。
 
 ### PIO-2：合格的等长更新必须原地写
@@ -110,6 +112,12 @@ Sync 不改根 config、历史 model、cwd、user-event、workspace roots、titl
 → 最后取消点 → config（仅 Switch）→ rollout → global state（仅显式 Repair）
 → SQLite 原生事务提交 → 结果 / 受管备份清理 → 释放 Home 锁
 ```
+
+分页组的 SQLite 行只有全体成员均已对齐或本次成功写入才可更新。Apply 新增文件仅有界读首行并 deferred，不扩大写集合；提交前对已发现的 deferred 文件重新有界读首行，不沿用首次 Apply 的归属缓存，读取失败或无效时清除可信 ID/historyMode。已知同 ID 新增/变化阻止对应行，未知/坏新增保守阻止全部已知分页候选行。提交前重核相关整组，包含原先已对齐成员，并区分本轮流式替换和外部变化；这是重试收敛保护，不是外部并发原子隔离。
+
+只要有冻结 SQLite 写候选，SQLite 步骤提交前就执行有界首行终检，不依赖分页或已知 deferred 的存在。本轮所有成功写入成员先确认新的 binding，涵盖传统文件的原地/流式写；首轮 Apply 后才新增的已知同 ID 文件仍能保护对应传统行。无 SQLite 写候选时不额外确认 binding 或终检，不新增事务、备份或写目标；传统 unknown 正关联规则与候选只收缩的限制保持。
+
+路径归属在备份前和既有 SQLite 写事务内按全部当前行重验，包含已对齐行与新行。新增或改变 owner 导致争用时只缩减冻结候选，保留受影响行，不阻止无关健康组。
 
 只使用 `<Codex Home>/tmp/provider-sync.lock`；跨 Home 的 SQLite 竞争交给原生事务。预检不预留未来数据库写锁：之后仍可能 busy。首次 mutation 前失败零业务写入；mutation 后失败为带 backupId/failedStage/failureCode/retryRecommended 的 `partial`，重新 Prepare/执行收敛，或用户手动 Restore。
 
@@ -163,6 +171,7 @@ npm test
 | 字节描述符、歧义输入、原地失败与恢复兼容 | [in-place-transaction.test.js](../../test/in-place-transaction.test.js) |
 | Windows 原生原地写、共享 worker 和占用/变化 | [windows-rewrite-worker.test.js](../../test/windows-rewrite-worker.test.js) |
 | Prepare 单轮首行事实、Apply 重新复核及时间戳 | [provider-preparation-facts.test.js](../../test/provider-preparation-facts.test.js) |
+| 分页同线程组、路径锚点、半同步收敛及新增文件防护 | [provider-paginated-groups.test.js](../../test/provider-paginated-groups.test.js) |
 | 可选数值计时投影、观测错误隔离和 Desktop 日志 | [file-update-timing-json.test.js](../../test/file-update-timing-json.test.js)、[contracts 检查](../../packages/contracts/checks/file-update-timing.contract.mjs)、[Desktop 日志测试](../../apps/desktop/tests/file-update-timing-log.test.mjs) |
 | Plan/revision/单次消费/取消、Home 协调 | [plan-apply.test.js](../../test/plan-apply.test.js)、[status-coordination.test.js](../../test/status-coordination.test.js) |
 | Restore 独立 crash matrix | [restore-v2-state-machine.test.js](../../test/restore-v2-state-machine.test.js) |

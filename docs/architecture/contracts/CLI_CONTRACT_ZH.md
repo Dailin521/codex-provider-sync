@@ -4,6 +4,8 @@
 
 ADR-0045 当前增量：Provider Sync/Switch/Watch 将单条首行无效、128 MiB 输入/输出超限、占用/不可读、消失/变化及明确未损坏源文件的写入失败列为跳过，正常候选继续；对应 SQLite 行及不确定关联保持原样。计划排除集合冻结，新增数据留待下次；全局安全、目录枚举、配置/存储、数据库和备份故障仍停止。部分完成新增有界 `skipSummary`（最多 200 项本机完整路径/安全行标识、原因/阶段/可重试性及总数/省略/未确认数）；诊断导出单独移除路径和标识。全部跳过的 Sync 无备份，Switch 仍备份并切换配置。JSON 部分完成退出 3，Human 保持既有行为；协议结构版本不变。保留 128 MiB 与 PIO，Repair/Restore 边界不变。详见 [ADR-0045](../../adr/0045-isolated-provider-data-skips.md)。
 
+ADR-0047 当前增量：分页同线程组在内部按可信 ID、明确 `history_mode=paginated` 和 SQLite `rollout_path` 的唯一规范化锚点选择，`ordinal` 不影响 CLI 行为。成员跳过、新增/变化或未知新增导致关联行保留时，仍返回既有 partial/`skipSummary` 和 JSON exit 3；半同步重试只补 SQLite 后随后的 noop 不建备份。未增加命令、参数、JSON schema、协议版本或错误码；Human 输出保持既有 partial 表述。Windows 路径别名只在内部比较时规范化，CLI 不改写数据库路径。详见 [ADR-0047](../../adr/0047-paginated-provider-associations.md)。
+
 ADR-0041 增量：Status/Diagnostics JSON 可选 `staleLockDetected:boolean` 表示发现已证明失效的 Home 锁，不表示已删除锁；检查保持只读。正常写命令重新验证后回收失效锁。未知 owner 仍为 `LOCK_UNVERIFIABLE`，写命令 JSON 退出码仍为 5。
 
 > 状态：Accepted（Phase 0 Human 兼容基线；ADR-0016 C2/C3 增量已实现）
