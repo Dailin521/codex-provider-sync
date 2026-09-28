@@ -90,6 +90,8 @@ export const resources = {
       },
       global: {
         ready: "Ready",
+        projectHome: "Open GitHub project home",
+        projectHomeFailed: "Could not open the browser. Please try again.",
         readingStatus: "Reading status…",
         statusUnavailable: "Status unavailable",
         statusNeedsRefresh: "Refresh needed",
@@ -560,6 +562,7 @@ export const resources = {
         updateManualHint: "Check once on the first launch each day; only newer releases trigger a popup. This portable or local build opens the GitHub download page; download and replace it manually. It does not install or restart automatically.",
         updateAutomaticHint: "Check once on the first launch each day and notify only for newer releases. Download when ready, then confirm a restart to install. Your Codex data is not part of the update.",
         updateOpenDownload: "Open official download page",
+        updateOpenReleasePage: "Open release page",
         updateIgnore: "Don't remind me about this version",
         updateRestoreReminder: "Remind me about this version",
         updateIgnored: "Reminders for this version are off. You can still update now.",
@@ -939,6 +942,8 @@ export const resources = {
       },
       global: {
         ready: "就绪",
+        projectHome: "打开 GitHub 项目主页",
+        projectHomeFailed: "无法打开浏览器，请重试。",
         readingStatus: "正在读取状态…",
         statusUnavailable: "无法读取当前状态",
         statusNeedsRefresh: "状态待刷新",
@@ -1409,6 +1414,7 @@ export const resources = {
         updateManualHint: "每天首次启动检查一次，仅发现新版时弹窗。便携版或本地构建会打开 GitHub 下载页，请下载后手动替换；不会自动安装或退出。",
         updateAutomaticHint: "每天首次启动检查一次，有新版时弹窗提示。按需下载，再确认重启安装。更新不替换你的 Codex 数据。",
         updateOpenDownload: "打开官方下载页",
+        updateOpenReleasePage: "打开发布页",
         updateIgnore: "不再提醒此版本",
         updateRestoreReminder: "恢复此版本提醒",
         updateIgnored: "已关闭此版本提醒，仍可正常更新。",

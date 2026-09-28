@@ -25,6 +25,8 @@ export const DESKTOP_IPC_CHANNELS = Object.freeze({
   profilesDelete: "cps:v1:profiles:delete",
   profilesReveal: "cps:v1:profiles:reveal",
   historyReveal: "cps:v1:history:reveal",
+  projectOpenHome: "cps:v1:project:open-home",
+  projectOpenReleases: "cps:v1:project:open-releases",
   clipboardWriteText: "cps:v1:clipboard:write-text",
   operationLogsList: "cps:v1:operation-logs:list",
   operationLogsGet: "cps:v1:operation-logs:get",

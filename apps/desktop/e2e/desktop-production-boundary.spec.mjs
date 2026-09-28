@@ -327,7 +327,7 @@ test("production desktop bundle has no test bridge and reads the real SQLite fix
       require: typeof globalThis.require
     }));
     expect(boundary).toEqual({
-      bridgeKeys: ["clipboard", "core", "diagnostics", "history", "operationLogs", "profiles", "updates", "version", "watch"],
+      bridgeKeys: ["clipboard", "core", "diagnostics", "history", "operationLogs", "profiles", "project", "updates", "version", "watch"],
       coreKeys: [
         "cancelOperation",
         "requestMaintenance",
@@ -557,6 +557,50 @@ test("production desktop bundle has no test bridge and reads the real SQLite fix
       await fixture.close();
     }
     if (closeError) throw closeError;
+  }
+});
+
+test("production desktop project links hand fixed URLs to the native browser without changing data", async () => {
+  test.setTimeout(PRODUCTION_SMOKE_TIMEOUT_MS);
+  test.skip(Boolean(packagedExecutable), "Native handoff interception uses the production Electron main-process driver.");
+  const fixture = await createDesktopReadOnlyFixture();
+  await claimDailyUpdateCheck(fixture.userData);
+  let app;
+  try {
+    app = await launchProductionDesktop({
+      args: [path.join(desktopRoot, "out", "main", "index.js"), `--user-data-dir=${fixture.userData}`, "--lang=en-US"],
+      env: { ...process.env, CODEX_HOME: fixture.codexHome, CPS_DESKTOP_E2E: "1", CPS_DESKTOP_WINDOW_DISPLAY: "hidden", ELECTRON_ENABLE_SECURITY_WARNINGS: "true" }
+    });
+    const page = await app.firstWindow();
+    await waitForProductionReady(page);
+    await app.evaluate(({ shell }) => {
+      globalThis.__projectHomeUrls = [];
+      shell.openExternal = async (url) => { globalThis.__projectHomeUrls.push(url); };
+    });
+    const button = page.getByRole("button", { name: "Open GitHub project home", exact: true });
+    for (const width of [1366, 390]) {
+      await page.setViewportSize({ width, height: 768 });
+      await expect(button).toBeInViewport({ ratio: 1 });
+      expect(await button.locator(".cps-github-mark").evaluate((icon) => getComputedStyle(icon).maskImage)).toContain("github-mark.svg");
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    }
+    await page.setViewportSize({ width: 1366, height: 768 });
+    expect(await app.evaluate(() => globalThis.__projectHomeUrls)).toEqual([]);
+    await button.focus();
+    await page.keyboard.press("Enter");
+    await expect.poll(() => app.evaluate(() => globalThis.__projectHomeUrls)).toEqual(["https://github.com/Dailin521/codex-provider-sync"]);
+    await expect(page).toHaveURL("cps-app://app/index.html");
+    await captureViewport(page, { path: test.info().outputPath("project-home-button-1366.png") });
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page.getByRole("button", { name: "Open release page", exact: true }).click();
+    await expect.poll(() => app.evaluate(() => globalThis.__projectHomeUrls)).toEqual([
+      "https://github.com/Dailin521/codex-provider-sync",
+      "https://github.com/Dailin521/codex-provider-sync/releases"
+    ]);
+    await expect(page).toHaveURL("cps-app://app/index.html");
+    await fixture.assertUnchanged();
+  } finally {
+    try { await app?.close(); } finally { await fixture.close(); }
   }
 });
 

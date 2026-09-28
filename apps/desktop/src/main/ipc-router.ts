@@ -70,6 +70,8 @@ export interface DesktopIpcRouterOptions {
   revealProfileDirectory(path: string): Promise<boolean>;
   revealHistoryFile?(path: string): Promise<boolean>;
   writeClipboardText?(text: string): void;
+  openProjectHome?(): Promise<void>;
+  openReleasePage?(): Promise<void>;
   isProfileMutationBlocked(): boolean;
   supervisor: CoreRuntimeSupervisor;
   diagnosticsExporter: DesktopDiagnosticsExporter;
@@ -966,6 +968,24 @@ export function registerDesktopIpc(options: DesktopIpcRouterOptions): DesktopIpc
     const target = input.target === "codex-home" ? profile.codexHome : profile.sqliteHome;
     return { revealed: target ? await options.revealProfileDirectory(target) : false };
   });
+
+  for (const [channel, openPage] of [
+    [DESKTOP_IPC_CHANNELS.projectOpenHome, options.openProjectHome],
+    [DESKTOP_IPC_CHANNELS.projectOpenReleases, options.openReleasePage]
+  ] as const) {
+    register(channel, async (event, value) => {
+      if (!isTrustedSender(event, options.getWindow(), options.rendererOrigin)
+          || value !== null || !openPage) {
+        return { opened: false };
+      }
+      try {
+        await openPage();
+        return { opened: true };
+      } catch {
+        return { opened: false };
+      }
+    });
+  }
 
   register(DESKTOP_IPC_CHANNELS.clipboardWriteText, (event, value) => {
     if (!isTrustedSender(event, options.getWindow(), options.rendererOrigin)) {

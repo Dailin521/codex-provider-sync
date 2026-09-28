@@ -1,6 +1,6 @@
 import type { WatchSnapshot, WatchStatusList } from "@codex-provider-sync/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Globe2, Languages, Moon, Play, RefreshCw, Sun } from "lucide-react";
+import { ExternalLink, Globe2, Languages, Moon, Play, RefreshCw, Sun } from "lucide-react";
 import { Fragment, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -92,6 +92,9 @@ export function SettingsPage({ props, profile, capabilities, recoveryBlocked, wr
     mutationFn: ({ version, ignored }: { version: string; ignored: boolean }) => props.host.setUpdateReminder?.(version, ignored) ?? Promise.reject(new Error("Update preference unavailable.")),
     onSuccess: storeUpdate
   });
+  const openReleasePage = useMutation({
+    mutationFn: () => props.host.openReleasePage?.() ?? Promise.reject(new Error("Release page unavailable."))
+  });
   const updateRequestFailed = update.isError || checkUpdate.isError || downloadUpdate.isError || installUpdate.isError;
   const updateBusy = checkUpdate.isPending || downloadUpdate.isPending || installUpdate.isPending || reminder.isPending;
   const setLocale = async (locale: "zh-CN" | "en") => {
@@ -161,7 +164,9 @@ export function SettingsPage({ props, profile, capabilities, recoveryBlocked, wr
               <div className="mt-4 flex flex-wrap gap-2">
                 {updateRequestFailed ? <p className="w-full text-sm text-[var(--danger)]" role="alert">{t("settings.updateRequestFailed")}</p> : null}
                 {reminder.isError ? <p className="w-full text-sm text-[var(--danger)]" role="alert">{t("settings.updateReminderFailed")}</p> : null}
+                {openReleasePage.isError ? <p className="w-full text-sm text-[var(--danger)]" role="alert">{t("global.projectHomeFailed")}</p> : null}
                 {update.data && ["idle", "not-available", "error", "available"].includes(update.data.state) && props.host.checkForUpdates ? <Button disabled={updateBusy} onClick={() => checkUpdate.mutate()} type="button" variant="secondary">{checkUpdate.isPending ? t("settings.updateStatus.checking") : t("settings.updateCheck")}</Button> : null}
+                {props.host.openReleasePage ? <Button disabled={openReleasePage.isPending} onClick={() => openReleasePage.mutate()} type="button" variant="secondary"><ExternalLink size={16} />{t("settings.updateOpenReleasePage")}</Button> : null}
                 {update.data?.state === "available" && props.host.downloadUpdate ? <Button disabled={updateBusy} onClick={() => downloadUpdate.mutate()} type="button">{t(update.data.mode === "manual" ? "settings.updateOpenDownload" : "settings.updateDownload")}</Button> : null}
                 {update.data?.state === "downloaded" && props.host.installUpdate ? <Button disabled={!update.data.installAllowed || updateBusy} onClick={() => installUpdate.mutate()} type="button">{t("settings.updateInstall")}</Button> : null}
                 {update.data?.version && ["available", "downloaded"].includes(update.data.state) && props.host.setUpdateReminder ? <Button disabled={updateBusy} onClick={() => reminder.mutate({ version: update.data!.version!, ignored: !update.data!.reminderIgnored })} type="button" variant="secondary">{t(update.data.reminderIgnored ? "settings.updateRestoreReminder" : "settings.updateIgnore")}</Button> : null}

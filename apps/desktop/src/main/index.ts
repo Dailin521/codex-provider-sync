@@ -303,6 +303,8 @@ if (!app.requestSingleInstanceLock()) {
       writeClipboardText(text) {
         clipboard.writeText(text);
       },
+      openProjectHome: () => shell.openExternal("https://github.com/Dailin521/codex-provider-sync"),
+      openReleasePage: () => shell.openExternal(PUBLIC_RELEASES_URL),
       onActiveWatchCountChanged(count) {
         activeWatchCount = count;
       },

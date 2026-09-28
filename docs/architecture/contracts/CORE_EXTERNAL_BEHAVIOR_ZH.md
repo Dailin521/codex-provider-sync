@@ -1068,6 +1068,7 @@ ADR-0040：Prepare/普通写内部失败可携带白名单 `failureStage/causeCo
 - Desktop 完整诊断独立请求预算为 15 分钟，不沿用普通只读的 30 秒。UI 显示扫描中、失败、重试和成功时间；重试失败时保留并明确标记上次成功结果。仍按 Profile/revision 隔离、无后台扫描。
 
 - Desktop复制遵循ADR-0018补充：Host提供只写`copyText`，窄IPC只接受`{schemaVersion:1,text}`且完整JSON UTF-8≤64KiB；Main验证顶层来源并使用原生剪贴板，失败有反馈，无读取/日志/Utility转发。Web保留浏览器复制接口。
+- ADR-0048：Desktop 顶栏状态旁提供固定 GitHub 项目主页入口，“设置 → 更新”提供“打开发布页”。`HostClient.openProjectHome()` / `openReleasePage()` 通过 Preload 无输入 `project.openHome()` / `project.openReleases()` 调用 `cps:v1:project:open-home` / `cps:v1:project:open-releases`；Main 只接受可信顶层 sender 和 `null` payload，分别打开固定 `https://github.com/Dailin521/codex-provider-sync` / `https://github.com/Dailin521/codex-provider-sync/releases` 并返回 `{opened:boolean}`。原生打开 resolve 后才成功，失败由 UI 显示；发布页入口不依赖更新检查结果或下载/安装状态，不改变更新状态。不在启动时打开，不接收 URL/路径/channel，不进入 Core、Utility、Provider/Profile 或操作日志。旧 Host 无能力时 UI 隐藏对应按钮，Web/Legacy 及既有 CSP、导航/新窗口/权限默认拒绝不变。
 - 诊断的`*NeedingRepair`字段保持原有算法与兼容名称，UI解释为可选元数据差异，不是聊天损坏数。模型标签可有合法历史差异；workspaceRoots计数为设置项变化/缺失备份数；encryptedContentFiles为出现加密字段的文件数，非解密测试或修复请求。
 
 - ADR-0019 将 `diagnostics` route 的展示入口命名为“高级功能 / Advanced features”，不改 Core/CLI 方法。完整诊断只由显式按钮触发；专项修复默认折叠、targets 默认全不选，选择后仍需 Prepare/Confirm/Apply。普通 Sync/Switch 成功或失败均不自动调用 Diagnostics/Repair；会话 ordinal 修复和 Codex 历史显示索引重建不在当前 targets 中，也不得暗含在日常同步中。必要备份、锁和占用跳过语义不变。

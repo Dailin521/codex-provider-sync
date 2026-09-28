@@ -446,6 +446,26 @@ async function cancelOperation(input: DesktopCancelOperationInput): Promise<{ ac
 
 const api: DesktopBridgeApi = {
   version: 1,
+  project: {
+    async openHome() {
+      const result: unknown = await ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.projectOpenHome, null);
+      if (!result || typeof result !== "object" || Array.isArray(result)
+          || Object.keys(result).join(",") !== "opened"
+          || typeof (result as { opened: unknown }).opened !== "boolean") {
+        throw new TypeError("Invalid project home response.");
+      }
+      return { opened: (result as { opened: boolean }).opened };
+    },
+    async openReleases() {
+      const result: unknown = await ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.projectOpenReleases, null);
+      if (!result || typeof result !== "object" || Array.isArray(result)
+          || Object.keys(result).join(",") !== "opened"
+          || typeof (result as { opened: unknown }).opened !== "boolean") {
+        throw new TypeError("Invalid project releases response.");
+      }
+      return { opened: (result as { opened: boolean }).opened };
+    }
+  },
   core: {
     requestReadOnly,
     requestSyncSwitch,

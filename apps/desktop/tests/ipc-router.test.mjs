@@ -56,6 +56,8 @@ function harness({
   diagnosticsTarget = "D:\\safe\\diagnostics.zip",
   updateRestartPending = false,
   writeClipboardText,
+  openProjectHome,
+  openReleasePage,
   profileList = [{
     id: "default",
     name: "Default",
@@ -267,6 +269,8 @@ function harness({
     },
     operationLogs,
     writeClipboardText,
+    openProjectHome,
+    openReleasePage,
     directorySelections: { async authorize() { return { token: "a".repeat(43), displayName: "safe" }; }, consume() { return "D:\\safe"; } },
     async selectProfileDirectory() { return null; },
     async revealProfileDirectory() { return true; },
@@ -962,6 +966,43 @@ test("cancel IPC is fixed-schema and sender-bound", async () => {
     assert.equal(value.cancellations.length, 0);
   } finally { value.cleanup(); }
 });
+
+for (const [capability, channel] of [
+  ["openProjectHome", DESKTOP_IPC_CHANNELS.projectOpenHome],
+  ["openReleasePage", DESKTOP_IPC_CHANNELS.projectOpenReleases]
+]) {
+test(`${capability} accepts only an explicit trusted no-input action and never reaches Core or logs`, async () => {
+  const opened = [];
+  const value = harness({ [capability]: async (...args) => { opened.push(args); } });
+  const invoke = value.handlers.get(channel);
+  try {
+    assert.equal(opened.length, 0);
+    assert.deepEqual(await invoke(value.event, null), { opened: true });
+    assert.deepEqual(opened, [[]]);
+    for (const bad of [undefined, {}, [], "https://example.com", { url: "https://example.com" }, { path: "C:/private" }, { schemaVersion: 1 }]) {
+      assert.deepEqual(await invoke(value.event, bad), { opened: false });
+    }
+    for (const event of [
+      { ...value.event, sender: { id: 999 } },
+      { ...value.event, senderFrame: { url: "cps-app://app/index.html" } }
+    ]) assert.deepEqual(await invoke(event, null), { opened: false });
+    assert.equal(opened.length, 1);
+    assert.equal(value.calls.length, 0);
+    assert.equal(value.logCounter, 0);
+  } finally { value.cleanup(); }
+});
+
+test(`${capability} failure or missing native capability never acknowledges success`, async () => {
+  for (const openPage of [undefined, async () => { throw new Error("native failure"); }]) {
+    const value = harness({ [capability]: openPage });
+    try {
+      assert.deepEqual(await value.handlers.get(channel)(value.event, null), { opened: false });
+      assert.equal(value.calls.length, 0);
+      assert.equal(value.logCounter, 0);
+    } finally { value.cleanup(); }
+  }
+});
+}
 
 test("clipboard is write-only, validated, trusted and does not reach Core or logs", async () => {
   const copied = [];

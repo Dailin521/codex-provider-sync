@@ -28,6 +28,14 @@ if (!bridge || bridge.version !== 1) throw new Error("Desktop preload bridge is 
 
 const core = new DesktopCoreClient(bridge.core);
 const host: HostClient = Object.freeze({
+  async openProjectHome() {
+    const result = await bridge.project.openHome();
+    if (!result.opened) throw new Error("Could not open project home.");
+  },
+  async openReleasePage() {
+    const result = await bridge.project.openReleases();
+    if (!result.opened) throw new Error("Could not open release page.");
+  },
   async copyText(text: string) {
     const result = await bridge.clipboard.writeText({ schemaVersion: 1, text });
     if (!result.copied) throw new Error("Copy failed.");
