@@ -6,6 +6,7 @@ import { DB_FILE_BASENAME, SESSION_DIRS, SQLITE_DIR_BASENAME } from "./constants
 import { CoreError } from "./core-error.js";
 import { openDatabase } from "./sqlite.js";
 import { resolveStorageLayout } from "./storage-layout.js";
+import { selectProviderRows } from "./provider-skips.js";
 
 const DEFAULT_BUSY_TIMEOUT_MS = 0;
 const SQLITE_TITLE_QUERY_CHUNK_SIZE = 500;
@@ -710,6 +711,18 @@ export async function updateSqliteProvider(storageOrLocation, targetProvider, af
       const update = db.prepare(`UPDATE threads SET model_provider = ? WHERE ${key} = ? AND model_provider IS ?${hasPath ? " AND rollout_path IS ?" : ""}`);
       let changes = 0;
       const changedRows = new Set();
+      // Check ownership against every row inside the same native transaction,
+      // including new rows and already-aligned owners. Use the shared pure
+      // association algorithm; the admitted write set can only shrink.
+      if (options.providerAssociations) {
+        const currentRows = db.prepare(`SELECT ${key} AS id, model_provider${hasPath ? ", rollout_path" : ""} FROM threads`).all();
+        const associations = selectProviderRows(options.providerAssociations.codexHome, options.providerAssociations,
+          { key, rows: currentRows }, targetProvider);
+        const eligible = new Set(associations.rows.map(row => String(row.id)));
+        const plannedIds = new Set(options.plannedRows.map(row => String(row.id)));
+        for (const id of plannedIds) if (!eligible.has(id)) changedRows.add(id);
+        skippedItems.push(...associations.skippedItems.filter(item => plannedIds.has(item.id)).map(item => ({ ...item, stage: "sqlite" })));
+      }
       if (Array.isArray(options.expectedRows)) {
         for (const row of options.expectedRows) {
           const current = read.get(row.id);

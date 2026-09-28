@@ -4,6 +4,8 @@
 
 ADR-0045 当前增量：Provider Sync/Switch/Watch 将单条首行无效、128 MiB 输入/输出超限、占用/不可读、消失/变化及明确未损坏源文件的写入失败列为跳过，正常候选继续；对应 SQLite 行及不确定关联保持原样。计划排除集合冻结，新增数据留待下次；全局安全、目录枚举、配置/存储、数据库和备份故障仍停止。部分完成新增有界 `skipSummary`（最多 200 项本机完整路径/安全行标识、原因/阶段/可重试性及总数/省略/未确认数）；诊断导出单独移除路径和标识。全部跳过的 Sync 无备份，Switch 仍备份并切换配置。JSON 部分完成退出 3，Human 保持既有行为；协议结构版本不变。保留 128 MiB 与 PIO，Repair/Restore 边界不变。详见 [ADR-0045](../../adr/0045-isolated-provider-data-skips.md)。
 
+ADR-0047 修订关联选择而不新增错误码：缺少分页 marker、无路径锚点、跨 ID 或多 owner 的同 ID 多文件继续使用既有 `association-conflict`/`association-unknown` 跳过语义；组成员锁定、变化、消失、写失败及 Apply 的 deferred 新增继续使用既有原因、阶段和 partial/exit 3。SQLite-only 半同步补齐和后续 noop 不产生新结果码。详见 [ADR-0047](../../adr/0047-paginated-provider-associations.md)。
+
 ADR-0041 修订：全部 owner 已证明失效时，内部锁观察返回 `stale`，不再把该情形当作 `LOCK_UNVERIFIABLE`；Status 不创建虚假的进行中操作。任何未知、变动或不可验证 owner 仍按原码阻止写入，未新增错误码。
 
 > **状态：Accepted（阶段 0 合同；ADR-0016 C2/C3 轻量写增量已实施）**

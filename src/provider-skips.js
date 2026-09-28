@@ -16,8 +16,20 @@ export function fileReadSkipReason(error) {
   return null;
 }
 
+function comparableProviderPath(value) {
+  if (process.platform !== "win32") return value;
+  // Only fold ordinary DOS/UNC namespace aliases. Device namespaces are not
+  // filesystem association evidence, even when they contain a sessions name.
+  const windows = value.replaceAll("/", "\\");
+  if (/^\\\\\?\\UNC\\[^\\]+\\[^\\]+(?:\\|$)/i.test(windows)) return `\\\\${windows.slice(8)}`;
+  if (/^\\\\\?\\[A-Za-z]:\\/.test(windows)) return windows.slice(4);
+  if (/^\\\\[?.]\\/.test(windows)) return null;
+  return value;
+}
+
 export function providerPathKey(value) {
-  const normalized = path.resolve(value);
+  const comparable = comparableProviderPath(value);
+  const normalized = path.resolve(comparable ?? value);
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
@@ -51,8 +63,11 @@ export function summarizeSkips(items, unconfirmed = 0) {
 // Resolve only paths within a known rollout tree. No filename-based identity inference.
 function rowRolloutPath(home, value) {
   if (typeof value !== "string" || !value || value.includes("\0")) return null;
-  const absolute = path.resolve(home, value);
-  const relative = path.relative(home, absolute).split(path.sep);
+  const comparableHome = comparableProviderPath(home);
+  const comparableValue = comparableProviderPath(value);
+  if (comparableHome === null || comparableValue === null) return null;
+  const absolute = path.resolve(comparableHome, comparableValue);
+  const relative = path.relative(comparableHome, absolute).split(path.sep);
   if (!["sessions", "archived_sessions"].includes(relative[0]) || relative.includes("..")) return null;
   return providerPathKey(absolute);
 }
@@ -68,7 +83,7 @@ export function selectProviderRows(home, scan, state, targetProvider, additional
     matches.push(file); byId.set(file.id, matches);
   }
   for (const item of skipped) if (item.kind === "rollout" && !byPath.has(providerPathKey(item.path))) {
-    const file = { path: item.path, id: item.id ?? null };
+    const file = { path: item.path, id: item.id ?? null, historyMode: item.historyMode ?? null };
     byPath.set(providerPathKey(item.path), file);
     if (file.id) { const matches = byId.get(file.id) ?? []; matches.push(file); byId.set(file.id, matches); }
   }
@@ -81,7 +96,10 @@ export function selectProviderRows(home, scan, state, targetProvider, additional
     const pathKey = rowRolloutPath(home, row.rollout_path);
     const pathMatch = pathKey ? byPath.get(pathKey) : null;
     const matches = [...new Map([...idMatches, ...(pathMatch ? [pathMatch] : [])].map(file => [providerPathKey(file.path), file])).values()];
-    const conflict = matches.length > 1 || (pathMatch?.id && String(row.id) !== pathMatch.id && state.key !== "rowid");
+    const paginatedGroup = state.key !== "rowid" && pathMatch?.id === String(row.id)
+      && matches.every(file => file.id === String(row.id) && file.historyMode === "paginated");
+    const conflict = (matches.length > 1 && !paginatedGroup)
+      || (pathMatch?.id && String(row.id) !== pathMatch.id && state.key !== "rowid");
     rowMatches.set(row, { matches, conflict });
     for (const match of matches) {
       const key = providerPathKey(match.path);
@@ -101,7 +119,7 @@ export function selectProviderRows(home, scan, state, targetProvider, additional
   // the file. Do not manufacture that certainty for corrupt/no-ID headers.
   for (const key of skippedPaths) {
     const file = byPath.get(key);
-    if (file?.id && byId.get(file.id)?.length === 1 && !ownersByPath.has(key)) associatedBadPaths.add(key);
+    if (file?.id && (state.key !== "rowid" || (byId.get(file.id)?.length === 1 && !ownersByPath.has(key)))) associatedBadPaths.add(key);
   }
   const unknown = [...skippedPaths].some(key => !associatedBadPaths.has(key));
   const selected = [];
@@ -113,7 +131,7 @@ export function selectProviderRows(home, scan, state, targetProvider, additional
     const skippedMatch = matches.find(file => skippedPaths.has(providerPathKey(file.path)));
     const fileSkip = skippedMatch ? skipped.find(item => item.kind === "rollout" && providerPathKey(item.path) === providerPathKey(skippedMatch.path)) : null;
     if (!reason && fileSkip) reason = fileSkip.reason;
-    if (!reason && unknown && matches.length === 0) reason = "association-unknown";
+    if (!reason && unknown && (matches.length === 0 || matches.some(file => file.historyMode === "paginated"))) reason = "association-unknown";
     if (reason) rowSkips.push({ kind: "sqlite", id: String(row.id), reason, stage: "plan", retryable: !conflict && fileSkip?.retryable === true });
     else selected.push({ ...row, paths: matches.map(file => file.path) });
   }

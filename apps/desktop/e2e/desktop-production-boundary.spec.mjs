@@ -786,6 +786,93 @@ test("production or unpacked desktop completes real Sync and Restore through Uti
   }
 });
 
+test("production desktop syncs one paginated thread group, noops, and restores through Utility Core", async () => {
+  test.setTimeout(PRODUCTION_SMOKE_TIMEOUT_MS);
+  const fixture = await createDesktopSyncSwitchFixture({ paginatedGroup: true });
+  await claimDailyUpdateCheck(fixture.userData);
+  const baseline = await fixture.inspectPaginatedGroup();
+  expect(baseline.rollouts.map((rollout) => rollout.ordinal)).toEqual([7, 7]);
+  expect(baseline.rollouts.every((rollout) => rollout.metadata.history_mode === "paginated")).toBe(true);
+  expect(baseline.sqlite.rolloutPath).toBe(fixture.rolloutPath);
+  let electronApp;
+  try {
+    electronApp = await launchProductionDesktop({
+      args: [
+        ...(packagedExecutable ? [] : [path.join(desktopRoot, "out", "main", "index.js")]),
+        `--user-data-dir=${fixture.userData}`,
+        "--lang=en-US"
+      ],
+      env: {
+        ...process.env,
+        CODEX_HOME: fixture.codexHome,
+        CPS_DESKTOP_E2E: "1",
+        CPS_DESKTOP_WINDOW_DISPLAY: "hidden",
+        ELECTRON_ENABLE_SECURITY_WARNINGS: "true"
+      }
+    });
+    const page = await electronApp.firstWindow();
+    await waitForProductionReady(page);
+
+    const result = page.getByRole("dialog", { name: "Operation result" });
+    const directSync = page.getByRole("button", { name: "Sync now", exact: true });
+    await expect(directSync).toBeEnabled();
+    await directSync.click();
+    await expect(result.getByRole("heading", { name: "Completed", exact: true })).toBeVisible({
+      timeout: PRODUCTION_OPERATION_TIMEOUT_MS
+    });
+    const synced = await fixture.inspectPaginatedGroup();
+    expect(synced.rollouts).toHaveLength(2);
+    for (const [index, rollout] of synced.rollouts.entries()) {
+      const { model_provider: provider, ...metadata } = rollout.metadata;
+      const { model_provider: originalProvider, ...originalMetadata } = baseline.rollouts[index].metadata;
+      expect(provider).toBe("prov_a");
+      expect(originalProvider).toBe("openai");
+      expect(metadata).toEqual(originalMetadata);
+      expect(rollout.headerWithoutProvider).toEqual(baseline.rollouts[index].headerWithoutProvider);
+      expect(rollout.bodyHash).toBe(baseline.rollouts[index].bodyHash);
+      expect(rollout.ordinal).toBe(baseline.rollouts[index].ordinal);
+      expect(rollout.turnContext).toEqual(baseline.rollouts[index].turnContext);
+      expect(rollout.body).toBe(baseline.rollouts[index].body);
+    }
+    expect(synced.sqlite).toEqual({ ...baseline.sqlite, provider: "prov_a" });
+    expect(synced.sqlite.rolloutPath).toBe(fixture.rolloutPath);
+    expect(synced.backupIds).toHaveLength(1);
+    const syncBackupId = synced.backupIds[0];
+    const syncLogs = await page.evaluate(() => window.codexProvider.operationLogs.list({ schemaVersion: 1, page: 1, pageSize: 50, operation: "sync" }));
+    const completedSync = syncLogs.entries.find((entry) => entry.status === "completed");
+    expect(completedSync.counts.changedSessionFiles).toBe(2);
+    expect(completedSync.counts.sqliteRowsUpdated).toBe(1);
+    await result.getByRole("button", { name: "Close", exact: true }).last().click();
+
+    await expect(directSync).toBeEnabled({ timeout: PRODUCTION_OPERATION_TIMEOUT_MS });
+    await directSync.click();
+    await expect(result.getByRole("heading", { name: "Completed", exact: true })).toBeVisible({
+      timeout: PRODUCTION_OPERATION_TIMEOUT_MS
+    });
+    await result.getByRole("button", { name: "Close", exact: true }).last().click();
+    const afterNoop = await fixture.inspectPaginatedGroup();
+    expect(afterNoop.rollouts).toEqual(synced.rollouts);
+    expect(afterNoop.sqlite).toEqual(synced.sqlite);
+    expect(afterNoop.backupIds).toEqual([syncBackupId]);
+
+    await page.getByRole("button", { name: "Backups / Restore", exact: true }).click();
+    await page.getByRole("button", { name: new RegExp(syncBackupId) }).click();
+    await page.getByRole("button", { name: "Preview restore", exact: true }).click();
+    const restoreDialog = page.getByRole("dialog", { name: "Confirm restore" });
+    await expect(restoreDialog).toBeVisible();
+    await restoreDialog.getByRole("button", { name: "Confirm restore", exact: true }).click();
+    await expect(restoreDialog).toBeHidden({ timeout: PRODUCTION_OPERATION_TIMEOUT_MS });
+    await expect(result.getByRole("heading", { name: "Completed", exact: true })).toBeVisible({
+      timeout: PRODUCTION_OPERATION_TIMEOUT_MS
+    });
+    const restored = await fixture.inspectPaginatedGroup();
+    expect(restored.rollouts).toEqual(baseline.rollouts);
+    expect(restored.sqlite).toEqual(baseline.sqlite);
+  } finally {
+    try { await electronApp?.close(); } finally { await fixture.close(); }
+  }
+});
+
 
 for (const mixed of [false, true]) test(mixed ? "production desktop syncs healthy mixed data and restores" : "production desktop syncs and restores large session metadata", async () => {
   test.setTimeout(PRODUCTION_SMOKE_TIMEOUT_MS);

@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { CoreError } from "./core-error.js";
 import { fileReadSkipReason, rolloutSkip, providerPathKey } from "./provider-skips.js";
-import { collectProviderChanges, readProviderRevisionHeader } from "./session-files.js";
+import { collectProviderChanges, readProviderRevisionHeader, providerAssociationFromHeader } from "./session-files.js";
 import { readSqliteProviderRevisionState } from "./sqlite-state.js";
 
 const SESSION_SCOPES = ["sessions", "archived_sessions"];
@@ -241,7 +241,18 @@ export async function captureRolloutRevision(codexHome, { fsImpl = fs, mode = "c
       if (expected && (!prior || prior.skip)) {
         const skip = prior?.skip ?? rolloutSkip(filePath, "deferred", "revalidate");
         revision = { skipped: skip.reason };
-        record = { skip };
+        record = { skip, id: prior?.id ?? null, historyMode: prior?.historyMode ?? null };
+        // New targets stay deferred. A bounded header read establishes only
+        // which existing index row must be protected, never write eligibility.
+        if (!prior && mode === "provider") {
+          try {
+            await captureProviderHeader(filePath, fsImpl, undefined, (_, value) => {
+              record = { ...value, ...(value.record ? providerAssociationFromHeader(value.record.firstLine) : {}), skip };
+            });
+          } catch (error) {
+            if (!fileReadSkipReason(error)) throw error;
+          }
+        }
       } else {
         try {
           revision = mode === "provider" || mode === "status"
@@ -250,7 +261,7 @@ export async function captureRolloutRevision(codexHome, { fsImpl = fs, mode = "c
             ? await captureStableMetadata(filePath, fsImpl, { allowLocked: true })
             : await captureStableFile(filePath, fsImpl, { allowLocked: true });
           if (revision.skipReason) record = { skip: rolloutSkip(filePath, revision.skipReason, expected ? "revalidate" : "scan", prior?.id) };
-          if (prior && (prior.headerHash !== revision.headerHash || prior.realPath !== revision.realPath
+          if (prior && !revision.skipReason && (prior.headerHash !== revision.headerHash || prior.realPath !== revision.realPath
               || prior.ino !== revision.ino || prior.dev !== revision.dev || prior.nlink !== revision.nlink
               || BigInt(revision.observedSize ?? 0) < BigInt(prior.observedSize ?? 0))) {
             record = { skip: rolloutSkip(filePath, "changed", "revalidate", prior.id) };
@@ -262,6 +273,7 @@ export async function captureRolloutRevision(codexHome, { fsImpl = fs, mode = "c
           revision = { skipped: reason };
         }
       }
+      if (record?.skip && prior) record = { ...record, id: prior.id ?? null, historyMode: prior.historyMode ?? null };
       onProviderHeader?.(filePath, record);
       fileBindings.push({ path: filePath, ...revision, ...(record?.skip ? { skip: record.skip } : {}) });
       const { observedSize, ...binding } = revision;
@@ -272,7 +284,7 @@ export async function captureRolloutRevision(codexHome, { fsImpl = fs, mode = "c
   }
   if (expected) for (const [key, prior] of expected) if (!seen.has(key)) {
     const skip = prior.skip ?? rolloutSkip(prior.path, "missing", "revalidate", prior.id);
-    onProviderHeader?.(prior.path, { skip });
+    onProviderHeader?.(prior.path, { skip, id: prior.id ?? null, historyMode: prior.historyMode ?? null });
     fileBindings.push({ ...prior, skip });
   }
   manifest.sort((left, right) => left.path.localeCompare(right.path));
@@ -299,6 +311,7 @@ export async function collectProviderPreparationFacts(codexHome, targetProvider,
     const files = new Map(scan.files.map(file => [providerPathKey(file.path), file]));
     rollout.fileBindings = rollout.fileBindings.map(binding => ({ ...binding,
       id: files.get(providerPathKey(binding.path))?.id ?? binding.id ?? null,
+      historyMode: files.get(providerPathKey(binding.path))?.historyMode ?? binding.historyMode ?? null,
       ...(skips.has(providerPathKey(binding.path)) ? { skip: skips.get(providerPathKey(binding.path)) } : {}) }));
     rollout.rolloutScanComplete = scan.skippedItems.length === 0;
     return { rollout, scan };
@@ -309,6 +322,31 @@ export async function collectProviderPreparationFacts(codexHome, targetProvider,
     throw error;
   } finally {
     records.clear();
+  }
+}
+
+// Private storage acknowledgement for a successful Provider write. Capture its
+// new identity now so final group validation accepts our own atomic replacement
+// but rejects a later external replacement. No body reads or public DTO fields.
+export async function captureAppliedProviderBinding(change, previous, result, { fsImpl = fs } = {}) {
+  try {
+    let record;
+    const revision = await captureProviderHeader(change.path, fsImpl, undefined, (_, value) => { record = value; });
+    const expected = Buffer.from((result === "APPLIED_IN_PLACE" ? change.originalFirstLine : change.updatedFirstLine)
+      + change.originalSeparator, "utf8");
+    if (result === "APPLIED_IN_PLACE") Buffer.from(change.inPlaceMutation.replacementBase64, "base64").copy(expected, change.inPlaceMutation.byteOffset);
+    const minimumSize = BigInt(change.originalSize) + BigInt(expected.length - Buffer.byteLength(change.originalFirstLine + change.originalSeparator, "utf8"));
+    if (revision.skipReason) return { ...previous, skip: rolloutSkip(change.path, revision.skipReason, "write", previous.id) };
+    if (!record?.record || revision.headerHash !== sha256Revision(expected)
+        || BigInt(revision.observedSize) < minimumSize || revision.realPath !== previous.realPath
+        || (result === "APPLIED_IN_PLACE" && (revision.ino !== previous.ino || revision.dev !== previous.dev || revision.nlink !== previous.nlink))) {
+      return { ...previous, skip: rolloutSkip(change.path, "changed", "write", previous.id) };
+    }
+    return { ...previous, ...revision };
+  } catch (error) {
+    const reason = fileReadSkipReason(error);
+    if (!reason) throw error;
+    return { ...previous, skip: rolloutSkip(change.path, reason, "write", previous.id) };
   }
 }
 

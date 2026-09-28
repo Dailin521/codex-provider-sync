@@ -1797,7 +1797,8 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
       const prepared = preparationRecords?.get(rolloutPath);
       if (prepared?.skip) {
         skippedItems.push(prepared.skip);
-        files.push({ path: rolloutPath, id: prepared.skip.id ?? null });
+        files.push({ path: rolloutPath, id: prepared.id ?? prepared.skip.id ?? null,
+          historyMode: prepared.historyMode ?? null });
         if (prepared.skip.reason === "locked") lockedPaths.push(rolloutPath);
         continue;
       }
@@ -1839,7 +1840,8 @@ export async function collectSessionChanges(codexHome, targetProvider, options =
         continue;
       }
       const currentProvider = parsed.payload.model_provider ?? "(missing)";
-      files.push({ path: rolloutPath, id: typeof parsed.payload.id === "string" && parsed.payload.id ? parsed.payload.id : null, provider: currentProvider });
+      files.push({ path: rolloutPath, id: typeof parsed.payload.id === "string" && parsed.payload.id ? parsed.payload.id : null,
+        historyMode: parsed.payload.history_mode === "paginated" ? "paginated" : null, provider: currentProvider });
       if (typeof parsed.payload.id === "string" && parsed.payload.id) nativeSessionIds.add(parsed.payload.id);
       // Selected repair work is addressed by Codex's native session id, never
       // by a rollout filename/path. Files without that identity stay out.
@@ -2023,6 +2025,14 @@ export async function readProviderRevisionHeader(filePath, { fsImpl = fsp } = {}
   return readFirstLineRecord(filePath, {
     maxBytes: PROVIDER_SESSION_META_MAX_BYTES, fsImpl, wrapBusyErrors: false, strictMetadata: true
   });
+}
+
+export function providerAssociationFromHeader(firstLine) {
+  const parsed = parseSessionMetaRecord(firstLine, true);
+  return {
+    id: typeof parsed?.payload.id === "string" && parsed.payload.id ? parsed.payload.id : null,
+    historyMode: parsed?.payload.history_mode === "paginated" ? "paginated" : null
+  };
 }
 
 // Fourth argument is an internal, call-local Prepare seam. It is never an

@@ -8,7 +8,7 @@ import {
   isConfiguredSqliteHome,
   missingConfiguredStateDbError,
   codexStorage,
-  summarizeSkips, rolloutSkip, uniqueSkips, selectProviderRows, updateSessionBackupManifest
+  summarizeSkips, rolloutSkip, uniqueSkips, selectProviderRows, providerPathKey, updateSessionBackupManifest
 } from "../infrastructure/node-core-ports.js";
 import { executeOrdinaryWrite } from "./ordinary-write-runtime.js";
 import { preparePlanContext } from "./plan-context.js";
@@ -18,6 +18,7 @@ import { operationRuntime, sqliteTransaction } from "./runtime-context.js";
 const {
   applySessionChanges,
   collectProviderPreparationFacts,
+  captureAppliedProviderBinding,
   summarizeProviderCounts
 } = codexStorage.sessions;
 const { readCurrentProviderFromConfigText, configDeclaresProvider } = codexStorage.config;
@@ -56,9 +57,12 @@ function providerResult({ context, state, current, targetProvider, scan, initial
   const sqliteResult = state.outputs.sqlite ?? state.data.sqliteResult ?? emptySqliteMutationResult(Boolean(context.storage.stateDbLocation));
   const skippedLockedRolloutFiles = sortedUnique([
     ...initiallySkipped,
-    ...(applyResult.skippedLockedPaths ?? [])
+    ...(applyResult.skippedLockedPaths ?? []),
+    ...(state.data.skippedItems ?? []).filter(item => item.kind === "rollout" && item.reason === "locked").map(item => item.path)
   ]);
-  const skippedChangedRolloutFiles = sortedUnique([...(scan.skippedItems ?? []).filter(item => ["changed", "missing"].includes(item.reason)).map(item => item.path), ...(applyResult.skippedChangedPaths ?? [])]);
+  const skippedChangedRolloutFiles = sortedUnique([...(scan.skippedItems ?? []), ...(state.data.skippedItems ?? [])]
+    .filter(item => item.kind === "rollout" && ["changed", "missing"].includes(item.reason)).map(item => item.path)
+    .concat(applyResult.skippedChangedPaths ?? []));
   const skipSummary = summarizeSkips([...(scan.skippedItems ?? []),
     ...initiallySkipped.map(filePath => rolloutSkip(filePath, "locked", "revalidate")),
     ...(state.data.skippedItems ?? []), ...(sqliteResult.skippedItems ?? [])], (state.data.unconfirmed ?? 0) + (state.data.sqliteUnconfirmed ?? 0));
@@ -163,6 +167,11 @@ export async function buildProviderWriteProgram(context, settings = {}) {
       throw new CoreError("STALE_STATE", "The thread index changed before backup.", { details: { reason: "state-db" } });
     }
     const currentRows = new Map(currentState.rows.map(row => [String(row.id), row]));
+    const currentAssociations = selectProviderRows(context.codexHome, scan, currentState, targetProvider,
+      initiallySkipped.map(filePath => rolloutSkip(filePath, "locked", "revalidate")));
+    const currentEligible = new Set(currentAssociations.rows.map(row => String(row.id)));
+    selection.rows = selection.rows.filter(row => currentEligible.has(String(row.id)));
+    selection.skippedItems.push(...currentAssociations.skippedItems.filter(item => expectedRowIds.has(item.id)));
     const changedRows = new Set();
     for (const expected of sqliteState.rows) {
       const id = String(expected.id);
@@ -178,6 +187,11 @@ export async function buildProviderWriteProgram(context, settings = {}) {
     }
   }
   const sqliteRowsToWrite = selection.rows.length;
+  const paginatedPaths = new Set(scan.files.filter(file => file.historyMode === "paginated")
+    .map(file => providerPathKey(file.path)));
+  const protectedPaths = new Set(selection.rows.flatMap(row => row.paths)
+    .filter(filePath => paginatedPaths.has(providerPathKey(filePath))).map(providerPathKey));
+  const finalBindings = new Map(facts.rollout.fileBindings.map(file => [providerPathKey(file.path), file]));
   selection.skippedItems.push(...(context.expectedPlanState?.providerScope?.excludedRows ?? []));
   const initialSkips = uniqueSkips([...(scan.skippedItems ?? []),
     ...initiallySkipped.map(filePath => rolloutSkip(filePath, "locked", "revalidate")), ...selection.skippedItems]);
@@ -281,6 +295,15 @@ export async function buildProviderWriteProgram(context, settings = {}) {
                       partialRollout.appliedChanges += 1;
                       if (mutation.result === "APPLIED_IN_PLACE") partialRollout.inPlaceChanges += 1;
                       writeContext.markMutation();
+                      const key = providerPathKey(change.path);
+                      if (protectedPaths.size > 0) {
+                        const binding = await captureAppliedProviderBinding(change, finalBindings.get(key), mutation.result);
+                        finalBindings.set(key, binding);
+                        if (binding.skip) {
+                          writeSkips.push(binding.skip);
+                          state.data.skippedItems.push(binding.skip);
+                        }
+                      }
                       await writeContext.faultInjector?.({ point: "after_rollout_mutation_before_applied", path: change.path, mutation });
                     },
                     onUnwritten: change => { definitelyUnwritten.add(change.path); },
@@ -291,6 +314,8 @@ export async function buildProviderWriteProgram(context, settings = {}) {
                         : result === "SKIP_UNREADABLE" ? "unreadable" : result === "SKIP_NOT_APPLIED" ? "write-not-applied" : "changed";
                       const skip = rolloutSkip(change.path, reason, "write", change.threadId);
                       writeSkips.push(skip);
+                      const key = providerPathKey(change.path);
+                      if (finalBindings.has(key)) finalBindings.set(key, { ...finalBindings.get(key), skip });
                       state.data.skippedItems.push(skip);
                       partialRollout.skippedPaths.push(change.path);
                       if (reason === "locked") partialRollout.skippedLockedPaths.push(change.path);
@@ -313,11 +338,16 @@ export async function buildProviderWriteProgram(context, settings = {}) {
               stage: "update_sqlite",
               complete: (result) => ({ updatedRows: result.updatedRows }),
               run: async ({ context: writeContext, state }) => {
-                const finalSelection = selectProviderRows(context.codexHome, scan, sqliteState, targetProvider,
+                // Reuse the bounded reader/manifest. Only the originally
+                // admitted rows may survive; new files are association-only.
+                const finalScan = protectedPaths.size > 0
+                  ? (await collectProviderPreparationFacts(context.codexHome, targetProvider, { expectedFiles: [...finalBindings.values()] })).scan
+                  : scan;
+                const finalSelection = selectProviderRows(context.codexHome, finalScan, sqliteState, targetProvider,
                   [...initiallySkipped.map(filePath => rolloutSkip(filePath, "locked", "revalidate")), ...writeSkips]);
                 const eligible = new Set(selection.rows.map(row => String(row.id)));
                 finalSelection.rows = finalSelection.rows.filter(row => eligible.has(String(row.id)));
-                state.data.skippedItems = uniqueSkips([...(state.data.skippedItems ?? []), ...selection.skippedItems, ...finalSelection.skippedItems]);
+                state.data.skippedItems = uniqueSkips([...(state.data.skippedItems ?? []), ...(finalScan.skippedItems ?? []), ...selection.skippedItems, ...finalSelection.skippedItems]);
                 const result = await sqliteTransaction.updateProvider(writeContext.storage, targetProvider, {
                   busyTimeoutMs: writeContext.sqliteBusyTimeoutMs,
                   plannedRows: finalSelection.rows,
@@ -325,6 +355,7 @@ export async function buildProviderWriteProgram(context, settings = {}) {
                   expectedSchema: sqliteState.schema,
                   expectedIdentity: sqliteState.identity,
                   expectedRowIds: [...expectedRowIds],
+                  providerAssociations: { codexHome: context.codexHome, files: finalScan.files, skippedItems: finalScan.skippedItems },
                   onCommitAttempt: result => {
                     state.data.sqliteUnconfirmed = result.updatedRows;
                     if (result.updatedRows > 0) writeContext.markMutation();

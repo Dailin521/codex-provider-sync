@@ -55,6 +55,49 @@ function headerReadProbe(file) {
   return { counts: () => ({ opens, bytes }), restore() { fs.open = originalOpen; fs.readFile = originalReadFile; fsSync.createReadStream = originalStream; } };
 }
 
+test("paginated ID and history mode remain frozen when a member changes, disappears or becomes unreadable", async t => {
+  const value = await fixture(t);
+  await fs.writeFile(value.file, JSON.stringify({ type: "session_meta", payload: { id: "fixture", history_mode: "paginated", model_provider: "custom" } }) + "\n");
+  const facts = await collectProviderPreparationFacts(value.home, "openai");
+  assert.equal(facts.rollout.fileBindings[0].historyMode, "paginated");
+  const expectedFiles = facts.rollout.fileBindings;
+  await fs.writeFile(value.file, JSON.stringify({ type: "session_meta", payload: { id: "different", model_provider: "custom" } }) + "\n");
+  const changed = await collectProviderPreparationFacts(value.home, "openai", { expectedFiles });
+  assert.deepEqual(changed.scan.files.map(file => [file.id, file.historyMode]), [["fixture", "paginated"]]);
+  assert.equal(changed.scan.skippedItems[0].reason, "changed");
+  const locked = await collectProviderPreparationFacts(value.home, "openai", { expectedFiles, fsImpl: { ...fs,
+    async open(target, ...args) {
+      if (String(target) === value.file) throw Object.assign(new Error("synthetic locked member"), { code: "EBUSY" });
+      return fs.open(target, ...args);
+    }
+  } });
+  assert.deepEqual(locked.scan.files.map(file => [file.id, file.historyMode]), [["fixture", "paginated"]]);
+  assert.equal(locked.scan.skippedItems[0].reason, "locked");
+  await fs.unlink(value.file);
+  const missing = await collectProviderPreparationFacts(value.home, "openai", { expectedFiles });
+  assert.deepEqual(missing.scan.files.map(file => [file.id, file.historyMode]), [["fixture", "paginated"]]);
+  assert.equal(missing.scan.skippedItems[0].reason, "missing");
+});
+
+test("new files lend bounded association facts but never enter the frozen write set", async t => {
+  const value = await fixture(t);
+  const original = await collectProviderPreparationFacts(value.home, "openai");
+  const added = path.join(value.home, "sessions", "rollout-added.jsonl");
+  await fs.writeFile(added, Buffer.concat([Buffer.from(JSON.stringify({ type: "session_meta", payload: {
+    id: "fixture", history_mode: "paginated", model_provider: "custom"
+  } }) + "\n"), value.body]));
+  const probe = headerReadProbe(added);
+  let facts;
+  try {
+    facts = await collectProviderPreparationFacts(value.home, "openai", { expectedFiles: original.rollout.fileBindings });
+    assert.deepEqual(probe.counts(), { opens: 1, bytes: 64 * 1024 });
+  } finally { probe.restore(); }
+  assert.deepEqual(facts.scan.files.find(file => file.path === added), { path: added, id: "fixture", historyMode: "paginated" });
+  assert.ok(facts.scan.skippedItems.some(item => item.path === added && item.reason === "deferred"));
+  assert.ok(facts.scan.changes.every(change => change.path !== added));
+  assert.equal(facts.rollout.fileBindings.find(file => file.path === added).historyMode, "paginated");
+});
+
 test("Provider facts reuse the exact revision and change algorithm with one bounded header read instead of three", async t => {
   const value = await fixture(t);
   const probe = headerReadProbe(value.file);
