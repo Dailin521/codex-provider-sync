@@ -159,6 +159,7 @@ Status 发现已确认失效的锁时只作提示、不删除文件，后续正�
 - **会话占用**：结束相关写入后再次同步；重试只处理仍未对齐的目标。若要撤销，选择受管备份恢复。
 - **SQLite busy**：预检阶段 busy 会在修改前停止；写入后才发生 busy 则可能 partial，以结果为准。
 - **恢复未完成**：保留备份和 journal，在桌面/Web 查看恢复状态；不要删除保护文件。
+- **401 / Unauthorized**：Provider 元数据对齐不等于已通过认证。先在 Codex 和目标服务中核对实际 Provider、请求地址与对应登录/Key 状态；本工具不处理认证，重复 Sync 或 Repair 不会修复鉴权失败。鉴权方式以 [Codex 官方认证说明](https://developers.openai.com/codex/auth)为准，不要公开 `auth.json`、密钥或完整配置。
 - **历史可见但无法继续**：可能需要原 Provider/账号才能解密，不能用重复 Sync 或 Repair 解密。
 
 普通写入不会自动全量回滚。当前 CLI 的 Sync/Switch/Repair/Restore 没有提供受控取消入口；请等待终态结果，不要用 Ctrl+C 或强制结束进程代替恢复流程。JSON 的 130 是已取消结果的映射，不保证终端中断会输出该对象。Watch 和 Web 单独处理 Ctrl+C/SIGTERM，按其清理流程停止。
