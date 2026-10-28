@@ -2,8 +2,11 @@
 
 ## 本次范围
 
-- 普通文档 PR 使用白名单轻量检查，规则见 [Windows 发布流程](WINDOWS_ELECTRON_RELEASE_ZH.md)。按整个 PR 判断，代码 PR 后续只补文档仍完整检查。
+- 普通文档 PR 的轻量白名单覆盖贡献指南、用户指南和翻译等，规则见 [Windows 发布流程](WINDOWS_ELECTRON_RELEASE_ZH.md)。按整个 PR 判断，代码 PR 后续只补文档仍执行代码检查。
+- 四目标候选包、候选集合校验、历史正式 Release 恢复取证和 C10 仅在 main push 执行；代码 PR 保留数据安全、兼容和生产构建检查，Fork PR 不再因发布取证被主动报错。
 - 同一 PR 新提交取消旧运行；main 和独立发布运行保留。
+- 代码 PR 按 Web、桌面 Renderer、共享 UI、Electron 运行时/打包、Legacy .NET 范围选择检查。普通 UI 的工作区/Web 只跑 Linux / Node 24，桌面生产包跑 Windows；Core、共享依赖、CI 和未知路径保留完整代码矩阵。main 仍执行全量矩阵。
+- 普通文档只检查本地链接，正式发布说明才触发版本与说明格式校验。GitHub 不再要求解决所有审查对话，维护者判断评论是否阻断；PR 与 `ci-gate` 仍必需。
 - electron-builder 使用 `compression: normal`，保留原包大小限制、产物审计和容器验收。
 - main 最终源码的跨平台检查与发布门禁不变。RC 与正式更新渠道的产物复用、不稳定测试诊断留待后续处理。
 

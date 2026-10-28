@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import test from "node:test";
-import { changedFiles, classifyChanges, c10BusinessJobs, HEAVY_JOBS, verifyGate, verifyLocalLinks } from "../scripts/ci-docs.mjs";
+import { changedFiles, classifyChanges, c10BusinessJobs, checkDocumentation, HEAVY_JOBS, RELEASE_JOBS, requiredJobs, scopeOutputs, verifyGate, verifyLocalLinks } from "../scripts/ci-docs.mjs";
 
 function fixture(run) {
   const base = process.platform === "win32" && fs.existsSync("D:/Temp") ? "D:/Temp" : os.tmpdir();
@@ -14,11 +14,16 @@ function fixture(run) {
 }
 
 test("only explicit ordinary docs in a nonempty whole PR permit the light path", () => {
-  const docs = ["README.md", "CHANGELOG.md", "docs/release-notes/v1.0.2-zh.md"];
+  const docs = ["README.md", "CHANGELOG.md", "CONTRIBUTING.md", "CONTRIBUTORS.md",
+    ".github/pull_request_template.md", "docs/README_CLI_ZH.md", "docs/README_JA.md",
+    "docs/README_DESKTOP_EN.md", "docs/WORKING_PRINCIPLE_ZH.md", "docs/AUTOMATION_QUICKSTART_ZH.md",
+    "docs/RELEASE_NOTES_V0.5.0.md", "docs/release-notes/TEMPLATE-zh.md", "docs/release-notes/v1.0.2-zh.md"];
   assert.equal(classifyChanges("pull_request", docs), "docs");
   for (const file of ["src/main.js", "package-lock.json", ".github/workflows/ci.yml", "AGENTS.md",
     "docs/adr/0042.md", "docs/architecture/contracts/CORE.md", "docs/migration/BEHAVIOR_FIXTURES_ZH.md",
-    "docs/WINDOWS_ELECTRON_RELEASE_ZH.md", "docs/release-notes/../config.md", "README.md\nother.js"]) {
+    "docs/WINDOWS_ELECTRON_RELEASE_ZH.md", "docs/NPM_PUBLISHING.md", "docs/MAIN_BRANCH_PROTECTION.md",
+    "docs/CI_PERFORMANCE_ZH.md", "docs/VNEXT_ELECTRON_NODE_ARCHITECTURE_ZH.md", "docs/README_EN.js",
+    "docs/unknown.md", "docs/release-notes/../config.md", "docs/README_..md", "docs\\README_EN.md", "README.md\nother.js"]) {
     assert.equal(classifyChanges("pull_request", [...docs, file]), "full", file);
   }
   for (const event of ["push", undefined, "workflow_dispatch"]) assert.equal(classifyChanges(event, docs), "full");
@@ -46,25 +51,30 @@ test("whole PR comparison retains earlier code changes and both sides of renames
   assert.throws(() => changedFiles(root, "a".repeat(40), beforeRename));
 }));
 
-function results(mode) {
+function results(mode, event = mode === "docs" ? "pull_request" : "push") {
   return { "change-scope": { result: "success", outputs: { mode } },
     "docs-check": { result: mode === "docs" ? "success" : "skipped" },
-    ...Object.fromEntries(HEAVY_JOBS.map((job) => [job, { result: mode === "docs" ? "skipped" : "success" }])) };
+    ...Object.fromEntries(HEAVY_JOBS.map((job) => [job, {
+      result: requiredJobs(event, mode).includes(job) ? "success" : "skipped"
+    }])) };
 }
 
-test("gate accepts documented skips only for a verified PR docs run", () => {
+test("gate permits only documented PR skips and requires complete main release evidence", () => {
   verifyGate("pull_request", results("docs"));
+  verifyGate("pull_request", results("full", "pull_request"));
   verifyGate("push", results("full"));
   assert.throws(() => verifyGate("push", results("docs")));
-  for (const mode of ["docs", "full"]) {
+  for (const [event, mode] of [...["docs", "web", "desktop-ui", "ui", "desktop", "legacy", "full"].map((mode) => ["pull_request", mode]), ["push", "full"]]) {
+    verifyGate(event, results(mode, event));
     for (const result of ["failure", "cancelled", "skipped"]) {
-      const needs = results(mode); needs["change-scope"].result = result;
-      assert.throws(() => verifyGate("pull_request", needs));
+      const needs = results(mode, event); needs["change-scope"].result = result;
+      assert.throws(() => verifyGate(event, needs));
     }
     for (const job of HEAVY_JOBS) {
-      for (const result of ["failure", "cancelled", mode === "full" ? "skipped" : "success"]) {
-        const needs = results(mode); needs[job].result = result;
-        assert.throws(() => verifyGate("pull_request", needs), `${mode}: ${job}: ${result}`);
+      const expected = results(mode, event)[job].result;
+      for (const result of ["failure", "cancelled", expected === "success" ? "skipped" : "success"]) {
+        const needs = results(mode, event); needs[job].result = result;
+        assert.throws(() => verifyGate(event, needs), `${event}: ${mode}: ${job}: ${result}`);
       }
     }
   }
@@ -202,19 +212,97 @@ test("C10 retains exactly the original business results including failures", () 
   assert.throws(() => c10BusinessJobs({ ...needs, "change-scope": { result: "success", outputs: { mode: "docs" } } }));
 });
 
-test("workflow wires every heavy job and C10 to full mode while always emitting the gate", () => {
+test("workflow keeps safety checks on code PRs and release evidence on main pushes", () => {
   const workflow = fs.readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
   const jobs = Object.fromEntries([...workflow.slice(workflow.indexOf("jobs:")).matchAll(/^  ([a-z][a-z0-9-]+):\r?\n([\s\S]*?)(?=^  [a-z][a-z0-9-]+:|$(?![\s\S]))/gm)]
     .map((match) => [match[1], match[2]]));
   assert.deepEqual(Object.keys(jobs).sort(), ["change-scope", "docs-check", "ci-gate", ...HEAVY_JOBS].sort());
   for (const job of HEAVY_JOBS) {
     assert.match(jobs[job], /needs[\s\S]*change-scope/);
-    assert.match(jobs[job], /if: .*needs\.change-scope\.outputs\.mode == 'full'/);
+    const jobCondition = jobs[job].match(/^    if: (.*)$/m)[1];
+    if (RELEASE_JOBS.includes(job)) {
+      assert.match(jobCondition, /github\.event_name == 'push'/);
+      assert.match(jobCondition, /needs\.change-scope\.outputs\.mode == 'full'/);
+    } else assert.equal(jobCondition.trim(), `contains(fromJSON(needs.change-scope.outputs.jobs), '${job}')`);
     assert.ok(jobs["ci-gate"].includes(`- ${job}\n`) || jobs["ci-gate"].includes(`- ${job}\r\n`));
   }
   assert.match(jobs["ci-gate"], /if: \$\{\{ always\(\) \}\}/);
   assert.match(jobs["ci-gate"], /CPS_CI_NEEDS: \$\{\{ toJSON\(needs\) \}\}/);
   assert.match(jobs["ci-gate"], /node scripts\/ci-docs\.mjs gate/);
   assert.match(jobs["c10-evidence-bundle"], /node scripts\/ci-docs\.mjs c10/);
+  assert.match(jobs["workspace-contract"], /run: npm run architecture:check/);
+  assert.match(jobs.test, /run: npm test/);
+  assert.match(jobs["cross-runtime-fixtures"], /run: npm run fixtures:cross-runtime/);
+  assert.match(jobs["cross-runtime-fixtures"], /run: npm run fixtures:historical-tags/);
+  assert.match(jobs["cross-runtime-fixtures"], /name: Verify a hosted formal Release backup[^\n]*\r?\n        if: github\.event_name == 'push'/);
+  assert.match(jobs["cross-runtime-fixtures"], /name: Upload hosted formal Release backup evidence\r?\n        if: github\.event_name == 'push'/);
+  assert.doesNotMatch(jobs["cross-runtime-fixtures"], /run: throw|head\.repo/);
   assert.match(workflow, /cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}/);
+  for (const key of ["jobs", "platforms", "electron_platforms", "node_versions"]) {
+    assert.ok(jobs["change-scope"].includes(`${key}: \${{ steps.scope.outputs.${key} }}`));
+  }
+  assert.match(jobs["electron-desktop"], /os: \$\{\{ fromJSON\(needs\.change-scope\.outputs\.electron_platforms\) \}\}/);
+  for (const job of ["test", "workspace-contract", "root-package-compat", "web-build"]) {
+    assert.match(jobs[job], /os: \$\{\{ fromJSON\(needs\.change-scope\.outputs\.platforms\) \}\}/);
+  }
+  assert.match(jobs.test, /node-version: \$\{\{ fromJSON\(needs\.change-scope\.outputs\.node_versions\) \}\}/);
 });
+
+test("UI and Legacy scopes select their consumers without unrelated release work", () => {
+  const cases = [
+    ["web", ["apps/web/src/main.tsx"], ["workspace-contract", "web-build", "web-browser"]],
+    ["desktop-ui", ["apps/desktop/src/renderer/styles.css"], ["workspace-contract", "electron-desktop"]],
+    ["ui", ["packages/app-ui/src/home.tsx"], ["workspace-contract", "web-build", "web-browser", "electron-desktop"]],
+    ["ui", ["packages/design-system/src/tokens.css"], ["workspace-contract", "web-build", "web-browser", "electron-desktop"]],
+    ["ui", ["apps/web/src/main.tsx", "apps/desktop/src/renderer/main.tsx"], ["workspace-contract", "web-build", "web-browser", "electron-desktop"]],
+    ["desktop", ["apps/desktop/src/main/updater.ts"], ["test", "workspace-contract", "electron-desktop"]],
+    ["desktop", ["apps/desktop/scripts/build.mjs", "apps/desktop/src/renderer/main.tsx"], ["test", "workspace-contract", "electron-desktop"]],
+    ["legacy", ["desktop/CodexProviderSync.Core/RestoreService.cs"], ["test", "cross-runtime-fixtures", "desktop-test", "desktop-macos", "desktop-linux-lock"]],
+  ];
+  for (const [mode, files, expected] of cases) {
+    const outputs = scopeOutputs("pull_request", [...files, "CONTRIBUTING.md"]);
+    assert.equal(outputs.mode, mode);
+    assert.deepEqual(JSON.parse(outputs.jobs), expected);
+    if (["web", "desktop-ui", "ui"].includes(mode)) {
+      assert.deepEqual(JSON.parse(outputs.platforms), ["ubuntu-latest"]);
+      assert.deepEqual(JSON.parse(outputs.electron_platforms), ["windows-latest"]);
+      assert.deepEqual(JSON.parse(outputs.node_versions), ["24"]);
+    } else {
+      assert.deepEqual(JSON.parse(outputs.platforms), ["windows-latest", "ubuntu-latest"]);
+      assert.deepEqual(JSON.parse(outputs.electron_platforms), ["windows-latest", "ubuntu-latest", "macos-latest"]);
+    }
+    assert.equal(scopeOutputs("push", files).mode, "full");
+    assert.deepEqual(JSON.parse(scopeOutputs("push", files).jobs), HEAVY_JOBS);
+  }
+});
+
+test("Core, dependencies, shared contracts, CI and unknown paths retain full safety coverage", () => {
+  for (const file of ["src/session-files.js", "packages/core/src/application/restore.js",
+    "packages/contracts/src/index.ts", "packages/core-client/src/index.ts", "packages/test-fixtures/static/data.json",
+    "package.json", "package-lock.json", "apps/web/package.json", "apps/desktop/package.json",
+    "packages/app-ui/package.json", "apps/web/tsconfig.json", "tsconfig.workspaces.json",
+    ".github/workflows/ci.yml", "scripts/package-release-assets.ps1", "test/provider-sync-lite.test.js",
+    "new-module/file.js", "apps/web/../core.js", "apps/web//main.ts", "apps/web/src/main.ts\n"]) {
+    const outputs = scopeOutputs("pull_request", ["apps/web/src/main.tsx", file]);
+    assert.equal(outputs.mode, "full", file);
+    assert.deepEqual(JSON.parse(outputs.jobs), HEAVY_JOBS.filter((job) => !RELEASE_JOBS.includes(job)));
+    assert.equal(JSON.parse(outputs.platforms).length, 2);
+    assert.equal(JSON.parse(outputs.electron_platforms).length, 3);
+    assert.deepEqual(JSON.parse(outputs.node_versions), ["16.20.2", "24"]);
+  }
+  assert.equal(classifyChanges("pull_request", ["desktop/Core.cs", "apps/web/src/main.tsx"]), "full");
+  for (const mode of ["docs", "web", "desktop-ui", "ui", "desktop", "legacy", "unknown", "__proto__"]) {
+    assert.throws(() => requiredJobs("push", mode));
+  }
+});
+
+test("ordinary documentation and release templates need no product version files", () => fixture((root) => {
+  fs.writeFileSync(path.join(root, "README.md"), "Documentation only\n");
+  fs.mkdirSync(path.join(root, "docs/release-notes"), { recursive: true });
+  fs.writeFileSync(path.join(root, "docs/release-notes/TEMPLATE-zh.md"), "Template\n");
+  checkDocumentation(root, ["README.md", "docs/release-notes/TEMPLATE-zh.md"]);
+  fs.writeFileSync(path.join(root, "README.md"), "[broken](missing.md)\n");
+  assert.throws(() => checkDocumentation(root, ["README.md"]), /missing local link/);
+  fs.writeFileSync(path.join(root, "docs/release-notes/v1.0.4-zh.md"), "Release\n");
+  assert.throws(() => checkDocumentation(root, ["docs/release-notes/v1.0.4-zh.md"]), /package.json/);
+}));
