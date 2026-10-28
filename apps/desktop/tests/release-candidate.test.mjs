@@ -268,14 +268,14 @@ test("runtime SBOM projection includes production closure and excludes Desktop b
     "better-sqlite3@13.0.3",
     "electron-updater@6.8.9",
     "react@19.2.8",
-    "zod@4.4.3"
+    "zod@4.6.7"
   ]) assert.equal(refs.has(ref), true, `Runtime projection is missing ${ref}.`);
   for (const ref of [
     "@playwright/test@1.62.1",
     "electron-builder@26.15.7",
     "plist@5.0.0",
     "resedit@3.1.0",
-    "vite@7.3.6"
+    "vite@7.3.7"
   ]) assert.equal(refs.has(ref), false, `Runtime projection contains build-only ${ref}.`);
 });
 

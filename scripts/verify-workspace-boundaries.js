@@ -160,7 +160,7 @@ assert(
   "Desktop fault fixtures must remain an exact private devDependency, never a production dependency."
 );
 const approvedDesktopElectronDependencies = new Map([
-  ["electron", { version: "44.0.0", field: "devDependencies", checkpoint: "C6" }],
+  ["electron", { version: "44.9.3", field: "devDependencies", checkpoint: "C6" }],
   ["electron-vite", { version: "5.0.0", field: "devDependencies", checkpoint: "C6" }],
   ["electron-builder", { version: "26.15.7", field: "devDependencies", checkpoint: "C6" }],
   ["electron-updater", { version: "6.8.9", field: "dependencies", checkpoint: "C8" }],

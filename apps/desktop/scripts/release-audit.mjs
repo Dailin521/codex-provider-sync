@@ -375,7 +375,7 @@ async function verifyNativeDriver(nativeBinding, asarPath) {
   if (!match) throw new Error("Electron native driver probe did not return a result.");
   const probe = JSON.parse(match[1]);
   assert.equal(probe.driver, "better-sqlite3");
-  assert.equal(probe.electron, "44.0.0");
+  assert.equal(probe.electron, "44.9.3");
   assert.match(String(probe.modules), /^\d+$/);
   return Object.freeze({
     driver: probe.driver,
@@ -623,7 +623,7 @@ export async function createRuntimeProjection(lockfilePath) {
 
 export function createCycloneDx({ audit, timestamp, runtimeProjection }) {
   const applicationRef = `application:@codex-provider-sync/desktop@${audit.version}`;
-  const electronRef = "framework:electron@44.0.0";
+  const electronRef = "framework:electron@44.9.3";
   const projected = new Set(runtimeProjection.components.map((component) => component.ref));
   for (const component of audit.components) {
     if (component.name === "@codex-provider-sync/desktop") continue;
@@ -667,7 +667,7 @@ export function createCycloneDx({ audit, timestamp, runtimeProjection }) {
       }
     },
     components: [
-      { type: "framework", name: "electron", version: "44.0.0", "bom-ref": electronRef },
+      { type: "framework", name: "electron", version: "44.9.3", "bom-ref": electronRef },
       ...libraries
     ],
     dependencies: [

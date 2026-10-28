@@ -19,6 +19,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       mode: ${{ steps.scope.outputs.mode }}
+      jobs: ${{ steps.scope.outputs.jobs }}
+      platforms: ${{ steps.scope.outputs.platforms }}
+      electron_platforms: ${{ steps.scope.outputs.electron_platforms }}
+      node_versions: ${{ steps.scope.outputs.node_versions }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -54,17 +58,13 @@ jobs:
 
   test:
     needs: change-scope
-    if: needs.change-scope.outputs.mode == 'full'
+    if: contains(fromJSON(needs.change-scope.outputs.jobs), 'test')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - windows-latest
-          - ubuntu-latest
-        node-version:
-          - "16.20.2"
-          - "24"
+        os: ${{ fromJSON(needs.change-scope.outputs.platforms) }}
+        node-version: ${{ fromJSON(needs.change-scope.outputs.node_versions) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -84,14 +84,12 @@ jobs:
 
   workspace-contract:
     needs: change-scope
-    if: needs.change-scope.outputs.mode == 'full'
+    if: contains(fromJSON(needs.change-scope.outputs.jobs), 'workspace-contract')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - windows-latest
-          - ubuntu-latest
+        os: ${{ fromJSON(needs.change-scope.outputs.platforms) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -104,14 +102,12 @@ jobs:
 
   root-package-compat:
     needs: change-scope
-    if: needs.change-scope.outputs.mode == 'full'
+    if: contains(fromJSON(needs.change-scope.outputs.jobs), 'root-package-compat')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - windows-latest
-          - ubuntu-latest
+        os: ${{ fromJSON(needs.change-scope.outputs.platforms) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -126,14 +122,12 @@ jobs:
 
   web-build:
     needs: change-scope
-    if: needs.change-scope.outputs.mode == 'full'
+    if: contains(fromJSON(needs.change-scope.outputs.jobs), 'web-build')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - windows-latest
-          - ubuntu-latest
+        os: ${{ fromJSON(needs.change-scope.outputs.platforms) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -145,7 +139,7 @@ jobs:
 
   web-browser:
     needs: change-scope
-    if: needs.change-scope.outputs.mode == 'full'
+    if: contains(fromJSON(needs.change-scope.outputs.jobs), 'web-browser')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -160,15 +154,12 @@ jobs:
 
   electron-desktop:
     needs: change-scope
-    if: needs.change-scope.outputs.mode == 'full'
+    if: contains(fromJSON(needs.change-scope.outputs.jobs), 'electron-desktop')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - windows-latest
-          - ubuntu-latest
-          - macos-latest
+        os: ${{ fromJSON(needs.change-scope.outputs.electron_platforms) }}
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
     steps:
@@ -222,7 +213,7 @@ jobs:
 
   electron-release-candidate:
     needs: change-scope
-    if: needs.change-scope.outputs.mode == 'full'
+    if: github.event_name == 'push' && needs.change-scope.outputs.mode == 'full'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -315,7 +306,7 @@ jobs:
 
   electron-candidate-set:
     needs: [change-scope, electron-release-candidate]
-    if: needs.change-scope.outputs.mode == 'full'
+    if: github.event_name == 'push' && needs.change-scope.outputs.mode == 'full'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -342,7 +333,7 @@ jobs:
 
   dependency-audit:
     needs: change-scope
-    if: needs.change-scope.outputs.mode == 'full'
+    if: contains(fromJSON(needs.change-scope.outputs.jobs), 'dependency-audit')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -358,7 +349,7 @@ jobs:
 
   cross-runtime-fixtures:
     needs: change-scope
-    if: needs.change-scope.outputs.mode == 'full'
+    if: contains(fromJSON(needs.change-scope.outputs.jobs), 'cross-runtime-fixtures')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -376,12 +367,8 @@ jobs:
       - run: dotnet build desktop/CodexProviderSync.Core.Tests/CrashHost/CodexProviderSync.CrashHost.csproj --configuration Release
       - run: npm run fixtures:cross-runtime
       - run: npm run fixtures:historical-tags
-      - name: Refuse hosted Release binary execution for an untrusted fork
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
-        shell: pwsh
-        run: throw 'Hosted historical binaries are verified only from a same-repository branch; a maintainer must run the release-evidence gate from trusted repository code.'
       - name: Verify a hosted formal Release backup with current Node Restore
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        if: github.event_name == 'push'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: npm run fixtures:historical-formal-release
@@ -393,7 +380,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
       - name: Upload hosted formal Release backup evidence
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        if: github.event_name == 'push'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: historical-formal-release-backup-evidence
@@ -403,7 +390,7 @@ jobs:
 
   desktop-test:
     needs: change-scope
-    if: needs.change-scope.outputs.mode == 'full'
+    if: contains(fromJSON(needs.change-scope.outputs.jobs), 'desktop-test')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -423,7 +410,7 @@ jobs:
 
   desktop-macos:
     needs: change-scope
-    if: needs.change-scope.outputs.mode == 'full'
+    if: contains(fromJSON(needs.change-scope.outputs.jobs), 'desktop-macos')
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -439,7 +426,7 @@ jobs:
 
   desktop-linux-lock:
     needs: change-scope
-    if: needs.change-scope.outputs.mode == 'full'
+    if: contains(fromJSON(needs.change-scope.outputs.jobs), 'desktop-linux-lock')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -449,7 +436,7 @@ jobs:
       - run: dotnet test desktop/CodexProviderSync.Core.Tests/CodexProviderSync.Core.Tests.csproj --filter FullyQualifiedName~LockServiceTests
 
   c10-evidence-bundle:
-    if: ${{ always() && needs.change-scope.result == 'success' && needs.change-scope.outputs.mode == 'full' }}
+    if: ${{ always() && github.event_name == 'push' && needs.change-scope.result == 'success' && needs.change-scope.outputs.mode == 'full' }}
     needs:
       - change-scope
       - test

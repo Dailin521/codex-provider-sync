@@ -48,7 +48,7 @@ test("publish workflow resolves a tag-bound Chinese announcement instead of hard
   assert.doesNotMatch(workflow, /^\s+body:\s*\|/m);
 });
 
-test("CI requires all four native Electron candidates and their aggregate index", () => {
+test("main CI retains all four native Electron candidates and their aggregate index", () => {
   const workflow = read(".github/workflows/ci.yml");
 
   for (const value of [

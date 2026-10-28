@@ -5,7 +5,7 @@
 ## 1. 提交与合并
 
 1. 保留本地已有变更，核对源码、合同、配套生成物与测试清单。不要提交 `output/`、Playwright traces、真实数据或本地安装目录。
-2. 首次 V1 迁移使用 V1 分支；后续补丁从最新 `origin/main` 创建独立修复分支。以可审计提交推送并创建指向 main 的 PR，等待当前 head 对应的 `ci-gate` 成功；产品改动必须完整检查，普通文档例外见下文，旧 head 的绿灯不可复用。
+2. 首次 V1 迁移使用 V1 分支；后续补丁从最新 `origin/main` 创建独立修复分支。以可审计提交推送并创建指向 main 的 PR，等待当前 head 对应的 `ci-gate` 成功；产品改动执行代码 PR 检查，普通文档走轻量检查，发布取证在 main push 执行，旧 head 的绿灯不可复用。
 3. 按 [AGENTS.md](../AGENTS.md) 的 Codex 审查规则，只检查 PR 已有审查一次，仅经确认的 P0 问题阻断；不主动触发复杂或反复 Codex 审查，P1/P2/P3 不阻断交付。采用 merge commit 合并，分支禁止 squash、rebase、force-push 或绕过失败门禁；明确授权的同版本标签更新例外见第 6 节。
 4. main 合入后的实际 SHA 必须再次通过 `ci-gate`。所有产物与测试结论记录实际 SHA，不以 PR 分支名代替。
 
@@ -13,11 +13,15 @@
 
 ### 普通文档 PR 的轻量检查
 
-仅 `pull_request` 的整个 base…head 差异非空、且所有路径都属于根 `README.md`、`CHANGELOG.md` 或 `docs/release-notes/v*-zh.md` 时，允许轻量检查。不按最后一次提交判断；重命名检查新旧两个路径。合同、ADR、行为夹具、发布流程文档、工作流、配置、依赖和代码均触发完整 CI；未知路径或空差异也走完整 CI，Git 比较失败直接使门禁失败。
+仅 `pull_request` 的整个 base…head 差异非空、且所有路径属于以下普通文档时，允许轻量检查：根 `README.md`、`CHANGELOG.md`、`CONTRIBUTING.md`、`CONTRIBUTORS.md`，`.github/pull_request_template.md`，`docs/README_*.md` 用户指南与翻译，`docs/WORKING_PRINCIPLE_ZH.md`、`docs/AUTOMATION_QUICKSTART_ZH.md`、`docs/RELEASE_NOTES_V<版本>.md`，以及 `docs/release-notes/v<版本>-zh.md` 和该目录的 `TEMPLATE-zh.md`。精确白名单见 `scripts/ci-docs.mjs`。不按最后一次提交判断；重命名检查新旧两个路径。合同、ADR、行为夹具、发布流程文档、工作流、配置、依赖和代码均触发代码 PR 检查；未知路径或空差异也走代码 PR 检查，Git 比较失败直接使门禁失败。
 
-轻量检查无需安装依赖，验证改动文档的本地链接目标、全项目版本一致性和改动的中文发布说明。删除白名单文档会使检查失败，避免遗漏未修改文档中的入链；本地目标支持平衡或转义括号。远程链接与 Markdown 锚点不做可达性验证。重型任务和 C10 明确跳过，但 `ci-gate` 始终执行，只有分类与文档检查成功且跳过状态符合预期才通过。轻量 PR 不生成候选包或 C10 发布证据。
+轻量检查无需安装依赖，只验证改动文档的本地链接目标；修改 `docs/release-notes/v<版本>-zh.md` 时才额外验证全项目版本一致性和发布说明格式，模板不触发版本检查。版本文件修改仍触发含版本测试的代码检查。删除白名单文档会使检查失败，避免遗漏未修改文档中的入链；本地目标支持平衡或转义括号。远程链接与 Markdown 锚点不做可达性验证。重型任务和 C10 明确跳过，但 `ci-gate` 始终执行，只有分类与文档检查成功且跳过状态符合预期才通过。轻量 PR 不生成候选包或 C10 发布证据。
 
-main push 始终完整执行全部原有任务和 C10，最终 SHA 的发布门禁不变。同一 PR 新提交可取消过期检查；main 检查和独立发布工作流不被该规则取消。首次提交前一次性核对代码、版本、文档和测试要求，避免补漏引发重复 CI。
+代码 PR 按整个差异选择检查：Web 运行工作区与 Web；桌面 Renderer 运行工作区与 Windows Electron；共享 UI 运行两端。界面工作区/Web 矩阵为 Linux / Node 24。Electron 非 Renderer 改动保留根测试、工作区和 Windows/Linux/macOS 桌面验证；纯 Legacy .NET 改动运行根测试、跨运行时恢复与历史标签夹具及 Legacy 平台检查。Core/存储、共享合同、依赖、CI、未知路径和跨领域混合改动保留完整代码检查（含 Provider I/O、包兼容和依赖审计）。UI 组合变更检查两端，Renderer 加主进程使用完整桌面范围。精确范围与平台输出见 `scripts/ci-docs.mjs`，`ci-gate` 根据事件和范围拒绝失败及非预期跳过。
+
+四目标 `electron-release-candidate`、`electron-candidate-set` 和 `c10-evidence-bundle` 在所有 PR 中明确跳过。历史正式 Release 二进制恢复取证及其证据上传仅在 main push 执行，Fork PR 不再因这项取证被主动报错。
+
+main push 始终完整执行全部原有任务、历史正式 Release 恢复取证和 C10，最终 SHA 的发布门禁不变。PR 的绿灯不代替 main 发布验收。同一 PR 新提交可取消过期检查；main 检查和独立发布工作流不被该规则取消。
 
 ## 2. 候选包与独立流程
 

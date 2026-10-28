@@ -13,13 +13,66 @@ export const HEAVY_JOBS = Object.freeze([
   "desktop-linux-lock", "c10-evidence-bundle",
 ]);
 
+export const RELEASE_JOBS = Object.freeze([
+  "electron-release-candidate", "electron-candidate-set", "c10-evidence-bundle",
+]);
+
+const SCOPED_JOBS = Object.freeze({
+  docs: [],
+  web: ["workspace-contract", "web-build", "web-browser"],
+  "desktop-ui": ["workspace-contract", "electron-desktop"],
+  ui: ["workspace-contract", "web-build", "web-browser", "electron-desktop"],
+  desktop: ["test", "workspace-contract", "electron-desktop"],
+  legacy: ["test", "cross-runtime-fixtures", "desktop-test", "desktop-macos", "desktop-linux-lock"],
+  full: HEAVY_JOBS.filter((job) => !RELEASE_JOBS.includes(job)),
+});
+
+export function requiredJobs(event, mode) {
+  assert.ok(Object.hasOwn(SCOPED_JOBS, mode), "Missing or invalid CI mode");
+  if (event !== "pull_request") {
+    assert.equal(mode, "full", "Only PRs may use scoped checks");
+    return [...HEAVY_JOBS];
+  }
+  return [...SCOPED_JOBS[mode]];
+}
+
+export function scopeOutputs(event, files) {
+  const mode = classifyChanges(event, files);
+  const allPlatforms = ["full", "desktop", "legacy"].includes(mode);
+  return {
+    mode,
+    jobs: JSON.stringify(requiredJobs(event, mode)),
+    platforms: JSON.stringify(allPlatforms ? ["windows-latest", "ubuntu-latest"] : ["ubuntu-latest"]),
+    electron_platforms: JSON.stringify(allPlatforms ? ["windows-latest", "ubuntu-latest", "macos-latest"] : ["windows-latest"]),
+    node_versions: JSON.stringify(allPlatforms ? ["16.20.2", "24"] : ["24"]),
+  };
+}
+
 export function isOrdinaryDoc(file) {
-  return typeof file === "string" && /^(?:README\.md|CHANGELOG\.md|docs\/release-notes\/v[0-9][0-9A-Za-z.+-]*-zh\.md)$/.test(file);
+  if (typeof file !== "string" || /[\\\r\n]/.test(file) || file.split("/").some((part) => !part || part === "." || part === "..")) return false;
+  // User-facing prose only; contracts, architecture, release policy and executable assets stay full.
+  return /^(?:(?:README|CHANGELOG|CONTRIBUTING|CONTRIBUTORS)\.md|\.github\/pull_request_template\.md|docs\/(?:README_[A-Za-z0-9_-]+|WORKING_PRINCIPLE_ZH|AUTOMATION_QUICKSTART_ZH|RELEASE_NOTES_V[0-9.]+)\.md|docs\/release-notes\/(?:v[0-9][0-9A-Za-z.+-]*-zh|TEMPLATE-zh)\.md)$/.test(file);
 }
 
 export function classifyChanges(event, files) {
-  return event === "pull_request" && Array.isArray(files) && files.length > 0 && files.every(isOrdinaryDoc)
-    ? "docs" : "full";
+  if (event !== "pull_request" || !Array.isArray(files) || files.length === 0) return "full";
+  const scopes = new Set();
+  for (const file of files) {
+    if (isOrdinaryDoc(file)) continue;
+    // Dependencies, shared configuration, malformed and unknown paths retain complete checks.
+    if (typeof file !== "string" || /[\\\r\n]/.test(file) || file.split("/").some((part) => !part || part === "." || part === "..") || /(?:^|\/)(?:package(?:-lock)?\.json|tsconfig[^/]*\.json)$/.test(file)) return "full";
+    if (/^apps\/web\//.test(file)) scopes.add("web");
+    else if (/^apps\/desktop\/src\/renderer\//.test(file)) scopes.add("desktop-ui");
+    else if (/^apps\/desktop\//.test(file)) scopes.add("desktop");
+    else if (/^packages\/(?:app-ui|design-system)\/(?:src|checks)\//.test(file)) scopes.add("ui");
+    else if (/^desktop\//.test(file)) scopes.add("legacy");
+    else return "full";
+  }
+  if (scopes.size === 0) return "docs";
+  if (scopes.size === 1) return [...scopes][0];
+  if ([...scopes].every((scope) => ["web", "desktop-ui", "ui"].includes(scope))) return "ui";
+  if ([...scopes].every((scope) => ["desktop-ui", "desktop"].includes(scope))) return "desktop";
+  return "full";
 }
 
 export function changedFiles(root, base, head) {
@@ -34,7 +87,7 @@ export function changedFiles(root, base, head) {
 export function verifyGate(event, needs) {
   assert.equal(needs["change-scope"]?.result, "success", "Change classification must succeed");
   const mode = needs["change-scope"].outputs?.mode;
-  assert.ok(mode === "docs" || mode === "full", "Missing or invalid CI mode");
+  const required = requiredJobs(event, mode);
   assert.deepEqual(Object.keys(needs).sort(), ["change-scope", "docs-check", ...HEAVY_JOBS].sort(), "CI job inventory drift");
   if (mode === "docs") {
     assert.equal(event, "pull_request", "Only PRs may skip full CI");
@@ -42,7 +95,10 @@ export function verifyGate(event, needs) {
     for (const job of HEAVY_JOBS) assert.equal(needs[job]?.result, "skipped", `${job} must explicitly skip in docs mode`);
   } else {
     assert.equal(needs["docs-check"].result, "skipped");
-    for (const job of HEAVY_JOBS) assert.equal(needs[job]?.result, "success", `${job} did not succeed`);
+    for (const job of HEAVY_JOBS) {
+      const expected = required.includes(job) ? "success" : "skipped";
+      assert.equal(needs[job]?.result, expected, `${job} must be ${expected}`);
+    }
   }
 }
 
@@ -202,25 +258,29 @@ export function verifyLocalLinks(root, file) {
   }
 }
 
+export function checkDocumentation(root, files) {
+  for (const file of files) verifyLocalLinks(root, file);
+  const releases = files.filter((entry) => /^docs\/release-notes\/v[0-9][0-9A-Za-z.+-]*-zh\.md$/.test(entry));
+  if (releases.length === 0) return;
+  const version = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).version;
+  verifyReleaseVersion({ rootDir: root, tag: `v${version}` });
+  for (const file of releases) readReleaseMetadata({ rootDir: root, tag: path.basename(file, "-zh.md") });
+}
+
 function main() {
   const root = process.cwd();
   const event = process.env.GITHUB_EVENT_NAME;
   const command = process.argv[2];
   if (command === "classify") {
     const files = event === "pull_request" ? changedFiles(root, process.env.CPS_PR_BASE_SHA, process.env.CPS_PR_HEAD_SHA) : [];
-    const mode = classifyChanges(event, files);
-    fs.appendFileSync(process.env.GITHUB_OUTPUT, `mode=${mode}\n`);
-    console.log(`CI mode: ${mode}; ${files.length} changed PR paths`);
+    const outputs = scopeOutputs(event, files);
+    fs.appendFileSync(process.env.GITHUB_OUTPUT, Object.entries(outputs).map(([key, value]) => `${key}=${value}\n`).join(""));
+    console.log(`CI mode: ${outputs.mode}; ${files.length} changed PR paths`);
   } else if (command === "check") {
     const files = changedFiles(root, process.env.CPS_PR_BASE_SHA, process.env.CPS_PR_HEAD_SHA);
     assert.equal(classifyChanges(event, files), "docs", "Recheck entire PR before accepting docs mode");
-    for (const file of files) verifyLocalLinks(root, file);
-    const version = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).version;
-    verifyReleaseVersion({ rootDir: root, tag: `v${version}` });
-    for (const file of files.filter((entry) => entry.startsWith("docs/release-notes/"))) {
-      readReleaseMetadata({ rootDir: root, tag: path.basename(file, "-zh.md") });
-    }
-    console.log("Documentation links, version consistency and changed release announcements passed.");
+    checkDocumentation(root, files);
+    console.log("Documentation links and any changed release announcements passed.");
   } else if (command === "gate") {
     verifyGate(event, JSON.parse(process.env.CPS_CI_NEEDS));
   } else if (command === "c10") {

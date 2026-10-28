@@ -90,6 +90,7 @@ On Windows, `\\wsl.localhost\...` and `\\wsl$\...` SQLite Homes are diagnostic-o
 - Only a verified P0 finding from a Codex PR review blocks merge or release. Fix that finding and run the checks relevant to the fix; do not trigger another full Codex review by default.
 - P1/P2/P3 findings and advisory suggestions do not block delivery or require repeated modifications. Record relevant follow-up items without expanding the approved scope.
 - This policy governs Codex review overhead. Required local checks, CI, release-container acceptance, and explicit publication authorization still apply; never weaken those gates to satisfy a review preference.
+- GitHub conversation resolution is advisory, not a required merge rule. Maintainers decide which comments require action; verified P0 findings still block delivery.
 
 ## Mandatory Provider I/O regression gate
 
@@ -97,11 +98,13 @@ On Windows, `\\wsl.localhost\...` and `\\wsl$\...` SQLite Homes are diagnostic-o
 - Eligible equal-byte-length JSON Provider literals must use the existing in-place descriptor/handle path. Preserve file identity, size and body hash; character-count equality alone is insufficient. Do not fall back to whole-file replacement after an in-place failure.
 - Ineligible but valid headers use streaming tail copy and atomic replacement with byte-identical bodies. Invalid/changed/locked targets must not be forcibly rewritten.
 - Run `npm run architecture:check` and `npm test` for Core changes; platform skips and failures must be reported. The first command reuses workspace boundary checks and Provider I/O tests, not a second rule engine.
-- Behavior changes require an explicit ADR/contract/fixture update and matching user docs. Do not weaken an invariant test to bless accidental drift. README is not a substitute for the current Core guide.
+- Behavior changes require applicable contract/fixture updates and matching user docs; add or amend an ADR for architectural decisions or safety-boundary changes. Routine fixes restoring an existing contract do not require a new ADR. Maintainers may help contributors complete these updates. Do not weaken an invariant test to bless accidental drift. README is not a substitute for the current Core guide.
 
 ## Mandatory local preflight and release flow
 
 Follow this order: **local preflight passes → CI cross-platform and real installation acceptance passes → publish with explicit authorization**. See [Windows release procedure](docs/WINDOWS_ELECTRON_RELEASE_ZH.md) for commands and evidence requirements.
+
+- PR checks and release acceptance are separate: ordinary documentation checks local links (formal release notes additionally validate versions and metadata). Web, desktop renderer, shared UI, Electron runtime/packaging and Legacy .NET changes use the scopes in `scripts/ci-docs.mjs`; UI uses Linux/Node 24 workspace checks and Windows desktop smoke. Core/storage, shared contracts/dependencies, CI, unknown paths and cross-domain changes retain full code checks. Four-target candidates, hosted formal Release evidence and C10 run on main pushes only; main retains complete final-SHA acceptance before publication.
 
 - Before pushing, review all affected contracts, test expectations and build modes together, then run the relevant local tests. Do not use Actions as the first check for failures reproducible locally. Report unavailable local checks explicitly and leave them to the matching CI environment.
 - Desktop changes require relevant production-bundle checks, not just development-mode tests. Update changes must cover both portable/manual and authorized installed-updater modes; derive expectations from the intended channel/container, never from the application's returned value.

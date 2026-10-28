@@ -52,3 +52,9 @@
 上述 `1.0.0` 是首发批准的历史事实。后续 Windows Electron 补丁候选以根 `package.json` 的实际严格 `1.0.x` 基础版本生成，仅允许 `1.0.x-rc.N`；`x` 与 `N` 都是无前导零整数。`stable-manual` 仅接受 Windows x64 的严格 `1.0.x` 和完全匹配的现有 tag。每个新 stable 版本仍须独立发布批准，且不改变 exact main push `ci-gate`、不可变 tag/SHA、拒绝覆盖已有 Release、Draft 复核、资产白名单、未签名手动安装及不上传生产更新 metadata 的边界。
 
 C10 的机器可读 JSON Schema 同步接受严格 `1.0.x-alpha/beta/rc.N` CI 证据，并通过实际 Schema 验证补丁候选。正式版本不直接作为 CI 候选，来源版本一致性仍由生成器核验；历史 `1.0.0` 候选证据继续兼容。
+
+## 2026-10-28：贡献检查与发布验收分开
+
+维护者批准降低普通 PR 的等待与填写成本，取代上文“完整合并 CI”对每个 PR 一律全量的要求。文档白名单扩大到用户指南、翻译和贡献说明；普通文档只校验链接，正式发布说明额外验证版本和格式。代码 PR 按 Web、桌面 Renderer、共享 UI、Electron 运行时/打包、Legacy .NET 分类；普通 UI 缩小平台矩阵，Core/存储、共享依赖与合同、CI、未知路径和跨领域改动保留完整代码检查。具体任务和平台见 `scripts/ci-docs.mjs` 与 [发布流程](../WINDOWS_ELECTRON_RELEASE_ZH.md)。
+
+候选包、候选集合、历史正式 Release 恢复取证和 C10 仅在 main push 执行；PR 的预期跳过由 `ci-gate` 严格核验。main 的完整平台、安装验收、最终 SHA、发布授权和 Provider I/O 数据安全要求不变。GitHub 的审查对话解决要求关闭，PR、必过 `ci-gate`、禁止强推与删除继续保留；维护者判断评论，已核实的 P0 仍阻断交付。
