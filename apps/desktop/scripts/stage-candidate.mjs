@@ -108,7 +108,7 @@ const staging = {
   createdAt: timestamp,
   lockfileSha256: await sha256File(path.join(RELEASE_REPOSITORY_ROOT, "package-lock.json")),
   toolVersions: {
-    electron: "44.0.0",
+    electron: "44.9.3",
     electronBuilder: "26.15.7",
     electronAsar: "4.3.0",
     electronFuses: "2.1.3",

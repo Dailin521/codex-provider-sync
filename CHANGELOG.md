@@ -2,6 +2,11 @@
 
 本文件记录面向用户和集成方的重要变化。完整的发布叙事、升级说明和下载入口见对应版本的中文发布说明；实现证据和测试门禁见技术发布说明。
 
+## [Unreleased]
+
+- 更新 Electron 44.9.3、Vite、Zod、Vitest 及受影响的间接依赖，修复依赖审计发现的安全问题；桌面发布审计与清单同步记录新的 Electron 版本。
+- 按改动范围精简 PR 检查，完整候选包与 C10 发布取证保留在 main 验证；简化贡献说明和审查对话要求。
+
 ## [1.0.4] - 2026-09-28
 
 Windows x64 Electron 修复版本。发布状态和下载以 [GitHub Release](https://github.com/Dailin521/codex-provider-sync/releases/tag/v1.0.4) 为准；[升级说明](docs/release-notes/v1.0.4-zh.md)。

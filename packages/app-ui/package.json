@@ -35,7 +35,7 @@
     "react-markdown": "10.1.0",
     "remark-gfm": "4.0.1",
     "tailwind-merge": "3.6.0",
-    "zod": "4.4.3"
+    "zod": "4.6.7"
   },
   "peerDependencies": {
     "react": "19.2.8",
@@ -47,6 +47,6 @@
     "@testing-library/react": "16.3.2",
     "@testing-library/user-event": "14.6.6",
     "jsdom": "29.1.1",
-    "vitest": "4.1.11"
+    "vitest": "4.1.12"
   }
 }
