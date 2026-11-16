@@ -599,7 +599,7 @@ export async function createEvidenceBundle({
   environment = process.env,
   now = new Date()
 }) {
-  const repository = requiredEnvironment(environment, "GITHUB_REPOSITORY", /^Dailin521\/codex-provider-sync$/);
+  const repository = requiredEnvironment(environment, "GITHUB_REPOSITORY", /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/codex-provider-sync$/);
   const evidenceForCommit = requiredEnvironment(environment, "GITHUB_SHA", SHA_PATTERN).toLowerCase();
   const sourceHeadCommit = requiredEnvironment(environment, "CPS_SOURCE_HEAD_SHA", SHA_PATTERN).toLowerCase();
   const eventBaseCommit = requiredEnvironment(environment, "CPS_EVENT_BASE_SHA", SHA_PATTERN).toLowerCase();
